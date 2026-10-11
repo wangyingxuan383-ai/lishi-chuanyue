@@ -1,0 +1,45 @@
+# Dependencies and build artifacts
+node_modules/
+dist/
+build/
+target/
+.cache/
+.gradle/
+local.properties
+
+# Secrets, local credentials and signing material
+.env
+.env.*
+!.env.example
+.private/
+.secrets/
+secrets/
+credentials/
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.key
+
+# Real saves, exports, backups and diagnostic output
+saves/
+backups/
+logs/
+diagnostics/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.timejump
+*.log
+
+# Local editor and OS data
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
