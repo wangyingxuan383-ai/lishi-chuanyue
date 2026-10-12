@@ -9,11 +9,12 @@
 
 use std::time::Duration;
 
-use reqwest::{header, Client, Url};
+use reqwest::{header, Client, RequestBuilder, Url};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -40,7 +41,13 @@ pub enum StreamEventKind {
 #[serde(rename_all = "snake_case")]
 pub enum StreamErrorCode {
     InvalidUrl,
+    InvalidConfig,
     InvalidOptions,
+    CredentialMissing,
+    CredentialUnavailable,
+    CredentialUnconfirmed,
+    CredentialEcho,
+    OperationDropped,
     ClientSetup,
     Network,
     ConnectTimeout,
@@ -111,7 +118,7 @@ impl Default for StreamOptions {
 }
 
 impl StreamOptions {
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         !self.connect_timeout.is_zero()
             && self.connect_timeout <= Duration::from_secs(5)
             && !self.idle_timeout.is_zero()
@@ -131,15 +138,16 @@ enum Outcome {
     ConsumerClosed,
 }
 
-struct Emitter<F> {
+struct Emitter<'a, F> {
     operation_id: String,
     sequence: u64,
     text: String,
     delta_count: u64,
+    credential_guard: Option<CredentialGuard<'a>>,
     emit: F,
 }
 
-impl<F: FnMut(ProbeStreamEvent) -> bool> Emitter<F> {
+impl<F: FnMut(ProbeStreamEvent) -> bool> Emitter<'_, F> {
     fn send(&mut self, kind: StreamEventKind, text: Option<String>) -> bool {
         let accepted = (self.emit)(ProbeStreamEvent {
             operation_id: self.operation_id.clone(),
@@ -180,6 +188,183 @@ impl<F: FnMut(ProbeStreamEvent) -> bool> Emitter<F> {
             delta_count: self.delta_count,
         }
     }
+
+    fn append_delta(&mut self, text: String, max_output_bytes: usize) -> Result<(), Outcome> {
+        let buffered = self
+            .credential_guard
+            .as_ref()
+            .map_or(0, |guard| guard.pending.len());
+        if self
+            .text
+            .len()
+            .saturating_add(buffered)
+            .saturating_add(text.len())
+            > max_output_bytes
+        {
+            return Err(Outcome::Failed(StreamErrorCode::OutputTooLarge));
+        }
+        let text = match self.credential_guard.as_mut() {
+            Some(guard) => guard.filter(&text).map_err(Outcome::Failed)?,
+            None => text,
+        };
+        self.deliver_delta(text)
+    }
+
+    fn deliver_delta(&mut self, text: String) -> Result<(), Outcome> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.text.push_str(&text);
+        self.delta_count += 1;
+        if self.send(StreamEventKind::Delta, Some(text)) {
+            Ok(())
+        } else {
+            Err(Outcome::ConsumerClosed)
+        }
+    }
+
+    fn flush_credential_tail(&mut self) -> Result<(), Outcome> {
+        let tail = self
+            .credential_guard
+            .as_mut()
+            .map(|guard| std::mem::take(&mut *guard.pending))
+            .unwrap_or_default();
+        self.deliver_delta(tail)
+    }
+}
+
+/// Withhold only the suffix that could still complete the exact credential.
+/// A complete match fails before any of its bytes reach a callback/result.
+/// The prefix automaton also handles overlaps and Unicode split across deltas.
+struct CredentialGuard<'a> {
+    secret: &'a str,
+    prefix: Vec<usize>,
+    pending: Zeroizing<String>,
+}
+
+impl<'a> CredentialGuard<'a> {
+    fn new(secret: &'a str) -> Self {
+        let bytes = secret.as_bytes();
+        let mut prefix = vec![0; bytes.len()];
+        let mut matched = 0;
+        for index in 1..bytes.len() {
+            while matched > 0 && bytes[index] != bytes[matched] {
+                matched = prefix[matched - 1];
+            }
+            if bytes[index] == bytes[matched] {
+                matched += 1;
+            }
+            prefix[index] = matched;
+        }
+        Self {
+            secret,
+            prefix,
+            pending: Zeroizing::new(String::new()),
+        }
+    }
+
+    fn filter(&mut self, text: &str) -> Result<String, StreamErrorCode> {
+        self.pending.push_str(text);
+        let bytes = self.secret.as_bytes();
+        let mut matched = 0;
+        for &byte in self.pending.as_bytes() {
+            while matched > 0 && byte != bytes[matched] {
+                matched = self.prefix[matched - 1];
+            }
+            if byte == bytes[matched] {
+                matched += 1;
+            }
+            if matched == bytes.len() {
+                self.pending.clear();
+                return Err(StreamErrorCode::CredentialEcho);
+            }
+        }
+        let safe_end = self.pending.len() - matched;
+        // Both input and credential are valid UTF-8. A matching prefix that
+        // ends at the input boundary necessarily ends on a character boundary.
+        let safe = self.pending[..safe_end].to_owned();
+        self.pending.drain(..safe_end);
+        Ok(safe)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct TransportDiagnostics {
+    pub http_status: Option<u16>,
+    pub usage: Option<TokenUsage>,
+    pub attempts: u8,
+}
+
+pub(crate) fn bounded_client(options: &StreamOptions) -> Result<Client, StreamErrorCode> {
+    Client::builder()
+        .connect_timeout(options.connect_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .build()
+        .map_err(|_| StreamErrorCode::ClientSetup)
+}
+
+pub(crate) fn failed_stream(
+    operation_id: String,
+    error: StreamErrorCode,
+    emit: impl FnMut(ProbeStreamEvent) -> bool,
+) -> StreamResult {
+    let mut emitter = Emitter {
+        operation_id,
+        sequence: 0,
+        text: String::new(),
+        delta_count: 0,
+        credential_guard: None,
+        emit,
+    };
+    let outcome = if emitter.send(StreamEventKind::Started, None) {
+        Outcome::Failed(error)
+    } else {
+        Outcome::ConsumerClosed
+    };
+    emitter.finish(outcome)
+}
+
+pub(crate) async fn run_request_stream_with_options(
+    operation_id: String,
+    request: RequestBuilder,
+    cancel: CancellationToken,
+    options: StreamOptions,
+    protected_secret: Option<&str>,
+    emit: impl FnMut(ProbeStreamEvent) -> bool,
+) -> (StreamResult, TransportDiagnostics) {
+    let mut diagnostics = TransportDiagnostics::default();
+    let mut emitter = Emitter {
+        operation_id,
+        sequence: 0,
+        text: String::new(),
+        delta_count: 0,
+        credential_guard: protected_secret.map(CredentialGuard::new),
+        emit,
+    };
+    let outcome = if !emitter.send(StreamEventKind::Started, None) {
+        Outcome::ConsumerClosed
+    } else {
+        receive_request_stream(
+            request,
+            &cancel,
+            &options,
+            true,
+            &mut diagnostics,
+            &mut emitter,
+        )
+        .await
+    };
+    (emitter.finish(outcome), diagnostics)
 }
 
 /// Receives one SSE response. The callback must return promptly; `false` stops
@@ -205,6 +390,7 @@ pub async fn run_probe_stream_with_options(
         sequence: 0,
         text: String::new(),
         delta_count: 0,
+        credential_guard: None,
         emit,
     };
     if !emitter.send(StreamEventKind::Started, None) {
@@ -218,7 +404,7 @@ async fn receive_stream<F: FnMut(ProbeStreamEvent) -> bool>(
     url: &str,
     cancel: &CancellationToken,
     options: &StreamOptions,
-    emitter: &mut Emitter<F>,
+    emitter: &mut Emitter<'_, F>,
 ) -> Outcome {
     if cancel.is_cancelled() {
         return Outcome::Cancelled;
@@ -237,22 +423,35 @@ async fn receive_stream<F: FnMut(ProbeStreamEvent) -> bool>(
         }
         _ => return Outcome::Failed(StreamErrorCode::InvalidUrl),
     };
-    let deadline = Instant::now() + options.total_timeout;
-    let client = match Client::builder()
-        .connect_timeout(options.connect_timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .no_proxy()
-        .build()
-    {
+    let client = match bounded_client(options) {
         Ok(client) => client,
-        Err(_) => return Outcome::Failed(StreamErrorCode::ClientSetup),
+        Err(error) => return Outcome::Failed(error),
     };
     let request = client
         .get(url)
         .header(header::ACCEPT, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .send();
+        .header(header::CACHE_CONTROL, "no-cache");
+    let mut diagnostics = TransportDiagnostics::default();
+    receive_request_stream(request, cancel, options, false, &mut diagnostics, emitter).await
+}
+
+async fn receive_request_stream<F: FnMut(ProbeStreamEvent) -> bool>(
+    request: RequestBuilder,
+    cancel: &CancellationToken,
+    options: &StreamOptions,
+    strict_usage: bool,
+    diagnostics: &mut TransportDiagnostics,
+    emitter: &mut Emitter<'_, F>,
+) -> Outcome {
+    if cancel.is_cancelled() {
+        return Outcome::Cancelled;
+    }
+    if !options.is_valid() {
+        return Outcome::Failed(StreamErrorCode::InvalidOptions);
+    }
+    let deadline = Instant::now() + options.total_timeout;
+    diagnostics.attempts = 1;
+    let request = request.send();
     let mut response = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Outcome::Cancelled,
@@ -264,6 +463,7 @@ async fn receive_stream<F: FnMut(ProbeStreamEvent) -> bool>(
             Ok(Ok(response)) => response,
         },
     };
+    diagnostics.http_status = Some(response.status().as_u16());
     if response.status() != reqwest::StatusCode::OK {
         return Outcome::Failed(StreamErrorCode::HttpStatus);
     }
@@ -306,10 +506,13 @@ async fn receive_stream<F: FnMut(ProbeStreamEvent) -> bool>(
                 Ok(None) => continue,
                 Err(error) => return Outcome::Failed(error),
             };
-            match interpret_message(message) {
+            match interpret_message(message, strict_usage, &mut diagnostics.usage) {
                 Err(error) => return Outcome::Failed(error),
                 Ok(Payload::Metadata) => {}
                 Ok(Payload::Done) => {
+                    if let Err(outcome) = emitter.flush_credential_tail() {
+                        return outcome;
+                    }
                     return if emitter.text.is_empty() {
                         Outcome::Failed(StreamErrorCode::EmptyOutput)
                     } else {
@@ -317,13 +520,8 @@ async fn receive_stream<F: FnMut(ProbeStreamEvent) -> bool>(
                     };
                 }
                 Ok(Payload::Delta(text)) => {
-                    if emitter.text.len().saturating_add(text.len()) > options.max_output_bytes {
-                        return Outcome::Failed(StreamErrorCode::OutputTooLarge);
-                    }
-                    emitter.text.push_str(&text);
-                    emitter.delta_count += 1;
-                    if !emitter.send(StreamEventKind::Delta, Some(text)) {
-                        return Outcome::ConsumerClosed;
+                    if let Err(outcome) = emitter.append_delta(text, options.max_output_bytes) {
+                        return outcome;
                     }
                 }
             }
@@ -425,7 +623,11 @@ enum Payload {
     Done,
 }
 
-fn interpret_message(message: SseMessage) -> Result<Payload, StreamErrorCode> {
+fn interpret_message(
+    message: SseMessage,
+    strict_usage: bool,
+    usage: &mut Option<TokenUsage>,
+) -> Result<Payload, StreamErrorCode> {
     if message.event == "error" {
         return Err(StreamErrorCode::UpstreamError);
     }
@@ -441,13 +643,28 @@ fn interpret_message(message: SseMessage) -> Result<Payload, StreamErrorCode> {
     if object.get("error").is_some_and(|error| !error.is_null()) {
         return Err(StreamErrorCode::UpstreamError);
     }
+    if strict_usage {
+        if let Some(value) = object.get("usage").filter(|value| !value.is_null()) {
+            let current = parse_usage(value)?;
+            if usage.as_ref().is_some_and(|previous| previous != &current) {
+                return Err(StreamErrorCode::InvalidPayload);
+            }
+            *usage = Some(current);
+        }
+    }
     let choices = match object.get("choices") {
         Some(value) => value.as_array().ok_or(StreamErrorCode::InvalidPayload)?,
-        None if object.get("usage").is_some_and(Value::is_object) => return Ok(Payload::Metadata),
+        None if object.get("usage").is_some_and(Value::is_object)
+            || (strict_usage && object.get("usage").is_some_and(Value::is_null)) =>
+        {
+            return Ok(Payload::Metadata)
+        }
         None => return Err(StreamErrorCode::InvalidPayload),
     };
     let Some(choice) = choices.first() else {
-        return if object.get("usage").is_some_and(Value::is_object) {
+        return if object.get("usage").is_some_and(Value::is_object)
+            || (strict_usage && object.get("usage").is_some_and(Value::is_null))
+        {
             Ok(Payload::Metadata)
         } else {
             Err(StreamErrorCode::InvalidPayload)
@@ -503,5 +720,70 @@ fn interpret_message(message: SseMessage) -> Result<Payload, StreamErrorCode> {
         Some(Value::String(text)) if text.is_empty() => Ok(Payload::Metadata),
         Some(Value::String(text)) => Ok(Payload::Delta(text.clone())),
         Some(_) => Err(StreamErrorCode::InvalidPayload),
+    }
+}
+
+fn parse_usage(value: &Value) -> Result<TokenUsage, StreamErrorCode> {
+    // Counts cross a JavaScript IPC boundary. Larger integers are not exactly
+    // representable there and cannot be valid for this bounded one-shot probe.
+    const MAX_EXACT_JS_INTEGER: u64 = 9_007_199_254_740_991;
+    let object = value.as_object().ok_or(StreamErrorCode::InvalidPayload)?;
+    let integer = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_u64)
+            .filter(|count| *count <= MAX_EXACT_JS_INTEGER)
+            .ok_or(StreamErrorCode::InvalidPayload)
+    };
+    let usage = TokenUsage {
+        prompt_tokens: integer("prompt_tokens")?,
+        completion_tokens: integer("completion_tokens")?,
+        total_tokens: integer("total_tokens")?,
+    };
+    if usage.prompt_tokens.checked_add(usage.completion_tokens) != Some(usage.total_tokens) {
+        return Err(StreamErrorCode::InvalidPayload);
+    }
+    Ok(usage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_guard_blocks_unicode_overlapping_and_single_character_secrets() {
+        for (secret, chunks) in [
+            ("密钥🙂", vec!["前文", "密", "钥", "🙂"]),
+            ("ababac", vec!["前文", "abab", "ab", "ac"]),
+            ("x", vec!["前文", "x"]),
+        ] {
+            let mut guard = CredentialGuard::new(secret);
+            let mut visible = String::new();
+            let mut blocked = false;
+            for chunk in chunks {
+                match guard.filter(chunk) {
+                    Ok(safe) => visible.push_str(&safe),
+                    Err(StreamErrorCode::CredentialEcho) => {
+                        blocked = true;
+                        break;
+                    }
+                    Err(_) => panic!("unexpected safe error code"),
+                }
+                assert!(guard.pending.len() < secret.len());
+            }
+            assert!(blocked);
+            assert!(!visible.contains(secret));
+            assert!(visible.starts_with("前文"));
+        }
+    }
+
+    #[test]
+    fn credential_guard_releases_false_prefix_and_retains_only_candidate_suffix() {
+        let mut guard = CredentialGuard::new("密钥🙂");
+        assert_eq!(guard.filter("这是密").unwrap(), "这是");
+        assert_eq!(guard.filter("码，密").unwrap(), "密码，");
+        assert_eq!(guard.pending.as_str(), "密");
+        assert_eq!(guard.filter("封故事。").unwrap(), "密封故事。");
+        assert!(guard.pending.is_empty());
     }
 }

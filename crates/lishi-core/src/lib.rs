@@ -1,5 +1,6 @@
 //! Platform-independent application core. M01 exposes text and SQLite probes.
 
+pub mod model_probe;
 pub mod probe_jobs;
 pub mod probe_pack;
 pub mod recovery;

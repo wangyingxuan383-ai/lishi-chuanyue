@@ -4,6 +4,7 @@ import StreamProbe from "./StreamProbe";
 import SecretProbe from "./SecretProbe";
 import FileProbe from "./FileProbe";
 import RecoveryProbe from "./RecoveryProbe";
+import ModelProbe from "./ModelProbe";
 import { t } from "./i18n";
 import {
   describeProbeError,
@@ -198,6 +199,7 @@ export default function App() {
       <SQLiteProbe coreConnected={connection.status === "connected"} />
       <StreamProbe coreConnected={connection.status === "connected"} />
       <SecretProbe coreConnected={connection.status === "connected"} />
+      <ModelProbe coreConnected={connection.status === "connected"} />
       <FileProbe coreConnected={connection.status === "connected"} />
       <RecoveryProbe coreConnected={connection.status === "connected"} />
 

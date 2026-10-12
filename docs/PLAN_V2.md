@@ -432,6 +432,8 @@ Key 保存后以 secret_ref 引用；profile 导出不带认证字段。自定�
 
 ### 8.2 能力与生成路线
 
+M01受控认证探针先验证Chat Completions文本POST：显式完整endpoint、model、单条测试prompt、stream与可选include_usage。地址不自动补路径。fixture模式只允许字面loopback HTTP和内置无效测试凭据；saved模式只允许HTTPS并在原生层读取平台密钥。每次最多一次send，不重定向、重试或自动换服务。诊断仅保留状态码、耗时、尝试次数和经过校验的usage；缺失为未知，价格不推定。此技术探针不写世界、不保存生产Provider配置，不替代M02能力探测。
+
 能力属于端点 + 协议 + 模型 + 配置组合，包含 streaming、structured_output、usage、context_limit 等。记录 unknown/supported/unsupported，以及信息来自声明、用户配置还是测试。
 
 JSON 路线：一次主调用生成正文和状态；解析或验证失败时最多一次修复。TEXT_EXTRACT 路线：主调用输出正文，第二次提取状态，两次仍不可靠则失败。支持服务商 schema 时也必须做应用校验。

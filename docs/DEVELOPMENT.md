@@ -103,7 +103,7 @@ Android系统证书验证由`src-tauri/src/android_tls.rs`在Wry JNI线程初始
 
 ## 密钥存储探针
 
-只使用无效测试值；固定槽`m01-provider`用于M01，不是正式模型配置。密码框提交即清空，保存会替换该槽，刷新在核心内部解密验证但仅返回`configured`；删除后再次核对缺失。首次输入不可避免经UI与IPC，界面不回读已存明文、前缀、长度或指纹。当前不会发送密钥到任何模型。
+存储验收只使用无效测试值；固定槽`m01-provider`用于M01，不是正式模型配置。密码框提交即清空，保存会替换该槽，刷新在核心内部解密验证但仅返回`configured`；删除后再次核对缺失。首次输入不可避免经UI与IPC，界面不回读已存明文、前缀、长度或指纹。认证探针fixture模式不使用该槽；saved模式由用户明确开始后才在原生读取并发往填写的HTTPS地址，自动验收不采用此模式发外部请求。
 
 Windows用当前用户DPAPI，密文在Tauri私有目录下`secrets/secret-v1-<slot字节hex>.dpapi`，与SQLite笔记分开。namespace/slot附加entropy防换槽；只把密文写入同目录临时文件，sync后替换。Android用系统Keystore AES256-GCM与随机IV/AAD，密文放`noBackupFilesDir/lishi-secret-store-v1/…`；已有密文但alias丢失时报错，需要明确删除并重配，不会悄悄创建新Key覆盖。
 
@@ -143,3 +143,15 @@ Android当前选择为GET_CONTENT临时授权，保存为CREATE_DOCUMENT，不�
 恢复面板包含large-truncated场景：12000B中文分片后直接EOF，验证大Channel晚到时仍以持久失败为准。前端不得让晚到事件或旧查询降低已确认终态；真正取数发生在原生IPC中，测试不替换模型或数据库结果。
 
 五个握手边界子进程强杀和Windows真实UI验证见M01记录；平台策略见 [D022](DECISIONS.md#d022-独立恢复探针验证提交边界与单进程持有权)。用户恢复手机测试时按 [六项设备清单](validation/M01_DEVICE_CHECKLIST.md) 执行，当前完整M01门槛未通过。
+
+## 认证 POST 技术探针
+
+统一自动验证入口（不调用真实模型、不读取Key）：`./scripts/Verify-Dev.ps1`。默认检查Rust格式/lint/测试、前端类型/构建、两个fixture语法和文档导航/台账；可加`-BuildWindows -BuildAndroid -AndroidTests`构建两端及仪器测试APK，`-AndroidTests`要求同时`-BuildAndroid`。脚本遇失败停止，实际结果、耗时和构建产物hash保存在忽略的`.cache/validation/verify-*.json`。仪器测试只编译，不执行设备测试。并行writer必须先冻结；截图/UI、签名/页对齐和真实设备仍单独验收。
+
+运行 `node scripts/model-fixture.mjs`，在原生应用的认证探针选择本地模式。默认完整endpoint为 `http://127.0.0.1:18742/normal/v1/chat/completions`；fixture只监听本机，只接受固定无效凭据，不接受真实Key，也不记录请求正文和认证头。`--port`可改变监听端口，此时在界面显式修改完整地址。
+
+本地模式不读平台密钥。可以选择正常/慢速/缺失usage/401/429/redirect/错误usage/截断/凭据回显/超时场景。勾选usage才发送`stream_options.include_usage`；无数据显示未知。调用计数、HTTP状态、耗时、usage与费用未知提示位于诊断区。查询和历史读取不触发HTTP；一次操作只发送一次请求，不重试或跟随重定向。
+
+已保存凭据模式只允许HTTPS。填写完整endpoint、模型ID和测试prompt，明确开始后由Rust读取平台槽并发送；输入内容会发给该地址，返回只作内存草稿，不更新任何SQLite。保存/删除Key仍通过独立密钥面板，已保存值不会读回JS。禁止在URL放Key、查询参数或userinfo。未连接原生核心的浏览器预览不会代发请求。
+
+认证记录限同进程十项；退出后消失。结果未知时先查询，不自动重复。读取密钥超时不代表平台worker已被杀死；在worker真正完成前存储占用仍保留。传输取消不承诺取消远端收费。接口仅验证文本Chat Completions，不证明生产配置、其他协议、结构化游戏输出或真实模型能力已验收。设计取舍见[D023](DECISIONS.md#d023-受控认证post固定一次尝试与安全诊断)。实际结果与未验证事项见[认证记录](validation/M01_AUTH.md)。

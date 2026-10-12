@@ -1,6 +1,6 @@
 # 任务台账
 
-更新时间：2026-10-13T00:15:18+08:00。M01-T002～T007待验收；下一独立工作为T004受控认证POST验证，完整设备门槛保留。
+更新时间：2026-10-13T01:00:29+08:00。M01-T002～T007待验收；受控认证POST与本地证据已建立，实际模型/设备门槛保留。
 
 本文件是任务完成情况的唯一事实源。第二版计划描述目标，DECISIONS.md 记录原因，STATE.md 只保存短现场和接手入口；其他文件不能自行宣布任务已完成。第一版报告用于理解想法，不自动形成约束。
 
@@ -160,31 +160,31 @@
 
 ### M01-T004 验证流式请求与取消
 
-- 目标/交付：用 reqwest/Tokio 从 Rust 发起受控流式请求，经 IPC 展示草稿并取消；先受控HTTP服务，后配置的真实兼容端点。
+- 目标/交付：用 reqwest/Tokio 从 Rust 发起受控流式请求，经 IPC 展示草稿并取消；先受控HTTP服务，后配置的真实兼容端点。认证POST子交付包含最小请求/内部凭据/usage与有界诊断/UI、固定故障fixture及统一自动验证入口；不建立M02正式Provider配置。
 - 依赖：M01-T002。
 - 状态：待验收。
-- 负责人/范围：根 AI 负责操作管理、Tauri桥/集成/验证与全局文档；storage_review核心stream及TCP测试，docs_review fixture与Android TLS独立接线，ui_review前端及真实Windows QA；各范围均已收尾。
-- 验收：中文分片无乱码；取消可结束本地任务；断网返回可理解错误；取消不声称已撤销服务商计费。
-- 实际成果：[stream核心](../crates/lishi-core/src/stream.rs)、[操作管理](../crates/lishi-core/src/probe_jobs.rs)、[TCP测试](../crates/lishi-core/tests/stream_probe.rs)、[fixture](../scripts/stream-fixture.mjs)、[原生桥](../src-tauri/src/stream_probe.rs)、[TLS初始化](../src-tauri/src/android_tls.rs)、[界面](../src/StreamProbe.tsx)及Windows exe/ARM64 APK存在；本面板草稿仅内存，独立持久恢复另见M01-T007，实际模型Provider尚未实现。
-- 证据：[M01记录](validation/M01.md)：18项核心测试通过（含10项流式/集成、3项管理、5项SQLite），fmt/clippy及前端/两端构建通过。Windows15次主动启动=15次HTTP，中文/取消断连/错误/超时/重载查询通过，全部活动流和定时器归零。APK v2签名、ZIP/ELF16KiB与Verifier DEX类检查通过；重载有旧回调警告，未掩盖。
-- 阻塞：Android设备、真实HTTPS可信/不可信证书验证暂缓；实际兼容模型端点/认证尚未配置，需后续安全配置及有限请求。受控传输成功不能记成真实模型或手机成功。
-- 更新时间：2026-10-13T00:15:18+08:00。
+- 负责人/范围：根 AI集成、POST fixture、验证脚本、Windows QA/两端构建和全局文档；auth_transport仅core stream/model_probe及10TCP/2unit，auth_native仅shell model_probe和core内部密钥读取及9tests，auth_ui仅新面板/client/messages/CSS。各范围已冻结收尾。
+- 验收：中文分片无乱码；取消可结束本地任务；断网返回可理解错误；取消不声称已撤销服务商计费。POST请求体/认证/可选usage与单次尝试、401/429/redirect/截断/超时/凭据回显有固定检查；前端无已存明文返回，查询不重发，Windows及ARM64构建留下证据，实际模型/设备另行登记。
+- 实际成果：旧GET/取消保持；新增[认证核心](../crates/lishi-core/src/model_probe.rs)、[原生接线](../src-tauri/src/model_probe.rs)、[POST fixture](../scripts/model-fixture.mjs)、[面板](../src/ModelProbe.tsx)、[统一验证](../scripts/Verify-Dev.ps1)及[文档检查](../scripts/check-docs.mjs)。POST诊断/安全读取/有界历史已实现，正式游戏Provider配置未实现。
+- 证据：[认证记录](validation/M01_AUTH.md)：74项workspace、fmt/Clippy、33模块前端与最终Windows/ARM64构建通过；16主动请求=16HTTP/认证body通过，中文/usage/401/429/redirect/截断/超时/取消/回显/非法地址/缺Key/去重/并发/迟到Channel/重载及冷启动历史验证通过。最终原生与浏览器360px/0控制台错误、签名/ZIP/ELF16KiB通过；重载旧callback警告单独保留。
+- 阻塞：Android设备/实际HTTPS证书与真实兼容模型仍未验证；只用固定无效凭据，本地成功不记手机/付费模型通过。认证记录同进程十项、退出清空，持久世界恢复另见T007。
+- 更新时间：2026-10-13T01:00:29+08:00。
 - 完成时间：—。
-- 关联决策：D005、D008、D010、D018、D019、V001、V002。
+- 关联决策：D005、D008、D010、D018、D019、D020、D023、V001、V002。
 
 ### M01-T005 实现并验证平台 SecretStore
 
 - 目标/交付：Windows 用当前用户 DPAPI；Android 用小 Kotlin 插件调用 Keystore AES-GCM，密文置私有目录。已保存 API token 由 Rust 核心经平台适配器读取，前端不读回明文；AES 密钥由 Keystore 管理，首次 token 输入经过 UI。
 - 依赖：M01-T002。
 - 状态：待验收。
-- 负责人/范围：root核心服务/入队占用、壳命令/集成、构建和全局文档；原storage_review/core+DPAPI、docs_review/Android桥+仪器测试、ui_review/前端均已收尾；secret_security_review只读复核，secret_native_qa真实Windows验收。无并行writer。
+- 负责人/范围：根 AI验证/集成/文档，平台实现及既有测试保持；auth_native仅扩展core SecretProbe内部消费式load与shell认证worker占用。本轮各writer已收尾，无保存/删除现有槽。
 - 验收：两端重启可读取；删除生效；前端不读明文 Key；备份/日志无秘密；不得用明文或硬编码口令降级。
-- 实际成果：[契约](../crates/lishi-core/src/secrets.rs)、[服务](../crates/lishi-core/src/secret_probe.rs)、[平台适配](../src-tauri/src/secret/mod.rs)、[Kotlin](../src-tauri/gen/android/app/src/main/java/io/timejump/lishi/SecretStorePlugin.kt)、[IPC](../src-tauri/src/secret_commands.rs)、[界面](../src/SecretProbe.tsx)、[6项设备测试](../src-tauri/gen/android/app/src/androidTest/java/io/timejump/lishi/SecretStoreTest.kt)及应用/测试APK存在。只验证固定测试槽，不建立模型配置或发送凭据。
-- 证据：[M01记录](validation/M01.md)：workspace31项通过（4项真实DPAPI、3项secret值、5项服务、1项deadline，加原18项），fmt/Clippy/前端/两端构建通过；Windows保存/替换/非法输入保护/正常重开/删除/只bool返回及读明文拒绝通过，最终占用/超时版本原生IPC再次通过。APK签名/ZIP+ELF16KiB/DEX桥/备份声明检查通过；6项设备测试仅编译，未执行。
+- 实际成果：原DPAPI/Keystore、只bool的IPC及6项Android测试保持；新增消费式load_for_request供原生POST调用，先占用后入队，密钥不可Clone/Serialize，前端没有读明文入口。正式模型配置尚未实现；未用该槽发外部请求。
+- 证据：原Windows存储与APK证据见[M01记录](validation/M01.md)；本轮74项通过，新增内部load与认证worker超时/取消/drop占用测试，真实Windows槽missing时attempts0、saved模式bool和禁用通过，fixture不使用保存Key。最终两端构建/签名/16KiB通过；10项设备测试只编译。详见[认证记录](validation/M01_AUTH.md)。
 - 阻塞：用户暂缓真机，Android Keystore运行/重启/错误路径、前端隔离和备份实效仍需设备证据；不得把编译或Windows成功记为Android通过。SecretStore队列占用仍为内存，与T007独立文本操作恢复不同。
-- 更新时间：2026-10-13T00:15:18+08:00。
+- 更新时间：2026-10-13T01:00:29+08:00。
 - 完成时间：—。
-- 关联决策：D004、D011、D018、D020、V001。
+- 关联决策：D004、D011、D018、D020、D023、V001。
 
 ### M01-T006 验证 Android 文档导入导出
 

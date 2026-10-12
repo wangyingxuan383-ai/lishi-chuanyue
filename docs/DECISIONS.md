@@ -1,6 +1,6 @@
 # 决策记录
 
-更新时间：2026-10-12（Asia/Shanghai）。本文件记录为什么选择某条路线，不代表对应功能已经实现。
+更新时间：2026-10-13（Asia/Shanghai）。本文件记录为什么选择某条路线，不代表对应功能已经实现。
 
 ## 状态与证据规则
 
@@ -35,6 +35,9 @@
 | D018 | 暂缓真机验收，继续 M01 可独立工作 | 已采纳（门槛保留） |
 | D019 | 使用系统证书验证并显式初始化Android TLS | 已采纳（设备HTTPS待验证） |
 | D020 | 密钥仅内部读取、排队占用与备份边界 | 已采纳（Android运行待验证） |
+| D021 | 系统选择器、私有暂存与技术包 | 已采纳（设备运行待验证） |
+| D022 | 独立恢复探针与单进程持有权 | 已采纳（设备运行待验证） |
+| D023 | 受控认证POST与安全诊断 | 已采纳（实现/验证另见任务） |
 
 ## 已采纳的产品与工程决策
 
@@ -303,6 +306,18 @@
 - 关联任务：M01-T007/T008、M02-T004；补充D008/D020。
 - 依据：[SQLite WAL](https://www.sqlite.org/wal.html)、[原子提交](https://www.sqlite.org/atomiccommit.html)、[Rust File::try_lock](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock)、[Android进程生命周期](https://developer.android.com/guide/components/activities/process-lifecycle)，2026-10-12核实。
 - 记录日期：2026-10-12（Asia/Shanghai）。
+
+### D023 受控认证POST、固定一次尝试与安全诊断
+
+- 状态：已采纳；实现与验证结果由M01-T004登记，真实模型和Android运行待验收。
+- 问题：GET SSE探针尚未证明兼容接口的POST请求体、认证与usage；原始上游错误可能包含秘密。
+- 方案：完整endpoint不自动补路径；最小请求为model、单条user测试prompt、stream=true，include_usage只在显式勾选时发送。fixture只用原生生成的固定无效值及字面loopback HTTP；saved只用HTTPS，在入队前占用的原生worker读取m01-provider，明文不作为IPC参数或返回值。读取完成后释放存储占用，本次请求持有独立SecretValue，后续修改用于下一次请求。
+- 故障与诊断：一次send，无重试、redirect、代理与跨服务fallback。查询仅读内存，不重发；保留最多十项同进程结果。显示安全错误枚举、状态码、耗时、尝试数与严格整数usage，缺失用量与价格为未知，不显示上游错误正文/认证头。流式正文若回显本次凭据，跨分片检测后失败，未确定后缀暂缓输出。
+- 代价/限制：测试prompt与返回正文仍可能是个人资料，点击前明确发送目标；不承诺远端取消收费。检测针对原样解码正文，不涵盖变形编码或所有内存副本。操作记录在重开进程后消失；认证探针不与技术恢复库或正式世界混用。实际端点、TLS和设备能力需单独实测。
+- 复议条件：进入M02配置持久化、更多协议/工具/多模态或代理需求时重新规格化；不为兼容性静默降级到HTTP或重试。
+- 关联任务：M01-T004/T005/T008、M02-T001；补充D010/D019/D020。
+- 依据：[官方请求协议](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[流式chunk与usage](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events)，2026-10-13核实。官方协议不证明第三方服务已支持。
+- 记录日期：2026-10-13（Asia/Shanghai）。
 
 ## 待验证记录
 

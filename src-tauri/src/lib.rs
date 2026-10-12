@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 mod file_probe;
+mod model_probe;
 mod recovery_probe;
 mod secret;
 mod secret_commands;
@@ -93,6 +94,7 @@ pub fn run() {
             let store = lishi_core::storage::ProbeStore::open(data_dir.join("m01-probe.sqlite"))?;
             app.manage(Arc::new(store));
             app.manage(Arc::new(lishi_core::probe_jobs::ProbeJobs::default()));
+            app.manage(Arc::new(model_probe::ModelProbe::default()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -110,7 +112,11 @@ pub fn run() {
             file_probe::import_probe_pack,
             recovery_probe::start_probe_recovery_stream,
             recovery_probe::get_probe_recovery,
-            recovery_probe::cancel_probe_recovery
+            recovery_probe::cancel_probe_recovery,
+            model_probe::start_probe_model,
+            model_probe::cancel_probe_model,
+            model_probe::get_probe_model,
+            model_probe::list_probe_model_history
         ])
         .run(tauri::generate_context!())
         .expect("failed to run platform probe");

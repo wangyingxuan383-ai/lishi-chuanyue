@@ -1,4 +1,5 @@
-//! Application service for the single-slot M01 storage probe. No model calls.
+//! Single-slot M01 secret service. Only status crosses the UI boundary;
+//! trusted native requests may consume a reservation to load a protected value.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -68,6 +69,13 @@ impl Drop for ProbeSecretOperation {
 }
 
 impl ProbeSecretOperation {
+    /// Native provider use only: the returned value cannot be cloned or
+    /// serialized. This consumes the queued/running reservation and releases
+    /// it only after the platform read actually returns, including failures.
+    pub fn load_for_request(self) -> Result<Option<SecretValue>, SecretStoreError> {
+        self.store.load(&self.slot)
+    }
+
     pub fn status(self) -> Result<ProbeSecretStatus, SecretStoreError> {
         self.checked_status()
     }
@@ -224,5 +232,51 @@ mod tests {
         release_tx.send(()).unwrap();
         assert!(!worker.join().unwrap().unwrap().configured);
         assert!(!probe.status().unwrap().configured);
+    }
+
+    #[test]
+    fn trusted_load_returns_owned_value_and_releases_reservation_after_read() {
+        let probe = SecretProbe::new(Arc::new(BrokenStore::WrongValue)).unwrap();
+        let operation = probe.reserve().unwrap();
+        assert!(matches!(
+            probe.reserve(),
+            Err(SecretStoreError::Unavailable)
+        ));
+        let value = operation.load_for_request().unwrap().unwrap();
+        assert_eq!(value.expose_secret(), "invalid-test-other");
+        // Holding a frozen request credential does not block future settings:
+        // the platform read, rather than the network lifetime, owns the lease.
+        assert!(probe.reserve().is_ok());
+        assert_eq!(format!("{value:?}"), "SecretValue([REDACTED])");
+    }
+
+    #[test]
+    fn trusted_load_preserves_missing_and_failed_platform_reads() {
+        struct FailedLoad;
+        impl SecretStore for FailedLoad {
+            fn save(&self, _: &SecretSlot, _: &SecretValue) -> Result<(), SecretStoreError> {
+                Ok(())
+            }
+            fn load(&self, _: &SecretSlot) -> Result<Option<SecretValue>, SecretStoreError> {
+                Err(SecretStoreError::KeyUnavailable)
+            }
+            fn delete(&self, _: &SecretSlot) -> Result<(), SecretStoreError> {
+                Ok(())
+            }
+        }
+        let missing = SecretProbe::new(Arc::new(BrokenStore::MissingAfterSave)).unwrap();
+        assert!(missing
+            .reserve()
+            .unwrap()
+            .load_for_request()
+            .unwrap()
+            .is_none());
+        assert!(missing.reserve().is_ok());
+        let failed = SecretProbe::new(Arc::new(FailedLoad)).unwrap();
+        assert!(matches!(
+            failed.reserve().unwrap().load_for_request(),
+            Err(SecretStoreError::KeyUnavailable)
+        ));
+        assert!(failed.reserve().is_ok());
     }
 }
