@@ -54,3 +54,5 @@ Playwright CLI连接实际WebView2，未伪造Tauri/HTTP DTO。
 自有两次Windows进程正常关闭，fixture与preview核对当前实际PID/路径后停止，自有浏览器关闭；未复用旧PID或更改用户进程。原报告SHA256保持`3326D3F7421820CD5A219682062AC4D19E8AC920A2AAACEC2E431BEAE92F38C7`，秘密、私有数据、包、QA缓存未入Git。
 
 真实兼容服务/付费模型、Android安装/运行、HTTPS可信与错误证书、锁屏/JNI/Keystore等设备行为、release/R8均未执行。六项门槛见[设备清单](M01_DEVICE_CHECKLIST.md)；T004/T005保持待验收。生产Provider配置、游戏协议与正式回合仍待后续阶段；本探针进程退出后诊断清空。下一步及Git位置由[STATE](../STATE.md)维护。
+
+源码/验证基线本地提交`2bf2a2e`，24个自有文件。最终文档检查11份Markdown、96相对链接、48任务、27决策通过；任务由台账登记7已完成/6待验收/35待开始。现场回填为随后独立文档提交。
