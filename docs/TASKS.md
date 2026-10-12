@@ -1,6 +1,6 @@
 # 任务台账
 
-更新时间：2026-10-12T13:22:16+08:00。M01-T002/T003/T004待验收；下一项可独立工作为T005。
+更新时间：2026-10-12T18:53:17+08:00。M01-T002～T005待验收；下一独立任务为T006。
 
 本文件是任务完成情况的唯一事实源。第二版计划描述目标，DECISIONS.md 记录原因，STATE.md 只保存短现场和接手入口；其他文件不能自行宣布任务已完成。第一版报告用于理解想法，不自动形成约束。
 
@@ -11,7 +11,7 @@
 - 完成前填写实际成果、可定位证据、验收结果、完成时间及关联决策变更。文件存在、HTTP 200、框架宣称支持均不能替代验收。
 - 受阻时记录已尝试事项、具体失败与恢复条件；不能将未到达的前置依赖笼统标为受阻。取消保留原因和历史，不删除任务 ID。
 - 日期按 Asia/Shanghai；需要准确顺序时可写完整时间和时区。未知完成时间写“—”。
-- M00 六项与 M01-T001 已完成；T002/T003/T004待验收，其余38项待开始。平台完整验收尚未完成。
+- M00 六项与 M01-T001 已完成；T002/T003/T004/T005待验收，其余37项待开始。平台完整验收尚未完成。
 - M01-T008 是 Android 技术门槛。未通过前不得扩张功能；M06-T007 是私人 v0.1 交付门槛；M07 在 v0.1 稳定后开展。
 - 新问题追加明确 ID 的任务或写入现有任务的阻塞/决策；不无限展开经济、战争、地图、云同步等远期愿景。
 
@@ -176,15 +176,15 @@
 
 - 目标/交付：Windows 用当前用户 DPAPI；Android 用小 Kotlin 插件调用 Keystore AES-GCM，密文置私有目录。已保存 API token 由 Rust 核心经平台适配器读取，前端不读回明文；AES 密钥由 Keystore 管理，首次 token 输入经过 UI。
 - 依赖：M01-T002。
-- 状态：待开始。
-- 负责人/范围：待认领（Rust/Kotlin）；保存、读取、删除与错误路径。
+- 状态：待验收。
+- 负责人/范围：root核心服务/入队占用、壳命令/集成、构建和全局文档；原storage_review/core+DPAPI、docs_review/Android桥+仪器测试、ui_review/前端均已收尾；secret_security_review只读复核，secret_native_qa真实Windows验收。无并行writer。
 - 验收：两端重启可读取；删除生效；前端不读明文 Key；备份/日志无秘密；不得用明文或硬编码口令降级。
-- 实际成果：尚未实现。
-- 证据：暂无已登记验收证据。
-- 阻塞：无已确认阻塞。
-- 更新时间：2026-10-11（Asia/Shanghai）。
+- 实际成果：[契约](../crates/lishi-core/src/secrets.rs)、[服务](../crates/lishi-core/src/secret_probe.rs)、[平台适配](../src-tauri/src/secret/mod.rs)、[Kotlin](../src-tauri/gen/android/app/src/main/java/io/timejump/lishi/SecretStorePlugin.kt)、[IPC](../src-tauri/src/secret_commands.rs)、[界面](../src/SecretProbe.tsx)、[6项设备测试](../src-tauri/gen/android/app/src/androidTest/java/io/timejump/lishi/SecretStoreTest.kt)及应用/测试APK存在。只验证固定测试槽，不建立模型配置或发送凭据。
+- 证据：[M01记录](validation/M01.md)：workspace31项通过（4项真实DPAPI、3项secret值、5项服务、1项deadline，加原18项），fmt/Clippy/前端/两端构建通过；Windows保存/替换/非法输入保护/正常重开/删除/只bool返回及读明文拒绝通过，最终占用/超时版本原生IPC再次通过。APK签名/ZIP+ELF16KiB/DEX桥/备份声明检查通过；6项设备测试仅编译，未执行。
+- 阻塞：用户暂缓真机，Android Keystore运行/重启/错误路径、前端隔离和备份实效仍需设备证据；不得把编译或Windows成功记为Android通过。M01-T007持久中断恢复未实现。
+- 更新时间：2026-10-12T18:53:17+08:00。
 - 完成时间：—。
-- 关联决策：D004、D011、V001。
+- 关联决策：D004、D011、D018、D020、V001。
 
 ### M01-T006 验证 Android 文档导入导出
 

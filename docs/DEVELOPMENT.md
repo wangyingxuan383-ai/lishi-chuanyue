@@ -55,8 +55,8 @@ pnpm tauri android build --debug --target aarch64 --apk --ci
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
-# 隔离临时数据库与真实loopback HTTP/SSE的核心测试。
-cargo test -p lishi-core
+# 核心、真实loopback HTTP/SSE、隔离Windows DPAPI与期限/排队测试。
+cargo test --workspace
 ```
 
 也可以向环境脚本传 `-JavaHome`、`-AndroidHome`，或沿用已存在的 JAVA_HOME / ANDROID_HOME。Gradle 用户缓存默认位于项目忽略的 `.cache/gradle`；Windows 原生及 Android 产物位于忽略的 `target` / Android `app/build`。
@@ -80,7 +80,7 @@ Android 工程已经生成，通常不要重复 `android init`；它可能覆盖
 
 ## 当前产物与数据
 
-`target/debug/lishi-app.exe` 为Windows技术探针；Android debug APK在`src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。当前包含原生信息、文本往返、SQLite测试笔记与HTTP/SSE面板，不能开局或游玩。双击exe可普通运行。`pnpm tauri dev` 的原生热更新路径尚未单独验收，当前以已验证的打包exe为入口。
+`target/debug/lishi-app.exe` 为Windows技术探针；Android debug APK在`src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。当前包含原生信息、文本往返、SQLite、HTTP/SSE和密钥安全存储面板，不能开局或游玩。双击exe可普通运行。`pnpm tauri dev` 的原生热更新路径尚未单独验收，当前以已验证的打包exe为入口。
 
 笔记由Rust写入Tauri应用私有目录的`m01-probe.sqlite`，与未来每世界游戏数据库分开。每次保存原子更新正文、保存时间和修订，64KiB按UTF-8字节限制。重开测试仅涉及已提交笔记，完整操作中断恢复在M01-T007。
 
@@ -99,3 +99,26 @@ Android 工程已经生成，通常不要重复 `android init`；它可能覆盖
 Android系统证书验证由`src-tauri/src/android_tls.rs`在Wry JNI线程初始化；`stream_tls_unavailable`表示发送前拒绝，需核对初始化而不能关闭TLS。Gradle读取Cargo.lock中的shim版本，匹配Kotlin AAR；改网络依赖后必须重建并检查DEX，不能只做Windows测试。设计与设备边界见[D019](DECISIONS.md#d019-使用系统证书验证并显式初始化-android-tls)。
 
 本探针的实现依据于2026-10-12核对：[SSE解析规则](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream)、[Tauri Channel](https://v2.tauri.app/develop/calling-frontend/#channels)、[reqwest构建选项](https://docs.rs/reqwest/0.13.5/reqwest/struct.ClientBuilder.html)、[Tokio取消令牌](https://docs.rs/tokio-util/0.7.20/tokio_util/sync/struct.CancellationToken.html)。
+
+## 密钥存储探针
+
+只使用无效测试值；固定槽`m01-provider`用于M01，不是正式模型配置。密码框提交即清空，保存会替换该槽，刷新在核心内部解密验证但仅返回`configured`；删除后再次核对缺失。首次输入不可避免经UI与IPC，界面不回读已存明文、前缀、长度或指纹。当前不会发送密钥到任何模型。
+
+Windows用当前用户DPAPI，密文在Tauri私有目录下`secrets/secret-v1-<slot字节hex>.dpapi`，与SQLite笔记分开。namespace/slot附加entropy防换槽；只把密文写入同目录临时文件，sync后替换。Android用系统Keystore AES256-GCM与随机IV/AAD，密文放`noBackupFilesDir/lishi-secret-store-v1/…`；已有密文但alias丢失时报错，需要明确删除并重配，不会悄悄创建新Key覆盖。
+
+移动插件namespace拒绝前端命令并终止fallback；内部load仅经无@Command JNI helper。Root入队前持有owned占用，10秒等待超时返回未确认而不重发，排队或执行中旧任务仍未结束时不接受新操作。已启动平台worker不能安全强杀；JNI读的5秒只限制返回等待。持续不可用需重开。密文/内存占用不充当完整游戏操作恢复，后者在M01-T007。
+
+Rust受控值与JNI JSON、DPAPI解密分配、Kotlin明文ByteArray有清零；JS/Tauri传输副本/JVM immutable String不能保证全部主动擦除。不要开启包含原始IPC参数的生产日志或把真实Key用于验收。应用声明关闭自动备份并排除cloud/device-transfer数据；游戏迁移留给显式存档包，秘密不进包。规则、边界和来源见[D020](DECISIONS.md#d020-密钥只在内部读取安全存储操作在入队前占用)。
+
+Android六项仪器测试使用独立随机namespace/fake token。已编译测试包，尚未连接设备或执行：
+
+```powershell
+# 先完成同源码ARM64原生构建。
+. .\scripts\Enter-Dev.ps1
+pnpm tauri android build --debug --target aarch64 --apk --ci
+
+# 只编译设备测试APK；native库已有成功构建，排除会重启Tauri临时CLI的Rust任务。
+& .\src-tauri\gen\android\gradlew.bat -p src-tauri/gen/android :app:assembleUniversalDebugAndroidTest -PabiList=arm64-v8a -ParchList=arm64 -PtargetList=aarch64 -x :app:rustBuildUniversalDebug -x :app:rustBuildArm64Debug
+```
+
+测试APK在`src-tauri/gen/android/app/build/outputs/apk/androidTest/universal/debug/app-universal-debug-androidTest.apk`。后续指定设备并安装两包后，用`adb shell am instrument -w -e class io.timejump.lishi.SecretStoreTest io.timejump.lishi.test/androidx.test.runner.AndroidJUnitRunner`运行；当前这条命令未执行。须先核对实际test applicationId，记录设备/系统/测试结果再验收。

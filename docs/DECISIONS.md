@@ -34,6 +34,7 @@
 | D017 | 持久化接手文档与唯一任务状态源 | 已采纳（实现/验证另见任务） |
 | D018 | 暂缓真机验收，继续 M01 可独立工作 | 已采纳（门槛保留） |
 | D019 | 使用系统证书验证并显式初始化Android TLS | 已采纳（设备HTTPS待验证） |
+| D020 | 密钥仅内部读取、排队占用与备份边界 | 已采纳（Android运行待验证） |
 
 ## 已采纳的产品与工程决策
 
@@ -261,6 +262,20 @@
 - 复议条件：Tauri/Wry升级到同版JNI后移除桥；平台运行或证书拒绝失败时修正初始化，不以关闭验证或静默更换信任源规避。
 - 关联任务：M01-T004、M01-T008、M02-T001；补充D005，不替代现有共享核心路线。
 - 依据：[上游Android集成说明](https://github.com/rustls/rustls-platform-verifier#android)、[0.2.0官方POM](https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/android-release-support/maven/org/rustls/rustls-platform-verifier/0.2.0/rustls-platform-verifier-0.2.0.pom)、[JNI0.22 API](https://docs.rs/jni/0.22.4/jni/struct.EnvUnowned.html)，2026-10-12核实。上游README有旧坐标/API示例，实施按匹配版本源码与POM。
+- 记录日期：2026-10-12（Asia/Shanghai）。
+
+### D020 密钥只在内部读取，安全存储操作在入队前占用
+
+- 状态：已采纳；Windows实现/验收通过，Android源码/两类APK构建通过，设备运行未验收。
+- 问题：怎样避免移动插件把已保存明文交给JS，以及超时后的旧存储操作覆盖新值？
+- 方案：纯核心SecretValue不提供Clone/Serialize，Debug固定脱敏；状态DTO仅configured。Windows当前用户DPAPI以namespace/slot绑定，密文有界/原子替换。Android AES256-GCM、随机IV与AAD绑定，密文置noBackupFilesDir；插件namespace明确拒绝前端调用并返回handled，内部load经无@Command JNI helper。
+- 排他与超时：三个原生命令入队前取得不可Clone、单次消费的owned operation；它覆盖排队和执行期间，直到实际完成或被丢弃才释放。UI等待10秒后返回结果未确认；abort仅辅助停止未启动任务，已启动平台调用不能安全强杀，新操作在占用期间立即拒绝。JNI读另有5秒等待期限，不代表worker已取消。
+- 备份：应用声明allowBackup=false，并为旧版backup及新版cloud/device-transfer配置全域排除；不开启跨平台系统迁移。游戏迁移采用M06显式存档导出，秘密永不进包。不把厂家实际备份行为记成已运行验证。
+- 理由：Tauri移动fallback意味着缺省无Rust handler并不足以阻止Kotlin命令；仅在worker启动后取锁也不足以覆盖阻塞池排队。首次输入仍必须通过UI，保存后的读取保持在核心/原生层。
+- 代价/限制：需要一个小JNI读取桥、Kotlin执行线程与队列占用。能零化Rust受控字符串/DPAPI分配/Kotlin明文字节数组，不能承诺JavaScript、Tauri/serde和JVM不可变字符串的所有副本都擦除。原生调用永久停滞时需重启，未把内存占用误记成M01-T007持久恢复。
+- 复议条件：更换平台桥/开放插件命令/引入系统备份或真实Provider时重评权限与数据流；不得降低为明文存储。
+- 关联任务：M01-T005/T007/T008、M02-T001、M06-T002/T005；补充D004/D011。
+- 依据：[Tauri移动插件](https://v2.tauri.app/develop/plugins/develop-mobile/)、[Windows DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)、[Android Keystore](https://developer.android.com/privacy-and-security/keystore)、[Android备份规则](https://developer.android.com/identity/data/autobackup)及锁版本源码，2026-10-12核实。
 - 记录日期：2026-10-12（Asia/Shanghai）。
 
 ## 待验证记录

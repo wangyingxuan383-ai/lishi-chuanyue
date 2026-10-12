@@ -364,6 +364,37 @@ textarea {
   overflow-y: auto;
 }
 
+.secret-safety-note {
+  margin-top: -4px;
+  margin-bottom: 16px;
+  color: #5c6c7e;
+}
+
+.secret-connection-notice {
+  margin-bottom: 16px;
+}
+
+.secret-status {
+  margin-bottom: 16px;
+  color: #246448;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.secret-status--unknown {
+  color: #617186;
+}
+
+.secret-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.secret-message {
+  margin-top: 14px;
+}
+
 @media (max-width: 440px) {
   .probe-card {
     padding: 17px;
@@ -374,7 +405,8 @@ textarea {
   }
 
   .note-actions .secondary-button,
-  .stream-actions .secondary-button {
+  .stream-actions .secondary-button,
+  .secret-actions .secondary-button {
     width: 100%;
   }
 }

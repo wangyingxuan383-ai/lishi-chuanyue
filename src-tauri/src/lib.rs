@@ -2,6 +2,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::Manager;
 
+mod secret;
+mod secret_commands;
 mod stream_probe;
 
 #[cfg(target_os = "android")]
@@ -72,6 +74,7 @@ async fn save_probe_note(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(secret::init())
         .setup(|app| {
             #[cfg(target_os = "android")]
             android_tls::initialize(app)?;
@@ -89,7 +92,10 @@ pub fn run() {
             save_probe_note,
             stream_probe::start_probe_stream,
             stream_probe::cancel_probe_stream,
-            stream_probe::get_probe_stream
+            stream_probe::get_probe_stream,
+            secret_commands::get_probe_secret_status,
+            secret_commands::save_probe_secret,
+            secret_commands::delete_probe_secret
         ])
         .run(tauri::generate_context!())
         .expect("failed to run platform probe");

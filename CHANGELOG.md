@@ -14,6 +14,9 @@
 - 增加真实HTTP/SSE传输、一次性操作注册、Tauri Channel、核心取消令牌与内存状态查询；未提交草稿不入SQLite。中文分片、断流、超时、响应边界和Windows取消断连验证通过，实际模型Provider后续实现。
 - 显式接入Android系统证书验证初始化及匹配Kotlin组件（D019），避免HTTP成功掩盖HTTPS未初始化；ARM64编译与DEX存在检查通过，设备证书验证尚未执行。
 - 同进程界面重载可查询活动请求并取消，未重发HTTP；Tauri旧回调警告如实保留，持久强杀恢复仍在M01-T007。
+- 加入SecretStore契约、当前用户DPAPI、Android Keystore AES-GCM与密码输入/状态面板；保存后状态仅为configured，存储明文不返回前端。31项自动检查及Windows正常重开/删除验收通过，Android6项测试仅编译。
+- 为存储命令增加入队前owned占用和10秒结果未确认期限，修正无限等待与旧排队任务覆盖新值的竞态；后台原生操作不假称取消。插件前端namespace明确拒绝，内部读取经无@Command JNI桥（D020）。
+- 应用关闭系统自动备份并声明cloud/device-transfer排除，秘密放无备份私有目录；实际设备备份行为未运行验收，游戏迁移留M06显式存档导出。
 
 ## 2026-10-11 — M00 本地文档基线（已验收）
 

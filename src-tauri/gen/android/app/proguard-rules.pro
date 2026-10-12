@@ -1,6 +1,9 @@
 # Add project specific ProGuard rules here.
 # Rust calls this component through JNI; R8 cannot discover those references.
 -keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
+# Rust-only JNI entry and native plugin are not discovered by R8 call analysis.
+-keep class io.timejump.lishi.SecretStorePlugin { *; }
+-keep class io.timejump.lishi.RustSecretStoreBridge { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #
