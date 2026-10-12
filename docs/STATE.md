@@ -29,6 +29,6 @@ M00与M01-T001已完成。M01-T002～T005已有源码、Windows实测与ARM64 AP
 
 ## Git与恢复
 
-分支main，前次HEAD79bd63a。T005的core/shell依赖、secrets/service、平台适配/备份规则、前端、Android测试与台账/证据均在本轮范围，正在保存本地提交；实际最新位置用git log -1与git status核实。无真实Key/模型请求、远程发布；原报告hash不变。
+分支main；T005源码/配置/验证基线c285ee1，前次基线79bd63a。本现场回填随后单独提交，实际最新位置用git log -1与git status核实。所有源码、台账、决策与证据保留本地历史。无真实Key/模型请求、远程发布；原报告hash不变。
 
 恢复顺序：AGENTS → README → 本文 → TASKS的M01-T006及依赖 → 相关PLAN/DECISIONS → 实际源码/验证记录。四项任务待验收表示有实物与部分证据，不能推定Android/真实模型已通过。
