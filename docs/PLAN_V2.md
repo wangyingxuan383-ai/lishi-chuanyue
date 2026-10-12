@@ -147,6 +147,8 @@ Windows 在叙事旁增加可收起的状态和分支区域，复用全部核心
 
 Tauri 与插件的框架支持不等于本项目已兼容。SQLite、流式请求、密钥、文件 URI 和进程恢复必须在 Android 技术验证中通过。
 
+TLS采用系统证书验证，不关闭可信链或主机名检查。reqwest平台验证器在Android由壳初始化JVM/context并引入与Cargo锁对应的Kotlin组件；初始化失败时禁止发送。具体版本接线、代价与重评条件见[D019](DECISIONS.md#d019-使用系统证书验证并显式初始化-android-tls)。M01另检查真实HTTPS成功与不可信证书拒绝，HTTP测试或编译通过不能替代。
+
 ### 4.2 最小代码组织
 
 未来代码在仓库根组织为：共用前端、原生壳、独立核心三个主要包。核心最初使用一个 crate 内模块组织 application、domain、storage、provider、memory、research；secret 与 file I/O 由平台适配器实现。M07 再增加独立 local-server 包。
@@ -749,6 +751,7 @@ Android 最低版本及真实设备、原生库 16 KB 运行、平台密钥与�
 | S13 | [Tauri 16 KB 页](https://v2.tauri.app/develop/plugins/develop-mobile/#android-16kb-memory-pages) / [Android 页大小支持](https://developer.android.com/guide/practices/page-sizes) | NDK、原生库对齐和实际验证 |
 | S14 | [Tauri WebDriver](https://v2.tauri.app/develop/tests/webdriver/) | 桌面自动化与 Android 验收边界 |
 | S15 | [Brave Web Search API](https://api-dashboard.search.brave.com/api-reference/web/search/get) | 首批独立研究搜索接口与认证适配 |
+| S16（2026-10-12补查） | [rustls平台验证器Android集成](https://github.com/rustls/rustls-platform-verifier#android) | 系统可信链、匹配Kotlin组件与JVM初始化；按锁版本源码/POM核实 |
 
 ## 14. 文档变更规则与交付后现场
 

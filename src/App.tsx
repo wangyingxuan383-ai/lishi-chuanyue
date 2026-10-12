@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import SQLiteProbe from "./SQLiteProbe";
+import StreamProbe from "./StreamProbe";
 import { t } from "./i18n";
 import {
   describeProbeError,
@@ -192,6 +193,7 @@ export default function App() {
       </section>
 
       <SQLiteProbe coreConnected={connection.status === "connected"} />
+      <StreamProbe coreConnected={connection.status === "connected"} />
 
       <footer className="page-footer">{t("probe.page.footer")}</footer>
     </main>

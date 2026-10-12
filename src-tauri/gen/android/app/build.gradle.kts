@@ -1,10 +1,43 @@
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ValueSource
+import org.gradle.api.provider.ValueSourceParameters
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("rust")
+}
+
+// Keep the JVM verifier artifact synchronized with the shim selected by Cargo.
+// The shim's version is not the Rust rustls-platform-verifier crate version.
+abstract class RustlsAndroidVersion : ValueSource<String, RustlsAndroidVersion.Parameters> {
+    interface Parameters : ValueSourceParameters {
+        val lockFile: RegularFileProperty
+    }
+
+    override fun obtain(): String {
+        val lockText = parameters.lockFile.get().asFile.readText(Charsets.UTF_8)
+        val versions = Regex(
+            """(?m)^name = "rustls-platform-verifier-android"\r?\nversion = "([^"]+)"\r?$"""
+        ).findAll(lockText).map { it.groupValues[1] }.toList()
+        require(versions.size == 1) {
+            "Expected exactly one rustls-platform-verifier-android version in Cargo.lock"
+        }
+        return versions.single()
+    }
+}
+
+val rustlsAndroidVersion = providers.of(RustlsAndroidVersion::class.java) {
+    parameters.lockFile.set(layout.projectDirectory.file("../../../../Cargo.lock"))
+}
+
+repositories {
+    maven {
+        url = uri("https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/android-release-support/maven/")
+        content { includeGroup("org.rustls") }
+    }
 }
 
 val tauriProperties = Properties().apply {
@@ -72,6 +105,7 @@ rust {
 }
 
 dependencies {
+    implementation("org.rustls:rustls-platform-verifier:${rustlsAndroidVersion.get()}")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

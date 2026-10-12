@@ -1,4 +1,6 @@
 # Add project specific ProGuard rules here.
+# Rust calls this component through JNI; R8 cannot discover those references.
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #

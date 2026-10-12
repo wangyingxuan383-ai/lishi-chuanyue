@@ -16,3 +16,7 @@ tauri-build = { version = "2", features = [] }
 lishi-core = { path = "../crates/lishi-core" }
 serde.workspace = true
 tauri = { version = "2", features = [] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "=0.22.4", default-features = false }
+rustls-platform-verifier = "=0.7.1"

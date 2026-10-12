@@ -33,6 +33,7 @@
 | D016 | 历史证据、冲突与外部内容边界 | 已采纳（实现/验证另见任务） |
 | D017 | 持久化接手文档与唯一任务状态源 | 已采纳（实现/验证另见任务） |
 | D018 | 暂缓真机验收，继续 M01 可独立工作 | 已采纳（门槛保留） |
+| D019 | 使用系统证书验证并显式初始化Android TLS | 已采纳（设备HTTPS待验证） |
 
 ## 已采纳的产品与工程决策
 
@@ -248,6 +249,18 @@
 - 代价/限制：M01-T002 的 APK 安装与共享核心 Android 调用尚待证据；M01-T003～T007 可在同一技术探针中预备和实现，不能将桌面成功推定为 Android 成功。
 - 复议条件：用户安排设备或模拟器主机条件实际改变后补相应验收；M01-T008 完整真机门槛仍保留，未通过前不进入 M02 玩法开发。
 - 关联任务：M01-T001～T008；不替代 D002 / V001。
+- 记录日期：2026-10-12（Asia/Shanghai）。
+
+### D019 使用系统证书验证并显式初始化 Android TLS
+
+- 状态：已采纳；源码与ARM64编译通过，Android HTTPS运行待验证。
+- 问题：reqwest0.13的rustls默认平台验证器需要Android JVM支持，仅HTTP与APK构建会掩盖未初始化的证书验证问题。
+- 方案：继续使用系统信任链，不关闭证书校验。Android壳固定verifier0.7.1/jni0.22.4，Gradle从Cargo.lock解析android shim0.2.0并引入匹配`org.rustls` AAR；保留ProGuard规则。Tauri/Wry JNI0.21回调内新建Application context引用，经窄范围raw桥初始化0.22，成功后才开放探针请求。
+- 理由：系统信任链跟随平台更新；explicit ready检查避免异步初始化尚未完成时发送请求。网络核心仍不依赖Tauri/JNI初始化细节。
+- 代价/限制：目前Tauri与验证器JNI版本不同，需要两处有安全说明的unsafe桥；上下文初始化及DEX类存在不证明HTTPS或错误证书拒绝已经运行通过。release/R8及设备配置还需验证。
+- 复议条件：Tauri/Wry升级到同版JNI后移除桥；平台运行或证书拒绝失败时修正初始化，不以关闭验证或静默更换信任源规避。
+- 关联任务：M01-T004、M01-T008、M02-T001；补充D005，不替代现有共享核心路线。
+- 依据：[上游Android集成说明](https://github.com/rustls/rustls-platform-verifier#android)、[0.2.0官方POM](https://raw.githubusercontent.com/rustls/rustls-platform-verifier/maven-archive/android-release-support/maven/org/rustls/rustls-platform-verifier/0.2.0/rustls-platform-verifier-0.2.0.pom)、[JNI0.22 API](https://docs.rs/jni/0.22.4/jni/struct.EnvUnowned.html)，2026-10-12核实。上游README有旧坐标/API示例，实施按匹配版本源码与POM。
 - 记录日期：2026-10-12（Asia/Shanghai）。
 
 ## 待验证记录

@@ -2,6 +2,11 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::Manager;
 
+mod stream_probe;
+
+#[cfg(target_os = "android")]
+mod android_tls;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProbeInfo {
@@ -68,17 +73,23 @@ async fn save_probe_note(
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(target_os = "android")]
+            android_tls::initialize(app)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let store = lishi_core::storage::ProbeStore::open(data_dir.join("m01-probe.sqlite"))?;
             app.manage(Arc::new(store));
+            app.manage(Arc::new(lishi_core::probe_jobs::ProbeJobs::default()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             probe_info,
             echo_text,
             read_probe_note,
-            save_probe_note
+            save_probe_note,
+            stream_probe::start_probe_stream,
+            stream_probe::cancel_probe_stream,
+            stream_probe::get_probe_stream
         ])
         .run(tauri::generate_context!())
         .expect("failed to run platform probe");
