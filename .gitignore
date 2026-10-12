@@ -6,6 +6,12 @@ target/
 .cache/
 .gradle/
 local.properties
+tauri.properties
+.tauri/
+.playwright-cli/
+output/playwright/
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/schemas/
 
 # Secrets, local credentials and signing material
 .env
@@ -20,6 +26,7 @@ credentials/
 *.pfx
 *.jks
 *.keystore
+key.properties
 *.key
 
 # Real saves, exports, backups and diagnostic output

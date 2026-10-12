@@ -1,0 +1,18 @@
+[package]
+name = "lishi-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "lishi_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+lishi-core = { path = "../crates/lishi-core" }
+serde.workspace = true
+tauri = { version = "2", features = [] }

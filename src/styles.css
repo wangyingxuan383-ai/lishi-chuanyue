@@ -1,0 +1,313 @@
+:root {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #1e2b3b;
+  background: #f4f6f8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.65;
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 280px;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  min-height: 44px;
+  padding: 9px 17px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #8ebcfa;
+  outline-offset: 3px;
+}
+
+.probe-page {
+  width: min(100% - 32px, 820px);
+  margin: 0 auto;
+  padding-top: max(28px, env(safe-area-inset-top));
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+}
+
+.page-header {
+  margin-bottom: 23px;
+}
+
+.stage-label {
+  color: #496783;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+h1 {
+  margin: 7px 0 7px;
+  font-size: clamp(24px, 5vw, 30px);
+  line-height: 1.35;
+}
+
+h2 {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.4;
+}
+
+h3 {
+  margin: 17px 0 7px;
+  font-size: 14px;
+}
+
+p {
+  margin: 0;
+}
+
+.page-header p,
+.section-description,
+.input-help,
+.page-footer {
+  color: #5c6c7e;
+}
+
+.probe-card {
+  min-width: 0;
+  padding: 22px;
+  margin-bottom: 16px;
+  border: 1px solid #dce3eb;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 13px;
+}
+
+.card-heading > div {
+  min-width: 0;
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  color: #617186;
+  font-size: 14px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.connection-status--connected,
+.result-success {
+  color: #246448;
+}
+
+.connection-status--error,
+.error-message {
+  color: #a02f2f;
+}
+
+.connection-status--loading {
+  color: #285f9c;
+}
+
+.secondary-button {
+  color: #344e6a;
+  border-color: #d4dfe9;
+  background: #f8fafc;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: #edf2f7;
+}
+
+.primary-button {
+  color: #fff;
+  background: #2e5e90;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: #254e78;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 19px 0 0;
+}
+
+.info-grid div {
+  min-width: 0;
+}
+
+.info-grid dt {
+  margin-bottom: 3px;
+  color: #66788c;
+  font-size: 13px;
+}
+
+.info-grid dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.notice,
+.error-message {
+  margin-top: 15px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.section-description {
+  margin-top: 8px;
+  margin-bottom: 18px;
+  font-size: 14px;
+}
+
+.input-label {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 145px;
+  padding: 12px;
+  border: 1px solid #bac9d8;
+  border-radius: 9px;
+  color: #1e2b3b;
+  background: #fbfcfe;
+  resize: vertical;
+  line-height: 1.65;
+}
+
+.input-help {
+  margin-top: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.echo-feedback:empty {
+  display: none;
+}
+
+.echo-result {
+  margin-top: 19px;
+  padding-top: 17px;
+  border-top: 1px solid #e3e8ee;
+}
+
+.result-success {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.result-counts {
+  margin-top: 13px;
+}
+
+.echo-output {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  color: #31465d;
+  background: #f1f5f9;
+  font: inherit;
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.page-footer {
+  padding: 3px 2px;
+  font-size: 12px;
+}
+
+.note-connection-notice {
+  margin: -6px 0 16px;
+  color: #617186;
+}
+
+.note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.note-message {
+  margin-top: 14px;
+}
+
+.saved-note {
+  margin-top: 20px;
+  padding-top: 15px;
+  border-top: 1px solid #e3e8ee;
+}
+
+.saved-note h3 {
+  margin-top: 0;
+}
+
+.note-metadata {
+  margin-top: 13px;
+  margin-bottom: 12px;
+}
+
+.saved-note-text {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+@media (max-width: 440px) {
+  .probe-card {
+    padding: 17px;
+  }
+
+  .primary-button {
+    width: 100%;
+  }
+
+  .note-actions .secondary-button {
+    width: 100%;
+  }
+}
