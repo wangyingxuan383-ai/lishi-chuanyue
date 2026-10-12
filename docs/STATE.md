@@ -28,6 +28,6 @@ SecretStore、文档URI和操作持久强杀恢复未实现。草稿/最近十�
 
 ## Git与恢复
 
-分支main，前次HEAD dc63fb0；本轮流式/操作管理、Tauri/TLS桥、前端/fixture、Gradle与锁文件、计划/台账/证据均已验收相应边界，正在保存本地提交。提交前的未提交变化全部属于本轮，不删除；最终位置用git log -1与git status核实。无远程发布。
+分支main；M01-T004源码/配置/验证基线提交919f31a，前次基线dc63fb0。本现场回填另有随后文档提交，实际最新位置用git log -1与git status核实。源码、台账、决策、计划与证据均已保留本地历史，无远程发布。
 
 恢复顺序：AGENTS → README → 本文 → TASKS的M01-T005及依赖 → 相关PLAN/DECISIONS → 实际源码/验证记录。三项任务待验收表示有实物与部分证据，不能推定Android/真实模型已通过。
