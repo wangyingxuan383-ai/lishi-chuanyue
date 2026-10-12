@@ -4,6 +4,8 @@
 # Rust-only JNI entry and native plugin are not discovered by R8 call analysis.
 -keep class io.timejump.lishi.SecretStorePlugin { *; }
 -keep class io.timejump.lishi.RustSecretStoreBridge { *; }
+# Only Rust may open a selected SAF document through this worker-thread bridge.
+-keep class io.timejump.lishi.RustFileAccessBridge { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #

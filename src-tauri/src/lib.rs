@@ -2,6 +2,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::Manager;
 
+mod file_probe;
+mod recovery_probe;
 mod secret;
 mod secret_commands;
 mod stream_probe;
@@ -74,12 +76,20 @@ async fn save_probe_note(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(secret::init())
         .setup(|app| {
             #[cfg(target_os = "android")]
             android_tls::initialize(app)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            // Own the probe before touching shared stages or note storage.
+            // A second host must not clean a live host's temporary import.
+            app.manage(Arc::new(recovery_probe::RecoveryProbe::open(
+                data_dir.join("m01-recovery.sqlite"),
+            )?));
+            file_probe::setup(app)?;
             let store = lishi_core::storage::ProbeStore::open(data_dir.join("m01-probe.sqlite"))?;
             app.manage(Arc::new(store));
             app.manage(Arc::new(lishi_core::probe_jobs::ProbeJobs::default()));
@@ -95,7 +105,12 @@ pub fn run() {
             stream_probe::get_probe_stream,
             secret_commands::get_probe_secret_status,
             secret_commands::save_probe_secret,
-            secret_commands::delete_probe_secret
+            secret_commands::delete_probe_secret,
+            file_probe::export_probe_pack,
+            file_probe::import_probe_pack,
+            recovery_probe::start_probe_recovery_stream,
+            recovery_probe::get_probe_recovery,
+            recovery_probe::cancel_probe_recovery
         ])
         .run(tauri::generate_context!())
         .expect("failed to run platform probe");

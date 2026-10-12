@@ -1,34 +1,34 @@
 # 当前工作现场
 
-> 更新时间：2026-10-12T18:53:17+08:00｜当前里程碑：M01｜下一任务：M01-T006
+> 更新时间：2026-10-13T00:15:18+08:00｜当前里程碑：M01｜下一独立工作：M01-T004受控认证POST
 
-M00与M01-T001已完成。M01-T002～T005已有源码、Windows实测与ARM64 APK，设备/真实模型部分待验收。用户“暂时不用真机”，按D018继续独立探针，保留M01-T008门槛。游戏尚未实现；唯一任务状态见 [TASKS](TASKS.md)。
+T006/T007本地实现与验证已登记，设备验收保留。用户“暂时不用真机”，按D018继续不依赖设备的M01工作；M01-T008门槛不变，M02游戏尚未开始。唯一任务状态见 [TASKS](TASKS.md)。
 
-## 最后确定完成的步骤
+## 最后确定成功的步骤
 
-- 共用React界面、Tauri原生壳、独立Rust核心和Android工程已建立；文案使用src/i18n.ts的类型安全键。
-- Windows真实IPC中文/换行/emoji/空文本通过；SQLite五项隔离测试、后台IPC、真实UI保存/超限拒绝、正常关闭后重开恢复通过。未将笔记重开记成完整强杀恢复。
-- 流式HTTP/SSE、取消、草稿内存查询和操作注册已实现。18项核心测试、fmt/clippy/前端构建通过；Windows15次主动启动=15次HTTP，中文/断流/错误/超时/取消断连及同进程重载查询通过，未新增模型或数据库写入。
-- 最终Windows debug exe与ARM64 APK构建成功；APK签名/ZIP及ELF16KiB对齐通过，未安装手机或验证16KiB设备运行。产物/hash与修复细节见 [M01验证](validation/M01.md)。
-- Android TLS初始化、匹配Kotlin组件与发送前ready检查已接线，DEX含Verifier；D019记录JNI桥与信任链。编译/静态检查不代表手机HTTPS或错误证书拒绝已通过。
-- SecretStore契约、DPAPI、Keystore/JNI、密码框/仅bool状态及入队前owned占用已实现；workspace31项/Clippy/两端构建通过。Windows保存/替换/非法保护/正常重开/删除与最终IPC复核通过，fake槽已删除；6项Android测试APK已编译但未运行，D020与验证记录保存边界。
-- 工具路径、环境脚本、测试和启动入口见 [DEVELOPMENT](DEVELOPMENT.md)。原报告hash保持不变；无真实模型请求、远程仓库或公开发布。
+- React/Tauri/独立Rust核心及Android工程已建立；中文、SQLite、流式取消、DPAPI与Keystore源码、TLS初始化均有既有证据。
+- 新文件探针只打包显式文本。系统picker→私有stage→严格验证→预览；Windows中文/emoji路径导入、导出、取消、损坏、超限与前端权限拒绝通过，不覆盖原笔记或导出秘密。D021记录临时URI/worker/fd与provider限制。
+- 新恢复库独立保存操作/候选/正式快照；owner先于壳的stage清理与笔记初始化。五个子进程握手边界强杀全部通过；Windows生成/校验/事务三处真实强杀重开保基线且无自动HTTP重发。第二实例明确Busy、首实例stage保留。
+- 已修复大Channel晚到与旧查询降低持久终态；真实Response延迟800ms回归通过。正常二次提交/重开为修订2，原笔记99字节/修订5保持、密钥测试槽missing。D022区分技术快照与正式世界。
+- workspace53项、fmt/Clippy与前端构建通过；最终Windows与ARM64应用包重建成功。应用/测试APK签名、应用ZIP/ELF16KiB、DEX桥与Manifest检查通过；10项Android仪器测试只编译、未执行。
+- 产物/hash、Windows详细证据与失败修复见 [M01记录](validation/M01.md)；实际命令见 [DEVELOPMENT](DEVELOPMENT.md)。原报告hash保持不变，无真实模型请求或远程发布。
 
 ## 下一步可执行动作
 
-1. 认领M01-T006，先读D002/D007与文件URI相关计划；核实Tauri Dialog/Android SAF返回URI及权限行为，定义窄FileAccess接口。
-2. 在同一技术探针做选择/保存/取消、content URI→私有临时复制→验证与中文名称/损坏包路径；不用URI直接打开SQLite，不扩大成完整.timejump实现。
-3. 核心/Windows检查与ARM64构建后记录实际证据；手机文件选择/权限/后台行为保持待验收，不擅自开启系统备份或导出秘密。
-4. 实际兼容端点尚未配置，当前T004不是认证POST Provider；后续M02安全配置仍受完整M01门槛约束。
+1. 读取T004现有stream/fixture、T005 SecretStore和D010/D019/D020；先定义M01受控认证POST探针的最小请求、凭据读取与安全诊断边界，补入原任务范围后实现。仅用本地假凭据验证请求体/流式/错误/取消/单次请求；不用前端读密钥，不自动跨服务重试，不扩大成M02游戏配置。
+2. 继续保留实际兼容端点、Android HTTPS可信链/错误证书与设备执行为未验证；有用户配置或设备条件后才执行相应有限测试。
+3. 用户恢复手机测试时按 [六项清单](validation/M01_DEVICE_CHECKLIST.md) 核对设备与两包，再登记真实结果；不能以源码、Windows或测试APK编译替代M01-T008。
 
-## 已知限制与当前进程
+## 已知限制与进程
 
-文档URI与操作持久强杀恢复未实现。草稿/最近十项操作/密钥操作占用只在内存；10秒等待未知不等于后台worker已取消，长期停滞需重开。JS/Tauri/JVM明文副本不能保证全部擦除。Tauri重载仍可能有旧callback警告；WHPX未启用，无设备/模拟器运行证据。
+游戏Schema/开局/正式回合/长期记忆/分支/.timejump均未实现。原流式面板仍是内存结果；恢复面板的候选可暂存，但只有committed快照正式可见。SecretStore队列占用不是持久回合恢复。caller期限不杀已运行worker；原生I/O永久停滞需重开，Android后台持续生成不承诺。
 
-最终QA应用已正常关闭，fake测试槽已删除；9222/18741无监听，无活动构建/Vite/代理writer。不要按旧PID停止进程。Schema/JNI链接、缓存、两类APK、诊断、笔记数据库和机器配置均被忽略。产物/hash及仪器测试未运行事实见M01验证。
+移动picker把取消与选择器错误合并为未选中；provider写失败可能留部分外部文件。真实设备/模拟器、Keystore/JNI/SAF/锁屏/强杀、release/R8和物理断电均未验收。JS/Tauri/JVM所有秘密副本不能保证擦除。原流式面板重载曾有旧callback警告，未抹去历史。
+
+最后owned应用已正常关闭，fixture核对归属后停止；9222/9223/18741无监听，无活动writer/构建。不要复用文档或.cache旧PID。截图、两类APK、测试包、隔离WebView缓存、日志与私有数据库均忽略；自有桌面包与stage marker已清理。
 
 ## Git与恢复
 
-分支main；T005源码/配置/验证基线c285ee1，前次基线79bd63a。本现场回填随后单独提交，实际最新位置用git log -1与git status核实。所有源码、台账、决策与证据保留本地历史。无真实Key/模型请求、远程发布；原报告hash不变。
+分支main；本轮起点08edb27，本轮源码/验证与交接改动待本地提交。实际位置以git log -1与git status核对；不上传、不建远程仓库。提交后回填源码/验证基线，现场回填可单独文档提交。
 
-恢复顺序：AGENTS → README → 本文 → TASKS的M01-T006及依赖 → 相关PLAN/DECISIONS → 实际源码/验证记录。四项任务待验收表示有实物与部分证据，不能推定Android/真实模型已通过。
+恢复顺序：AGENTS → README → 本文 → TASKS的M01-T004及T005依赖 → 相关PLAN/DECISIONS → 实际源码与验证记录。待验收表示平台证据尚未齐备，不能推定手机或真实模型通过。

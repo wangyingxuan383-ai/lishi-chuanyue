@@ -22,7 +22,7 @@ if (args.length !== 0) {
 
 const scenarioNames = [
   "normal", "slow", "stall", "truncated", "malformed", "http-error",
-  "invalid-utf8", "large-event",
+  "invalid-utf8", "large-event", "large-truncated",
 ];
 const scenarios = Object.fromEntries(scenarioNames.map((name) => [name, {
   requests: 0,
@@ -198,6 +198,12 @@ const server = http.createServer((request, response) => {
   }
   if (scenario === "truncated") {
     sendSequence(response, context, [event(chunk("你走到")), event(chunk("城门前。"))], 300);
+    return;
+  }
+  if (scenario === "large-truncated") {
+    // Exceeds the native Channel inline threshold while staying below the
+    // SSE event limit. No DONE: transport failure must remain authoritative.
+    sendSequence(response, context, [event(chunk("史".repeat(4000)))], 300);
     return;
   }
   if (scenario === "malformed") {

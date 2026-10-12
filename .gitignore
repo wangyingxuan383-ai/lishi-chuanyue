@@ -41,6 +41,8 @@ diagnostics/
 *.db
 *.db-*
 *.timejump
+*.lishi-probe
+*.owner-lock
 *.log
 
 # Local editor and OS data

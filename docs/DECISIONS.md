@@ -278,6 +278,32 @@
 - 依据：[Tauri移动插件](https://v2.tauri.app/develop/plugins/develop-mobile/)、[Windows DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)、[Android Keystore](https://developer.android.com/privacy-and-security/keystore)、[Android备份规则](https://developer.android.com/identity/data/autobackup)及锁版本源码，2026-10-12核实。
 - 记录日期：2026-10-12（Asia/Shanghai）。
 
+### D021 系统选择器与私有暂存验证，文件权限留在原生层
+
+- 状态：已采纳；实现验证证据见M01记录，Android运行尚待验收。
+- 问题：Android返回文档URI，不能直接作为SQLite或普通磁盘路径；云文件提供器也可能阻塞。
+- 方案：Tauri Dialog 2.8.2选择/创建文档；导入即时复制到私有临时文件后验证。技术包`.lishi-probe` v1只含显式文本、格式/版本与SHA256，不是正式.timejump存档。文本64KiB，编码包400KiB，未知字段/版本、损坏和超限拒绝；校验只检测损坏，不证明作者可信。
+- 平台：Windows同目录临时写入、sync后替换明确选中的探针文件。Android选择器当前使用GET_CONTENT临时授权，保存为CREATE_DOCUMENT；URI不持久保存，Kotlin无@Command桥在Rust阻塞worker调用openFileDescriptor，避免上游AssetFileDescriptor偏移与UI线程I/O问题。Rust拥有并关闭fd，JS无URI/路径输入与返回。
+- 超时与权限：选好后等worker最多30秒，超时为未知结果且不重发；owned占用随排队/执行任务保留。等待选择器本身不计该期限。前端capabilities仍仅core:default，无dialog/fs直调权限；JNI桥及ProGuard规则单独维护。
+- 代价/限制：官方移动选择器将取消与选择器错误合并为None，只能说明未选中；云provider已启动I/O不能安全强杀。Android创建的目标若写入失败可留部分文件，不声称跨provider原子替换；导入预览不覆盖笔记。设备提供器、撤权和R8尚待验证。
+- 复议条件：升级插件、持久URI、完整存档或增加前端文件权限时重评；M06另定数据库备份与.timejump协议。
+- 关联任务：M01-T006/T008、M06-T002；补充D007/D011，不替代正式存档设计。
+- 依据：[Tauri Dialog](https://v2.tauri.app/plugin/dialog/)、[官方插件源码](https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/fs)、[Android SAF](https://developer.android.com/training/data-storage/shared/documents-files)及锁版本源码，2026-10-12核实。
+- 记录日期：2026-10-12（Asia/Shanghai）。
+
+### D022 独立恢复探针验证提交边界与单进程持有权
+
+- 状态：已采纳；实现验证证据见M01记录，Android生命周期尚待验收。
+- 问题：内存草稿和正常重开不能证明生成中或提交中强杀安全；两个Windows进程也可能误扫描彼此的活操作。
+- 方案：独立m01-recovery.sqlite保存操作、校验候选、正式快照与不可重复提交记录。持有期文件锁在打开/扫描前取得，也先于壳的stage清理及笔记初始化；第二owner提前拒绝，终止释放。启动把pending/generating/validating标为interrupted并清候选，不重发HTTP；正式文本、修订、操作终态与提交记录在WAL/FULL短事务中一并提交。
+- 验证：子进程在登记/生成/校验/事务未提交/提交完成五个真实边界握手后强杀，重开核对全部存在或全部不存在。原生面板额外提供默认关闭的20秒校验/事务暂停，仅用于技术验收；commit_paused事件在事务写完且COMMIT前发送。默认路径无此长暂停。
+- 排他与取消：入队前owned占用，取消令牌不释放尚未结束worker；校验与事务暂停都可取消，事务内取消回滚。DB等待与HTTP不占UI线程，外部请求期间无事务。已提交ID和旧head拒绝重复写入。
+- 代价/限制：恢复DTO只验证技术文本，不含M02人物/时间/资源协议；流式草稿仅内存，传输完成后的校验候选可暂存数据库且不会进入正式快照。Android强杀、文件锁与实际存储仍需设备证据；进程强杀不等同物理断电测试。
+- 复议条件：进入M02完整回合时沿用已证实的规则，按正式Schema补测试；多进程/多分支需要重新定义持有权和并发范围。
+- 关联任务：M01-T007/T008、M02-T004；补充D008/D020。
+- 依据：[SQLite WAL](https://www.sqlite.org/wal.html)、[原子提交](https://www.sqlite.org/atomiccommit.html)、[Rust File::try_lock](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock)、[Android进程生命周期](https://developer.android.com/guide/components/activities/process-lifecycle)，2026-10-12核实。
+- 记录日期：2026-10-12（Asia/Shanghai）。
+
 ## 待验证记录
 
 ### V001 Android 路线尚未实测

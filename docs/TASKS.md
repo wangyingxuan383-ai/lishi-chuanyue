@@ -1,6 +1,6 @@
 # 任务台账
 
-更新时间：2026-10-12T18:53:17+08:00。M01-T002～T005待验收；下一独立任务为T006。
+更新时间：2026-10-13T00:15:18+08:00。M01-T002～T007待验收；下一独立工作为T004受控认证POST验证，完整设备门槛保留。
 
 本文件是任务完成情况的唯一事实源。第二版计划描述目标，DECISIONS.md 记录原因，STATE.md 只保存短现场和接手入口；其他文件不能自行宣布任务已完成。第一版报告用于理解想法，不自动形成约束。
 
@@ -11,7 +11,7 @@
 - 完成前填写实际成果、可定位证据、验收结果、完成时间及关联决策变更。文件存在、HTTP 200、框架宣称支持均不能替代验收。
 - 受阻时记录已尝试事项、具体失败与恢复条件；不能将未到达的前置依赖笼统标为受阻。取消保留原因和历史，不删除任务 ID。
 - 日期按 Asia/Shanghai；需要准确顺序时可写完整时间和时区。未知完成时间写“—”。
-- M00 六项与 M01-T001 已完成；T002/T003/T004/T005待验收，其余37项待开始。平台完整验收尚未完成。
+- M00 六项与 M01-T001 已完成；T002～T007共六项待验收，其余35项待开始。平台完整验收尚未完成。
 - M01-T008 是 Android 技术门槛。未通过前不得扩张功能；M06-T007 是私人 v0.1 交付门槛；M07 在 v0.1 稳定后开展。
 - 新问题追加明确 ID 的任务或写入现有任务的阻塞/决策；不无限展开经济、战争、地图、云同步等远期愿景。
 
@@ -165,10 +165,10 @@
 - 状态：待验收。
 - 负责人/范围：根 AI 负责操作管理、Tauri桥/集成/验证与全局文档；storage_review核心stream及TCP测试，docs_review fixture与Android TLS独立接线，ui_review前端及真实Windows QA；各范围均已收尾。
 - 验收：中文分片无乱码；取消可结束本地任务；断网返回可理解错误；取消不声称已撤销服务商计费。
-- 实际成果：[stream核心](../crates/lishi-core/src/stream.rs)、[操作管理](../crates/lishi-core/src/probe_jobs.rs)、[TCP测试](../crates/lishi-core/tests/stream_probe.rs)、[fixture](../scripts/stream-fixture.mjs)、[原生桥](../src-tauri/src/stream_probe.rs)、[TLS初始化](../src-tauri/src/android_tls.rs)、[界面](../src/StreamProbe.tsx)及Windows exe/ARM64 APK存在；草稿仅内存，未实现模型Provider或操作持久恢复。
+- 实际成果：[stream核心](../crates/lishi-core/src/stream.rs)、[操作管理](../crates/lishi-core/src/probe_jobs.rs)、[TCP测试](../crates/lishi-core/tests/stream_probe.rs)、[fixture](../scripts/stream-fixture.mjs)、[原生桥](../src-tauri/src/stream_probe.rs)、[TLS初始化](../src-tauri/src/android_tls.rs)、[界面](../src/StreamProbe.tsx)及Windows exe/ARM64 APK存在；本面板草稿仅内存，独立持久恢复另见M01-T007，实际模型Provider尚未实现。
 - 证据：[M01记录](validation/M01.md)：18项核心测试通过（含10项流式/集成、3项管理、5项SQLite），fmt/clippy及前端/两端构建通过。Windows15次主动启动=15次HTTP，中文/取消断连/错误/超时/重载查询通过，全部活动流和定时器归零。APK v2签名、ZIP/ELF16KiB与Verifier DEX类检查通过；重载有旧回调警告，未掩盖。
 - 阻塞：Android设备、真实HTTPS可信/不可信证书验证暂缓；实际兼容模型端点/认证尚未配置，需后续安全配置及有限请求。受控传输成功不能记成真实模型或手机成功。
-- 更新时间：2026-10-12T13:22:16+08:00。
+- 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
 - 关联决策：D005、D008、D010、D018、D019、V001、V002。
 
@@ -181,8 +181,8 @@
 - 验收：两端重启可读取；删除生效；前端不读明文 Key；备份/日志无秘密；不得用明文或硬编码口令降级。
 - 实际成果：[契约](../crates/lishi-core/src/secrets.rs)、[服务](../crates/lishi-core/src/secret_probe.rs)、[平台适配](../src-tauri/src/secret/mod.rs)、[Kotlin](../src-tauri/gen/android/app/src/main/java/io/timejump/lishi/SecretStorePlugin.kt)、[IPC](../src-tauri/src/secret_commands.rs)、[界面](../src/SecretProbe.tsx)、[6项设备测试](../src-tauri/gen/android/app/src/androidTest/java/io/timejump/lishi/SecretStoreTest.kt)及应用/测试APK存在。只验证固定测试槽，不建立模型配置或发送凭据。
 - 证据：[M01记录](validation/M01.md)：workspace31项通过（4项真实DPAPI、3项secret值、5项服务、1项deadline，加原18项），fmt/Clippy/前端/两端构建通过；Windows保存/替换/非法输入保护/正常重开/删除/只bool返回及读明文拒绝通过，最终占用/超时版本原生IPC再次通过。APK签名/ZIP+ELF16KiB/DEX桥/备份声明检查通过；6项设备测试仅编译，未执行。
-- 阻塞：用户暂缓真机，Android Keystore运行/重启/错误路径、前端隔离和备份实效仍需设备证据；不得把编译或Windows成功记为Android通过。M01-T007持久中断恢复未实现。
-- 更新时间：2026-10-12T18:53:17+08:00。
+- 阻塞：用户暂缓真机，Android Keystore运行/重启/错误路径、前端隔离和备份实效仍需设备证据；不得把编译或Windows成功记为Android通过。SecretStore队列占用仍为内存，与T007独立文本操作恢复不同。
+- 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
 - 关联决策：D004、D011、D018、D020、V001。
 
@@ -190,29 +190,29 @@
 
 - 目标/交付：接入系统文档选择和保存，对 content URI 读写；导入先复制到应用私有临时文件再验证。
 - 依赖：M01-T002、M01-T003。
-- 状态：待开始。
-- 负责人/范围：待认领（Android/文件）；URI 与私有文件桥接。
+- 状态：待验收。
+- 负责人/范围：根 AI 负责集成、验证与全局文档；file_access负责probe_pack核心/测试与file_probe平台桥；probe_ui负责FileProbe/fileClient与新组件样式。互不覆盖中心lib/Cargo/App/i18n。
 - 验收：手机文件选择后可导入/导出测试包；URI 不被直接传给 SQLite；取消和权限失效安全返回。
-- 实际成果：尚未实现。
-- 证据：暂无已登记验收证据。
-- 阻塞：无已确认阻塞。
-- 更新时间：2026-10-11（Asia/Shanghai）。
+- 实际成果：[测试包核心](../crates/lishi-core/src/probe_pack.rs)、[文件桥](../src-tauri/src/file_probe.rs)、[Android fd桥](../src-tauri/src/file_access_android.rs)、[界面](../src/FileProbe.tsx)、6项核心/5项shell/4项Android仪器测试源码已落盘；新设备清单在validation目录。独立预览，不覆盖笔记。
+- 证据：[M01记录](validation/M01.md)：workspace53项、fmt/Clippy/29模块前端与最终两端构建通过；Windows系统选择器导出/中文emoji路径导入/取消/损坏/409601字节拒绝均通过且旧预览/99字节笔记保持。原生fs/dialog直调权限拒绝、360px与零控制台错误通过；4项Android文件测试已编译但未运行。应用/测试APK签名与应用ZIP/ELF16KiB检查通过。
+- 阻塞：用户暂缓真机；手机SAF/权限实效保持待验收，本轮继续核心与Windows及APK验证。
+- 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
-- 关联决策：D002、D007、V001。
+- 关联决策：D002、D007、D021、V001。
 
 ### M01-T007 验证后台与强杀恢复
 
 - 目标/交付：持久化 pending 操作和最后正式快照；在流式、校验和提交边界模拟退后台、进程终止和重新启动。
 - 依赖：M01-T003、M01-T004。
-- 状态：待开始。
-- 负责人/范围：待认领（核心/Android）；生命周期恢复。
+- 状态：待验收。
+- 负责人/范围：根 AI 负责集成、Windows强杀验证与全局文档；recovery_core负责recovery核心/测试/原生桥；probe_ui负责RecoveryProbe/recoveryClient。使用独立恢复探针数据库，不覆盖原SQLite测试笔记。
 - 验收：不完整草稿不进入正式世界；重启能识别未完成操作；无重复提交；后台持续生成不作为首版保证。
-- 实际成果：尚未实现。
-- 证据：暂无已登记验收证据。
-- 阻塞：无已确认阻塞。
-- 更新时间：2026-10-11（Asia/Shanghai）。
+- 实际成果：[恢复核心](../crates/lishi-core/src/recovery.rs)、[8项核心测试](../crates/lishi-core/tests/recovery_probe.rs)、[原生桥及3项占用测试](../src-tauri/src/recovery_probe.rs)、[界面](../src/RecoveryProbe.tsx)已落盘。独立数据库、owner锁、持久操作/候选/正式快照与阶段事件已实现。
+- 证据：[M01记录](validation/M01.md)：workspace53项包含五边界子进程强杀/回滚/并发/去重/旧head/worker占用；Windows生成/校验/提交事务三处真实强杀重开均保修订1、显示中断且不重发HTTP。正常二次提交/重开为修订2；大Channel真实Response延迟800ms后仍failed且旧快照不变。第二实例owner先拒绝、活stage保留；10次主动开始=10次HTTP，无残留流/定时器。fmt/Clippy/两端最终构建及产物检查通过。
+- 阻塞：用户暂缓真机；Android生命周期实测未执行。探针不扩大为M02世界/模型协议。
+- 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
-- 关联决策：D008、V001。
+- 关联决策：D008、D022、V001。
 
 ### M01-T008 验收 Android 技术门槛
 
@@ -221,10 +221,10 @@
 - 状态：待开始。
 - 负责人/范围：待认领（集成）+ 用户真机验证；仅技术探针验收。
 - 验收：用户手机六项均通过；Windows 开发壳可用；失败项记录原因，停止功能扩张并修订决策后再前进。
-- 实际成果：尚未实现。
-- 证据：暂无已登记验收证据。
-- 阻塞：无已确认阻塞。
-- 更新时间：2026-10-11（Asia/Shanghai）。
+- 实际成果：已有整合技术探针及[六项设备清单](validation/M01_DEVICE_CHECKLIST.md)，整体门槛尚未验收。
+- 证据：Windows/自动化/产物证据集中于M01记录；六项手机结果全部未运行，不记门槛通过。
+- 阻塞：用户暂缓真机；不擅自以桌面/源码/测试APK编译替代设备证据。
+- 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
 - 关联决策：D002、D005、D011、V001。
 
