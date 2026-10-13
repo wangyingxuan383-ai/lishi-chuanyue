@@ -230,6 +230,8 @@
 
 ## M02：单世界最小可玩闭环
 
+M02实现与验收摘要的本地提交：`d5373fb`。完成范围按D024为核心/Windows，Android设备尾项仍在M01台账；下一项具备依赖的任务为M03-T001。
+
 ### M02-T001 兼容 API 配置与能力探测
 
 - 目标/交付：保存完整Chat Completions endpoint、模型、原生Key引用与连接测试；能力明确unknown/supported/unsupported，不按厂商猜测。
