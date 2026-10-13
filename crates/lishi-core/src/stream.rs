@@ -93,7 +93,8 @@ pub struct StreamResult {
     pub delta_count: u64,
 }
 
-/// Tests may lower these budgets. Increasing the production caps is rejected.
+/// Trusted Rust callers may select timeouts within fixed hard caps. The probe
+/// defaults remain 5/10/90 seconds; these options are not an IPC request DTO.
 #[derive(Debug, Clone)]
 pub struct StreamOptions {
     pub connect_timeout: Duration,
@@ -120,9 +121,9 @@ impl Default for StreamOptions {
 impl StreamOptions {
     pub(crate) fn is_valid(&self) -> bool {
         !self.connect_timeout.is_zero()
-            && self.connect_timeout <= Duration::from_secs(5)
+            && self.connect_timeout <= Duration::from_secs(30)
             && !self.idle_timeout.is_zero()
-            && self.idle_timeout <= Duration::from_secs(10)
+            && self.idle_timeout <= Duration::from_secs(30)
             && !self.total_timeout.is_zero()
             && self.total_timeout <= Duration::from_secs(90)
             && (1..=MAX_EVENT_BYTES).contains(&self.max_event_bytes)
@@ -689,10 +690,17 @@ fn interpret_message(
     if delta.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "content" | "role" | "refusal" | "tool_calls" | "function_call"
+            "content" | "role" | "refusal" | "tool_calls" | "function_call" | "reasoning_content"
         )
     }) {
         return Err(StreamErrorCode::InvalidPayload);
+    }
+    // Compatible providers may stream reasoning separately from the answer.
+    // Accept its documented scalar shape, then discard it: reasoning never
+    // reaches the output/credential guard, UI events or subsequent context.
+    match delta.get("reasoning_content") {
+        None | Some(Value::Null | Value::String(_)) => {}
+        Some(_) => return Err(StreamErrorCode::InvalidPayload),
     }
     if delta
         .get("role")

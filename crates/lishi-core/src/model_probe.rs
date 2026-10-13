@@ -25,6 +25,15 @@ pub enum CredentialMode {
     Saved,
 }
 
+/// Native-only policy: an explicit user choice may permit a saved credential
+/// over HTTP. It is deliberately absent from the deserializable request DTO,
+/// so ordinary callers retain HTTPS-only validation and transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedEndpointPolicy {
+    HttpsOnly,
+    ExplicitHttp,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelProbeRequest {
@@ -40,6 +49,16 @@ impl ModelProbeRequest {
     /// Repeated by the native host before reservation and credential access.
     /// Parsing does not perform DNS or any other network operation.
     pub fn validate(&self) -> Result<(), StreamErrorCode> {
+        self.validate_with_endpoint_policy(SavedEndpointPolicy::HttpsOnly)
+    }
+
+    /// `ExplicitHttp` changes the allowed scheme for saved credentials only.
+    /// Fixture authorities, URL credentials, query strings and fragments retain
+    /// their original restrictions. It never changes TLS verification.
+    pub fn validate_with_endpoint_policy(
+        &self,
+        policy: SavedEndpointPolicy,
+    ) -> Result<(), StreamErrorCode> {
         if !(8..=128).contains(&self.operation_id.len())
             || !self
                 .operation_id
@@ -72,7 +91,12 @@ impl ModelProbeRequest {
             return Err(StreamErrorCode::InvalidUrl);
         }
         match self.credential_mode {
-            CredentialMode::Saved if url.scheme() == "https" => Ok(()),
+            CredentialMode::Saved
+                if url.scheme() == "https"
+                    || (policy == SavedEndpointPolicy::ExplicitHttp && url.scheme() == "http") =>
+            {
+                Ok(())
+            }
             CredentialMode::Fixture
                 if url.scheme() == "http" && literal_fixture_authority(&self.endpoint) =>
             {
@@ -133,6 +157,28 @@ pub async fn run_model_probe_with_options(
     options: StreamOptions,
     emit: impl FnMut(ProbeStreamEvent) -> bool,
 ) -> ModelProbeResult {
+    run_model_probe_with_endpoint_policy(
+        request,
+        secret,
+        cancel,
+        options,
+        SavedEndpointPolicy::HttpsOnly,
+        emit,
+    )
+    .await
+}
+
+/// Only a trusted native caller may opt into HTTP for a saved credential. The
+/// same bounded client, single attempt, cancellation and credential-echo guard
+/// are used for both policies; there is no redirect, retry, or TLS bypass.
+pub async fn run_model_probe_with_endpoint_policy(
+    request: ModelProbeRequest,
+    secret: Option<SecretValue>,
+    cancel: CancellationToken,
+    options: StreamOptions,
+    policy: SavedEndpointPolicy,
+    emit: impl FnMut(ProbeStreamEvent) -> bool,
+) -> ModelProbeResult {
     let started = Instant::now();
     let fail = |error, emit| ModelProbeResult {
         stream: failed_stream(request.operation_id.clone(), error, emit),
@@ -143,7 +189,7 @@ pub async fn run_model_probe_with_options(
             attempts: 0,
         },
     };
-    if let Err(error) = request.validate() {
+    if let Err(error) = request.validate_with_endpoint_policy(policy) {
         return fail(error, emit);
     }
     if !options.is_valid() {

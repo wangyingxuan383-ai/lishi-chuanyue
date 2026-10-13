@@ -9,6 +9,9 @@ use lishi_core::secrets::{SecretSlot, SecretStoreError, SecretValue};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::Runtime;
 
+/// Trusted native services share adapters; this managed state has no IPC getter.
+pub(crate) struct PlatformSecrets(pub Arc<dyn SecretStore>);
+
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "windows")]
@@ -61,6 +64,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             #[cfg(not(target_os = "android"))]
             let _ = api;
             use tauri::Manager;
+            app.manage(PlatformSecrets(Arc::clone(&store)));
             app.manage(Arc::new(SecretProbe::new(store)?));
             Ok(())
         })

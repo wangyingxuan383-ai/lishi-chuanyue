@@ -3,6 +3,9 @@
 export const locale = "zh-CN";
 
 const messages = {
+  "app.navigation":"应用页面",
+  "app.game":"游戏",
+  "app.probes":"技术验证",
   "probe.page.stage": "M01 · 平台技术探针",
   "probe.page.title": "AI 历史穿越模拟器",
   "probe.page.description": "验证原生核心连接、中文通信、本地笔记、流式取消、密钥、文件与中断恢复。",

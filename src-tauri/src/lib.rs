@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 mod file_probe;
+mod game_commands;
 mod model_probe;
 mod recovery_probe;
 mod secret;
@@ -95,6 +96,11 @@ pub fn run() {
             app.manage(Arc::new(store));
             app.manage(Arc::new(lishi_core::probe_jobs::ProbeJobs::default()));
             app.manage(Arc::new(model_probe::ModelProbe::default()));
+            let platform_secrets = Arc::clone(&app.state::<secret::PlatformSecrets>().0);
+            app.manage(Arc::new(game_commands::GameService::open(
+                &data_dir,
+                platform_secrets,
+            )?));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -116,7 +122,19 @@ pub fn run() {
             model_probe::start_probe_model,
             model_probe::cancel_probe_model,
             model_probe::get_probe_model,
-            model_probe::list_probe_model_history
+            model_probe::list_probe_model_history,
+            game_commands::list_game_worlds,
+            game_commands::create_game_world,
+            game_commands::get_game_world,
+            game_commands::start_game_turn,
+            game_commands::cancel_game_turn,
+            game_commands::set_game_policy,
+            game_commands::get_game_provider,
+            game_commands::save_game_provider,
+            game_commands::delete_game_provider,
+            game_commands::test_game_provider,
+            game_commands::list_game_presets,
+            game_commands::save_game_preset
         ])
         .run(tauri::generate_context!())
         .expect("failed to run platform probe");

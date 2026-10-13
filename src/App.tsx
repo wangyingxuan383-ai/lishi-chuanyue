@@ -5,6 +5,7 @@ import SecretProbe from "./SecretProbe";
 import FileProbe from "./FileProbe";
 import RecoveryProbe from "./RecoveryProbe";
 import ModelProbe from "./ModelProbe";
+import Game from "./Game";
 import { t } from "./i18n";
 import {
   describeProbeError,
@@ -39,7 +40,7 @@ function connectionLabel(connection: ConnectionState): string {
   }
 }
 
-export default function App() {
+function TechnicalProbes() {
   const [connection, setConnection] = useState<ConnectionState>(() =>
     hasNativeCore() ? { status: "loading" } : { status: "unavailable" },
   );
@@ -206,4 +207,15 @@ export default function App() {
       <footer className="page-footer">{t("probe.page.footer")}</footer>
     </main>
   );
+}
+
+export default function App() {
+  const [showProbes,setShowProbes]=useState(false);
+  return <>
+    <nav className="app-navigation" aria-label={t("app.navigation")}>
+      <button type="button" className="secondary-button" onClick={()=>setShowProbes(false)} aria-pressed={!showProbes}>{t("app.game")}</button>
+      <button type="button" className="secondary-button" onClick={()=>setShowProbes(true)} aria-pressed={showProbes}>{t("app.probes")}</button>
+    </nav>
+    {showProbes?<TechnicalProbes/>:<Game/>}
+  </>;
 }

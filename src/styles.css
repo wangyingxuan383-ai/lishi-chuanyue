@@ -488,3 +488,10 @@ textarea {
     width: 100%;
   }
 }
+.app-navigation {
+  display:flex;
+  justify-content:center;
+  gap:12px;
+  padding:16px;
+  flex-wrap:wrap;
+}

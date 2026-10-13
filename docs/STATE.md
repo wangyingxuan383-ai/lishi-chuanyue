@@ -1,34 +1,39 @@
 # 当前工作现场
 
-> 更新时间：2026-10-13T01:05:00+08:00｜里程碑：M01｜下一独立工作：Android release/R8 与 JNI 保留验证
+> 更新时间：2026-10-13（Asia/Shanghai）｜M02核心/Windows已验收｜下一里程碑：M03
 
-用户暂缓真机；按D018继续可独立的M01工作，M01-T008门槛保持，M02玩法尚未开始。唯一任务状态见[TASKS](TASKS.md)。本轮T004受控认证POST源码、自动化、Windows和两端debug包证据已登记，实际模型/设备仍待验收。
+用户要求持续做到M02结束，并明确选择核心/Windows先行、Android真机暂缓。D024替代D018门槛；不要再次让手机阻断玩法。任务状态唯一来源为[TASKS](TASKS.md)。原始报告保持不变，不创建远程仓库或发布。
 
-## 最后确定成功的步骤
+## 最后确定通过的步骤
 
-- 共用界面/独立Rust、SQLite、GET流式取消、平台密钥、文档包和持久恢复保持既有证据；本轮没有修改测试笔记99B/修订5、恢复快照修订2或保存密钥（槽missing）。原报告hash未变，无远程上传。
-- 新认证POST使用显式endpoint/model/prompt及可选usage；fixture只用原生固定无效值与字面loopback，saved仅HTTPS并在原生读取SecretValue。一次send、无重试/redirect/fallback；同进程十项安全诊断和状态查询不重发HTTP。D023记录数据流和限制。
-- 共享SSE拦截跨分片原样凭据回显；usage严格整数/总和/JS精度，未知价格保持未知。密钥读取先占用再入队，取消/超时/drop不提前释放running worker。RAII请求收尾，迟到事件不降低终态。
-- workspace74项、fmt/Clippy -D warnings、33模块前端通过；Windows16主动开始=16有效HTTP，中文/用量/错误/超时/取消/去重/并发/非法地址/缺Key/800ms大Channel/重载通过。默认fixture多读密钥状态已修复，最终exe再次验收。
-- 最终Windows/ARM64 debug重建与签名、ZIP/ELF16KiB检查通过；10项Android仪器测试只编译。最终原生及普通浏览器360px无横溢出，0 errors/0 warnings；重载测试另有旧callback与IPC fallback警告，保留事实。
-- `Verify-Dev.ps1`顺序检查并留下安全JSON；`check-docs.mjs`检查UTF-8/导航/任务/决策/依赖。初次全流程记录与最终UI修复包hash不同，准确产物和场景见[认证记录](validation/M01_AUTH.md)，命令见[开发说明](DEVELOPMENT.md)。
+- M02-T001～T006已有实现及验收证据：正式协议、每世界SQLite、不可变回合/快照、原子提交、取消/失败/启动恢复、开局/模板、自由行动/候选/继续/OOC、原生Key与API配置、手动新ID重试。详见[M02验证](validation/M02.md)及[正式契约](contracts/TURN_V1.md)。
+- 固定Windows十回合：余额110/46800秒/伤病解决。用户指定gemini-3.8-flash-high真实十回合：余额112/22800秒/药肆地点/口粮2/管事关系10/扭伤仍活跃。17个正式操作含10提交及7失败，另2次连接测试；失败没有改正式事实，也没有自动再发。
+- 最终真实WorldView+Provider配置正常关闭/重开逐字段相同；无CDP进程也正常退出。360px无横向溢出，最终控制台0 errors/0 warnings。M01笔记99字节/修订5、技术恢复修订2、旧Key未配置保持。
+- 最终128项Rust、格式/Clippy/前端和Windows通过（`.cache/validation/verify-20261013T091059432Z.json`）；ARM64 debug及10项设备测试编译通过（`m02-android-20261013T091141815Z.json`）。APK签名/ZIP16KiB/四个ELF LOAD/包内so一致性通过，产物hash在验证记录中。设备测试没有执行。
+
+## 用户接口与保存的数据
+
+生产配置修订6，模型gemini-3.8-flash-high，用户指定远程HTTP完整Chat Completions端点，allowInsecureHttp=true。Key已通过Windows DPAPI保存；**不要再从聊天复制、读回前端或写入文档/日志**。地址只在用户原生配置中读取；不擅自更换模型/服务，不自动降级传输。默认配置仍要求HTTPS，显式HTTP的取舍见D026。
+
+保留真实世界`real-m02-gemini-20261013`、固定十回合世界与秦朝模板；失败输入也保留。只清理过四个自有辅助QA世界。不要删除、改写用户世界或加密配置。单世界文件位于应用私有目录，SHA256世界ID映射名称；目录与现有命令见[开发说明](DEVELOPMENT.md)。
+
+## 实际能力与待验证项
+
+- 当前只有main主线；初始纪年是年精度锚点，经过秒数单调保存，没有完整历法/年龄。随机开局只从三个本地示例抽选，自定义可填任意国家/年份，历史研究尚未实现。
+- prompt v2明确物品字符串属性/层级及金额单位，开局偏好与OOC分别保存；完整状态、必要事实、近期最多四段剧情及行动总计8192字节。超限明确失败，不静默删事实。M03需替换此有限方案，并验证至少300回合召回。
+- 模型每操作一次请求，无自动修复/重试；生产等待30/30/90秒（D028），M01默认仍5/10/90。推理元数据直接丢弃（D027），正文完整解码后展示，逐字叙事后续。当前游戏未采集/展示usage与费用；模型uncertainties保存在原始输出，尚无独立UI。
+- 真实剧情中的历史币值/雇佣章程/药物等没有考证；提示改善后仍有金额与铜钱等同的残留表述。不能把模型写出的文献名当已核实来源。资料/不确定性体验归M05。
+- Android真机、HTTP/HTTPS/输入法/Keystore/SAF/杀进程运行、release/R8仍待验收；debug允许cleartext，release默认禁用。M01-T008及设备清单保持待办，不算M02未完成。
 
 ## 下一步可执行动作
 
-1. 认领M01-T002/T004/T005的release验证子范围：先读Android app/build.gradle.kts的release optimization、app/proguard及插件consumer规则，核对Tauri CLI选项和签名默认。使用本地未发布产物，不新建用户正式签名Key、不上传；记录是否unsigned/debug签名，不把包构建当设备验收。
-2. 在全部writer冻结后运行受控ARM64 release构建；检查R8后Verifier/SecretStore/FileAccess JNI bridge及入口仍存在、ELF/ZIP16KiB兼容，记录源码/产物/hash/失败修复。若缺签名只保留unsigned技术产物与具体限制，不要求用户现在真机。
-3. 实际兼容端点有用户配置后才做有限真实请求；不能从fixture推定模型能力。有设备后按[六项清单](validation/M01_DEVICE_CHECKLIST.md)做安装、可信HTTPS/错误证书、Keystore/SAF/强杀等真实记录。
+1. 从台账领取M03-T001；先读PLAN长期状态/记忆章节及D007/D009/D025，检查现有Entity、GameEvent、KnownFact和每回合完整快照，不创建第二套事实源。
+2. 先写别名、人物认知和持续事实的兼容规格；涉及输出/数据库v1变更时补版本、迁移和旧十回合存档备份/回归任务，再实现。
+3. M03-T003～T005逐步增加摘要、检索和上下文预算，保留原始记录、来源范围和提示版本；固定300回合数据先行，不用付费模型随机文案作为确定性断言。
+4. 手机验收待用户恢复时再按六项短清单执行；不要重复追问型号或连接。
 
-## 限制与恢复安全
+## Git与进程交接
 
-游戏Schema/开局/正式回合/长期记忆/分支/.timejump尚未实现。认证probe配置/诊断只在内存，不混入恢复库；进程重开历史为空。原GET草稿也仅内存；恢复库只让committed技术快照正式可见。平台worker永久停滞需重开；取消不承诺远端不收费，JS/Tauri/JVM所有秘密副本不能保证清零。
+Git分支main，此前基线`662cc2e`。本轮M02源码和全局文档自有修改正在收尾，尚未提交；所有代理已冻结，根统一维护文档。最终检查导航/秘密模式/原报告hash及git diff后保存本地提交，不上传。后续接手必须先运行git status与git log确认实际位置。
 
-真实设备/模拟器、AndroidHTTPS/JNI/Keystore/SAF/生命周期与release/R8未验收。移动picker合并取消与错误，provider失败可能留部分外部文件。原样凭据过滤不涵盖变形编码。旧Channel重载warning不是请求重试，详情保留验证记录。
-
-自有两次原生应用正常关闭，fixture/preview检查当次PID与路径后停止，自有浏览器关闭；1421/18742/9222/9223/18741无监听，无writer或构建。不要复用.cache旧PID。APK/测试包/截图/诊断/私有数据库全部忽略。
-
-## Git现场
-
-分支main；本轮起点56ca52c，认证源码/脚本/验证基线2bf2a2e。24个自有文件已提交，3300余行主要为完整请求链路和测试；本现场回填随后单独文档提交，最新位置以git log -1与git status核对。无遗留源码修改；原始报告未改，秘密/产物未入库。
-
-恢复顺序：AGENTS → README → STATE → TASKS相关M01项 → PLAN/DECISIONS → 实际源码与验证。待验收不能推定手机或真实模型成功。
+最终自有调试进程PID9104已正常退出，CLI会话m02final已detach，不留应用/CDP调试进程；下次不要直接复用旧PID。忽略目录存放本轮原始验证与截图，永久摘要已写入M02记录；缺少.cache不等于应用或Git成果丢失。原报告SHA256保持3326D3F7421820CD5A219682062AC4D19E8AC920A2AAACEC2E431BEAE92F38C7；191个版本控制候选文件的秘密模式检查无命中，文档导航/任务依赖检查通过。

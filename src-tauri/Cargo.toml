@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 lishi-core = { path = "../crates/lishi-core" }
 serde.workspace = true
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["time", "sync"] }
 tauri-plugin-fs = "2.7.0"

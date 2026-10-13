@@ -1,6 +1,6 @@
 # 开发环境与命令
 
-本文记录 M01 的实际工具和入口，不代表游戏或平台验收已完成。阶段结果见 [TASKS](TASKS.md) 与 [M01 验证记录](validation/M01.md)。工具核实日期：2026-10-12，Asia/Shanghai。
+本文记录M01/M02的实际工具和入口，阶段结果见[TASKS](TASKS.md)、[M01验证](validation/M01.md)与[M02验证](validation/M02.md)。工具核实日期：2026-10-12，Asia/Shanghai；玩法入口更新于2026-10-13。
 
 ## 本机工具基线
 
@@ -81,11 +81,15 @@ Android 工程已经生成，通常不要重复 `android init`；它可能覆盖
 
 ## 当前产物与数据
 
-`target/debug/lishi-app.exe` 为Windows技术探针；Android debug APK在`src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。当前包含原生信息、文本往返、SQLite、HTTP/SSE、密钥、文件与恢复面板，不能开局或游玩。双击exe可普通运行。`pnpm tauri dev` 的原生热更新路径尚未单独验收，当前以已验证的打包exe为入口。
+`target/debug/lishi-app.exe`为当前Windows可玩入口；Android debug APK在`src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。默认进入游戏，“技术验证”仍可打开既有探针。双击exe可普通运行。`pnpm tauri dev`热更新路径尚未单独验收，当前以已验证的打包exe为入口。
+
+游戏步骤：创建随机/自定义世界（公元前用负年，无零年）→默认演示或设置完整Chat Completions端点/模型/Key→自由行动、选项或继续→核心确认后自动保存。世界外方针只改变叙事偏好；失败/取消/中断保留输入且不改事实，手动重试新ID。当前开局静态、仅主线，演示明确不是AI；保存HTTP须显式勾选允许，风险在界面显示，无自动降级或服务切换。
+
+正式世界位于Tauri应用私有目录`worlds/world-{SHA256(world_id)}.sqlite`；Provider/模板在独立`game-settings.sqlite`，密文在平台私有目录。不要把私有数据库、Key或旧技术文本包当作公开游戏导出；`.timejump`尚未实现。当前完整状态提示词上限8192字节，超限明确失败，不静默裁剪必要事实；缺失usage及费用保持未知。
 
 笔记由Rust写入Tauri应用私有目录的`m01-probe.sqlite`，与未来每世界游戏数据库分开。每次保存原子更新正文、保存时间和修订，64KiB按UTF-8字节限制。恢复探针另用`m01-recovery.sqlite`，不覆盖原笔记；它仍不包含正式游戏状态。
 
-界面文案集中于`src/i18n.ts`的类型安全键；目前仅提供简体中文，后续增加语言时扩展词条而非逐页搜索文字。正式输入与笔记内容保持原文，不参与翻译。
+界面文案集中于`src/i18n.ts`与`src/gameMessages.ts`的类型安全键；目前仅提供简体中文，后续增加语言时扩展词条而非逐页搜索文字。正式输入与笔记内容保持原文，不参与翻译。
 
 ## 流式传输探针
 
@@ -138,7 +142,7 @@ Android当前选择为GET_CONTENT临时授权，保存为CREATE_DOCUMENT，不�
 
 恢复面板使用独立`m01-recovery.sqlite`，操作ID/base head先持久登记，再发一次测试HTTP。传输完成先进入validating候选，只有短事务成功才更新正式文本、修订、操作终态和提交记录。流式草稿只在页面内存；校验候选暂存数据库，失败/取消/重开中断清除。启动只查询并显示中断，不重发请求；旧ID/旧head和第二活owner拒绝。
 
-默认无暂停。技术验收可选择20秒校验或提交事务暂停，看到明确边界事件后才强杀；commit_paused意味着事务写入已发生但未COMMIT。事务暂停仅用于证明回滚，不带入正常回合。取消可结束等待并回滚，状态查询可能等事务释放。正式世界Schema/资源结算属于M02，尚未实现。
+默认无暂停。技术验收可选择20秒校验或提交事务暂停，看到明确边界事件后才强杀；commit_paused意味着事务写入已发生但未COMMIT。事务暂停仅用于证明回滚，不带入正常回合。取消可结束等待并回滚，状态查询可能等事务释放。正式世界Schema/资源结算已在M02独立世界库实现；技术恢复库不参与游戏状态，证据见M02记录。
 
 恢复面板包含large-truncated场景：12000B中文分片后直接EOF，验证大Channel晚到时仍以持久失败为准。前端不得让晚到事件或旧查询降低已确认终态；真正取数发生在原生IPC中，测试不替换模型或数据库结果。
 
