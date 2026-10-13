@@ -5,7 +5,7 @@
 ## 准备与记录
 
 - 手机型号Xiaomi24117RK2CC，Android16/API36，WebView153.0.8010.39，4KB内存页。
-- 当前APK SHA256 `0072e2531451a565766a72eead919bae8b0f8c463d154637b6c74f34b6b40c64`；本地安装后保留数据更新，日期2026-10-13（Asia/Shanghai），源码提交收尾补充。
+- 当前APK SHA256 `0072e2531451a565766a72eead919bae8b0f8c463d154637b6c74f34b6b40c64`；本地安装后保留数据更新，日期2026-10-13（Asia/Shanghai），修复源码提交c2f2d7f。
 - 首次安装使用开发说明中的 ARM64 debug APK。保留已有应用数据；卸载会删除私有测试数据和密钥，不能当作重启。
 - 流式测试使用电脑的 `scripts/stream-fixture.mjs`。本轮无线ADB显式serial使用 `adb -s <serial> reverse tcp:18741 tcp:18741`；如改用局域网，记录具体服务地址。只使用无效测试值，不填真实 API Key。
 - 每项记录“通过 / 失败 / 未运行”、实际操作与现象；失败保留步骤、错误代码与安全截图。无需提供完整私有目录或认证信息。

@@ -6,7 +6,7 @@
 
 - Xiaomi，型号代码24117RK2CC；Android16/API36，arm64-v8a；系统PAGE_SIZE=4096，不能据此宣称16KB设备运行通过。
 - WebView：com.google.android.webview 153.0.8010.39；应用versionName0.0.1/minSdk24/targetSdk36。
-- 首次安装APK的SHA256为`03e73f3f36087dddf731758edad46a2fc3554126affe834835bf5749cf27cf1e`（M02基线）。修复窗口后保留数据更新成功：当前APK229893065字节，SHA256 `0072e2531451a565766a72eead919bae8b0f8c463d154637b6c74f34b6b40c64`。AndroidTest APK667208字节，SHA256 `68fe7bafa6e6de0b739ace961a8a8dd6de32ff6a5aa59a780d5a3c0552d365a9`。不含M03功能；源码提交在收尾时补充。
+- 首次安装APK的SHA256为`03e73f3f36087dddf731758edad46a2fc3554126affe834835bf5749cf27cf1e`（M02基线）。修复窗口后保留数据更新成功：当前APK229893065字节，SHA256 `0072e2531451a565766a72eead919bae8b0f8c463d154637b6c74f34b6b40c64`。AndroidTest APK667208字节，SHA256 `68fe7bafa6e6de0b739ace961a8a8dd6de32ff6a5aa59a780d5a3c0552d365a9`。不含M03功能；修复源码提交`c2f2d7f`（M02基线`d5373fb`），构建前后应用源码指纹一致。
 - 无线二维码配对成功。配对密码仅在进程内存及用户要求的临时二维码中，图像位于忽略目录；不写明文配置或Git。连接信息仅存`.cache/device/connection.json`，下轮须用adb devices重新确认，不能硬用旧端口。
 - 三次ADB保留数据安装均返回INSTALL_FAILED_USER_RESTRICTED；上传到Download后由用户本地安装成功，随后测试APK的ADB安装成功。未卸载、清数据、修改全局证书信任或上传存档。
 - 使用本项目WebView实际CDP/Tauri IPC；自有转发tcp9223与reverse18741/18742，固定无效凭据的本机fixture。真实Windows Key没有复制到手机。

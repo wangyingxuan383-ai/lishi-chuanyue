@@ -42,6 +42,6 @@ Xiaomi24117RK2CC/Android16/API36/4KB页/WebView153。Android16真机发现IME和
 
 ## Git与进程交接
 
-Git分支main，基线1759fde/M02实现d5373fb。本轮自有修改：项目/开发/台账/现场/决策/变更及设备记录、M03草稿、二维码脚本/忽略项、MainActivity与两句i18n。根统一全局文档，本轮实现提交在收尾后记录。未创建远程仓库或上传；接手先查git status与git log。
+Git分支main，本轮实现c2f2d7f，M02实现d5373fb/旧交接1759fde。本轮自有修改：项目/开发/台账/现场/决策/变更及设备记录、M03草稿、二维码脚本/忽略项、MainActivity与两句i18n。根统一全局文档，已在c2f2d7f提交；最后交接元信息另提交。未创建远程仓库或上传；接手先查git status与git log。
 
 最终自有调试进程PID9104已正常退出，CLI会话m02final已detach，不留应用/CDP调试进程；下次不要直接复用旧PID。忽略目录存放本轮原始验证与截图，永久摘要已写入M02记录；缺少.cache不等于应用或Git成果丢失。本轮最终128项Rust、fmt/Clippy/37模块前端/fixture语法与文档检查通过：verify-20261013T111940049Z.json。Windows同步exe与Android新APK hash见手机记录。原报告SHA256保持3326D3F7421820CD5A219682062AC4D19E8AC920A2AAACEC2E431BEAE92F38C7；194个版本控制候选文件秘密模式无命中，15份Markdown导航/48任务依赖无环通过。
