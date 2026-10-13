@@ -4,7 +4,10 @@ dist/
 build/
 target/
 .cache/
+__pycache__/
+*.pyc
 .gradle/
+.kotlin/
 local.properties
 tauri.properties
 .tauri/

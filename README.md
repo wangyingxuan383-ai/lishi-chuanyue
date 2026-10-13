@@ -15,9 +15,9 @@
 
 ## 当前实际情况
 
-截至2026-10-13，M02核心/Windows闭环已验收：开局、模板、自由行动/选项/继续、世界外方针、正式状态、取消/手动重试及重启保存可用。固定十回合与用户指定gemini-3.8-flash-high真实十回合通过，完整存档和配置正常重开保持；128项Rust检查、两端debug构建通过。Android真机与release独立待验收；下一阶段为M03长期状态与记忆。最新结果见[M02验证](docs/validation/M02.md)。
+截至2026-10-13，M02核心/Windows闭环已验收：开局、模板、自由行动/选项/继续、世界外方针、正式状态、取消/手动重试及重启保存可用。固定十回合与用户指定gemini-3.8-flash-high真实十回合通过，完整存档和配置正常重开保持；128项Rust检查、两端debug构建通过。本轮Android16真机完成固定十回合、10项仪器测试及输入法修复验收；完整M01仍待剩余故障/生命周期证据，release独立未验收。M03进入实体与迁移契约设计。最新结果见[M02验证](docs/validation/M02.md)。
 
-文档工作、代码构建和设备验收分别记录，真实完成情况只维护在[任务台账](docs/TASKS.md)；当前工作现场与下一步见[现场状态](docs/STATE.md)。用户暂时不做真机测试；D024允许M02核心/Windows先行，Android设备证据继续保留待验收。
+文档工作、代码构建和设备验收分别记录，真实完成情况只维护在[任务台账](docs/TASKS.md)；当前工作现场与下一步见[现场状态](docs/STATE.md)。用户已恢复真机验收，当前采用无线ADB连接；D024允许M02核心/Windows先行，Android设备证据依实际结果登记。
 
 开发命令与精确工具版本见[开发说明](docs/DEVELOPMENT.md)。可用 `pnpm dev` 预览界面；普通浏览器会提示原生未连接，不能在浏览器中验证 Rust 功能或游玩。
 
@@ -39,7 +39,9 @@ Windows原生入口为`target/debug/lishi-app.exe`。打开后创建世界，默
 | [开发说明](docs/DEVELOPMENT.md) | 实际工具、配置、命令和构建入口 | 安装或运行技术探针 |
 | [M01 验证记录](docs/validation/M01.md) | 平台探针的实测、修复与未执行项 | 核对构建和验收证据 |
 | [认证 POST 验证](docs/validation/M01_AUTH.md) | 安全请求、故障/用量、自动入口与最终包证据 | 核对认证技术链路 |
-| [M01 设备清单](docs/validation/M01_DEVICE_CHECKLIST.md) | 未执行的六项设备验收与记录入口 | 用户恢复手机测试时 |
+| [M01 设备清单](docs/validation/M01_DEVICE_CHECKLIST.md) | 六项设备门槛及当前证据 | 核对真机剩余验收 |
+| [Android 实测](docs/validation/ANDROID_DEVICE.md) | 无线设备、窗口修复、测试与限制 | 核对手机结果 |
+| [M03 草稿](docs/contracts/M03_ENTITIES_DRAFT.md) | 实体/知识/迁移设计，尚未实施 | 继续长期状态任务 |
 | [M02 验证](docs/validation/M02.md) | 固定/真实短局、原子状态、Windows重开与产物 | 核对当前可玩闭环 |
 | [正式回合 v1](docs/contracts/TURN_V1.md) | 实体/时间/资源与模型输出规则 | 实现Provider、状态、存档或迁移 |
 

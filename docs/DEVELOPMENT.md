@@ -99,7 +99,7 @@ Android 工程已经生成，通常不要重复 `android init`；它可能覆盖
 
 本面板操作注册先于请求，同一时间仅允许一个任务，最近十项结果仅保留于当前进程内存。界面重载可查询活动操作，无需再次发HTTP；进程终止后这些状态丢失。下面的独立恢复面板另外验证持久化，不将本面板的内存结果误当数据库。当前GET探针不是带认证的模型Provider，不能用于配置真实模型。
 
-后续Android调试可在明确连接的设备上使用`adb reverse tcp:18741 tcp:18741`映射loopback测试服务。手机上的localhost默认指向手机本身；当前未连接设备，未执行该命令或Android流式运行验收。公开release不包含debug明文网络许可，正式服务使用HTTPS。
+后续Android调试可在明确连接的设备上使用`adb reverse tcp:18741 tcp:18741`映射loopback测试服务。手机上的localhost默认指向手机本身；本轮无线ADB已经在明确设备上执行并验证GET/POST，结果见[手机记录](validation/ANDROID_DEVICE.md)。公开release不包含debug明文网络许可，正式服务使用HTTPS。
 
 Android系统证书验证由`src-tauri/src/android_tls.rs`在Wry JNI线程初始化；`stream_tls_unavailable`表示发送前拒绝，需核对初始化而不能关闭TLS。Gradle读取Cargo.lock中的shim版本，匹配Kotlin AAR；改网络依赖后必须重建并检查DEX，不能只做Windows测试。设计与设备边界见[D019](DECISIONS.md#d019-使用系统证书验证并显式初始化-android-tls)。
 
@@ -159,3 +159,24 @@ Android当前选择为GET_CONTENT临时授权，保存为CREATE_DOCUMENT，不�
 已保存凭据模式只允许HTTPS。填写完整endpoint、模型ID和测试prompt，明确开始后由Rust读取平台槽并发送；输入内容会发给该地址，返回只作内存草稿，不更新任何SQLite。保存/删除Key仍通过独立密钥面板，已保存值不会读回JS。禁止在URL放Key、查询参数或userinfo。未连接原生核心的浏览器预览不会代发请求。
 
 认证记录限同进程十项；退出后消失。结果未知时先查询，不自动重复。读取密钥超时不代表平台worker已被杀死；在worker真正完成前存储占用仍保留。传输取消不承诺取消远端收费。接口仅验证文本Chat Completions，不证明生产配置、其他协议、结构化游戏输出或真实模型能力已验收。设计取舍见[D023](DECISIONS.md#d023-受控认证post固定一次尝试与安全诊断)。实际结果与未验证事项见[认证记录](validation/M01_AUTH.md)。
+
+## 无线手机调试与二维码
+
+2026-10-13用户选择无线方式，已完成扫码配对。先同Wi-Fi、手机开启开发者选项/无线调试，在“使用二维码配对设备”扫码；不同厂商名称可能不同。已有配对优先用`adb devices -l`及`adb mdns services`确认，不需要每轮重新配对。ADB可能同时显示IP和mDNS两个transport，它们可能是同一手机；后续命令显式使用确认后的serial。
+
+[scripts/Pair-AndroidQr.py](../scripts/Pair-AndroidQr.py)是本地开发助手，不是游戏功能。需要Python及qrcode/Pillow；本机Python3.12、qrcode8.2安装于忽略的.cache/qr-deps。首次配对密码只在内存和临时二维码，不存文本；二维码本身也是短期秘密，不能上传或入Git。输出和连接结果放项目.cache目录，使用后删除二维码图像。具体工具命令：
+
+```powershell
+. .\scripts\Enter-Dev.ps1
+# 本机依赖位置；其他机器使用已安装的qrcode/Pillow。
+$env:PYTHONPATH = Join-Path (Get-Location) '.cache/qr-deps'
+python scripts/Pair-AndroidQr.py --adb (Join-Path $env:ANDROID_HOME 'platform-tools/adb.exe') --output .cache/device/android-pair-qr.png --result .cache/device/connection.json --timeout 300
+# 等待扫码成功后，核对serial再操作指定设备。
+adb devices -l
+```
+
+受控GET/POST fixture用`adb -s <serial> reverse tcp:18741 tcp:18741`及18742。WebView调试仅debug产物开放，使用当前应用PID建立自有forward；进程重开后PID变化，旧forward不可复用。验证结束只移除本轮自有转发/fixture，不清数据、不重置ADB或手机信任。
+
+[Android无线ADB](https://developer.android.com/tools/adb#wireless)、[AOSP无线架构](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/docs/dev/adb_wifi.md)、[AOSP二维码解析](https://android.googlesource.com/platform/packages/apps/Settings/+/refs/heads/main/src/com/android/settings/wifi/dpp/AdbQrCode.java)，查阅2026-10-13。实际配对成功不等于所有型号或网络均可连接。
+
+Android生成工程的MainActivity包含[D030窗口适配](DECISIONS.md#d030-android-webview-根容器处理系统栏与输入法边距)。重新生成工程必须保留边距处理及其他平台桥，否则系统栏和输入法可能重新遮挡。手机目前为debug安装，不是release发布包；16KiB产物对齐通过，当前4KB手机不提供16KB物理页运行证据。

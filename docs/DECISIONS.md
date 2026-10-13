@@ -394,9 +394,21 @@
 - 关联任务：M02-T001、M02-T002、M02-T006；补充D025，不改写已提交的v1剧情。
 - 记录日期：2026-10-13（Asia/Shanghai）。
 
+### D030 Android WebView 根容器处理系统栏与输入法边距
+
+- 状态：已采纳；Android16真机普通点击十回合和用户中文输入验收通过。
+- 问题：target36的旧MainActivity只开启edge-to-edge，WebView和提交按钮被状态栏/IME遮挡，键盘打开后CDP可见高度不变。实际点击没有形成回合，不能强制点击来绕过。
+- 方案：保留edge-to-edge，在android.R.id.content以ViewCompat处理systemBars/displayCutout/ime的联合最大边距；保存初始padding，重复分发不累计。原生父容器消费已处理insets，设置adjustResize并请求首次分发。
+- 兼容影响：只改变Android原生布局，不改正式协议v1、Key或存档；保持数据更新，已有笔记/世界保留。
+- 代价/限制：adjustResize有弃用编译警告；不同Android/WebView/横屏仍需后续覆盖。本次手机4KB页，不能宣称16KB物理设备或release/R8通过。
+- 重评条件：出现双重边距、键盘动画/旋转遮挡、其他版本回归时，用实际窗口证据修订；重新android init时必须保留此适配。
+- 关联任务：M01-T002、M01-T008、M02-T005、M06-T001；结果见[手机记录](validation/ANDROID_DEVICE.md)。
+- 依据：[Android edge-to-edge/insets](https://developer.android.com/develop/ui/views/layout/edge-to-edge)、[软键盘布局](https://developer.android.com/develop/ui/views/layout/sw-keyboard)及当前Tauri/Wry生成源码，2026-10-13核实。
+- 记录日期：2026-10-13（Asia/Shanghai）。
+
 ## 待验证记录
 
-### V001 Android 路线尚未实测
+### V001 Android 路线完整设备门槛
 
 - 状态：待验证。
 - 问题：Tauri/Rust/SQLite/网络/SecretStore/URI 与生命周期组合是否能在用户手机运行？
@@ -405,7 +417,7 @@
 - 代价/限制：需 APK 安装、用户参与真机测试和完整记录；手机型号/版本以实际测试为准。
 - 复议条件：任何门槛失败即记录日志/复现方式，修订 D002/D005/D011 或探针方案后再继续。
 - 关联任务：M01-T001~T008；完成后更新关联 D002、D005、D011 的证据。
-- 当前证据（2026-10-12）：Windows真实IPC、SQLite五项核心测试和正常重开读取通过；ARM64 APK与bundled SQLite编译、签名/16KiB产物对齐通过。Android安装/运行及完整平台清单尚未实测，仍待验证。详见validation/M01.md。
+- 当前证据（2026-10-13）：Android16/ARM64/4KB手机安装、核心/SQLite/Keystore、GET/POST/TLS、10项仪器测试、固定十回合和输入法修复通过；其余文件/网络/生命周期边界待补，完整门槛保持待验证。详见[手机记录](validation/ANDROID_DEVICE.md)。16KiB产物对齐通过不等于16KB物理设备或release验收。
 - 记录日期：2026-10-11（Asia/Shanghai）。
 
 ### V002 用户兼容端点能力验证

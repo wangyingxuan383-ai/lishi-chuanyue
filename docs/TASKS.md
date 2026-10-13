@@ -1,6 +1,6 @@
 # 任务台账
 
-更新时间：2026-10-13（Asia/Shanghai）。M02核心/Windows固定与真实模型十回合、正常重开已验收；M01设备独立待办。
+更新时间：2026-10-13（Asia/Shanghai）。M02核心/Windows已验收；M01真机T002/T003/T005已验收，其余依设备证据继续补齐。
 
 本文件是任务完成情况的唯一事实源。第二版计划描述目标，DECISIONS.md 记录原因，STATE.md 只保存短现场和接手入口；其他文件不能自行宣布任务已完成。第一版报告用于理解想法，不自动形成约束。
 
@@ -11,7 +11,7 @@
 - 完成前填写实际成果、可定位证据、验收结果、完成时间及关联决策变更。文件存在、HTTP 200、框架宣称支持均不能替代验收。
 - 受阻时记录已尝试事项、具体失败与恢复条件；不能将未到达的前置依赖笼统标为受阻。取消保留原因和历史，不删除任务 ID。
 - 日期按 Asia/Shanghai；需要准确顺序时可写完整时间和时区。未知完成时间写“—”。
-- M00与M01-T001已有完成证据；M01设备待验收保持。M02-T001～T006已完成核心/Windows验收（D024），含固定与真实模型十回合及完整正常重开；Android设备尾项独立保留。
+- M00与M01-T001～T003/T005已有完成证据；M01其余设备门槛待补齐。M02-T001～T006已完成核心/Windows验收（D024），含固定与真实模型十回合及完整正常重开；Android设备尾项独立保留。
 - M01-T008 是 Android 技术门槛。D024允许M02核心/Windows先行，设备项不得冒称完成；M06-T007 是私人 v0.1 交付门槛；M07 在 v0.1 稳定后开展。
 - 新问题追加明确 ID 的任务或写入现有任务的阻塞/决策；不无限展开经济、战争、地图、云同步等远期愿景。
 
@@ -134,28 +134,28 @@
 
 - 目标/交付：建立 React/TypeScript/Vite + Tauri 2 壳和独立 Rust 单 crate；通过共同应用接口调用核心。
 - 依赖：M01-T001。
-- 状态：待验收。
+- 状态：已完成。
 - 负责人/范围：根 AI（骨架、Rust、IPC、配置与构建），handoff_docs 子代理仅 src/ 前端。T001 准备期间先建立源码，原生验收依赖仍保留。
 - 验收：Windows 可启动；生成并安装最小 APK；同一核心函数能从两端调用；核心不依赖 UI 组件。
-- 实际成果：根 Cargo workspace、独立 lishi-core、Tauri 壳、Android 生成工程、React 技术探针、开发环境脚本已建立；已构建Windows debug exe和ARM64 APK，Android安装仍待验收。
-- 证据：pnpm build / Rust fmt 检查通过；Playwright 360×780、1280×900 无横溢出、按钮44px、中文换行、未连接时禁用发送通过，控制台零错误。Windows debug已构建，真实WebView2→Rust中文/emoji/换行与空文本回传通过；ARM64 APK构建、签名与ZIP/ELF16KiB对齐通过，详见M01记录。
-- 阻塞：用户明确暂时不用真机；Android 安装与原生交互未执行，保留待验收。
-- 更新时间：2026-10-12T12:41:44+08:00。
-- 完成时间：—。
-- 关联决策：D005、D006、V001。
+- 实际成果：独立lishi-core/Tauri/React及两端构建已落盘；手机保留数据安装、probe_info=android和同一echo核心真实调用通过。MainActivity新增系统栏/IME边距，固定十回合及用户中文输入通过。
+- 证据：既有Windows/360px/ARM64证据保留；本轮无线手机中文/换行/emoji18标量54字节一致，安装及原生调用通过；修复产物0072e253...签名/ZIP/ELF16KiB通过，详见[手机记录](validation/ANDROID_DEVICE.md)。
+- 阻塞：无本项阻塞；当前只覆盖Android16/ARM64/4KB页/debug，release及其他设备后续。
+- 更新时间：2026-10-13（Asia/Shanghai）。
+- 完成时间：2026-10-13T19:19:03+08:00。
+- 关联决策：D005、D006、D030、V001。
 
 ### M01-T003 验证应用私有 SQLite
 
 - 目标/交付：用 rusqlite + bundled SQLite 在应用私有目录创建、写入、重启读取测试数据库，确认事务与中文内容。
 - 依赖：M01-T002。
-- 状态：待验收。
-- 负责人/范围：根 AI 负责集成/验证；原 architecture_review 提供核心存储/测试，原 handoff_docs 提供前端。当前 storage_review 只读审查、ui_review 做原生QA；手机仍待验收。
+- 状态：已完成。
+- 负责人/范围：根 AI 负责集成/验证；原architecture_review提供核心存储/测试，原handoff_docs提供前端；根负责本轮手机验证，旧writer已冻结。
 - 验收：真机重启数据不丢；事务失败无半写入；SQLite 编译与设备读写均有证据。
-- 实际成果：storage.rs、5项核心测试、私有目录/后台IPC与SQLiteProbe前端已落盘，核心和Windows验收已通过，Android运行仍待验收。
-- 证据：cargo test -p lishi-core 5/5通过，fmt及workspace/all-targets clippy -D warnings通过；含SQLite的Windows构建、真实UI保存/拒绝/正常重开逐字恢复通过；更新ARM64 APK构建与签名/ZIP/ELF16KiB检查通过。见M01记录，未执行强杀或Android数据读写。
-- 阻塞：Android真机验收暂缓；不会将桌面/编译结果标成手机通过。
-- 更新时间：2026-10-12T12:41:44+08:00。
-- 完成时间：—。
+- 实际成果：bundled SQLite、私有笔记、原子保存/超限拒绝在Windows与手机均通过；与游戏世界和恢复数据库分开。
+- 证据：手机实际UI保存66字节/修订1；65537字节返回note_too_large且旧记录保持。生成中真实强杀、重开和保留数据更新APK后逐字恢复；固定十回合世界也已写入，最终完整重开比较由T008继续记录。既有事务/核心测试保留，见[手机记录](validation/ANDROID_DEVICE.md)。
+- 阻塞：无本项阻塞；不把进程终止验证称为物理断电。
+- 更新时间：2026-10-13（Asia/Shanghai）。
+- 完成时间：2026-10-13T19:19:03+08:00。
 - 关联决策：D007、V001。
 
 ### M01-T004 验证流式请求与取消
@@ -165,9 +165,9 @@
 - 状态：待验收。
 - 负责人/范围：根 AI集成、POST fixture、验证脚本、Windows QA/两端构建和全局文档；auth_transport仅core stream/model_probe及10TCP/2unit，auth_native仅shell model_probe和core内部密钥读取及9tests，auth_ui仅新面板/client/messages/CSS。各范围已冻结收尾。
 - 验收：中文分片无乱码；取消可结束本地任务；断网返回可理解错误；取消不声称已撤销服务商计费。POST请求体/认证/可选usage与单次尝试、401/429/redirect/截断/超时/凭据回显有固定检查；前端无已存明文返回，查询不重发，Windows及ARM64构建留下证据，实际模型/设备另行登记。
-- 实际成果：旧GET/取消保持；新增[认证核心](../crates/lishi-core/src/model_probe.rs)、[原生接线](../src-tauri/src/model_probe.rs)、[POST fixture](../scripts/model-fixture.mjs)、[面板](../src/ModelProbe.tsx)、[统一验证](../scripts/Verify-Dev.ps1)及[文档检查](../scripts/check-docs.mjs)。POST诊断/安全读取/有界历史已实现，正式游戏Provider配置未实现。
+- 实际成果：旧GET/取消保持；新增[认证核心](../crates/lishi-core/src/model_probe.rs)、[原生接线](../src-tauri/src/model_probe.rs)、[POST fixture](../scripts/model-fixture.mjs)、[面板](../src/ModelProbe.tsx)、[统一验证](../scripts/Verify-Dev.ps1)及[文档检查](../scripts/check-docs.mjs)。POST诊断/安全读取/有界历史已实现；正式游戏Provider已在M02独立交付，不能混用技术槽。
 - 证据：[认证记录](validation/M01_AUTH.md)：74项workspace、fmt/Clippy、33模块前端与最终Windows/ARM64构建通过；16主动请求=16HTTP/认证body通过，中文/usage/401/429/redirect/截断/超时/取消/回显/非法地址/缺Key/去重/并发/迟到Channel/重载及冷启动历史验证通过。最终原生与浏览器360px/0控制台错误、签名/ZIP/ELF16KiB通过；重载旧callback警告单独保留。
-- 阻塞：Android设备/实际HTTPS证书与真实兼容模型仍未验证；只用固定无效凭据，本地成功不记手机/付费模型通过。认证记录同进程十项、退出清空，持久世界恢复另见T007。
+- 阻塞：本轮手机GET/取消/POST/可信TLS和错误证书通过，设备断网/超时仍待补证；生产真实兼容模型已在M02验收，手机未调用付费模型。认证记录同进程十项、退出清空，持久世界恢复另见T007。
 - 更新时间：2026-10-13T01:00:29+08:00。
 - 完成时间：—。
 - 关联决策：D005、D008、D010、D018、D019、D020、D023、V001、V002。
@@ -176,14 +176,14 @@
 
 - 目标/交付：Windows 用当前用户 DPAPI；Android 用小 Kotlin 插件调用 Keystore AES-GCM，密文置私有目录。已保存 API token 由 Rust 核心经平台适配器读取，前端不读回明文；AES 密钥由 Keystore 管理，首次 token 输入经过 UI。
 - 依赖：M01-T002。
-- 状态：待验收。
-- 负责人/范围：根 AI验证/集成/文档，平台实现及既有测试保持；auth_native仅扩展core SecretProbe内部消费式load与shell认证worker占用。本轮各writer已收尾，无保存/删除现有槽。
+- 状态：已完成。
+- 负责人/范围：根 AI验证/集成/文档，平台实现及既有测试保持；auth_native仅扩展core SecretProbe内部消费式load与shell认证worker占用。旧writer已收尾；根本轮仅操作手机无效技术槽，Windows生产槽保持。
 - 验收：两端重启可读取；删除生效；前端不读明文 Key；备份/日志无秘密；不得用明文或硬编码口令降级。
-- 实际成果：原DPAPI/Keystore、只bool的IPC及6项Android测试保持；新增消费式load_for_request供原生POST调用，先占用后入队，密钥不可Clone/Serialize，前端没有读明文入口。正式模型配置尚未实现；未用该槽发外部请求。
-- 证据：原Windows存储与APK证据见[M01记录](validation/M01.md)；本轮74项通过，新增内部load与认证worker超时/取消/drop占用测试，真实Windows槽missing时attempts0、saved模式bool和禁用通过，fixture不使用保存Key。最终两端构建/签名/16KiB通过；10项设备测试只编译。详见[认证记录](validation/M01_AUTH.md)。
-- 阻塞：用户暂缓真机，Android Keystore运行/重启/错误路径、前端隔离和备份实效仍需设备证据；不得把编译或Windows成功记为Android通过。SecretStore队列占用仍为内存，与T007独立文本操作恢复不同。
-- 更新时间：2026-10-13T01:00:29+08:00。
-- 完成时间：—。
+- 实际成果：Windows DPAPI与Android Keystore AES-GCM、私有无备份目录、只bool状态及消费式内部读取；手机UI保存/重开/替换/删除通过，最终技术槽configured=false。生产WindowsKey保持。
+- 证据：手机实际运行SecretStoreTest6/6（连同文件桥共10项）通过；前端密码框清空，仅configured返回；强杀及APK更新后配置保持，UI替换和删除验证通过。设备有效flags无ALLOW_BACKUP；未触发用户云备份。详见[手机记录](validation/ANDROID_DEVICE.md)。
+- 阻塞：无本项阻塞；release/R8独立后置，JS/JVM字符串全部副本零化不作为承诺。
+- 更新时间：2026-10-13（Asia/Shanghai）。
+- 完成时间：2026-10-13T19:19:03+08:00。
 - 关联决策：D004、D011、D018、D020、D023、V001。
 
 ### M01-T006 验证 Android 文档导入导出
@@ -194,8 +194,8 @@
 - 负责人/范围：根 AI 负责集成、验证与全局文档；file_access负责probe_pack核心/测试与file_probe平台桥；probe_ui负责FileProbe/fileClient与新组件样式。互不覆盖中心lib/Cargo/App/i18n。
 - 验收：手机文件选择后可导入/导出测试包；URI 不被直接传给 SQLite；取消和权限失效安全返回。
 - 实际成果：[测试包核心](../crates/lishi-core/src/probe_pack.rs)、[文件桥](../src-tauri/src/file_probe.rs)、[Android fd桥](../src-tauri/src/file_access_android.rs)、[界面](../src/FileProbe.tsx)、6项核心/5项shell/4项Android仪器测试源码已落盘；新设备清单在validation目录。独立预览，不覆盖笔记。
-- 证据：[M01记录](validation/M01.md)：workspace53项、fmt/Clippy/29模块前端与最终两端构建通过；Windows系统选择器导出/中文emoji路径导入/取消/损坏/409601字节拒绝均通过且旧预览/99字节笔记保持。原生fs/dialog直调权限拒绝、360px与零控制台错误通过；4项Android文件测试已编译但未运行。应用/测试APK签名与应用ZIP/ELF16KiB检查通过。
-- 阻塞：用户暂缓真机；手机SAF/权限实效保持待验收，本轮继续核心与Windows及APK验证。
+- 证据：[M01记录](validation/M01.md)：workspace53项、fmt/Clippy/29模块前端与最终两端构建通过；Windows系统选择器导出/中文emoji路径导入/取消/损坏/409601字节拒绝均通过且旧预览/99字节笔记保持。原生fs/dialog直调权限拒绝、360px与零控制台错误通过；4项Android文件测试本轮已实际运行通过；手机SAF往返/取消也通过，损坏/超大/撤权完整链路仍待补证。应用/测试APK签名与应用ZIP/ELF16KiB检查通过。
+- 阻塞：手机SAF往返/取消已通过，余下文件失败边界待补证；不以文件桥仪器测试替代全部选择器场景。
 - 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
 - 关联决策：D002、D007、D021、V001。
@@ -209,7 +209,7 @@
 - 验收：不完整草稿不进入正式世界；重启能识别未完成操作；无重复提交；后台持续生成不作为首版保证。
 - 实际成果：[恢复核心](../crates/lishi-core/src/recovery.rs)、[8项核心测试](../crates/lishi-core/tests/recovery_probe.rs)、[原生桥及3项占用测试](../src-tauri/src/recovery_probe.rs)、[界面](../src/RecoveryProbe.tsx)已落盘。独立数据库、owner锁、持久操作/候选/正式快照与阶段事件已实现。
 - 证据：[M01记录](validation/M01.md)：workspace53项包含五边界子进程强杀/回滚/并发/去重/旧head/worker占用；Windows生成/校验/提交事务三处真实强杀重开均保修订1、显示中断且不重发HTTP。正常二次提交/重开为修订2；大Channel真实Response延迟800ms后仍failed且旧快照不变。第二实例owner先拒绝、活stage保留；10次主动开始=10次HTTP，无残留流/定时器。fmt/Clippy/两端最终构建及产物检查通过。
-- 阻塞：用户暂缓真机；Android生命周期实测未执行。探针不扩大为M02世界/模型协议。
+- 阻塞：手机生成中强杀/重开已通过；校验/事务暂停、后台/锁屏仍待补证。当前等待方便保持应用前台，独立技术库不代替正式游戏重开。
 - 更新时间：2026-10-13T00:15:18+08:00。
 - 完成时间：—。
 - 关联决策：D008、D022、V001。
@@ -218,13 +218,13 @@
 
 - 目标/交付：整合安装、SQLite、流式取消、SecretStore、URI、强杀恢复，形成 APK 和用户真机检查记录。
 - 依赖：M01-T003、M01-T004、M01-T005、M01-T006、M01-T007。
-- 状态：待开始。
-- 负责人/范围：待认领（集成）+ 用户真机验证；仅技术探针验收。
+- 状态：进行中。
+- 负责人/范围：根AI负责无线ADB连接、设备盘点、保留数据安装与设备/游戏验证；用户扫码/本地安装并确认输入法；根执行自有UI与系统选择器。记录只限本项目应用。
 - 验收：用户手机六项均通过；Windows 开发壳可用；失败项记录原因，停止功能扩张并修订决策后再前进。
 - 实际成果：已有整合技术探针及[六项设备清单](validation/M01_DEVICE_CHECKLIST.md)，整体门槛尚未验收。
-- 证据：Windows/自动化/产物证据集中于M01记录；六项手机结果全部未运行，不记门槛通过。
-- 阻塞：用户暂缓真机；不擅自以桌面/源码/测试APK编译替代设备证据。
-- 更新时间：2026-10-13T00:15:18+08:00。
+- 证据：Windows/自动化/产物证据集中于M01记录；10项手机仪器测试、实际UI中文/SQLite/Key/GET/POST/可信TLS和错误证书、生成中强杀、固定游戏10回合、用户输入法、SAF往返/取消通过，见[手机记录](validation/ANDROID_DEVICE.md)；余下边界未完成，不记总门槛通过。
+- 阻塞：用户已恢复手机验收；无线配对和安装已成功，无连接或权限阻塞。当前用户切到其他应用，等待方便保持本项目应用前台后补校验/事务强杀、坏包/超大包及生命周期；不抢占其他应用。
+- 更新时间：2026-10-13（Asia/Shanghai）。
 - 完成时间：—。
 - 关联决策：D002、D005、D011、V001。
 
@@ -297,7 +297,7 @@ M02实现与验收摘要的本地提交：`d5373fb`。完成范围按D024为核�
 - 验收：不采用选项仍可行动；OOC不算人物行动；未提交正文不进上下文；选项基于已提交head，未确认时不开始下一回合。
 - 实际成果：真实Tauri IPC、运行时DTO、序号/终态保护、界面恢复/重试新ID、手机和桌面布局；阶段进度先行，正文完整解码后展示待提交，逐字展示后续优化。
 - 证据：Windows界面连续十回合/候选自由输入/两个continue/OOC、故障恢复手动新ID重试；360px中文emoji长输入无横溢出，最终冷开0 errors/0 warnings。提示词排除候选正文自动检查通过，见[验证记录](validation/M02.md)。
-- 阻塞：无；浏览器不提供伪原生功能；Android输入法/生命周期真机另行验收。
+- 阻塞：无；浏览器不提供伪原生功能；Android输入法修复及固定十回合本轮通过，生命周期与完整重开继续补证。
 - 更新时间：2026-10-13（Asia/Shanghai）。
 - 完成时间：2026-10-13（Asia/Shanghai）。
 - 关联决策：D003、D008、D024、D025。
@@ -311,7 +311,7 @@ M02实现与验收摘要的本地提交：`d5373fb`。完成范围按D024为核�
 - 验收：固定Provider故障/去重/恢复全部通过；真实十回合可玩且正式状态可解释，实际重开保持；失败有准确证据及后续动作。
 - 实际成果：tests/game_playthrough.rs、tests/game_model_pipeline.rs与[验证记录](validation/M02.md)；固定Windows十回合资金110/46800秒/伤病解决。用户批准gemini-3.8-flash-high真实十回合，资金112/22800秒/药肆地点/伤病仍活跃/口粮2/管事关系10；完整WorldView与配置正常重开一致。
 - 证据：128项Rust、格式/Clippy/前端通过；最终Windows及Android debug编译，APK签名/ZIP/ELF16KiB通过。17个正式真实操作含10提交/7失败，另2连接测试，无自动重试；失败不改正式事实。真实UI候选/自由行动/continue与360px、旧M01数据保持通过；所有操作ID、提示版本、产物hash和重开证据见验证记录。
-- 阻塞：无M02核心/Windows阻塞。历史单位/章程/药物情节未考证，usage/费用未采集；M03长局与M05来源后续。Android设备与release/R8未验收，按D024不算本项门槛。
+- 阻塞：无M02核心/Windows阻塞。历史单位/章程/药物情节未考证，usage/费用未采集；M03长局与M05来源后续。Android固定十回合本轮通过，完整设备门槛和release/R8仍未验收，按D024不算本项门槛。
 - 更新时间：2026-10-13（Asia/Shanghai）。
 - 完成时间：2026-10-13（Asia/Shanghai）。
 - 关联决策：D003、D008、D009、D024、D025、D026、D027、D028、D029、V002。
@@ -321,13 +321,13 @@ M02实现与验收摘要的本地提交：`d5373fb`。完成范围按D024为核�
 
 - 目标/交付：建立人物/地点/组织/物品及关系、事实来源和主角可知范围；支持同名人物、改名和持续状态。
 - 依赖：M02-T006。
-- 状态：待开始。
-- 负责人/范围：待认领（核心/存储）；必要实体模型与百科查询。
+- 状态：进行中。
+- 负责人/范围：根AI统筹；m03_entity_design编写草稿、m03_draft_review两轮只读审查、根修订契约；不修改现有协议/存档或手机验收APK。
 - 验收：同名不串 ID；死活、持有物与长期状态可查；客观事实与角色已知可区分，不实现全 NPC 心智模拟。
-- 实际成果：尚未实现。
-- 证据：暂无已登记验收证据。
+- 实际成果：[兼容草稿](contracts/M03_ENTITIES_DRAFT.md)及独立源码审查已交付，补全物品/来源/角色视图/显式迁移与实施顺序；功能尚未实现，不将设计视为整项完成。
+- 证据：两轮只读审查核对game_protocol/store/provider/native/UI，修订8项契约问题及残留矛盾；文档QA通过。无v2代码、升级或模型验收证据。
 - 阻塞：无已确认阻塞。
-- 更新时间：2026-10-11（Asia/Shanghai）。
+- 更新时间：2026-10-13（Asia/Shanghai）。
 - 完成时间：—。
 - 关联决策：D003、D007、D012。
 
