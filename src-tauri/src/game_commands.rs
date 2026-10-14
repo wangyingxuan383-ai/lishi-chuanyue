@@ -1,9 +1,10 @@
 //! Native transport for formal worlds. The database owns facts; UI events are
 //! provisional. Secrets, profiles and world files have separate lifetimes.
 use lishi_core::{
+    game_context::ContextBudget,
     game_protocol::{self, WorldSetup},
     game_provider::{self, Capability, ProviderKind, ProviderStore, ProviderView, StoredProvider},
-    game_store::{GameOperationStatus, GameStore, GameStoreError, GameTurnRequest, WorldView},
+    game_store::{GameOperationStatus, GameStoreError, GameTurnRequest},
     model_probe::{CredentialMode, ModelProbeDiagnostics, ModelProbeRequest, SavedEndpointPolicy},
     secrets::{SecretSlot, SecretStore, SecretValue},
     CancellationToken, StreamStatus,
@@ -20,6 +21,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::ipc::Channel;
+
+#[path = "game_memory_service.rs"]
+pub mod memory_service;
+#[path = "game_runtime.rs"]
+mod runtime;
+#[path = "game_summary_commands.rs"]
+pub mod summary_commands;
+pub use runtime::WorldReply;
+use runtime::{OutputRoute, StoreRoute};
 
 fn world_file_name(id: &str) -> String {
     format!(
@@ -64,7 +74,10 @@ impl From<game_provider::ProviderError> for GameCommandError {
 
 pub struct GameService {
     worlds: PathBuf,
-    stores: Mutex<BTreeMap<String, Arc<GameStore>>>,
+    backups: PathBuf,
+    stores: Mutex<BTreeMap<String, Arc<StoreRoute>>>,
+    memory_directory: PathBuf,
+    memories: memory_service::MemoryServices,
     pub providers: Arc<ProviderStore>,
     secrets: Arc<dyn SecretStore>,
     profile_busy: Arc<AtomicBool>,
@@ -82,7 +95,10 @@ impl GameService {
         std::fs::create_dir_all(&worlds).map_err(|_| GameCommandError::new("game_database"))?;
         Ok(Self {
             worlds,
+            backups: directory.join("backups"),
             stores: Mutex::new(BTreeMap::new()),
+            memory_directory: directory.join("memory"),
+            memories: Mutex::new(BTreeMap::new()),
             providers: Arc::new(ProviderStore::open(directory.join("game-settings.sqlite"))?),
             secrets,
             profile_busy: Arc::new(AtomicBool::new(false)),
@@ -90,7 +106,7 @@ impl GameService {
             active: Mutex::new(None),
         })
     }
-    fn store(&self, id: &str, create: bool) -> Result<Arc<GameStore>, GameCommandError> {
+    fn store(&self, id: &str, create: bool) -> Result<Arc<StoreRoute>, GameCommandError> {
         if !(8..=128).contains(&id.len())
             || !id
                 .bytes()
@@ -109,12 +125,137 @@ impl GameService {
         if !create && !file.is_file() {
             return Err(GameCommandError::new("game_not_found"));
         }
-        let store = Arc::new(GameStore::open(&file)?);
-        if !create && store.view()?.setup.world_id != id {
+        let store = Arc::new(if file.is_file() {
+            StoreRoute::open_existing(&file)?
+        } else {
+            StoreRoute::open_new(&file)?
+        });
+        if !create && store.view()?.setup().world_id != id {
             return Err(GameCommandError::new("game_invalid_request"));
         }
         stores.insert(id.into(), Arc::clone(&store));
         Ok(store)
+    }
+    fn upgrade_sync(
+        &self,
+        world_id: &str,
+        expected_head: Option<&str>,
+    ) -> Result<WorldReply, GameCommandError> {
+        if !(8..=128).contains(&world_id.len())
+            || !world_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err(GameCommandError::new("game_invalid_request"));
+        }
+        // Keep this reservation through reopening. No new caller can acquire
+        // a store/turn while its owner lock is intentionally released.
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| GameCommandError::new("game_unavailable"))?;
+        if active.is_some() {
+            return Err(GameCommandError::new("game_migration_busy"));
+        }
+        let mut stores = self
+            .stores
+            .lock()
+            .map_err(|_| GameCommandError::new("game_unavailable"))?;
+        let file = self.worlds.join(world_file_name(world_id));
+        let metadata = lishi_core::game_inspection::inspect_world(&file)?;
+        if metadata.setup.world_id != world_id || metadata.head_turn_id.as_deref() != expected_head
+        {
+            return Err(GameCommandError::new("game_migration_conflict"));
+        }
+        if let Some(cached) = stores.get(world_id) {
+            if Arc::strong_count(cached) != 1 {
+                return Err(GameCommandError::new("game_migration_busy"));
+            }
+            let view = cached.view()?;
+            if view.head_turn_id() != expected_head || view.turn_count() != metadata.turn_count {
+                return Err(GameCommandError::new("game_migration_conflict"));
+            }
+            if view.latest_operation().is_some_and(|o| {
+                matches!(
+                    o.status,
+                    GameOperationStatus::Pending
+                        | GameOperationStatus::Generating
+                        | GameOperationStatus::Validating
+                )
+            }) {
+                return Err(GameCommandError::new("game_migration_busy"));
+            }
+        }
+        if metadata.schema_version == 2 {
+            if let Some(cached) = stores.get(world_id) {
+                return cached.view();
+            }
+            let store = Arc::new(StoreRoute::open_existing(&file)?);
+            let view = store.view()?;
+            stores.insert(world_id.into(), store);
+            return Ok(view);
+        }
+        if metadata.schema_version != 1 {
+            return Err(GameCommandError::new("game_incompatible_schema"));
+        }
+        std::fs::create_dir_all(&self.backups)
+            .map_err(|_| GameCommandError::new("game_migration_backup_failed"))?;
+        // Dropping only the selected idle cache entry closes SQLite and releases
+        // its owner lock. Existing backups and all other worlds stay owned.
+        drop(stores.remove(world_id));
+        let migration =
+            lishi_core::game_migration::upgrade_v1_if_head(&file, &self.backups, expected_head);
+        let restored = StoreRoute::open_existing(&file).and_then(|store| {
+            let store = Arc::new(store);
+            let view = store.view()?;
+            stores.insert(world_id.into(), store);
+            Ok(view)
+        });
+        match (migration, restored) {
+            (Ok(_), Ok(view)) => Ok(view),
+            (Err(error), Ok(_)) => Err(GameCommandError::new(error.to_string())),
+            // An external owner can reject both migration and reopening. Busy
+            // is a pre-commit refusal in the core, so preserve it rather than
+            // imply that an uncertain migration has already modified the save.
+            (Err(lishi_core::game_migration::MigrationError::Busy), Err(_)) => {
+                Err(GameCommandError::new("game_migration_busy"))
+            }
+            (_, Err(_)) => Err(GameCommandError::new("game_migration_unconfirmed")),
+        }
+    }
+    fn actor_view_sync(
+        &self,
+        world_id: &str,
+        actor_id: &str,
+    ) -> Result<serde_json::Value, GameCommandError> {
+        let store = self.store(world_id, false)?;
+        let history = store.knowledge_history()?;
+        if history.world_id() != world_id || history.current_state().protagonist_id != actor_id {
+            return Err(GameCommandError::new("game_invalid_request"));
+        }
+        let grants = lishi_core::game_knowledge::initial_visible_grants(&history, actor_id)?;
+        let visibility =
+            lishi_core::game_knowledge::SourceVisibilityIndex::from_recorded_observations(
+                &history, grants,
+            )?;
+        let json = lishi_core::game_knowledge::minimal_actor_fact_json(
+            &history,
+            &visibility,
+            actor_id,
+            128 * 1024,
+        )?;
+        let mut value: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|_| GameCommandError::new("game_invalid_output"))?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| GameCommandError::new("game_invalid_output"))?;
+        object.insert("worldId".into(), serde_json::Value::String(world_id.into()));
+        object.insert(
+            "headTurnId".into(),
+            serde_json::to_value(history.head_turn_id())
+                .map_err(|_| GameCommandError::new("game_invalid_output"))?,
+        );
+        Ok(value)
     }
     fn profile_lease(&self) -> Result<ProfileLease, GameCommandError> {
         self.profile_busy
@@ -124,7 +265,7 @@ impl GameService {
     }
     fn turn_lease(
         self: &Arc<Self>,
-        store: Arc<GameStore>,
+        store: Arc<StoreRoute>,
         id: &str,
     ) -> Result<TurnLease, GameCommandError> {
         let mut active = self
@@ -156,7 +297,7 @@ impl Drop for ProfileLease {
 }
 struct TurnLease {
     service: Arc<GameService>,
-    store: Arc<GameStore>,
+    store: Arc<StoreRoute>,
     id: String,
     cancel: CancellationToken,
     done: bool,
@@ -228,87 +369,70 @@ pub async fn list_game_worlds(
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<WorldList, GameCommandError> {
     let service = Arc::clone(service.inner());
-    blocking(move || {
-        let mut result = WorldList {
-            worlds: Vec::new(),
-            unavailable_count: 0,
+    blocking(move || list_worlds_sync(&service)).await
+}
+
+fn list_worlds_sync(service: &GameService) -> Result<WorldList, GameCommandError> {
+    let mut result = WorldList {
+        worlds: Vec::new(),
+        unavailable_count: 0,
+    };
+    for entry in
+        std::fs::read_dir(&service.worlds).map_err(|_| GameCommandError::new("game_database"))?
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                result.unavailable_count += 1;
+                continue;
+            }
         };
-        for entry in std::fs::read_dir(&service.worlds)
-            .map_err(|_| GameCommandError::new("game_database"))?
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => {
-                    result.unavailable_count += 1;
-                    continue;
-                }
-            };
-            if entry.path().extension().is_none_or(|e| e != "sqlite") {
-                continue;
-            }
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            if !file_name.starts_with("world-") {
-                continue;
-            }
-            let candidate = (|| -> Result<WorldView, GameCommandError> {
-                let mut stores = service
-                    .stores
-                    .lock()
-                    .map_err(|_| GameCommandError::new("game_unavailable"))?;
-                if let Some(store) = stores
-                    .iter()
-                    .find(|(id, _)| world_file_name(id) == file_name)
-                    .map(|(_, s)| s)
-                {
-                    return Ok(store.view()?);
-                }
-                let store = Arc::new(GameStore::open(entry.path())?);
-                let view = store.view()?;
-                if world_file_name(&view.setup.world_id) != file_name {
+        if entry.path().extension().is_none_or(|e| e != "sqlite") {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if !file_name.starts_with("world-") {
+            continue;
+        }
+        let candidate =
+            (|| -> Result<lishi_core::game_inspection::WorldMetadata, GameCommandError> {
+                let metadata = lishi_core::game_inspection::inspect_world(entry.path())?;
+                if world_file_name(&metadata.setup.world_id) != file_name {
                     return Err(GameCommandError::new("game_invalid_request"));
                 }
-                stores.insert(view.setup.world_id.clone(), store);
-                Ok(view)
+                Ok(metadata)
             })();
-            match candidate {
-                Ok(view) => result.worlds.push(WorldCard {
-                    world_id: view.setup.world_id,
-                    title: view.setup.title,
-                    country: view.setup.country,
-                    era_year: view.setup.era_year,
-                    protagonist_name: view.setup.protagonist_name,
-                    head_turn_id: view.head_turn_id,
-                    turn_count: view.turn_count,
-                }),
-                Err(_) => result.unavailable_count += 1,
-            }
-            if result.worlds.len() >= 512 {
-                break;
-            }
+        match candidate {
+            Ok(view) => result.worlds.push(WorldCard {
+                world_id: view.setup.world_id,
+                title: view.setup.title,
+                country: view.setup.country,
+                era_year: view.setup.era_year,
+                protagonist_name: view.setup.protagonist_name,
+                head_turn_id: view.head_turn_id,
+                turn_count: view.turn_count,
+            }),
+            Err(_) => result.unavailable_count += 1,
         }
-        result
-            .worlds
-            .sort_by(|a, b| a.title.cmp(&b.title).then(a.world_id.cmp(&b.world_id)));
-        Ok(result)
-    })
-    .await
+        if result.worlds.len() >= 512 {
+            break;
+        }
+    }
+    result
+        .worlds
+        .sort_by(|a, b| a.title.cmp(&b.title).then(a.world_id.cmp(&b.world_id)));
+    Ok(result)
 }
 #[tauri::command]
 pub async fn create_game_world(
     setup: WorldSetup,
     service: tauri::State<'_, Arc<GameService>>,
-) -> Result<WorldView, GameCommandError> {
+) -> Result<WorldReply, GameCommandError> {
     game_protocol::validate_setup(&setup)?;
     let service = Arc::clone(service.inner());
     blocking(move || {
-        let state = game_protocol::initial_state(&setup)?;
         let store = service.store(&setup.world_id, true)?;
-        Ok(store.create_world(
-            &setup,
-            &state,
-            &game_provider::opening_narrative(&setup),
-            &game_provider::initial_choices(),
-        )?)
+        store.create_world(&setup)
     })
     .await
 }
@@ -316,23 +440,43 @@ pub async fn create_game_world(
 pub async fn get_game_world(
     world_id: String,
     service: tauri::State<'_, Arc<GameService>>,
-) -> Result<WorldView, GameCommandError> {
+) -> Result<WorldReply, GameCommandError> {
     let service = Arc::clone(service.inner());
-    blocking(move || Ok(service.store(&world_id, false)?.view()?)).await
+    blocking(move || service.store(&world_id, false)?.view()).await
 }
 #[tauri::command]
 pub async fn set_game_policy(
     world_id: String,
     policy: String,
     service: tauri::State<'_, Arc<GameService>>,
-) -> Result<WorldView, GameCommandError> {
+) -> Result<WorldReply, GameCommandError> {
     let service = Arc::clone(service.inner());
     blocking(move || {
         let store = service.store(&world_id, false)?;
         store.update_policy(&policy)?;
-        Ok(store.view()?)
+        store.view()
     })
     .await
+}
+
+#[tauri::command]
+pub async fn upgrade_game_world(
+    world_id: String,
+    expected_head_turn_id: Option<String>,
+    service: tauri::State<'_, Arc<GameService>>,
+) -> Result<WorldReply, GameCommandError> {
+    let service = Arc::clone(service.inner());
+    blocking(move || service.upgrade_sync(&world_id, expected_head_turn_id.as_deref())).await
+}
+
+#[tauri::command]
+pub async fn get_game_actor_view(
+    world_id: String,
+    actor_id: String,
+    service: tauri::State<'_, Arc<GameService>>,
+) -> Result<serde_json::Value, GameCommandError> {
+    let service = Arc::clone(service.inner());
+    blocking(move || service.actor_view_sync(&world_id, &actor_id)).await
 }
 
 #[derive(Serialize)]
@@ -399,26 +543,20 @@ async fn run_turn(
     request: GameTurnRequest,
     provider_kind: ProviderKind,
     mut progress: Progress,
-) -> Result<WorldView, GameCommandError> {
+) -> Result<WorldReply, GameCommandError> {
     let store = Arc::clone(&lease.store);
     let request_copy = request.clone();
     let view = blocking(move || {
         let view = store.view()?;
-        if view
-            .state
-            .entities
-            .iter()
-            .find(|e| e.id == view.state.protagonist_id)
-            .is_some_and(|e| e.alive == Some(false))
-        {
+        if view.protagonist_dead() {
             return Err(GameCommandError::new("game_protagonist_dead"));
         }
         store.begin(&request_copy)?;
-        Ok(store.view()?)
+        store.view()
     })
     .await?;
     progress.phase("pending");
-    let generation:Result<game_protocol::TurnOutput,GameCommandError>=async {
+    let generation:Result<OutputRoute,GameCommandError>=async {
         if lease.cancel.is_cancelled(){return Err(GameCommandError::new("game_cancelled"))}
         let store=Arc::clone(&lease.store);let id=lease.id.clone();blocking(move||{store.mark_generating(&id)?;Ok(())}).await?;
         progress.phase("generating");
@@ -428,32 +566,43 @@ async fn run_turn(
                 // provisional stage, without faking model token streaming.
                 tokio::select!{biased;_ = lease.cancel.cancelled()=>return Err(GameCommandError::new("game_cancelled")),
                     _=tokio::time::sleep(Duration::from_millis(180))=>{}}
-                game_provider::demo_output(&view.state,&request)?
+                StoreRoute::demo_output(&view,&request)?
             }
             ProviderKind::Compatible=>{
                 #[cfg(target_os="android")]
                 if !crate::android_tls::is_ready(){return Err(GameCommandError::new("model_tls_unavailable"))}
-                let prompt=game_provider::compile_game_prompt(&view,&request)?;
+                let profile_store=Arc::clone(&lease.service.providers);
+                let frozen=blocking(move||profile_store.stored()?.ok_or_else(||GameCommandError::new("game_provider_missing"))).await?;
+                let budget=frozen.config.context_budget;
+                let prompt_store=Arc::clone(&lease.store);let prompt_view=view.clone();let prompt_request=request.clone();let prompt_service=Arc::clone(&lease.service);
+                let (prompt,memory)=blocking(move||prompt_service.compile_context_prompt(&prompt_store,&prompt_view,&prompt_request,budget)).await?;
                 let (profile,key)=profile_work(Arc::clone(&lease.service),|s|saved_credential(&s)).await?;
+                if profile.config.revision!=frozen.config.revision {return Err(GameCommandError::new("game_provider_stale"))}
                 let policy=if profile.config.allow_insecure_http{SavedEndpointPolicy::ExplicitHttp}else{SavedEndpointPolicy::HttpsOnly};
-                let result=lishi_core::model_probe::run_model_probe_with_endpoint_policy(ModelProbeRequest{operation_id:request.operation_id.clone(),
+                let context_policy=lishi_core::model_probe::ModelContextPolicy {max_prompt_bytes:budget.effective_input_limit_bytes().map_err(|_|GameCommandError::new("game_provider_invalid"))?,
+                    output_reserve_tokens:Some(budget.output_reserve_tokens.try_into().map_err(|_|GameCommandError::new("game_provider_invalid"))?)};
+                let result=lishi_core::model_probe::run_model_probe_with_context_policy(ModelProbeRequest{operation_id:request.operation_id.clone(),
                     endpoint:profile.config.endpoint,model:profile.config.model,prompt,include_usage:false,credential_mode:CredentialMode::Saved},
-                    Some(key),lease.cancel.clone(),game_provider::production_stream_options(),policy,|_|true).await;
+                    Some(key),lease.cancel.clone(),game_provider::production_stream_options(),policy,context_policy,|_|true).await;
+                if let Some(memory)=memory {
+                    let id=request.operation_id.clone();let actual=result.diagnostics.usage.as_ref().and_then(|usage|usize::try_from(usage.prompt_tokens).ok());
+                    blocking(move||memory.record_actual_usage(&id,actual)).await?;
+                }
                 if result.stream.status==StreamStatus::Cancelled{return Err(GameCommandError::new("game_cancelled"))}
                 if result.stream.status!=StreamStatus::Completed {
                     let code=result.stream.error_code.and_then(|e|serde_json::to_value(e).ok()).and_then(|v|v.as_str().map(str::to_owned))
                         .unwrap_or_else(||"game_provider_failed".into());return Err(GameCommandError::new(code));
                 }
                 lease.service.providers.record_streaming(profile.config.revision,Capability::Supported)?;
-                game_protocol::parse_output(&result.stream.text)?
+                StoreRoute::parse_output(&view,&result.stream.text)?
             }
         };
-        game_protocol::apply_output(&view.state,&output)?;
+        output.validate_against(&view,&request.operation_id)?;
         if lease.cancel.is_cancelled(){return Err(GameCommandError::new("game_cancelled"))}
         // Never stream raw JSON or reasoning. Display only a decoded, still
         // provisional narrative; the state is updated solely by SQL commit.
-        progress.send("narrative",None,Some(output.narrative.clone()),None);
-        let raw=serde_json::to_string(&output).map_err(|_|GameCommandError::new("game_invalid_output"))?;
+        progress.send("narrative",None,Some(output.narrative().to_owned()),None);
+        let raw=output.json()?;
         let store=Arc::clone(&lease.store);let id=lease.id.clone();blocking(move||{store.stage_output(&id,&raw)?;Ok(())}).await?;
         progress.phase("validating");Ok(output)
     }.await;
@@ -476,7 +625,7 @@ async fn run_turn(
             let persisted_code = code.clone();
             let view = blocking(move || {
                 store.finish_uncommitted(&id, status, Some(&persisted_code))?;
-                Ok(store.view()?)
+                store.view()
             })
             .await?;
             progress.send(
@@ -499,16 +648,16 @@ async fn run_turn(
                 GameOperationStatus::Cancelled,
                 Some("game_cancelled"),
             )?;
-            return Ok(store.view()?);
+            return store.view();
         }
         // The hook runs inside the short transaction immediately before commit.
-        Ok(store.commit_with_hook(&id, &output, || {
+        store.commit_with_hook(&id, &output, || {
             if cancel.is_cancelled() {
                 Err(GameStoreError::Cancelled)
             } else {
                 Ok(())
             }
-        })?)
+        })
     })
     .await;
     match committed {
@@ -516,8 +665,7 @@ async fn run_turn(
             lease.done = true;
             progress.phase(
                 if view
-                    .latest_operation
-                    .as_ref()
+                    .latest_operation()
                     .is_some_and(|o| o.status == GameOperationStatus::Committed)
                 {
                     "committed"
@@ -544,7 +692,7 @@ async fn run_turn(
             };
             let view = blocking(move || {
                 store.finish_uncommitted(&id, status, Some(&safe_code))?;
-                Ok(store.view()?)
+                store.view()
             })
             .await?;
             progress.send(
@@ -565,7 +713,7 @@ pub async fn start_game_turn(
     provider_kind: ProviderKind,
     on_event: Channel<GameProgress>,
     service: tauri::State<'_, Arc<GameService>>,
-) -> Result<WorldView, GameCommandError> {
+) -> Result<WorldReply, GameCommandError> {
     let service = Arc::clone(service.inner());
     let id = request.world_id.clone();
     let s = Arc::clone(&service);
@@ -656,6 +804,7 @@ pub async fn save_game_provider(
     token: Option<String>,
     expected_revision: u64,
     allow_insecure_http: Option<bool>,
+    context_budget: Option<ContextBudget>,
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<ProviderView, GameCommandError> {
     let token = token
@@ -663,19 +812,28 @@ pub async fn save_game_provider(
         .transpose()
         .map_err(|_| GameCommandError::new("secret_invalid_value"))?;
     let allow_insecure_http = allow_insecure_http.unwrap_or(false);
+    if let Some(budget) = context_budget {
+        budget
+            .effective_input_limit_bytes()
+            .map_err(|_| GameCommandError::new("game_provider_invalid"))?;
+    }
     game_provider::validate_config_with_http_opt_in(&endpoint, &model, allow_insecure_http)?;
     profile_work(Arc::clone(service.inner()), move |service| {
-        save_provider_sync(
+        save_provider_with_budget(
             &service,
-            &endpoint,
-            &model,
-            token,
-            expected_revision,
-            allow_insecure_http,
+            ProviderSaveInput {
+                endpoint: &endpoint,
+                model: &model,
+                token,
+                expected_revision,
+                allow_insecure_http,
+                context_budget,
+            },
         )
     })
     .await
 }
+#[cfg(test)]
 fn save_provider_sync(
     service: &GameService,
     endpoint: &str,
@@ -684,7 +842,46 @@ fn save_provider_sync(
     expected_revision: u64,
     allow_insecure_http: bool,
 ) -> Result<ProviderView, GameCommandError> {
+    save_provider_with_budget(
+        service,
+        ProviderSaveInput {
+            endpoint,
+            model,
+            token,
+            expected_revision,
+            allow_insecure_http,
+            context_budget: None,
+        },
+    )
+}
+
+struct ProviderSaveInput<'a> {
+    endpoint: &'a str,
+    model: &'a str,
+    token: Option<SecretValue>,
+    expected_revision: u64,
+    allow_insecure_http: bool,
+    context_budget: Option<ContextBudget>,
+}
+
+fn save_provider_with_budget(
+    service: &GameService,
+    input: ProviderSaveInput<'_>,
+) -> Result<ProviderView, GameCommandError> {
+    let ProviderSaveInput {
+        endpoint,
+        model,
+        token,
+        expected_revision,
+        allow_insecure_http,
+        context_budget,
+    } = input;
     game_provider::validate_config_with_http_opt_in(endpoint, model, allow_insecure_http)?;
+    if let Some(budget) = context_budget {
+        budget
+            .effective_input_limit_bytes()
+            .map_err(|_| GameCommandError::new("game_provider_invalid"))?;
+    }
     let previous = service.providers.stored()?;
     if service.providers.revision()? != expected_revision {
         return Err(GameCommandError::new("game_provider_stale"));
@@ -730,13 +927,23 @@ fn save_provider_sync(
             .secret_slot
             .clone()
     };
-    let result = service.providers.save_with_http_opt_in(
-        endpoint,
-        model,
-        &slot,
-        expected_revision,
-        allow_insecure_http,
-    );
+    let result = match context_budget {
+        Some(budget) => service.providers.save_with_context_budget(
+            endpoint,
+            model,
+            &slot,
+            expected_revision,
+            allow_insecure_http,
+            budget,
+        ),
+        None => service.providers.save_with_http_opt_in(
+            endpoint,
+            model,
+            &slot,
+            expected_revision,
+            allow_insecure_http,
+        ),
+    };
     if result.is_err() {
         if let Some(slot) = new_slot {
             let _ = service.secrets.delete(&slot);
@@ -845,6 +1052,7 @@ pub async fn test_game_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lishi_core::game_store::GameStore;
     use lishi_core::secrets::SecretStoreError;
     use std::sync::mpsc;
 
@@ -898,14 +1106,7 @@ mod tests {
         second.world_id = "Native-world-one".into();
         for setup in [&first, &second] {
             let store = service.store(&setup.world_id, true).unwrap();
-            store
-                .create_world(
-                    setup,
-                    &game_protocol::initial_state(setup).unwrap(),
-                    &game_provider::opening_narrative(setup),
-                    &game_provider::initial_choices(),
-                )
-                .unwrap();
+            store.create_world(setup).unwrap();
         }
         assert_ne!(
             world_file_name(&first.world_id),
@@ -918,7 +1119,7 @@ mod tests {
                 .unwrap()
                 .view()
                 .unwrap()
-                .setup
+                .setup()
                 .world_id,
             first.world_id
         );
@@ -928,7 +1129,7 @@ mod tests {
                 .unwrap()
                 .view()
                 .unwrap()
-                .setup
+                .setup()
                 .world_id,
             second.world_id
         );
@@ -1061,8 +1262,9 @@ mod tests {
         let service =
             Arc::new(GameService::open(dir.path(), Arc::new(FakeSecrets::default())).unwrap());
         let setup = setup();
-        let store = service.store(&setup.world_id, true).unwrap();
-        store
+        let old_store =
+            GameStore::open(service.worlds.join(world_file_name(&setup.world_id))).unwrap();
+        old_store
             .create_world(
                 &setup,
                 &game_protocol::initial_state(&setup).unwrap(),
@@ -1070,6 +1272,8 @@ mod tests {
                 &game_provider::initial_choices(),
             )
             .unwrap();
+        drop(old_store);
+        let store = service.store(&setup.world_id, false).unwrap();
         let request = GameTurnRequest {
             operation_id: "native-operation-one".into(),
             world_id: setup.world_id.clone(),
@@ -1089,11 +1293,11 @@ mod tests {
         let committed = run_turn(lease, request.clone(), ProviderKind::Demo, progress)
             .await
             .unwrap();
-        assert_eq!(committed.turn_count, 1);
-        assert_eq!(committed.state.resources[0].amount, 95);
+        assert_eq!(committed.turn_count(), 1);
+        assert!(matches!(&committed,WorldReply::V1(view) if view.state.resources[0].amount==95));
         let request = GameTurnRequest {
             operation_id: "native-operation-two".into(),
-            expected_head_turn_id: committed.head_turn_id.clone(),
+            expected_head_turn_id: committed.head_turn_id().map(str::to_owned),
             ..request
         };
         let lease = service
@@ -1108,12 +1312,574 @@ mod tests {
         let cancelled = run_turn(lease, request, ProviderKind::Demo, progress)
             .await
             .unwrap();
-        assert_eq!(cancelled.state, committed.state);
-        assert_eq!(cancelled.head_turn_id, committed.head_turn_id);
         assert_eq!(
-            cancelled.latest_operation.unwrap().status,
+            serde_json::to_value(cancelled.state()).unwrap(),
+            serde_json::to_value(committed.state()).unwrap()
+        );
+        assert_eq!(cancelled.head_turn_id(), committed.head_turn_id());
+        assert_eq!(
+            cancelled.latest_operation().unwrap().status,
             GameOperationStatus::Cancelled
         );
         assert!(service.active.lock().unwrap().is_none());
+    }
+
+    fn seed_legacy(service: &GameService, setup: &WorldSetup, turns: usize) {
+        let store = GameStore::open(service.worlds.join(world_file_name(&setup.world_id))).unwrap();
+        store
+            .create_world(
+                setup,
+                &game_protocol::initial_state(setup).unwrap(),
+                &game_provider::opening_narrative(setup),
+                &game_provider::initial_choices(),
+            )
+            .unwrap();
+        for index in 1..=turns {
+            let view = store.view().unwrap();
+            let request = GameTurnRequest {
+                operation_id: format!("native-legacy-{index:08}"),
+                world_id: setup.world_id.clone(),
+                branch_id: "main".into(),
+                expected_head_turn_id: view.head_turn_id,
+                action_kind: lishi_core::game_store::GameActionKind::Action,
+                action_text: "做短工赚钱".into(),
+            };
+            let output = game_provider::demo_output(&view.state, &request).unwrap();
+            store.begin(&request).unwrap();
+            store.mark_generating(&request.operation_id).unwrap();
+            store
+                .stage_output(
+                    &request.operation_id,
+                    &serde_json::to_string(&output).unwrap(),
+                )
+                .unwrap();
+            store.commit(&request.operation_id, &output).unwrap();
+        }
+    }
+    fn progress(id: &str) -> Progress {
+        Progress {
+            channel: Channel::new(|_| Ok(())),
+            id: id.into(),
+            sequence: 0,
+        }
+    }
+    fn request(id: &str, world: &str, head: Option<String>, text: &str) -> GameTurnRequest {
+        GameTurnRequest {
+            operation_id: id.into(),
+            world_id: world.into(),
+            branch_id: "main".into(),
+            expected_head_turn_id: head,
+            action_kind: lishi_core::game_store::GameActionKind::Action,
+            action_text: text.into(),
+        }
+    }
+
+    #[test]
+    fn native_discovery_routes_two_versions_without_initializing_or_upgrading_old_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = GameService::open(dir.path(), Arc::new(FakeSecrets::default())).unwrap();
+        let old = setup();
+        seed_legacy(&service, &old, 2);
+        let before = lishi_core::game_inspection::inspect_world(
+            service.worlds.join(world_file_name(&old.world_id)),
+        )
+        .unwrap();
+        let mut fresh = old.clone();
+        fresh.world_id = "native-default-v2".into();
+        let store = service.store(&fresh.world_id, true).unwrap();
+        assert!(matches!(
+            store.create_world(&fresh).unwrap(),
+            WorldReply::V2(_)
+        ));
+        drop(store);
+        let discovered = list_worlds_sync(&service).unwrap();
+        assert_eq!(discovered.worlds.len(), 2);
+        assert_eq!(discovered.unavailable_count, 0);
+        assert_eq!(
+            lishi_core::game_inspection::inspect_world(
+                service.worlds.join(world_file_name(&old.world_id))
+            )
+            .unwrap(),
+            before
+        );
+        assert!(!service.backups.exists());
+        assert!(matches!(
+            service.store(&old.world_id, false).unwrap().view().unwrap(),
+            WorldReply::V1(_)
+        ));
+        assert_eq!(
+            lishi_core::game_inspection::inspect_world(
+                service.worlds.join(world_file_name(&old.world_id))
+            )
+            .unwrap()
+            .schema_version,
+            1
+        );
+        let empty_path = service.worlds.join(world_file_name("native-empty-file"));
+        std::fs::write(&empty_path, []).unwrap();
+        let unavailable = list_worlds_sync(&service).unwrap();
+        assert_eq!(unavailable.unavailable_count, 1);
+        assert_eq!(std::fs::metadata(&empty_path).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_v2_ten_turn_restart_cancel_stale_head_and_dropped_lease_preserve_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(FakeSecrets::default());
+        let service = Arc::new(GameService::open(dir.path(), secrets.clone()).unwrap());
+        let setup = setup();
+        let store = service.store(&setup.world_id, true).unwrap();
+        let mut view = store.create_world(&setup).unwrap();
+        assert!(matches!(&view, WorldReply::V2(_)));
+        for (index, text) in [
+            "购买补给",
+            "做短工赚钱",
+            "赶路时受伤",
+            "休息两个小时",
+            "打听消息",
+            "购买口粮",
+            "工作赚钱",
+            "打听消息",
+            "休息两个小时",
+            "整理行囊",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let request = request(
+                &format!("native-v2-turn-{index:08}"),
+                &setup.world_id,
+                view.head_turn_id().map(str::to_owned),
+                text,
+            );
+            let lease = service
+                .turn_lease(Arc::clone(&store), &request.operation_id)
+                .unwrap();
+            view = run_turn(
+                lease,
+                request.clone(),
+                ProviderKind::Demo,
+                progress(&request.operation_id),
+            )
+            .await
+            .unwrap();
+            assert_eq!(view.turn_count(), index as u64 + 1);
+            assert_eq!(
+                view.latest_operation().unwrap().status,
+                GameOperationStatus::Committed
+            );
+        }
+        let state = serde_json::to_value(view.state()).unwrap();
+        let head = view.head_turn_id().map(str::to_owned);
+        let stale = request("native-v2-stale-head", &setup.world_id, None, "购买补给");
+        let lease = service
+            .turn_lease(Arc::clone(&store), &stale.operation_id)
+            .unwrap();
+        assert_eq!(
+            run_turn(
+                lease,
+                stale.clone(),
+                ProviderKind::Demo,
+                progress(&stale.operation_id)
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "game_stale_head"
+        );
+        assert_eq!(store.view().unwrap().turn_count(), 10);
+        let cancelled = request(
+            "native-v2-cancelled",
+            &setup.world_id,
+            head.clone(),
+            "购买补给",
+        );
+        let lease = service
+            .turn_lease(Arc::clone(&store), &cancelled.operation_id)
+            .unwrap();
+        lease.cancel.cancel();
+        let cancelled_view = run_turn(
+            lease,
+            cancelled.clone(),
+            ProviderKind::Demo,
+            progress(&cancelled.operation_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(serde_json::to_value(cancelled_view.state()).unwrap(), state);
+        assert_eq!(
+            cancelled_view.latest_operation().unwrap().status,
+            GameOperationStatus::Cancelled
+        );
+        let dropped = request(
+            "native-v2-dropped",
+            &setup.world_id,
+            head.clone(),
+            "购买补给",
+        );
+        let lease = service
+            .turn_lease(Arc::clone(&store), &dropped.operation_id)
+            .unwrap();
+        store.begin(&dropped).unwrap();
+        drop(lease);
+        let dropped_view = store.view().unwrap();
+        assert_eq!(
+            dropped_view.latest_operation().unwrap().status,
+            GameOperationStatus::Interrupted
+        );
+        assert_eq!(serde_json::to_value(dropped_view.state()).unwrap(), state);
+        assert!(service.active.lock().unwrap().is_none());
+        let actor = service.actor_view_sync(&setup.world_id, "player").unwrap();
+        assert_eq!(actor["headTurnId"], serde_json::json!(head));
+        assert!(actor["observedFacts"].as_array().unwrap().len() > 4);
+        drop(store);
+        drop(service);
+        let reopened = GameService::open(dir.path(), secrets).unwrap();
+        let view = reopened
+            .store(&setup.world_id, false)
+            .unwrap()
+            .view()
+            .unwrap();
+        assert_eq!(view.turn_count(), 10);
+        assert_eq!(view.head_turn_id().map(str::to_owned), head);
+        assert_eq!(serde_json::to_value(view.state()).unwrap(), state);
+    }
+
+    #[test]
+    fn native_explicit_upgrade_checks_cas_leases_and_keeps_provider_credentials_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(FakeSecrets::default());
+        let service = Arc::new(GameService::open(dir.path(), secrets.clone()).unwrap());
+        let setup = setup();
+        seed_legacy(&service, &setup, 2);
+        let profile = save_provider_sync(
+            &service,
+            "https://example.com/v1/chat/completions",
+            "fixture",
+            Some(SecretValue::new("invalid-native-upgrade-fixture-key".into()).unwrap()),
+            0,
+            false,
+        )
+        .unwrap();
+        let profile_json = serde_json::to_value(&profile).unwrap();
+        let borrowed = service.store(&setup.world_id, false).unwrap();
+        let before = borrowed.view().unwrap();
+        let head = before.head_turn_id().map(str::to_owned);
+        assert_eq!(
+            service
+                .upgrade_sync(&setup.world_id, head.as_deref())
+                .unwrap_err()
+                .code,
+            "game_migration_busy"
+        );
+        let lease = service
+            .turn_lease(Arc::clone(&borrowed), "native-upgrade-active")
+            .unwrap();
+        assert_eq!(
+            service
+                .upgrade_sync(&setup.world_id, head.as_deref())
+                .unwrap_err()
+                .code,
+            "game_migration_busy"
+        );
+        drop(lease);
+        drop(borrowed);
+        assert_eq!(
+            service
+                .upgrade_sync(&setup.world_id, None)
+                .unwrap_err()
+                .code,
+            "game_migration_conflict"
+        );
+        assert!(!service.backups.exists());
+        let upgraded = service
+            .upgrade_sync(&setup.world_id, head.as_deref())
+            .unwrap();
+        assert!(matches!(&upgraded, WorldReply::V2(_)));
+        assert_eq!(upgraded.head_turn_id(), before.head_turn_id());
+        assert_eq!(upgraded.turn_count(), before.turn_count());
+        assert_eq!(
+            serde_json::to_value(service.providers.view().unwrap()).unwrap(),
+            profile_json
+        );
+        assert_eq!(
+            saved_credential(&service).unwrap().1.expose_secret(),
+            "invalid-native-upgrade-fixture-key"
+        );
+        assert!(!serde_json::to_string(&upgraded)
+            .unwrap()
+            .contains("invalid-native-upgrade-fixture-key"));
+        let backups: Vec<_> = std::fs::read_dir(&service.backups)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sqlite"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            lishi_core::game_inspection::inspect_world(backups[0].path())
+                .unwrap()
+                .schema_version,
+            1
+        );
+        let actor = service.actor_view_sync(&setup.world_id, "player").unwrap();
+        let observed_cash = actor["observedFacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["factKey"]["type"] == "resource")
+            .unwrap();
+        if let WorldReply::V1(v) = &before {
+            assert_eq!(
+                observed_cash["value"]["amount"],
+                v.state.resources[0].amount
+            );
+        }
+        assert_eq!(
+            service
+                .actor_view_sync(&setup.world_id, "missing-actor")
+                .unwrap_err()
+                .code,
+            "game_invalid_request"
+        );
+        service
+            .upgrade_sync(&setup.world_id, head.as_deref())
+            .unwrap();
+        let backup_count = std::fs::read_dir(&service.backups)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sqlite"))
+            .count();
+        assert_eq!(backup_count, 1);
+    }
+
+    #[test]
+    fn native_world_reply_keeps_original_shape_and_rejects_cross_version_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = GameService::open(dir.path(), Arc::new(FakeSecrets::default())).unwrap();
+        let old = setup();
+        seed_legacy(&service, &old, 1);
+        let v1_store = service.store(&old.world_id, false).unwrap();
+        let v1 = v1_store.view().unwrap();
+        let mut fresh = old.clone();
+        fresh.world_id = "native-shape-v2".into();
+        let v2_store = service.store(&fresh.world_id, true).unwrap();
+        let v2 = v2_store.create_world(&fresh).unwrap();
+        let v1_json = serde_json::to_value(&v1).unwrap();
+        let v2_json = serde_json::to_value(&v2).unwrap();
+        if let WorldReply::V1(view) = &v1 {
+            assert_eq!(v1_json, serde_json::to_value(view).unwrap());
+        } else {
+            panic!("legacy world was automatically upgraded");
+        }
+        if let WorldReply::V2(view) = &v2 {
+            assert_eq!(v2_json, serde_json::to_value(view).unwrap());
+        } else {
+            panic!("new world did not use v2");
+        }
+        assert_eq!(v1_json["state"]["protocolVersion"], 1);
+        assert_eq!(v2_json["state"]["protocolVersion"], 2);
+        assert_eq!(
+            v1_json.as_object().unwrap().keys().collect::<Vec<_>>(),
+            v2_json.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+        let request_v1 = request(
+            "native-shape-op1",
+            &old.world_id,
+            v1.head_turn_id().map(str::to_owned),
+            "购买補给",
+        );
+        let request_v2 = request("native-shape-op2", &fresh.world_id, None, "购买补给");
+        let output_v1 = StoreRoute::demo_output(&v1, &request_v1).unwrap();
+        let output_v2 = StoreRoute::demo_output(&v2, &request_v2).unwrap();
+        assert!(StoreRoute::parse_output(&v1, &output_v2.json().unwrap()).is_err());
+        assert!(StoreRoute::parse_output(&v2, &output_v1.json().unwrap()).is_err());
+        assert_eq!(
+            output_v1
+                .validate_against(&v2, &request_v2.operation_id)
+                .unwrap_err()
+                .code,
+            "game_invalid_protocol"
+        );
+        assert_eq!(
+            output_v2
+                .validate_against(&v1, &request_v1.operation_id)
+                .unwrap_err()
+                .code,
+            "game_invalid_protocol"
+        );
+        assert_eq!(v1_store.view().unwrap(), v1);
+        assert_eq!(v2_store.view().unwrap(), v2);
+    }
+
+    #[test]
+    fn native_v2_commit_cancellation_rolls_back_and_readonly_discovery_keeps_live_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let service =
+            Arc::new(GameService::open(dir.path(), Arc::new(FakeSecrets::default())).unwrap());
+        let setup = setup();
+        let store = service.store(&setup.world_id, true).unwrap();
+        let before = store.create_world(&setup).unwrap();
+        let request = request("native-hook-cancel-001", &setup.world_id, None, "购买补给");
+        let lease = service
+            .turn_lease(Arc::clone(&store), &request.operation_id)
+            .unwrap();
+        store.begin(&request).unwrap();
+        store.mark_generating(&request.operation_id).unwrap();
+        let output = StoreRoute::demo_output(&before, &request).unwrap();
+        store
+            .stage_output(&request.operation_id, &output.json().unwrap())
+            .unwrap();
+        let listed = list_worlds_sync(&service).unwrap();
+        assert_eq!(listed.worlds.len(), 1);
+        assert_eq!(listed.worlds[0].turn_count, 0);
+        assert_eq!(
+            store.view().unwrap().latest_operation().unwrap().status,
+            GameOperationStatus::Validating
+        );
+        assert_eq!(
+            service
+                .upgrade_sync(&setup.world_id, None)
+                .unwrap_err()
+                .code,
+            "game_migration_busy"
+        );
+        assert_eq!(
+            service
+                .turn_lease(Arc::clone(&store), "native-concurrent-turn")
+                .err()
+                .unwrap()
+                .code,
+            "game_busy"
+        );
+        let result = store.commit_with_hook(&request.operation_id, &output, || {
+            lease.cancel.cancel();
+            Err(GameStoreError::Cancelled)
+        });
+        assert_eq!(result.unwrap_err().code, "game_cancelled");
+        let cancelled = store.view().unwrap();
+        assert_eq!(cancelled.head_turn_id(), before.head_turn_id());
+        assert_eq!(cancelled.turn_count(), 0);
+        assert_eq!(
+            serde_json::to_value(cancelled.state()).unwrap(),
+            serde_json::to_value(before.state()).unwrap()
+        );
+        store
+            .finish_uncommitted(
+                &request.operation_id,
+                GameOperationStatus::Cancelled,
+                Some("game_cancelled"),
+            )
+            .unwrap();
+        drop(lease);
+        assert_eq!(
+            store.view().unwrap().latest_operation().unwrap().status,
+            GameOperationStatus::Cancelled
+        );
+        assert!(service.active.lock().unwrap().is_none());
+        assert_eq!(store.begin(&request).unwrap_err().code, "game_duplicate");
+    }
+
+    #[test]
+    fn native_explicit_upgrade_reports_external_owner_busy_without_uncertain_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = GameService::open(dir.path(), Arc::new(FakeSecrets::default())).unwrap();
+        let setup = setup();
+        seed_legacy(&service, &setup, 1);
+        let file = service.worlds.join(world_file_name(&setup.world_id));
+        let external = GameStore::open(&file).unwrap();
+        let before = external.view().unwrap();
+        assert_eq!(
+            service
+                .upgrade_sync(&setup.world_id, before.head_turn_id.as_deref())
+                .unwrap_err()
+                .code,
+            "game_migration_busy"
+        );
+        assert_eq!(external.view().unwrap(), before);
+        assert_eq!(
+            lishi_core::game_inspection::inspect_world(&file)
+                .unwrap()
+                .schema_version,
+            1
+        );
+        assert!(service.stores.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&service.backups).unwrap().count(), 0);
+        drop(external);
+        let upgraded = service
+            .upgrade_sync(&setup.world_id, before.head_turn_id.as_deref())
+            .unwrap();
+        assert!(matches!(upgraded, WorldReply::V2(_)));
+        assert_eq!(upgraded.turn_count(), 1);
+    }
+
+    #[test]
+    fn native_actor_query_does_not_expose_unobserved_global_entity_or_npc_private_view() {
+        use lishi_core::game_protocol_v2::{
+            Disclosure, EntityInput, EventInput, StateChangeV2, TimeAdvanceV2, TurnOutputV2,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let service = GameService::open(dir.path(), Arc::new(FakeSecrets::default())).unwrap();
+        let setup = setup();
+        let store = service.store(&setup.world_id, true).unwrap();
+        store.create_world(&setup).unwrap();
+        let request = request(
+            "native-hidden-entity-001",
+            &setup.world_id,
+            None,
+            "按固定夹具创建隐藏人物。",
+        );
+        let output = TurnOutputV2 {
+            protocol_version: 2,
+            narrative: "这里只是固定测试剧情。".into(),
+            choices: Vec::new(),
+            time_advance: TimeAdvanceV2 {
+                elapsed_seconds: 0,
+                event_id: None,
+            },
+            state_changes: vec![StateChangeV2::CreateEntity {
+                entity: EntityInput {
+                    id: "hidden-person".into(),
+                    kind: lishi_core::game_protocol::EntityKind::Person,
+                    name: "隐藏身份甲".into(),
+                    alive: Some(true),
+                    attributes: BTreeMap::from([("secret".into(), "未获知的秘密标记".into())]),
+                },
+                event_id: "hidden-event".into(),
+            }],
+            events: vec![EventInput {
+                id: "hidden-event".into(),
+                description: "不可向未获知角色广播的事件内容。".into(),
+                entity_ids: vec!["hidden-person".into()],
+                disclosure: Disclosure::Restricted,
+            }],
+            source_references: Vec::new(),
+            uncertainties: Vec::new(),
+        };
+        store.begin(&request).unwrap();
+        store.mark_generating(&request.operation_id).unwrap();
+        store
+            .stage_output(
+                &request.operation_id,
+                &serde_json::to_string(&output).unwrap(),
+            )
+            .unwrap();
+        store
+            .commit_with_hook(&request.operation_id, &OutputRoute::V2(output), || Ok(()))
+            .unwrap();
+        let view = service.actor_view_sync(&setup.world_id, "player").unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("隐藏身份甲"));
+        assert!(!json.contains("未获知的秘密标记"));
+        assert!(!json.contains("不可向未获知角色广播"));
+        assert_eq!(
+            service
+                .actor_view_sync(&setup.world_id, "hidden-person")
+                .unwrap_err()
+                .code,
+            "game_invalid_request"
+        );
+        assert_eq!(view["worldId"], setup.world_id);
+        assert_eq!(view["actorId"], "player");
+        assert_eq!(view["headTurnId"], request.operation_id);
     }
 }

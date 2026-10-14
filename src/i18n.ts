@@ -149,7 +149,7 @@ const messages = {
   "probe.secret.error.statusFormat": "核心返回的密钥状态不符合约定，结果未确认，请重新查询。",
   "probe.error.unavailable": "未连接原生核心，请在 Windows 应用或 Android APK 中运行此探针。",
   "probe.file.heading": "文档导入导出技术探针",
-  "probe.file.description": "只打包下方技术文本。导入经应用私有临时目录验证后展示预览；此探针不覆盖 SQLite 测试笔记，也不是正式游戏存档。",
+  "probe.file.description": "只打包下方技术文本。导入经应用私有临时目录验证后展示预览；此探针不覆盖 SQLite 测试笔记，也不是正式游戏存档。Android 文档选择最长等待三分钟，返回结果未确认时保留原预览，可关闭选择器后重试。",
   "probe.file.unavailable": "未连接原生核心，系统文件选择与保存不可用。",
   "probe.file.inputLabel": "独立测试包文本",
   "probe.file.sample": "长安的钥匙🔑仍在。\n文档选择器往返测试🙂。",

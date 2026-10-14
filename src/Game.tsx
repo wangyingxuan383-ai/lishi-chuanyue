@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelGameTurn, createGameWorld, deleteGameProvider, describeGameCode, describeGameError,
-  getGameProvider, getGameWorld, hasGameCore, isGameRejectedBeforeStart, isGameTerminal,
-  listGamePresets, listGameWorlds, saveGamePreset, saveGameProvider, setGamePolicy, startGameTurn, testGameProvider,
+  getGameActorView, getGameProvider, getGameWorld, hasGameCore, isGameRejectedBeforeStart, isGameTerminal,
+  listGamePresets, listGameWorlds, saveGamePreset, saveGameProvider, setGamePolicy, startGameTurn, testGameProvider, upgradeGameWorld,
   type GameActionKind, type GameEvent, type GamePreset, type GameProviderProfile,
-  type GameProviderTest, type GameState, type GameStatus, type GameWorld, type GameWorldList,
-  type ProviderCapability, type ProviderKind, type WorldSetup,
+  type GameProviderTest, type GameStateV1, type GameStatus, type GameWorld, type GameWorldList,
+  type GameActorView, type HoldingValue, type ObservedCondition, type ObservedResource, type ObservedRelationship,
+  defaultContextBudget, parseContextBudget, type GameContextBudget,
+  type ProviderCapability, type ProviderKind, type WorldSetup, type Certainty, type AcquisitionMode,
 } from "./gameClient";
 import { gameT as t, type GameMessageKey } from "./gameMessages";
 import "./game.css";
+import GameMemory from "./GameMemory";
 
 type DisplayPhase = GameStatus | "starting" | "unconfirmed" | "notStarted";
-type WriteKind = "create" | "turn" | "policy" | "provider" | "providerTest" | "providerDelete" | "preset" | null;
+type WriteKind = "create" | "turn" | "policy" | "provider" | "providerTest" | "providerDelete" | "preset" | "upgrade" | "annotation" | null;
 interface LocalTurn {
   worldId: string; operationId: string; sequence: number;
   phase: DisplayPhase; draft: string; actionKind: GameActionKind; actionText: string;
@@ -60,7 +63,9 @@ function formFromSetup(setup: WorldSetup): SetupForm {
     locationName: setup.locationName, protagonistName: setup.protagonistName, narrativeStyle: setup.narrativeStyle };
 }
 
-function WorldStatePanel({ state }: { state: GameState }) {
+function LegacyWorldStatePanel({ state, upgradeDisabled, upgrading, onUpgrade }: {
+  state: GameStateV1; upgradeDisabled: boolean; upgrading: boolean; onUpgrade: () => void;
+}) {
   const names = new Map(state.entities.map((entity) => [entity.id, entity.name]));
   const nameOf = (id: string) => names.get(id) ?? id;
   const protagonist = state.entities.find((entity) => entity.id === state.protagonistId);
@@ -69,6 +74,10 @@ function WorldStatePanel({ state }: { state: GameState }) {
     <aside className="game-world-state" aria-labelledby="game-state-heading">
       <h2 id="game-state-heading">{t("game.stateHeading")}</h2>
       <p className="game-muted">{t("game.stateHelp")}</p>
+      <details className="game-upgrade" open><summary>{t("game.longState.heading")}</summary>
+        <p>{t("game.longState.legacy")}</p><p className="game-muted">{t("game.longState.upgradeHelp")}</p>
+        <button type="button" className="game-secondary" disabled={upgradeDisabled} onClick={onUpgrade}>{t(upgrading ? "game.longState.upgrading" : "game.longState.upgrade")}</button>
+      </details>
       <dl className="game-state-summary">
         <div><dt>{t("game.stateTime")}</dt><dd>{formatYear(state.time.eraYear)}<small>{formatElapsed(state.time.elapsedSeconds)}</small></dd></div>
         <div><dt>{t("game.stateLocation")}</dt><dd>{nameOf(state.locationId)}</dd></div>
@@ -100,6 +109,72 @@ function WorldStatePanel({ state }: { state: GameState }) {
   );
 }
 
+const certaintyKeys = {
+  certain: "game.actor.certainty.certain", reported: "game.actor.certainty.reported", doubtful: "game.actor.certainty.doubtful", legacy_unspecified: "game.actor.certainty.legacy_unspecified",
+} as const satisfies Record<Certainty, GameMessageKey>;
+const acquisitionKeys = {
+  observed: "game.actor.acquisition.observed", told: "game.actor.acquisition.told", inferred: "game.actor.acquisition.inferred", legacy_unspecified: "game.actor.acquisition.legacy_unspecified",
+} as const satisfies Record<AcquisitionMode, GameMessageKey>;
+
+function LongStatePanel({ world, view, loading, error, onRefresh }: {
+  world: GameWorld; view: GameActorView | null; loading: boolean; error: string | null; onRefresh: () => void;
+}) {
+  // The objective snapshot cannot fill gaps in the actor's filtered DTO. A
+  // newer hidden name, illness or claim assessment must remain hidden here.
+  const names = new Map(view?.entities.map((entity) => [entity.entityId, entity.name]) ?? []);
+  const nameOf = (id: string) => names.get(id) ?? t("game.actor.unknownName");
+  const facts = view?.observedFacts ?? [];
+  const resources = facts.filter((f) => f.factKey.type === "resource").map((f) => f.value as ObservedResource);
+  const conditions = facts.filter((f) => f.factKey.type === "condition").map((f) => f.value as ObservedCondition);
+  const relations = facts.filter((f) => f.factKey.type === "relationship").map((f) => f.value as ObservedRelationship);
+  const holdings = facts.filter((f) => f.factKey.type === "item_holding").map((f) => ({ itemId: f.factKey.type === "item_holding" ? f.factKey.itemId : "", value: f.value as HoldingValue }));
+  const knownKinds = new Map(facts.filter((f) => f.factKey.type === "entity_created").map((f) => {
+    const value = f.value as { id: string; kind: string }; return [value.id, value.kind];
+  }));
+  const people = view?.entities.filter((entity) => entity.alive !== null || knownKinds.get(entity.entityId) === "person") ?? [];
+  const protagonist = view?.entities.find((entity) => entity.entityId === world.state.protagonistId);
+  return <aside className="game-world-state game-long-state" aria-labelledby="game-state-heading">
+    <h2 id="game-state-heading">{t("game.actor.heading")}</h2>
+    <p className="game-muted">{t("game.actor.help")}</p>
+    <p className="game-save-notice">{t("game.longState.active")}</p>
+    <dl className="game-state-summary">
+      <div><dt>{t("game.stateTime")}</dt><dd>{formatYear(world.state.time.eraYear)}<small>{formatElapsed(world.state.time.elapsedSeconds)}</small></dd></div>
+      <div><dt>{t("game.stateLocation")}</dt><dd>{nameOf(world.state.locationId)}</dd></div>
+      <div><dt>{t("game.stateProtagonist")}</dt><dd>{nameOf(world.state.protagonistId)}<small>{t(protagonist?.alive === false ? "game.stateDead" : protagonist?.alive === true ? "game.stateAlive" : "game.stateLifeUnknown")}</small></dd></div>
+    </dl>
+    <button type="button" className="game-secondary game-actor-refresh" disabled={loading} onClick={onRefresh}>{t(loading ? "game.actor.loading" : "game.actor.refresh")}</button>
+    {error && <p className="game-error" role="alert">{error}</p>}
+    <details open><summary>{t("game.stateResources")}</summary>
+      {resources.length ? <ul className="game-state-list">{resources.map((resource) => <li key={`${resource.ownerId}:${resource.key}`}><span>{resource.key === "cash" ? t("game.stateCash") : resource.key}<small>{nameOf(resource.ownerId)}</small></span><strong>{resource.amount.toLocaleString("zh-CN")} {resource.unit}</strong></li>)}</ul> : <p className="game-muted">{t("game.stateResourcesEmpty")}</p>}
+    </details>
+    <details open><summary>{t("game.actor.inventory")}</summary>
+      {holdings.length ? <ul className="game-state-list game-inventory-list">{holdings.map(({ itemId, value }) => <li key={itemId}><span>{nameOf(itemId)}
+        {value.status === "legacy_unknown" ? <small className="game-state-pending">{t("game.actor.legacyUnknown")}</small> : <>
+          <small>{t("game.actor.quantity", { count: value.quantity!, unit: value.unit! })}</small>
+          {value.holderId && <small>{t("game.actor.holder", { name: nameOf(value.holderId) })}</small>}
+          {value.placeId && <small>{t("game.actor.place", { name: nameOf(value.placeId) })}</small>}
+          {value.quantity === 0 && <small>{t("game.actor.depleted")}</small>}
+        </>}</span></li>)}</ul> : <p className="game-muted">{t("game.actor.inventoryEmpty")}</p>}
+    </details>
+    <details open><summary>{t("game.actor.conditions")}</summary>
+      {conditions.length ? <ul className="game-state-list">{conditions.map((condition) => <li key={condition.id}><span>{condition.description}<small>{nameOf(condition.entityId)} · {t(condition.active ? "game.actor.conditionActive" : "game.actor.conditionResolved")}</small></span></li>)}</ul> : <p className="game-muted">{t("game.actor.conditionsEmpty")}</p>}
+    </details>
+    <details><summary>{t("game.statePeople")}</summary>
+      {people.length ? <div className="game-people-list">{people.map((person) => <details className="game-person-detail" key={person.entityId}>
+        <summary><span>{person.name ?? t("game.actor.unknownName")}</span><small>{t(person.alive === false ? "game.stateDead" : person.alive === true ? "game.stateAlive" : "game.stateLifeUnknown")}</small></summary>
+        {person.aliases.length > 0 && <p><span className="game-muted">{t("game.actor.aliases")}</span><br />{person.aliases.join("、")}</p>}
+        {Object.keys(person.attributes).length > 0 ? <dl className="game-person-attributes">{Object.entries(person.attributes).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl> : <p className="game-muted">{t("game.actor.noAttributes")}</p>}
+      </details>)}</div> : <p className="game-muted">{t("game.actor.empty")}</p>}
+    </details>
+    <details><summary>{t("game.stateRelationships")}</summary>
+      {relations.length ? <ul className="game-state-list">{relations.map((relation) => <li key={`${relation.fromId}:${relation.toId}:${relation.kind}`}><span>{nameOf(relation.fromId)} → {nameOf(relation.toId)}<small>{relation.kind} · {t("game.stateStrength", { value: relation.strength })}</small></span></li>)}</ul> : <p className="game-muted">{t("game.stateRelationshipsEmpty")}</p>}
+    </details>
+    <details><summary>{t("game.actor.knowledge")}</summary>
+      {view?.knowledge.length ? <ul className="game-state-list game-knowledge-list">{view.knowledge.map((known) => <li key={`${known.targetType}:${known.targetId}`}><span>{known.text}<small>{t(known.targetType === "claim" ? "game.actor.claim" : "game.actor.event")} · {t(certaintyKeys[known.certainty])} · {t(acquisitionKeys[known.acquisitionMode])}</small></span></li>)}</ul> : <p className="game-muted">{t("game.actor.knowledgeEmpty")}</p>}
+    </details>
+  </aside>;
+}
+
 export default function Game() {
   const native = hasGameCore();
   const [library, setLibrary] = useState<GameWorldList>({ worlds: [], unavailableCount: 0 });
@@ -117,11 +192,17 @@ export default function Game() {
   const [action, setAction] = useState("");
   const [policy, setPolicy] = useState("");
   const [policyMessage, setPolicyMessage] = useState<string | null>(null);
+  const [upgradeMessage, setUpgradeMessage] = useState<string | null>(null);
+  const [actorView, setActorView] = useState<GameActorView | null>(null);
+  const [actorLoading, setActorLoading] = useState(false);
+  const [actorError, setActorError] = useState<string | null>(null);
+  const [actorRevision, setActorRevision] = useState(0);
   const [providerKind, setProviderKind] = useState<ProviderKind>("demo");
   const [profile, setProfile] = useState<GameProviderProfile | null>(null);
   const [endpoint, setEndpoint] = useState("");
   const [model, setModel] = useState("");
   const [allowInsecureHttp, setAllowInsecureHttp] = useState(false);
+  const [contextBudget, setContextBudget] = useState<GameContextBudget>({ ...defaultContextBudget });
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [providerTest, setProviderTest] = useState<GameProviderTest | null>(null);
@@ -147,6 +228,7 @@ export default function Game() {
     if (previous?.setup.worldId === incoming.setup.worldId) {
       // A late query cannot roll back a committed head or a confirmed terminal operation.
       if (previous.turnCount > incoming.turnCount) return;
+      if (previous.turnCount === incoming.turnCount && previous.state.protocolVersion === 2 && incoming.state.protocolVersion === 1) return;
       const before = previous.latestOperation;
       const after = incoming.latestOperation;
       if (previous.turnCount === incoming.turnCount && before && after &&
@@ -185,6 +267,9 @@ export default function Game() {
     setAction("");
     setPolicy(incoming.narrativePolicy);
     setPolicyMessage(null);
+    setUpgradeMessage(null);
+    setActorView(null);
+    setActorError(null);
     setError(null);
     applyWorld(incoming);
     setShowSetup(false);
@@ -198,6 +283,7 @@ export default function Game() {
       setEndpoint(incoming.config?.endpoint ?? "");
       setModel(incoming.config?.model ?? "");
       setAllowInsecureHttp(incoming.config?.allowInsecureHttp ?? false);
+      setContextBudget({ ...(incoming.config?.contextBudget ?? defaultContextBudget) });
     }
   }
 
@@ -252,6 +338,24 @@ export default function Game() {
   const dead = protagonist?.alive === false;
   const canAct = native && world !== null && !loading && !querying && !busy && !dead &&
     (providerKind === "demo" || Boolean(profile?.configured));
+
+  useEffect(() => {
+    if (!native || !world || world.state.protocolVersion !== 2) {
+      setActorView(null); setActorError(null); setActorLoading(false); return;
+    }
+    let stopped = false;
+    const worldId = world.setup.worldId, head = world.headTurnId, actorId = world.state.protagonistId;
+    setActorView(null); setActorError(null); setActorLoading(true);
+    void getGameActorView(worldId, actorId).then((incoming) => {
+      if (!stopped && mounted.current && worldRef.current?.setup.worldId === worldId &&
+        worldRef.current.headTurnId === head && incoming.headTurnId === head) setActorView(incoming);
+      else if (!stopped && mounted.current) setActorError(t("game.error.stale"));
+    }).catch((caught: unknown) => { if (!stopped && mounted.current) setActorError(describeGameError(caught)); })
+      .finally(() => { if (!stopped && mounted.current) setActorLoading(false); });
+    return () => { stopped = true; };
+    // A policy/provider change cannot change which committed facts were known.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [native, world?.setup.worldId, world?.headTurnId, world?.state.protocolVersion, actorRevision]);
 
   useEffect(() => {
     if (!native || !world || !busy || loading) return;
@@ -387,6 +491,18 @@ export default function Game() {
     } catch (caught: unknown) { if (mounted.current) setPolicyMessage(describeGameError(caught)); }
     finally { releaseWrite(); }
   }
+  async function enableLongState() {
+    const frozen = worldRef.current;
+    if (!frozen || frozen.state.protocolVersion !== 1 || queryRef.current || !reserveWrite("upgrade")) return;
+    setUpgradeMessage(null); setError(null);
+    try {
+      const upgraded = await upgradeGameWorld(frozen.setup.worldId, frozen.headTurnId);
+      if (mounted.current && selectedId.current === frozen.setup.worldId) {
+        applyWorld(upgraded); setUpgradeMessage(t("game.longState.upgraded"));
+      }
+    } catch (caught: unknown) { if (mounted.current) setError(describeGameError(caught)); }
+    finally { releaseWrite(); await refreshWorld(true); }
+  }
   async function refreshProfile() {
     if (!native || busy || loading || writeRef.current) return;
     try { applyProfile(await getGameProvider(), true); setProfileError(null); }
@@ -399,7 +515,7 @@ export default function Game() {
     if (password.current) password.current.value = "";
     setProfileError(null); setProfileMessage(null); setProviderTest(null);
     try {
-      const saved = await saveGameProvider(endpoint.trim(), model.trim(), token, profileRef.current?.revision ?? 0, allowInsecureHttp);
+      const saved = await saveGameProvider(endpoint.trim(), model.trim(), token, profileRef.current?.revision ?? 0, allowInsecureHttp, parseContextBudget(contextBudget));
       if (mounted.current) { applyProfile(saved, true); setProfileMessage(t("game.providerSaved")); }
     } catch (caught: unknown) {
       if (mounted.current) setProfileError(describeGameError(caught));
@@ -497,6 +613,13 @@ export default function Game() {
             onChange={(event) => setAllowInsecureHttp(event.target.checked)} /><span>{t("game.providerAllowHttp")}</span></label>
           {(allowInsecureHttp || profile?.config?.allowInsecureHttp) && <p className="game-notice">{t("game.providerHttpRisk")}</p>}
           <label>{t("game.providerModel")}<input id="game-provider-model" value={model} maxLength={256} spellCheck={false} autoCapitalize="none" disabled={busy} onChange={(event) => setModel(event.target.value)} /></label>
+          <details className="game-context-settings"><summary>{t("game.context.settings")}</summary>
+            <p className="game-muted">{t("game.context.budgetHelp")}</p>
+            <div className="game-form-grid">
+              {([ ["maxInputBytes", "game.context.inputBytes"], ["contextLimitTokens", "game.context.tokenLimit"], ["outputReserveTokens", "game.context.outputReserve"], ["transportReserveTokens", "game.context.transportReserve"] ] as const).map(([key,label]) =>
+                <label key={key}>{t(label)}<input type="number" min={key === "transportReserveTokens" ? 0 : 1} max={4194304} step={1} value={contextBudget[key]} disabled={busy} onChange={(event) => setContextBudget({ ...contextBudget, [key]: Number(event.target.value) })} /></label>)}
+            </div>
+          </details>
           <label>{t("game.providerKey")}<input id="game-provider-key" ref={password} type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={8192} disabled={busy} /></label>
           <p className="game-muted game-small">{t("game.providerKeyHelp")}</p>
           <div className="game-actions"><button type="button" className="game-primary" disabled={!native || busy || loading} onClick={() => void saveProfile()}>{t(writeKind === "provider" ? "game.providerSaving" : "game.providerSave")}</button>
@@ -515,6 +638,7 @@ export default function Game() {
       </section>
 
       {error && <p className="game-error game-global-error" role="alert">{error}</p>}
+      {upgradeMessage && <p className="game-success" role="status">{upgradeMessage}</p>}
       {world && <div className="game-play-layout">
         <div className="game-story-column">
           <section className="game-story" aria-labelledby="game-story-heading">
@@ -546,8 +670,12 @@ export default function Game() {
             {policyMessage && <p className="game-notice" role="status">{policyMessage}</p>}
           </details>
         </div>
-        <WorldStatePanel state={world.state} />
+        {world.state.protocolVersion === 1
+          ? <LegacyWorldStatePanel state={world.state} upgradeDisabled={!native || busy || loading || querying} upgrading={writeKind === "upgrade"} onUpgrade={() => void enableLongState()} />
+          : <LongStatePanel world={world} view={actorView} loading={actorLoading || busy || !native} error={actorError} onRefresh={() => { if (native && !busy) setActorRevision((value) => value + 1); }} />}
       </div>}
+      {world && <GameMemory key={`${world.setup.worldId}:${world.branchId}`} world={world} actorView={actorView} busy={busy || loading || querying}
+        beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} />}
       <footer className="game-footer">{t("game.stateArchivedHelp")}</footer>
     </main>
   );

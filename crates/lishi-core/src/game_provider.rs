@@ -1,5 +1,6 @@
 //! Provider configuration is separate from world saves. No credential is stored
 //! here; native callers own the secret store and pass frozen protected values.
+use crate::game_context::ContextBudget;
 use crate::game_protocol::{GameError, TurnOutput, WorldState};
 use crate::game_store::{GameActionKind, GameTurnRequest, WorldView};
 use crate::model_probe::{CredentialMode, ModelProbeRequest, SavedEndpointPolicy};
@@ -30,6 +31,8 @@ pub struct ProviderConfig {
     pub model: String,
     pub revision: u64,
     pub allow_insecure_http: bool,
+    /// Application/user budget, not a verified capability of the named model.
+    pub context_budget: ContextBudget,
 }
 
 #[derive(Clone, Serialize)]
@@ -120,7 +123,7 @@ pub struct ProviderStore {
 }
 impl ProviderStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProviderError> {
-        let c = Connection::open(path)?;
+        let mut c = Connection::open(path)?;
         c.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = c.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > 1 {
@@ -135,6 +138,24 @@ impl ProviderStore {
           INSERT OR IGNORE INTO provider_meta(singleton,revision) SELECT 1,COALESCE(MAX(revision),0) FROM provider;
           CREATE TABLE IF NOT EXISTS presets(preset_id TEXT PRIMARY KEY,name TEXT NOT NULL,setup TEXT NOT NULL) STRICT;
           PRAGMA user_version=1;")?;
+        // Additive nullable metadata preserves old profiles and old readers.
+        // NULL is the legacy application's conservative default, not a model
+        // context-window claim. The selected row/revision/secret reference do
+        // not change during this schema update.
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_context_budget = {
+            let mut columns = tx.prepare("PRAGMA table_info(provider)")?;
+            let names = columns.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for name in names {
+                found |= name? == "context_budget";
+            }
+            found
+        };
+        if !has_context_budget {
+            tx.execute_batch("ALTER TABLE provider ADD COLUMN context_budget TEXT CHECK(context_budget IS NULL OR json_valid(context_budget));")?;
+        }
+        tx.commit()?;
         Ok(Self {
             connection: Mutex::new(c),
         })
@@ -147,39 +168,53 @@ impl ProviderStore {
         Self::read_stored(&c)
     }
     fn read_stored(c: &Connection) -> Result<Option<StoredProvider>, ProviderError> {
-        let raw:Option<(String,String,i64,String,String)>=c.query_row(
-          "SELECT endpoint,model,revision,secret_slot,streaming FROM provider WHERE singleton=1",[],
-          |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-        raw.map(|(endpoint, model, revision, secret_slot, streaming)| {
-            // HTTP metadata can only be written through the explicit native
-            // save policy. Its persisted scheme records that opt-in.
-            validate_config_with_http_opt_in(&endpoint, &model, true)?;
-            let allow_insecure_http = endpoint
-                .get(..5)
-                .is_some_and(|p| p.eq_ignore_ascii_case("http:"));
-            let revision = u64::try_from(revision).map_err(|_| ProviderError::Database)?;
-            let current = Self::read_revision(c)?;
-            if current != revision {
-                return Err(ProviderError::Database);
-            }
-            let streaming = match streaming.as_str() {
-                "unknown" => Capability::Unknown,
-                "supported" => Capability::Supported,
-                "unsupported" => Capability::Unsupported,
-                _ => return Err(ProviderError::Database),
-            };
-            crate::secrets::SecretSlot::new(&secret_slot).map_err(|_| ProviderError::Database)?;
-            Ok(StoredProvider {
-                config: ProviderConfig {
-                    endpoint,
-                    model,
-                    revision,
-                    allow_insecure_http,
-                },
-                secret_slot,
-                streaming,
-            })
-        })
+        let raw:Option<(String,String,i64,String,String,Option<String>)>=c.query_row(
+          "SELECT endpoint,model,revision,secret_slot,streaming,context_budget FROM provider WHERE singleton=1",[],
+          |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+        raw.map(
+            |(endpoint, model, revision, secret_slot, streaming, context_json)| {
+                // HTTP metadata can only be written through the explicit native
+                // save policy. Its persisted scheme records that opt-in.
+                validate_config_with_http_opt_in(&endpoint, &model, true)?;
+                let allow_insecure_http = endpoint
+                    .get(..5)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("http:"));
+                let revision = u64::try_from(revision).map_err(|_| ProviderError::Database)?;
+                let current = Self::read_revision(c)?;
+                if current != revision {
+                    return Err(ProviderError::Database);
+                }
+                let streaming = match streaming.as_str() {
+                    "unknown" => Capability::Unknown,
+                    "supported" => Capability::Supported,
+                    "unsupported" => Capability::Unsupported,
+                    _ => return Err(ProviderError::Database),
+                };
+                crate::secrets::SecretSlot::new(&secret_slot)
+                    .map_err(|_| ProviderError::Database)?;
+                let context_budget = context_json
+                    .map(|json| {
+                        serde_json::from_str::<ContextBudget>(&json)
+                            .map_err(|_| ProviderError::Database)
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                context_budget
+                    .effective_input_limit_bytes()
+                    .map_err(|_| ProviderError::Database)?;
+                Ok(StoredProvider {
+                    config: ProviderConfig {
+                        endpoint,
+                        model,
+                        revision,
+                        allow_insecure_http,
+                        context_budget,
+                    },
+                    secret_slot,
+                    streaming,
+                })
+            },
+        )
         .transpose()
     }
     pub fn view(&self) -> Result<ProviderView, ProviderError> {
@@ -240,7 +275,48 @@ impl ProviderStore {
         expected_revision: u64,
         allow_insecure_http: bool,
     ) -> Result<ProviderView, ProviderError> {
+        self.save_with_optional_context_budget(
+            endpoint,
+            model,
+            slot,
+            expected_revision,
+            allow_insecure_http,
+            None,
+        )
+    }
+    pub fn save_with_context_budget(
+        &self,
+        endpoint: &str,
+        model: &str,
+        slot: &str,
+        expected_revision: u64,
+        allow_insecure_http: bool,
+        context_budget: ContextBudget,
+    ) -> Result<ProviderView, ProviderError> {
+        self.save_with_optional_context_budget(
+            endpoint,
+            model,
+            slot,
+            expected_revision,
+            allow_insecure_http,
+            Some(context_budget),
+        )
+    }
+    fn save_with_optional_context_budget(
+        &self,
+        endpoint: &str,
+        model: &str,
+        slot: &str,
+        expected_revision: u64,
+        allow_insecure_http: bool,
+        context_budget: Option<ContextBudget>,
+    ) -> Result<ProviderView, ProviderError> {
         validate_config_with_http_opt_in(endpoint, model, allow_insecure_http)?;
+        if let Some(budget) = context_budget {
+            budget
+                .effective_input_limit_bytes()
+                .map_err(|_| ProviderError::InvalidConfig)?;
+        }
         crate::secrets::SecretSlot::new(slot).map_err(|_| ProviderError::InvalidConfig)?;
         if expected_revision >= 9_007_199_254_740_991 {
             return Err(ProviderError::Stale);
@@ -258,9 +334,16 @@ impl ProviderStore {
         if u64::try_from(revision).ok() != Some(expected_revision) {
             return Err(ProviderError::Stale);
         }
-        tx.execute("INSERT INTO provider(singleton,endpoint,model,revision,secret_slot,streaming) VALUES(1,?1,?2,?3,?4,'unknown')
+        let budget = context_budget.unwrap_or(
+            Self::read_stored(&tx)?
+                .map(|stored| stored.config.context_budget)
+                .unwrap_or_default(),
+        );
+        let context_json =
+            serde_json::to_string(&budget).map_err(|_| ProviderError::InvalidConfig)?;
+        tx.execute("INSERT INTO provider(singleton,endpoint,model,revision,secret_slot,streaming,context_budget) VALUES(1,?1,?2,?3,?4,'unknown',?5)
           ON CONFLICT(singleton) DO UPDATE SET endpoint=excluded.endpoint,model=excluded.model,revision=excluded.revision,
-          secret_slot=excluded.secret_slot,streaming='unknown'",params![endpoint,model,revision+1,slot])?;
+          secret_slot=excluded.secret_slot,streaming='unknown',context_budget=excluded.context_budget",params![endpoint,model,revision+1,slot,context_json])?;
         tx.execute(
             "UPDATE provider_meta SET revision=?1 WHERE singleton=1",
             [revision + 1],

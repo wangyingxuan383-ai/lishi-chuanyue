@@ -101,6 +101,20 @@
 .game-state-list li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
 .game-state-list li > span { min-width: 0; }
 .game-state-list strong { font-size: 13px; font-weight: 500; flex-shrink: 0; }
+.game-upgrade > button, .game-actor-refresh { width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.game-upgrade > p { font-size: 12px; margin: 8px 0; }
+.game-long-state .game-state-list strong { flex-shrink: 1; text-align: right; }
+.game-long-state .game-state-list li { align-items: flex-start; }
+.game-state-pending { color: #926847 !important; }
+.game-long-state .game-person-detail { display: block; padding: 9px 0; }
+.game-person-detail > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.game-person-detail > summary > span { min-width: 0; overflow-wrap: anywhere; }
+.game-person-detail > summary > small { color: var(--game-muted); font-size: 11px; flex-shrink: 0; }
+.game-person-detail p, .game-person-attributes { font-size: 12px; overflow-wrap: anywhere; }
+.game-person-attributes > div { margin: 8px 0; }
+.game-person-attributes dt { color: var(--game-muted); }
+.game-person-attributes dd { margin: 2px 0; white-space: pre-wrap; }
+.game-knowledge-list > li > span { white-space: pre-wrap; }
 .game-state-list small { display: block; color: #7f8f74; font-size: 11px; margin-top: 2px; }
 .game-footer { color: #83907a; font-size: 12px; text-align: center; padding-top: 10px; }
 @media (max-width: 820px) {

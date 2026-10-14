@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::Manager;
 
+mod document_picker;
 mod file_probe;
 mod game_commands;
 mod model_probe;
@@ -81,6 +82,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(secret::init())
+        .plugin(document_picker::init())
         .setup(|app| {
             #[cfg(target_os = "android")]
             android_tls::initialize(app)?;
@@ -126,6 +128,15 @@ pub fn run() {
             game_commands::list_game_worlds,
             game_commands::create_game_world,
             game_commands::get_game_world,
+            game_commands::upgrade_game_world,
+            game_commands::get_game_actor_view,
+            game_commands::memory_service::query_game_memory,
+            game_commands::memory_service::get_game_context_trace,
+            game_commands::memory_service::get_game_annotations,
+            game_commands::memory_service::pin_game_fact,
+            game_commands::memory_service::bookmark_game_turn,
+            game_commands::memory_service::remove_game_annotation,
+            game_commands::summary_commands::create_game_summary,
             game_commands::start_game_turn,
             game_commands::cancel_game_turn,
             game_commands::set_game_policy,

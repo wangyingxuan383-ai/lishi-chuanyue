@@ -281,6 +281,8 @@ pub async fn export_probe_pack(
 ) -> Result<ExportProbePackReply, &'static str> {
     let bytes = encode_probe_pack(&request.text).map_err(ProbePackError::code)?;
     let lease = probe.inner().acquire()?;
+    #[cfg(target_os = "android")]
+    crate::document_picker::ensure_idle(&app).await?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     file_dialog(&app, "导出技术探针")
         .set_file_name(DEFAULT_FILE_NAME)
@@ -309,11 +311,16 @@ pub async fn import_probe_pack(
 ) -> Result<ImportProbePackReply, &'static str> {
     let lease = probe.inner().acquire()?;
     let directory = probe.stage_directory.clone();
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    file_dialog(&app, "导入技术探针").pick_file(move |selected| {
-        let _ = sender.send(selected);
-    });
-    let selected = receiver.await.map_err(|_| "file_unavailable")?;
+    #[cfg(target_os = "android")]
+    let selected = crate::document_picker::pick_import(&app).await?;
+    #[cfg(not(target_os = "android"))]
+    let selected = {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        file_dialog(&app, "导入技术探针").pick_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+        receiver.await.map_err(|_| "file_unavailable")?
+    };
     let Some(selected) = selected else {
         return Ok(ImportProbePackReply {
             status: ImportStatus::Cancelled,

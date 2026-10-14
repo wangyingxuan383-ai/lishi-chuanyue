@@ -34,6 +34,43 @@ pub enum SavedEndpointPolicy {
     ExplicitHttp,
 }
 
+/// Trusted native policy, deliberately absent from ModelProbeRequest's JSON
+/// DTO. The ordinary technical probe retains the original 8192-byte boundary.
+/// `Some` selects the compatible `max_tokens` field explicitly; endpoints that
+/// reject that field fail once, without fallback, automatic retry or guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelContextPolicy {
+    pub max_prompt_bytes: usize,
+    pub output_reserve_tokens: Option<u32>,
+}
+
+pub const MAX_MODEL_PROMPT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MODEL_OUTPUT_TOKENS: u32 = 4 * 1024 * 1024;
+
+impl Default for ModelContextPolicy {
+    fn default() -> Self {
+        Self {
+            max_prompt_bytes: 8192,
+            output_reserve_tokens: None,
+        }
+    }
+}
+
+impl ModelContextPolicy {
+    pub fn validate(self) -> Result<(), StreamErrorCode> {
+        if self.max_prompt_bytes == 0
+            || self.max_prompt_bytes > MAX_MODEL_PROMPT_BYTES
+            || self
+                .output_reserve_tokens
+                .is_some_and(|tokens| tokens == 0 || tokens > MAX_MODEL_OUTPUT_TOKENS)
+        {
+            Err(StreamErrorCode::InvalidConfig)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelProbeRequest {
@@ -59,6 +96,15 @@ impl ModelProbeRequest {
         &self,
         policy: SavedEndpointPolicy,
     ) -> Result<(), StreamErrorCode> {
+        self.validate_with_context_policy(policy, ModelContextPolicy::default())
+    }
+
+    pub fn validate_with_context_policy(
+        &self,
+        policy: SavedEndpointPolicy,
+        context: ModelContextPolicy,
+    ) -> Result<(), StreamErrorCode> {
+        context.validate()?;
         if !(8..=128).contains(&self.operation_id.len())
             || !self
                 .operation_id
@@ -69,7 +115,7 @@ impl ModelProbeRequest {
                 .model
                 .chars()
                 .any(|character| character.is_whitespace() || character.is_control())
-            || !(1..=8192).contains(&self.prompt.len())
+            || !(1..=context.max_prompt_bytes).contains(&self.prompt.len())
         {
             return Err(StreamErrorCode::InvalidConfig);
         }
@@ -179,6 +225,30 @@ pub async fn run_model_probe_with_endpoint_policy(
     policy: SavedEndpointPolicy,
     emit: impl FnMut(ProbeStreamEvent) -> bool,
 ) -> ModelProbeResult {
+    run_model_probe_with_context_policy(
+        request,
+        secret,
+        cancel,
+        options,
+        policy,
+        ModelContextPolicy::default(),
+        emit,
+    )
+    .await
+}
+
+/// Same one-attempt transport with a separately validated native context policy.
+/// Limits apply to exact UTF-8 bytes; no action or prompt is truncated. Output
+/// reservation is a request limit, not a fabricated endpoint capability/usage.
+pub async fn run_model_probe_with_context_policy(
+    request: ModelProbeRequest,
+    secret: Option<SecretValue>,
+    cancel: CancellationToken,
+    options: StreamOptions,
+    policy: SavedEndpointPolicy,
+    context: ModelContextPolicy,
+    emit: impl FnMut(ProbeStreamEvent) -> bool,
+) -> ModelProbeResult {
     let started = Instant::now();
     let fail = |error, emit| ModelProbeResult {
         stream: failed_stream(request.operation_id.clone(), error, emit),
@@ -189,7 +259,7 @@ pub async fn run_model_probe_with_endpoint_policy(
             attempts: 0,
         },
     };
-    if let Err(error) = request.validate_with_endpoint_policy(policy) {
+    if let Err(error) = request.validate_with_context_policy(policy, context) {
         return fail(error, emit);
     }
     if !options.is_valid() {
@@ -220,6 +290,9 @@ pub async fn run_model_probe_with_endpoint_policy(
     });
     if request.include_usage {
         body["stream_options"] = serde_json::json!({"include_usage": true});
+    }
+    if let Some(tokens) = context.output_reserve_tokens {
+        body["max_tokens"] = serde_json::json!(tokens);
     }
     let body = match serde_json::to_vec(&body) {
         Ok(body) => body,
