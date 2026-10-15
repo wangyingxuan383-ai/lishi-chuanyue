@@ -378,6 +378,22 @@ async fn run_summary_branch(
                 );
                 let mut options = game_provider::production_stream_options();
                 options.max_output_bytes = MAX_SUMMARY_BYTES;
+                let call_request = lishi_core::game_store::GameTurnRequest {
+                    operation_id: lease.id.clone(),
+                    world_id: prepared.view.setup.world_id.clone(),
+                    branch_id: prepared.view.branch_id.clone(),
+                    expected_head_turn_id: prepared.view.head_turn_id.clone(),
+                    action_kind: lishi_core::game_store::GameActionKind::Continue,
+                    action_text: String::new(),
+                };
+                let (call_log, call_sequence) = super::call_commands::reserve(
+                    Arc::clone(&lease.service),
+                    &call_request,
+                    &request.model,
+                    SUMMARY_PROMPT_VERSION,
+                )
+                .await
+                .map_err(|_| SummaryFailure::Manual)?;
                 let result = lishi_core::model_probe::run_model_probe_with_context_policy(
                     request,
                     Some(key),
@@ -389,6 +405,9 @@ async fn run_summary_branch(
                 )
                 .await;
                 actual_usage = usage(&result.diagnostics);
+                super::call_commands::finish(call_log, &lease.id, call_sequence, &result)
+                    .await
+                    .map_err(|_| SummaryFailure::Manual)?;
                 if result.stream.status == StreamStatus::Cancelled || lease.cancel.is_cancelled() {
                     return Err(SummaryFailure::Cancelled);
                 }
@@ -895,6 +914,16 @@ mod tests {
             serde_json::Value::Null
         );
         assert!(!reply.to_string().contains(FAKE_KEY));
+        let ledger = service
+            .calls()
+            .unwrap()
+            .operation("summary-network-once")
+            .unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].actual_http_attempts, Some(1));
+        assert_eq!(ledger[0].prompt_version, SUMMARY_PROMPT_VERSION);
+        assert_eq!(ledger[0].usage.as_ref().unwrap().total_tokens, 30);
+        assert!(!serde_json::to_string(&ledger).unwrap().contains(FAKE_KEY));
         assert_eq!(formal(&route), before);
     }
     #[tokio::test]
@@ -938,6 +967,13 @@ mod tests {
                 .unwrap()
                 .is_empty());
             assert_eq!(local.calls.load(Ordering::SeqCst), 1);
+            let ledger = service
+                .calls()
+                .unwrap()
+                .operation("summary-native-failed")
+                .unwrap();
+            assert_eq!(ledger.len(), 1);
+            assert_eq!(ledger[0].actual_http_attempts, Some(1));
             assert_eq!(formal(&route), before);
             assert!(service.active.lock().unwrap().is_none());
             assert!(summarize(

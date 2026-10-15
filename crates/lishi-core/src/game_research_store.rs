@@ -30,6 +30,86 @@ const SCHEMA_VERSION: i32 = 1;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_RECORDS: usize = 10_000;
 const MAX_ADOPTIONS_PER_WORLD: usize = 4096;
+const WORLD_RESEARCH_BUNDLE_VERSION: u32 = 1;
+
+/// Portable frozen evidence for one world. Provider configuration, secret slots,
+/// search attempts, shared cache records and other worlds are never included.
+/// Restore into a dedicated empty sidecar so global change sequences stay exact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldResearchBundle {
+    pub version: u32,
+    pub world_id: String,
+    pub watermark: u64,
+    pub adoptions: Vec<ResearchAdoption>,
+}
+impl WorldResearchBundle {
+    pub fn validate(&self) -> ResearchResult<()> {
+        if self.version != WORLD_RESEARCH_BUNDLE_VERSION
+            || !id(&self.world_id)
+            || self.watermark > i64::MAX as u64
+            || self.adoptions.len() > MAX_ADOPTIONS_PER_WORLD
+        {
+            return Err(ResearchError::InvalidInput);
+        }
+        let mut ids = BTreeSet::new();
+        let mut previous = 0;
+        let mut encoded_bytes = 0usize;
+        for adoption in &self.adoptions {
+            adoption.validate()?;
+            if adoption.world_id != self.world_id
+                || !ids.insert(&adoption.id)
+                || adoption.change_seq <= previous
+                || adoption.change_seq > self.watermark
+            {
+                return Err(ResearchError::InvalidInput);
+            }
+            encoded_bytes = encoded_bytes
+                .checked_add(encode(adoption)?.len())
+                .filter(|size| *size <= 64 * 1024 * 1024)
+                .ok_or(ResearchError::TooLarge)?;
+            previous = adoption.change_seq;
+        }
+        Ok(())
+    }
+
+    /// Inputs must be the complete, core-validated histories for every branch,
+    /// including archived branches, rather than a recent UI history window.
+    pub fn validate_scopes(
+        &self,
+        branches: &[(&ResearchScope, &ValidatedHistory)],
+    ) -> ResearchResult<()> {
+        self.validate()?;
+        let mut ids = BTreeSet::new();
+        for (scope, history) in branches {
+            scope.validate(history)?;
+            if scope.context.world_id != self.world_id
+                || !ids.insert(&scope.context.branch_id)
+                || scope.branch_path.iter().any(|access| {
+                    access
+                        .through_change_seq
+                        .is_some_and(|watermark| watermark > self.watermark)
+                })
+            {
+                return Err(ResearchError::InvalidScope);
+            }
+        }
+        for adoption in &self.adoptions {
+            let (_, history) = branches
+                .iter()
+                .find(|(scope, _)| scope.context.branch_id == adoption.origin_branch_id)
+                .ok_or(ResearchError::InvalidScope)?;
+            if adoption
+                .head_turn_id
+                .as_deref()
+                .is_some_and(|head| !history.contains_turn(head))
+            {
+                return Err(ResearchError::InvisibleSource);
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResearchBranchAccess {
@@ -469,6 +549,94 @@ fn freeze_evidence(
     record.validate()?;
     Ok(record)
 }
+fn adoption_watermark(connection: &Connection) -> ResearchResult<u64> {
+    let (maximum, sequence): (i64, i64) = connection.query_row(
+        "SELECT (SELECT COALESCE(MAX(change_seq),0) FROM research_adoptions),COALESCE((SELECT seq FROM sqlite_sequence WHERE name='research_adoptions'),0)",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if maximum < 0 || sequence < maximum {
+        return Err(ResearchError::Database);
+    }
+    u64::try_from(sequence).map_err(|_| ResearchError::Database)
+}
+fn adopt_record_in_transaction(
+    tx: &Connection,
+    scope: &ResearchScope,
+    history: &ValidatedHistory,
+    adoption_id: &str,
+    cache: ResearchRecord,
+    source_ids: &[String],
+) -> ResearchResult<ResearchAdoption> {
+    scope.validate(history)?;
+    cache.validate()?;
+    if !id(adoption_id)
+        || source_ids.is_empty()
+        || source_ids.len() > MAX_RESEARCH_RESULTS
+        || source_ids.iter().any(|source| !id(source))
+        || source_ids.iter().collect::<BTreeSet<_>>().len() != source_ids.len()
+    {
+        return Err(ResearchError::InvalidInput);
+    }
+    if source_ids
+        .iter()
+        .any(|id| !cache.sources.iter().any(|source| &source.id == id))
+    {
+        return Err(ResearchError::InvisibleSource);
+    }
+    let previous: Option<String> = tx
+        .query_row(
+            "SELECT record FROM research_adoptions WHERE id=?1",
+            [adoption_id],
+            |row| bounded_json(row, 0),
+        )
+        .optional()?;
+    if let Some(json) = previous {
+        let previous: ResearchAdoption = decode(&json)?;
+        previous.validate()?;
+        if previous.world_id != scope.context.world_id
+            || previous.origin_branch_id != scope.context.branch_id
+            || previous.head_turn_id != scope.context.head_turn_id
+            || previous.record_id != cache.id
+            || previous.source_ids != source_ids
+        {
+            return Err(ResearchError::Conflict);
+        }
+        // An idempotent retry preserves its original interpretation revision,
+        // even when the shared cache gained conclusions since the first call.
+        return Ok(previous);
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM research_adoptions WHERE world_id=?1",
+        [&scope.context.world_id],
+        |row| row.get(0),
+    )?;
+    if count >= MAX_ADOPTIONS_PER_WORLD as i64 {
+        return Err(ResearchError::TooLarge);
+    }
+    adoption_watermark(tx)?;
+    tx.execute(
+        "INSERT INTO research_adoptions(id,world_id,record) VALUES(?1,?2,'{}')",
+        params![adoption_id, scope.context.world_id],
+    )?;
+    let change_seq = tx.last_insert_rowid() as u64;
+    let value = ResearchAdoption {
+        id: adoption_id.into(),
+        world_id: scope.context.world_id.clone(),
+        origin_branch_id: scope.context.branch_id.clone(),
+        head_turn_id: scope.context.head_turn_id.clone(),
+        record_id: cache.id.clone(),
+        source_ids: source_ids.to_vec(),
+        evidence: freeze_evidence(cache, source_ids)?,
+        change_seq,
+        created_at_ms: now_ms()?,
+    };
+    value.validate()?;
+    tx.execute(
+        "UPDATE research_adoptions SET record=?1 WHERE change_seq=?2",
+        params![encode(&value)?, change_seq as i64],
+    )?;
+    Ok(value)
+}
 impl ResearchStore {
     pub fn open_sidecar(path: impl AsRef<Path>) -> ResearchResult<Self> {
         let path = path.as_ref();
@@ -836,12 +1004,89 @@ impl ResearchStore {
     }
     pub fn watermark(&self) -> ResearchResult<u64> {
         let connection = self.connection()?;
-        let value: i64 = connection.query_row(
-            "SELECT COALESCE(MAX(change_seq),0) FROM research_adoptions",
-            [],
-            |row| row.get(0),
+        adoption_watermark(&connection)
+    }
+    pub fn export_world_bundle(&self, world_id: &str) -> ResearchResult<WorldResearchBundle> {
+        if !id(world_id) {
+            return Err(ResearchError::InvalidInput);
+        }
+        let connection = self.connection()?;
+        let watermark = adoption_watermark(&connection)?;
+        let mut statement = connection.prepare(
+            "SELECT id,change_seq,record FROM research_adoptions WHERE world_id=?1 ORDER BY change_seq",
         )?;
-        value.try_into().map_err(|_| ResearchError::Database)
+        let rows = statement.query_map([world_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                bounded_json(row, 2)?,
+            ))
+        })?;
+        let mut adoptions = Vec::new();
+        let mut encoded_bytes = 0usize;
+        for row in rows {
+            if adoptions.len() == MAX_ADOPTIONS_PER_WORLD {
+                return Err(ResearchError::TooLarge);
+            }
+            let (id, seq, json) = row?;
+            encoded_bytes = encoded_bytes
+                .checked_add(json.len())
+                .filter(|size| *size <= 64 * 1024 * 1024)
+                .ok_or(ResearchError::TooLarge)?;
+            let value: ResearchAdoption = decode(&json)?;
+            if value.id != id || value.change_seq != seq as u64 {
+                return Err(ResearchError::Database);
+            }
+            adoptions.push(value);
+        }
+        let bundle = WorldResearchBundle {
+            version: WORLD_RESEARCH_BUNDLE_VERSION,
+            world_id: world_id.into(),
+            watermark,
+            adoptions,
+        };
+        bundle.validate()?;
+        Ok(bundle)
+    }
+
+    /// No merge or sequence renumbering is permitted. The native shell stages a
+    /// dedicated per-world sidecar and publishes its directory with the world.
+    pub fn restore_world_bundle(&self, bundle: &WorldResearchBundle) -> ResearchResult<()> {
+        bundle.validate()?;
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let occupied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM research_config) OR EXISTS(SELECT 1 FROM research_operations) OR EXISTS(SELECT 1 FROM research_records) OR EXISTS(SELECT 1 FROM research_conclusions) OR EXISTS(SELECT 1 FROM research_adoptions) OR EXISTS(SELECT 1 FROM sqlite_sequence WHERE seq!=0)",
+            [], |row| row.get(0),
+        )?;
+        if occupied || config_revision(&tx)? != 0 {
+            return Err(ResearchError::Conflict);
+        }
+        for adoption in &bundle.adoptions {
+            tx.execute(
+                "INSERT INTO research_adoptions(change_seq,id,world_id,record) VALUES(?1,?2,?3,?4)",
+                params![
+                    adoption.change_seq as i64,
+                    adoption.id,
+                    adoption.world_id,
+                    encode(adoption)?
+                ],
+            )?;
+        }
+        if bundle.watermark > 0 {
+            let changed = tx.execute(
+                "UPDATE sqlite_sequence SET seq=?1 WHERE name='research_adoptions'",
+                [bundle.watermark as i64],
+            )?;
+            if changed == 0 {
+                tx.execute(
+                    "INSERT INTO sqlite_sequence(name,seq) VALUES('research_adoptions',?1)",
+                    [bundle.watermark as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
     pub fn config_revision(&self) -> ResearchResult<u64> {
         let connection = self.connection()?;
@@ -915,74 +1160,36 @@ impl ResearchStore {
         record_id: &str,
         source_ids: &[String],
     ) -> ResearchResult<ResearchAdoption> {
-        scope.validate(history)?;
-        if !id(adoption_id)
-            || !id(record_id)
-            || source_ids.is_empty()
-            || source_ids.len() > MAX_RESEARCH_RESULTS
-            || source_ids.iter().any(|source| !id(source))
-            || source_ids.iter().collect::<BTreeSet<_>>().len() != source_ids.len()
-        {
+        if !id(record_id) {
             return Err(ResearchError::InvalidInput);
         }
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cache = record(&tx, record_id)?.ok_or(ResearchError::Missing)?;
-        if source_ids
-            .iter()
-            .any(|id| !cache.sources.iter().any(|source| &source.id == id))
-        {
-            return Err(ResearchError::InvisibleSource);
-        }
-        let previous: Option<String> = tx
-            .query_row(
-                "SELECT record FROM research_adoptions WHERE id=?1",
-                [adoption_id],
-                |row| bounded_json(row, 0),
-            )
-            .optional()?;
-        if let Some(json) = previous {
-            let previous: ResearchAdoption = decode(&json)?;
-            previous.validate()?;
-            if previous.world_id != scope.context.world_id
-                || previous.origin_branch_id != scope.context.branch_id
-                || previous.head_turn_id != scope.context.head_turn_id
-                || previous.record_id != record_id
-                || previous.source_ids != source_ids
-            {
-                return Err(ResearchError::Conflict);
-            }
-            return Ok(previous);
-        }
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM research_adoptions WHERE world_id=?1",
-            [&scope.context.world_id],
-            |row| row.get(0),
-        )?;
-        if count >= MAX_ADOPTIONS_PER_WORLD as i64 {
-            return Err(ResearchError::TooLarge);
-        }
-        // Assign sequence in the same transaction as this immutable adoption.
-        tx.execute(
-            "INSERT INTO research_adoptions(id,world_id,record) VALUES(?1,?2,'{}')",
-            params![adoption_id, scope.context.world_id],
-        )?;
-        let change_seq = tx.last_insert_rowid() as u64;
-        let value = ResearchAdoption {
-            id: adoption_id.into(),
-            world_id: scope.context.world_id.clone(),
-            origin_branch_id: scope.context.branch_id.clone(),
-            head_turn_id: scope.context.head_turn_id.clone(),
-            record_id: record_id.into(),
-            source_ids: source_ids.to_vec(),
-            evidence: freeze_evidence(cache, source_ids)?,
-            change_seq,
-            created_at_ms: now_ms()?,
-        };
-        value.validate()?;
-        tx.execute(
-            "UPDATE research_adoptions SET record=?1 WHERE change_seq=?2",
-            params![encode(&value)?, change_seq as i64],
+        let value =
+            adopt_record_in_transaction(&tx, scope, history, adoption_id, cache, source_ids)?;
+        tx.commit()?;
+        Ok(value)
+    }
+    /// Only the trusted native layer passes an already validated shared-cache
+    /// record. The target sidecar need not contain a duplicate mutable cache.
+    pub fn adopt_record(
+        &self,
+        scope: &ResearchScope,
+        history: &ValidatedHistory,
+        adoption_id: &str,
+        record: &ResearchRecord,
+        source_ids: &[String],
+    ) -> ResearchResult<ResearchAdoption> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let value = adopt_record_in_transaction(
+            &tx,
+            scope,
+            history,
+            adoption_id,
+            record.clone(),
+            source_ids,
         )?;
         tx.commit()?;
         Ok(value)

@@ -83,7 +83,7 @@ pub(super) fn fragments(
     history: &ValidatedHistory,
 ) -> Result<Vec<ContextFragment>, GameCommandError> {
     let scope = scope(store, view)?;
-    let adopted = match s.research().and_then(|store|store.adopted(&scope,history).map_err(err)){
+    let adopted = match s.evidence_for_world(&view.setup.world_id).and_then(|store|store.adopted(&scope,history).map_err(err)){
         Ok(records)=>records,
         Err(_)=>return Ok(vec![ContextFragment{id:"historical-research-unavailable".into(),scope:scope.context.clone(),kind:ContextFragmentKind::HistoricalEvidence,status:ContextFragmentStatus::Committed,source_turn_ids:vec![],body:"历史研究资料目前无法读取；没有可引用来源，请标明历史不确定性，不以资料替换正式世界事实。".into(),relevance:1}])
     };
@@ -400,8 +400,13 @@ pub async fn adopt_game_research(
         }
         let history = store.selected_history(&branch_id)?;
         let scope = scope(store, &view)?;
-        s.research()?
-            .adopt(&scope, &history, &adoption_id, &record_id, &source_ids)
+        let record = s
+            .research()?
+            .record(&record_id)
+            .map_err(err)?
+            .ok_or_else(|| GameCommandError::new("research_missing"))?;
+        s.evidence_for_world(&world_id)?
+            .adopt_record(&scope, &history, &adoption_id, &record, &source_ids)
             .map_err(err)
     })
     .await
@@ -425,7 +430,10 @@ pub async fn list_game_research(
         }
         let history = store.selected_history(&branch_id)?;
         let scope = scope(store, &view)?;
-        let adopted = s.research()?.adopted(&scope, &history).map_err(err)?;
+        let adopted = s
+            .evidence_for_world(&world_id)?
+            .adopted(&scope, &history)
+            .map_err(err)?;
         let records = adopted.into_iter().map(|a| a.evidence).collect();
         Ok(records)
     })
@@ -439,7 +447,7 @@ pub(super) fn allowed_sources(
 ) -> Result<Vec<String>, GameCommandError> {
     let scope = scope(store, view)?;
     let adopted = match s
-        .research()
+        .evidence_for_world(&view.setup.world_id)
         .and_then(|store| store.adopted(&scope, history).map_err(err))
     {
         Ok(records) => records,
@@ -549,12 +557,12 @@ pub(super) async fn preflight(
             };
             let scope = scope(store, &view)?;
             let history = store.selected_history(&view.branch_id)?;
-            s.research()?
-                .adopt(
+            s.evidence_for_world(&view.setup.world_id)?
+                .adopt_record(
                     &scope,
                     &history,
                     &format!("adopt-{id}"),
-                    &record.id,
+                    &record,
                     &record
                         .sources
                         .iter()

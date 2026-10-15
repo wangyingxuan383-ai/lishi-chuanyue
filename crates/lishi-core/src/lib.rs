@@ -2,6 +2,8 @@
 
 pub mod game_annotations;
 pub mod game_archive;
+mod game_backup;
+pub mod game_call_log;
 pub mod game_context;
 pub mod game_context_log;
 pub mod game_inspection;
@@ -9,6 +11,7 @@ pub mod game_knowledge;
 pub mod game_legacy;
 pub mod game_memory;
 pub mod game_migration;
+pub mod game_portable_schema;
 pub mod game_protocol;
 pub mod game_protocol_v2;
 pub mod game_provider;
@@ -28,6 +31,7 @@ pub mod secret_probe;
 pub mod secrets;
 pub mod storage;
 pub mod stream;
+pub mod timejump_pack;
 
 pub use storage::{ProbeNote, ProbeStore, ProbeStoreError, MAX_PROBE_NOTE_BYTES};
 pub use stream::{

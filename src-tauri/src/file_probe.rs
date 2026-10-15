@@ -32,7 +32,7 @@ pub struct FileProbe {
     stage_directory: PathBuf,
 }
 
-struct FileLease(Arc<FileProbe>);
+pub(crate) struct FileLease(Arc<FileProbe>);
 
 impl Drop for FileLease {
     fn drop(&mut self) {
@@ -41,7 +41,7 @@ impl Drop for FileLease {
 }
 
 impl FileProbe {
-    fn acquire(self: &Arc<Self>) -> Result<FileLease, &'static str> {
+    pub(crate) fn acquire(self: &Arc<Self>) -> Result<FileLease, &'static str> {
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "file_busy")?;

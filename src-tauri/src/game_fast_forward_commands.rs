@@ -170,8 +170,10 @@ pub(super) async fn run_segment(
     if profile.config.revision!=frozen.config.revision{return Err(GameCommandError::new("game_provider_stale"));}
     let route=Arc::clone(&lease.store);let id=lease.id.clone();blocking(move||{v2(&route)?.reserve_fast_forward_model_request(&id)?;Ok(())}).await?;
     let endpoint_policy=if profile.config.allow_insecure_http{SavedEndpointPolicy::ExplicitHttp}else{SavedEndpointPolicy::HttpsOnly};
+    let (call_log,call_sequence)=super::call_commands::reserve(Arc::clone(&lease.service),&prepared.request,&profile.config.model,21_001).await?;
     let result=lishi_core::model_probe::run_model_probe_with_context_policy(ModelProbeRequest{operation_id:request.operation_id.clone(),endpoint:profile.config.endpoint,model:profile.config.model,prompt,include_usage:false,credential_mode:CredentialMode::Saved},Some(key),lease.cancel.clone(),game_provider::production_stream_options(),endpoint_policy,
      ModelContextPolicy{max_prompt_bytes:budget.effective_input_limit_bytes().map_err(|e|GameCommandError::new(e.to_string()))?,output_reserve_tokens:Some(budget.output_reserve_tokens.try_into().map_err(|_|GameCommandError::new("game_provider_invalid"))?)},|_|true).await;
+    super::call_commands::finish(call_log,&request.operation_id,call_sequence,&result).await?;
     let usage=result.diagnostics.usage.as_ref().map(|u|FastForwardUsage{input_tokens:Some(u.prompt_tokens),output_tokens:Some(u.completion_tokens),total_tokens:Some(u.total_tokens)}).unwrap_or_default();
     let actual=usage.input_tokens.and_then(|u|usize::try_from(u).ok());
     let route=Arc::clone(&lease.store);let id=lease.id.clone();blocking(move||{v2(&route)?.record_fast_forward_usage(&id,usage)?;memory.record_actual_usage(&id,actual)?;Ok(())}).await?;

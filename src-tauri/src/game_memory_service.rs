@@ -463,7 +463,10 @@ impl GameService {
         if let Some(memory) = services.get(world_id) {
             return Ok(Arc::clone(memory));
         }
-        let memory = Arc::new(GameMemoryService::open(&self.memory_directory, world_id)?);
+        let memory = Arc::new(GameMemoryService::open(
+            &self.memory_path(world_id)?,
+            world_id,
+        )?);
         services.insert(world_id.into(), Arc::clone(&memory));
         Ok(memory)
     }

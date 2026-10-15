@@ -15,8 +15,12 @@ import GameMemory from "./GameMemory";
 import GameResearch from "./GameResearch";
 import GameBranches from "./GameBranches";
 import GameFastForward from "./GameFastForward";
+import GameSaves from "./GameSaves";
+import GameCallHistory from "./GameCallHistory";
 import { branchT as bt } from "./gameBranchMessages";
 import type { BranchCard, RewriteAction } from "./gameBranchClient";
+import { WorkspaceNavigation, WorkspacePanel, type WorkspacePanelId } from "./GameWorkspace";
+import { workspaceT as wt } from "./workspaceMessages";
 
 type DisplayPhase = GameStatus | "starting" | "unconfirmed" | "notStarted";
 type WriteKind = "create" | "turn" | "policy" | "provider" | "providerTest" | "providerDelete" | "preset" | "upgrade" | "annotation" | null;
@@ -186,6 +190,10 @@ export default function Game() {
   const [world, setWorld] = useState<GameWorld | null>(null);
   const [form, setForm] = useState<SetupForm>({ ...samples[0] });
   const [showSetup, setShowSetup] = useState(false);
+  const [showLibrary, setShowLibrary] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [activePanel, setActivePanel] = useState<WorkspacePanelId>("story");
+  const [workingPanel, setWorkingPanel] = useState<WorkspacePanelId | null>(null);
   const [presets, setPresets] = useState<GamePreset[]>([]);
   const [presetName, setPresetName] = useState("");
   const [presetMessage, setPresetMessage] = useState<string | null>(null);
@@ -225,6 +233,32 @@ export default function Game() {
   const queryRef = useRef(false);
   const generation = useRef(0);
   const password = useRef<HTMLInputElement>(null);
+  const actionRef = useRef("");
+  const actionDrafts = useRef(new Map<string, string>());
+  const panelRef = useRef<WorkspacePanelId>("story");
+  const latestNarrative = useRef<HTMLElement>(null);
+  const composer = useRef<HTMLElement>(null);
+
+  function changeAction(value: string) {
+    actionRef.current = value;
+    if (selectedId.current) actionDrafts.current.set(JSON.stringify([selectedId.current, selectedBranch.current]), value);
+    setAction(value);
+  }
+  function choosePanel(panel: WorkspacePanelId) {
+    panelRef.current = panel; setActivePanel(panel);
+    requestAnimationFrame(() => document.getElementById("game-panel-" + panel)?.scrollIntoView({ block: "start" }));
+  }
+  function jumpToStory(target: "latest" | "action") {
+    panelRef.current = "story"; setActivePanel("story");
+    requestAnimationFrame(() => {
+      if (target === "latest") latestNarrative.current?.scrollIntoView({ block: "start" });
+      else {
+        const input = composer.current?.querySelector("textarea");
+        input?.scrollIntoView({ block: "center" });
+        input?.focus({ preventScroll: true });
+      }
+    });
+  }
 
   useEffect(() => {
     mounted.current = true;
@@ -269,12 +303,14 @@ export default function Game() {
   }, []);
 
   function selectWorld(incoming: GameWorld) {
+    if (selectedId.current) actionDrafts.current.set(JSON.stringify([selectedId.current, selectedBranch.current]), actionRef.current);
     selectedId.current = incoming.setup.worldId;
     selectedBranch.current = incoming.branchId;
     worldRef.current = null;
     localRef.current = null;
     setLocal(null);
-    setAction("");
+    const savedDraft = actionDrafts.current.get(JSON.stringify([incoming.setup.worldId, incoming.branchId])) ?? "";
+    actionRef.current = savedDraft; setAction(savedDraft);
     setPolicy(incoming.narrativePolicy);
     setPolicyMessage(null);
     setUpgradeMessage(null);
@@ -284,6 +320,8 @@ export default function Game() {
     setError(null);
     applyWorld(incoming);
     setShowSetup(false);
+    setShowLibrary(false);
+    panelRef.current = "story"; setActivePanel("story");
   }
   function applyProfile(incoming: GameProviderProfile, fillInputs = false) {
     if (!mounted.current) return;
@@ -396,9 +434,10 @@ export default function Game() {
     if (!native || writeRef.current || busy || loading) return false;
     writeRef.current = true;
     setWriteKind(kind);
+    setWorkingPanel(kind === "turn" ? "story" : kind === "annotation" ? panelRef.current : null);
     return true;
   }
-  function releaseWrite() { writeRef.current = false; if (mounted.current) setWriteKind(null); }
+  function releaseWrite() { writeRef.current = false; if (mounted.current) { setWriteKind(null); setWorkingPanel(null); } }
 
   async function createWorld() {
     const setup = setupFromForm(form);
@@ -466,7 +505,7 @@ export default function Game() {
         });
       if (mounted.current && localRef.current === operation) {
         applyWorld(stored);
-        if (stored.latestOperation?.operationId === operation.operationId && stored.latestOperation.status === "committed" && action === actionText) { setAction(""); setRewritePrefill(null); }
+        if (stored.latestOperation?.operationId === operation.operationId && stored.latestOperation.status === "committed" && actionRef.current === actionText) { changeAction(""); setRewritePrefill(null); }
       }
     } catch (caught: unknown) {
       if (mounted.current && localRef.current === operation) {
@@ -572,13 +611,25 @@ export default function Game() {
   const retry = world?.latestOperation;
   const canRetry = retry && (retry.status === "failed" || retry.status === "cancelled" || retry.status === "interrupted");
   const diagnostics = providerTest?.diagnostics;
+  const locationName = world?.state.protocolVersion === 2
+    ? currentActorView?.entities.find(entity => entity.entityId === world.state.locationId)?.name ?? t("game.actor.unknownName")
+    : world?.state.entities.find(entity => entity.id === world.state.locationId)?.name ?? t("game.unknown");
 
   return (
-    <main className="game-page">
+    <main className={"game-page" + (world ? " game-page--playing" : "")}>
       <header className="game-header"><div><span className="game-eyebrow">{t("game.stage")}</span><h1>{t("game.title")}</h1><p>{t("game.subtitle")}</p></div></header>
       {!native && <p className="game-notice" role="status">{t("game.unavailable")}</p>}
       {loading && <p className="game-notice" role="status">{t("game.loading")}</p>}
-      <section className="game-library" aria-labelledby="game-library-heading">
+      <div className="game-workspace-top">
+        {world && <div><h2>{world.setup.title}</h2><p className="game-workspace-location">{locationName} · {formatElapsed(world.state.time.elapsedSeconds)}</p>
+          <small>{wt("workspace.anchorYear", { year: formatYear(world.setup.eraYear) })} · {wt("workspace.branch", { name: branchCard?.name ?? world.branchId })}</small></div>}
+        <div className="game-workspace-tools"><button type="button" className="game-secondary" aria-expanded={showLibrary || !world} aria-controls="game-library-panel" onClick={() => setShowLibrary(value => !value)}>{wt("workspace.worlds")}</button>
+          <button type="button" className="game-secondary" aria-expanded={showSettings} aria-controls="game-settings-panel" onClick={() => setShowSettings(value => !value)}>{wt("workspace.settings")}</button></div>
+      </div>
+      <WorkspaceNavigation active={activePanel} hasWorld={world !== null} onSelect={choosePanel}
+        onLatest={() => jumpToStory("latest")} onAction={() => jumpToStory("action")} workingPanel={workingPanel} />
+      {workingPanel && activePanel !== workingPanel && <p className="game-workspace-busy" role="status">{wt("workspace.working")}</p>}
+      <section id="game-library-panel" className="game-library" aria-labelledby="game-library-heading" hidden={!showLibrary && world !== null}>
         <div className="game-section-top"><h2 id="game-library-heading">{t("game.library")}</h2><button type="button" className="game-secondary" onClick={() => setShowSetup((value) => !value)} disabled={busy || loading}>{t(showSetup && world ? "game.setupCancel" : "game.worldNew")}</button></div>
         {library.worlds.length ? <div className="game-world-tabs">{library.worlds.map((summary) => (
           <button type="button" className={`game-world-tab${world?.setup.worldId === summary.worldId ? " game-world-tab--active" : ""}`} key={summary.worldId}
@@ -615,7 +666,7 @@ export default function Game() {
         </details>
       </section>}
 
-      <section className="game-provider-card">
+      <section id="game-settings-panel" className="game-provider-card" hidden={!showSettings}>
         <label className="game-provider-select">{t("game.playProvider")}<select id="game-provider-kind" value={providerKind} disabled={busy} onChange={(event) => setProviderKind(event.target.value as ProviderKind)}>
           <option value="demo">{t("game.provider.demo")}</option><option value="compatible">{t("game.provider.compatible")}</option>
         </select></label>
@@ -652,29 +703,32 @@ export default function Game() {
             <div><dt>{t("game.diagnostic.elapsed")}</dt><dd>{t("game.diagnostic.elapsedValue", { count: diagnostics.elapsedMs })}</dd></div>
             <div><dt>{t("game.diagnostic.tokens")}</dt><dd>{diagnostics.usage?.totalTokens ?? t("game.unknown")}</dd></div></dl><p className="game-muted game-small">{t("game.diagnostic.cost")}</p></details>}
         </details>
+        <GameCallHistory />
       </section>
 
       {error && <p className="game-error game-global-error" role="alert">{error}</p>}
       {upgradeMessage && <p className="game-success" role="status">{upgradeMessage}</p>}
-      {world && <div className="game-play-layout">
+      <WorkspacePanel panel="story" active={activePanel}>
+      {world ? <div className="game-play-layout">
         <div className="game-story-column">
           <section className="game-story" aria-labelledby="game-story-heading">
             <div className="game-section-top"><div><span className="game-eyebrow">{world.setup.country} · {formatYear(world.setup.eraYear)}</span><h2 id="game-story-heading">{world.setup.title}</h2></div>
               <button type="button" className="game-secondary" disabled={!native || loading || querying} onClick={() => void refreshWorld()}>{t(querying ? "game.worldRefreshBusy" : "game.worldRefresh")}</button></div>
-            <article className="game-turn game-turn-opening"><span className="game-turn-label">{t("game.opening")}</span><div className="game-narrative">{world.openingNarrative}</div></article>
+            <article ref={world.turns.length ? undefined : latestNarrative} className="game-turn game-turn-opening"><span className="game-turn-label">{t("game.opening")}</span><div className="game-narrative">{world.openingNarrative}</div></article>
             {world.turnCount > world.turns.length && <p className="game-muted game-small">{t("game.timelineWindow", { count: world.turns.length })}</p>}
-            {world.turns.map((turn, index) => <article className="game-turn" key={turn.turnId}><div className="game-turn-top"><span className="game-turn-label">{t("game.turnHeading", { number: world.turnCount - world.turns.length + index + 1 })}</span><small>{formatElapsed(turn.state.time.elapsedSeconds)}</small></div>
+            {world.turns.map((turn, index) => <article ref={index === world.turns.length - 1 ? latestNarrative : undefined} className="game-turn" key={turn.turnId}><div className="game-turn-top"><span className="game-turn-label">{t("game.turnHeading", { number: world.turnCount - world.turns.length + index + 1 })}</span><small>{formatElapsed(turn.state.time.elapsedSeconds)}</small></div>
               <div className="game-player-action"><span>{t(turn.actionKind === "continue" ? "game.turnContinue" : "game.turnAction")}</span>{turn.actionKind === "action" && <p>{turn.actionText}</p>}</div>
               <div className="game-narrative">{turn.narrative}</div></article>)}
           </section>
-          <section className="game-composer" aria-labelledby="game-action-label">
+          <section ref={composer} className="game-composer" aria-labelledby="game-action-label">
             <div aria-live="polite">{phase && <p className={`game-phase game-phase--${phase}`}>{t(phaseKeys[phase])}</p>}{cancelState === "requested" && <p className="game-muted game-small">{t("game.cancelRequested")}</p>}</div>
             {currentLocal?.draft && currentLocal.phase !== "committed" && <div className="game-draft"><h3>{t("game.draftHeading")}</h3><p className="game-muted game-small">{t("game.draftHelp")}</p><div className="game-narrative">{currentLocal.draft}</div></div>}
             {choices.length > 0 && !dead && <div className="game-choices"><h3>{t("game.choicesHeading")}</h3>{choices.map((choice) => <button type="button" className="game-choice" key={`${world.headTurnId ?? "opening"}:${choice.id}`} disabled={!canAct} onClick={() => void submitTurn("action", choice.text)}>{choice.text}<span aria-hidden="true">↗</span></button>)}</div>}
             {archived && <p className="game-notice">{bt("branches.archivedHelp")}</p>}
             {rewritePrefill?.actionKind === "continue" && <p className="game-notice">{bt("branches.rewriteContinue")}</p>}
-            <label id="game-action-label" htmlFor="game-action">{t("game.actionLabel")}</label><textarea id="game-action" rows={4} value={action} maxLength={32768} placeholder={t("game.actionPlaceholder")} disabled={busy || dead || archived} onChange={(event) => setAction(event.target.value)} aria-describedby="game-action-help" />
+            <label id="game-action-label" htmlFor="game-action">{t("game.actionLabel")}</label><textarea id="game-action" rows={4} value={action} maxLength={32768} placeholder={t("game.actionPlaceholder")} disabled={busy || dead || archived} onChange={(event) => changeAction(event.target.value)} aria-describedby="game-action-help game-action-draft-help" />
             <p id="game-action-help" className="game-muted game-small">{t("game.actionHelp")}</p>
+            <p id="game-action-draft-help" className="game-muted game-small">{wt("workspace.draft")}</p>
             <div className="game-actions"><button type="button" className="game-primary" disabled={!canAct || !action.trim()} onClick={() => void submitTurn("action", action)}>{t(writeKind === "turn" ? "game.actionBusy" : "game.actionSubmit")}</button>
               <button type="button" className="game-secondary" disabled={!canAct} onClick={() => void submitTurn("continue", "")}>{t("game.continue")}</button>
               {(writeKind === "turn" || (writeKind !== "annotation" && (persistedActive || localActive))) && <button type="button" className="game-secondary" disabled={cancelState !== "idle"} onClick={() => void cancelTurn()}>{t(cancelState === "idle" ? "game.cancel" : "game.cancelling")}</button>}
@@ -689,21 +743,35 @@ export default function Game() {
             {policyMessage && <p className="game-notice" role="status">{policyMessage}</p>}
           </details>
         </div>
-        {world.state.protocolVersion === 1
+      </div> : <p className="game-workspace-empty">{wt("workspace.empty")}</p>}
+      </WorkspacePanel>
+      <WorkspacePanel panel="state" active={activePanel}>
+        {world && (world.state.protocolVersion === 1
           ? <LegacyWorldStatePanel state={world.state} upgradeDisabled={!native || busy || loading || querying} upgrading={writeKind === "upgrade"} onUpgrade={() => void enableLongState()} />
-          : <LongStatePanel world={world} view={currentActorView} loading={actorLoading || busy || !native} error={actorError} onRefresh={() => { if (native && !busy) setActorRevision((value) => value + 1); }} />}
-      </div>}
+          : <LongStatePanel world={world} view={currentActorView} loading={actorLoading || busy || !native} error={actorError} onRefresh={() => { if (native && !busy) setActorRevision((value) => value + 1); }} />)}
+      </WorkspacePanel>
+      <WorkspacePanel panel="branches" active={activePanel}>
       {world && <GameBranches key={world.setup.worldId} world={world} actorView={currentActorView} busy={busy || loading || querying}
         beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite}
         onCurrentBranch={(card) => { setBranchCard(card); setBranchStatusKnown(true); }}
-        onSelect={(incoming, card, originalAction) => { generation.current++; selectWorld(incoming); setBranchCard(card); setBranchStatusKnown(true); setRewritePrefill(originalAction); if (originalAction) setAction(originalAction.actionText); }} />}
+        onSelect={(incoming, card, originalAction) => { generation.current++; selectWorld(incoming); setBranchCard(card); setBranchStatusKnown(true); setRewritePrefill(originalAction); if (originalAction) changeAction(originalAction.actionText); }} />}
+      </WorkspacePanel>
+      <WorkspacePanel panel="memory" active={activePanel}>
       {world && <GameMemory key={"memory:"+world.setup.worldId+":"+world.branchId} world={world} actorView={currentActorView} busy={busy || loading || querying}
         beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} />}
+      </WorkspacePanel>
+      <WorkspacePanel panel="fast" active={activePanel}>
       {world && <GameFastForward key={"fast:"+world.setup.worldId+":"+world.branchId} world={world} busy={busy || loading || querying} archived={archived}
         branchesEnabled={branchCard !== null} providerKind={providerKind} providerConfigured={Boolean(profile?.configured)}
         beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} onWorld={applyWorld} />}
+      </WorkspacePanel>
+      <WorkspacePanel panel="research" active={activePanel}>
       {world && <GameResearch key={"research:"+world.setup.worldId+":"+world.branchId} world={world} busy={busy || loading || querying} disabled={archived} branchesEnabled={branchCard!==null}
         beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} />}
+      </WorkspacePanel>
+      <WorkspacePanel panel="saves" active={activePanel}><GameSaves world={world} busy={busy || loading || querying}
+        beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite}
+        onImported={incoming => { generation.current++; selectWorld(incoming); void listGameWorlds().then(value => { if (mounted.current) setLibrary(value); }).catch(cause => { if (mounted.current) setError(describeGameError(cause)); }); }} /></WorkspacePanel>
       <footer className="game-footer">{bt("branches.footer")}</footer>
     </main>
   );

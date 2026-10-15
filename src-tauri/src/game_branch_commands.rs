@@ -70,7 +70,7 @@ pub async fn fork_game_branch(
             .watermark()
             .map_err(|e| GameCommandError::new(e.to_string()))?;
         let research_watermark = s
-            .research()?
+            .evidence_for_world(&request.world_id)?
             .watermark()
             .map_err(|e| GameCommandError::new(e.to_string()))?;
         Ok(if let Some(turn) = rewrite_turn_id {
@@ -136,7 +136,7 @@ pub async fn correct_game_fact(
             .watermark()
             .map_err(|e| GameCommandError::new(e.to_string()))?;
         let research_watermark = s
-            .research()?
+            .evidence_for_world(&request.world_id)?
             .watermark()
             .map_err(|e| GameCommandError::new(e.to_string()))?;
         Ok(store.correct_fact_on_new_branch(

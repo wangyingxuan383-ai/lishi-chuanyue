@@ -81,11 +81,11 @@ Android 工程已经生成，通常不要重复 `android init`；它可能覆盖
 
 ## 当前产物与数据
 
-`target/debug/lishi-app.exe`为当前Windows开发入口；Android debug APK在`src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。默认进入游戏，“技术验证”仍可打开既有探针。当前exe使用Vite开发URL：先在本目录运行`pnpm dev --host 127.0.0.1`并保持1420端口服务，再启动exe；服务未运行时不能把空白页面当作存档损坏。Windows独立安装包和release仍在M06。
+`target/debug/lishi-app.exe`为当前Windows debug入口；Android debug APK在`src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。默认进入游戏，“技术验证”仍可打开既有探针。本轮使用`pnpm tauri build --debug --no-bundle`内置dist，实际关闭1420后冷启动已通过，可直接运行exe。`pnpm tauri dev`/普通`cargo build`的开发配置可能仍依赖Vite1420，不要把它与内置界面的构建混淆。Windows安装器与release仍未验收。
 
 游戏步骤：创建随机/自定义世界（公元前用负年，无零年）→默认演示或设置完整Chat Completions端点/模型/Key→自由行动、选项或继续→核心确认后自动保存。世界外方针只改变叙事偏好；失败/取消/中断保留输入且不改事实，手动重试新ID。新世界支持世界线面板的分叉/重写/归档/更正；旧世界需先显式备份升级。快进面板保存目标后每次明确继续一段，关键决策另提交普通行动再确认恢复。历史资料独立配置搜索Key，查询不推进时间，采用保留来源与不确定性；未配置仍能游玩。演示明确不是AI；保存HTTP须显式勾选允许，无自动降级或服务切换。
 
-正式世界位于Tauri应用私有目录`worlds/world-{SHA256(world_id)}.sqlite`；Provider/模板在独立`game-settings.sqlite`，研究在独立`research.sqlite`，注释/索引/脱敏trace由memory目录管理，密文在平台私有目录。不要把私有数据库、Key或旧技术文本包当作公开游戏导出；`.timejump`尚未实现。默认输入预算8192字节，可在设置中按端点容量调整；必要事实超限明确失败，其余片段按预算整片裁剪。缺失usage及费用保持未知。手工裸拷运行中SQLite/WAL不是正式备份方式。
+正式普通世界位于Tauri应用私有目录`worlds/world-{SHA256(world_id)}.sqlite`，导入世界位于`imports/{SHA256(world_id)}/world.sqlite`，其注释/冻结证据随整个目录发布。Provider/模板在独立`game-settings.sqlite`，共享研究在`research.sqlite`，普通注释/索引/脱敏trace由memory目录管理，密文在平台私有目录；`model-calls.sqlite`只保存安全本机调用台账。正式`.timejump`从游戏“存档”页导入导出，不含Key/配置/诊断/共享搜索缓存，同ID拒绝覆盖；格式与限制见[M06契约](contracts/M06.md)。默认输入预算8192字节，可在设置中按端点容量调整；必要事实超限明确失败，其余片段按预算整片裁剪。缺失usage及费用保持未知。手工裸拷运行中SQLite/WAL不是正式备份方式。
 
 笔记由Rust写入Tauri应用私有目录的`m01-probe.sqlite`，与未来每世界游戏数据库分开。每次保存原子更新正文、保存时间和修订，64KiB按UTF-8字节限制。恢复探针另用`m01-recovery.sqlite`，不覆盖原笔记；它仍不包含正式游戏状态。
 

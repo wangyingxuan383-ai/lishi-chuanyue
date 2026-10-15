@@ -163,7 +163,10 @@ pub fn run() {
             game_commands::delete_game_provider,
             game_commands::test_game_provider,
             game_commands::list_game_presets,
-            game_commands::save_game_preset
+            game_commands::save_game_preset,
+            game_commands::save_commands::export_game_save,
+            game_commands::call_commands::get_game_calls,
+            game_commands::save_commands::import_game_save
         ])
         .run(tauri::generate_context!())
         .expect("failed to run platform probe");

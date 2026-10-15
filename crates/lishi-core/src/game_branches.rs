@@ -1315,7 +1315,7 @@ fn fork_in_transaction(
     })
 }
 
-const BRANCH_SCHEMA:&str="
+pub(crate) const BRANCH_SCHEMA:&str="
 CREATE TABLE game_branches(branch_id TEXT PRIMARY KEY,parent_branch_id TEXT REFERENCES game_branches(branch_id),fork_turn_id TEXT REFERENCES game_turns(turn_id),fork_count INTEGER NOT NULL CHECK(fork_count>=0),head_turn_id TEXT REFERENCES game_turns(turn_id),turn_count INTEGER NOT NULL CHECK(turn_count>=fork_count),name TEXT NOT NULL,archived INTEGER NOT NULL CHECK(archived IN (0,1)),revision INTEGER NOT NULL CHECK(revision>=0),annotation_watermark INTEGER NOT NULL CHECK(annotation_watermark>=0),created_at_ms INTEGER NOT NULL,narrative_policy TEXT NOT NULL);
 CREATE TABLE game_turn_origins(turn_id TEXT PRIMARY KEY REFERENCES game_turns(turn_id),branch_id TEXT NOT NULL REFERENCES game_branches(branch_id),path_sequence INTEGER NOT NULL CHECK(path_sequence>0),UNIQUE(branch_id,path_sequence));
 CREATE TABLE game_operation_branches(operation_id TEXT PRIMARY KEY REFERENCES game_operations(operation_id),branch_id TEXT NOT NULL REFERENCES game_branches(branch_id));

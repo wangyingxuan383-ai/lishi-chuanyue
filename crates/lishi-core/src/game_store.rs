@@ -242,6 +242,12 @@ fn valid_text(text: &str, limit: usize, allow_empty: bool) -> bool {
 }
 
 impl GameStore {
+    pub fn snapshot_to(&self, target: &std::path::Path) -> Result<(), GameStoreError> {
+        let db = self.connection()?;
+        view_connection(&db)?;
+        if db.query_row("SELECT EXISTS(SELECT 1 FROM game_operations WHERE status IN ('pending','generating','validating'))",[],|r|r.get::<_,bool>(0))? {return Err(GameStoreError::Busy);}
+        crate::game_backup::snapshot(&db, target)
+    }
     pub fn open(path: impl AsRef<Path>) -> Result<Self, GameStoreError> {
         let path = path.as_ref();
         let mut lock_name = path.as_os_str().to_os_string();
@@ -843,7 +849,7 @@ pub fn persisted_game_error_code(code: &str) -> &str {
     }
 }
 
-const SCHEMA: &str = "
+pub(crate) const SCHEMA: &str = "
 CREATE TABLE game_world (
  id INTEGER PRIMARY KEY CHECK(id=1), world_id TEXT NOT NULL UNIQUE,
  setup TEXT NOT NULL CHECK(json_valid(setup)), initial_state TEXT NOT NULL CHECK(json_valid(initial_state)),

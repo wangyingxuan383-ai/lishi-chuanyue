@@ -24,6 +24,8 @@ use tauri::ipc::Channel;
 
 #[path = "game_branch_commands.rs"]
 pub mod branch_commands;
+#[path = "game_call_commands.rs"]
+pub mod call_commands;
 #[path = "game_fast_forward_commands.rs"]
 pub mod fast_forward_commands;
 #[path = "game_memory_service.rs"]
@@ -32,6 +34,8 @@ pub mod memory_service;
 pub mod research_commands;
 #[path = "game_runtime.rs"]
 mod runtime;
+#[path = "game_save_commands.rs"]
+pub mod save_commands;
 #[path = "game_summary_commands.rs"]
 pub mod summary_commands;
 pub use runtime::WorldReply;
@@ -86,6 +90,11 @@ pub struct GameService {
     memories: memory_service::MemoryServices,
     research: Mutex<Option<Arc<lishi_core::game_research_store::ResearchStore>>>,
     research_path: PathBuf,
+    imports: PathBuf,
+    save_stage: PathBuf,
+    world_research: Mutex<BTreeMap<String, Arc<lishi_core::game_research_store::ResearchStore>>>,
+    call_log: Mutex<Option<Arc<lishi_core::game_call_log::CallLog>>>,
+    call_log_path: PathBuf,
     pub providers: Arc<ProviderStore>,
     secrets: Arc<dyn SecretStore>,
     profile_busy: Arc<AtomicBool>,
@@ -101,6 +110,10 @@ impl GameService {
     pub fn open(directory: &Path, secrets: Arc<dyn SecretStore>) -> Result<Self, GameCommandError> {
         let worlds = directory.join("worlds");
         std::fs::create_dir_all(&worlds).map_err(|_| GameCommandError::new("game_database"))?;
+        let imports = directory.join("imports");
+        let save_stage = directory.join("save-stage");
+        save_commands::ensure_private_directory(&imports)?;
+        save_commands::ensure_private_directory(&save_stage)?;
         Ok(Self {
             worlds,
             backups: directory.join("backups"),
@@ -109,6 +122,11 @@ impl GameService {
             memories: Mutex::new(BTreeMap::new()),
             research: Mutex::new(None),
             research_path: directory.join("research.sqlite"),
+            imports,
+            save_stage,
+            world_research: Mutex::new(BTreeMap::new()),
+            call_log: Mutex::new(None),
+            call_log_path: directory.join("model-calls.sqlite"),
             providers: Arc::new(ProviderStore::open(directory.join("game-settings.sqlite"))?),
             secrets,
             profile_busy: Arc::new(AtomicBool::new(false)),
@@ -148,7 +166,7 @@ impl GameService {
         if let Some(store) = stores.get(id) {
             return Ok(Arc::clone(store));
         }
-        let file = self.worlds.join(world_file_name(id));
+        let file = self.world_path(id)?;
         if !create && !file.is_file() {
             return Err(GameCommandError::new("game_not_found"));
         }
@@ -188,7 +206,7 @@ impl GameService {
             .stores
             .lock()
             .map_err(|_| GameCommandError::new("game_unavailable"))?;
-        let file = self.worlds.join(world_file_name(world_id));
+        let file = self.world_path(world_id)?;
         let metadata = lishi_core::game_inspection::inspect_world(&file)?;
         if metadata.setup.world_id != world_id || metadata.head_turn_id.as_deref() != expected_head
         {
@@ -454,6 +472,28 @@ fn list_worlds_sync(service: &GameService) -> Result<WorldList, GameCommandError
             break;
         }
     }
+    let (imported, unavailable) = save_commands::imported_metadata(service)?;
+    result.unavailable_count += unavailable;
+    for view in imported {
+        if result
+            .worlds
+            .iter()
+            .any(|w| w.world_id == view.setup.world_id)
+        {
+            result.worlds.retain(|w| w.world_id != view.setup.world_id);
+            result.unavailable_count += 2;
+            continue;
+        }
+        result.worlds.push(WorldCard {
+            world_id: view.setup.world_id,
+            title: view.setup.title,
+            country: view.setup.country,
+            era_year: view.setup.era_year,
+            protagonist_name: view.setup.protagonist_name,
+            head_turn_id: view.head_turn_id,
+            turn_count: view.turn_count,
+        });
+    }
     result
         .worlds
         .sort_by(|a, b| a.title.cmp(&b.title).then(a.world_id.cmp(&b.world_id)));
@@ -663,9 +703,12 @@ async fn run_turn(
                 let policy=if profile.config.allow_insecure_http{SavedEndpointPolicy::ExplicitHttp}else{SavedEndpointPolicy::HttpsOnly};
                 let context_policy=lishi_core::model_probe::ModelContextPolicy {max_prompt_bytes:budget.effective_input_limit_bytes().map_err(|_|GameCommandError::new("game_provider_invalid"))?,
                     output_reserve_tokens:Some(budget.output_reserve_tokens.try_into().map_err(|_|GameCommandError::new("game_provider_invalid"))?)};
+                let prompt_version=match &view {WorldReply::V1(_)=>1,WorldReply::V2(_)=>lishi_core::game_provider_v2::GAME_PROMPT_VERSION_V2};
+                let (call_log,call_sequence)=call_commands::reserve(Arc::clone(&lease.service),&request,&profile.config.model,prompt_version).await?;
                 let result=lishi_core::model_probe::run_model_probe_with_context_policy(ModelProbeRequest{operation_id:request.operation_id.clone(),
                     endpoint:profile.config.endpoint,model:profile.config.model,prompt,include_usage:false,credential_mode:CredentialMode::Saved},
                     Some(key),lease.cancel.clone(),game_provider::production_stream_options(),policy,context_policy,|_|true).await;
+                call_commands::finish(call_log,&request.operation_id,call_sequence,&result).await?;
                 if let Some(memory)=memory {
                     let id=request.operation_id.clone();let actual=result.diagnostics.usage.as_ref().and_then(|usage|usize::try_from(usage.prompt_tokens).ok());
                     blocking(move||memory.record_actual_usage(&id,actual)).await?;
@@ -1092,9 +1135,32 @@ pub async fn test_game_provider(
     } else {
         SavedEndpointPolicy::HttpsOnly
     };
+    let operation_id = format!(
+        "provider-test-{}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| GameCommandError::new("game_clock"))?
+            .as_nanos(),
+        KEY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let test_request = GameTurnRequest {
+        operation_id: operation_id.clone(),
+        world_id: "provider-connection".into(),
+        branch_id: "settings".into(),
+        expected_head_turn_id: None,
+        action_kind: lishi_core::game_store::GameActionKind::Continue,
+        action_text: String::new(),
+    };
+    let (call_log, call_sequence) = call_commands::reserve(
+        Arc::clone(&service),
+        &test_request,
+        &profile.config.model,
+        1,
+    )
+    .await?;
     let result = lishi_core::model_probe::run_model_probe_with_endpoint_policy(
         ModelProbeRequest {
-            operation_id: "provider-connection-test".into(),
+            operation_id: operation_id.clone(),
             endpoint: profile.config.endpoint,
             model: profile.config.model,
             prompt: "请只回复：连接测试完成。".into(),
@@ -1108,6 +1174,7 @@ pub async fn test_game_provider(
         |_| true,
     )
     .await;
+    call_commands::finish(call_log, &operation_id, call_sequence, &result).await?;
     if result.stream.status == StreamStatus::Completed {
         service
             .providers
@@ -1970,3 +2037,7 @@ mod tests {
 #[cfg(test)]
 #[path = "game_commands/milestone_tests.rs"]
 mod milestone_tests;
+
+#[cfg(test)]
+#[path = "game_commands/provider_fault_tests.rs"]
+mod provider_fault_tests;

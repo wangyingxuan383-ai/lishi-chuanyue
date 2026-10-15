@@ -15,7 +15,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{backup::Backup, params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -646,6 +646,55 @@ impl AnnotationStore {
         u64::try_from(value).map_err(|_| AnnotationError::Database)
     }
 
+    /// A live WAL database must be copied through SQLite, never filesystem copy.
+    /// The destination must be new; no caller-selected existing file is replaced.
+    pub fn snapshot_to(&self, destination: impl AsRef<Path>) -> AnnotationResult<()> {
+        let destination = destination.as_ref();
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(|_| AnnotationError::Unavailable)?;
+        let result = (|| {
+            let connection = self.connection()?;
+            let mut target = Connection::open(destination)?;
+            {
+                let backup = Backup::new(&connection, &mut target)?;
+                backup.run_to_completion(128, std::time::Duration::from_millis(5), None)?;
+            }
+            target.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
+            check_portable_schema(&target)?;
+            check_portable_integrity(&target)?;
+            drop(target);
+            file.sync_all().map_err(|_| AnnotationError::Unavailable)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(destination);
+        }
+        result
+    }
+
+    /// Validate untrusted staged bytes without acquiring an owner lock, opening
+    /// WAL, changing recovery statuses, upgrading a schema or executing triggers.
+    /// Every actual branch (including archived branches) must have a core proof.
+    pub fn validate_portable(
+        path: impl AsRef<Path>,
+        world_id: &str,
+        branches: &[(&AnnotationScope, &ValidatedHistory)],
+    ) -> AnnotationResult<()> {
+        if !valid_id(world_id) || branches.is_empty() || branches.len() > 128 {
+            return Err(AnnotationError::InvalidScope);
+        }
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        check_portable_schema(&connection)?;
+        check_portable_integrity(&connection)?;
+        validate_portable_rows(&connection, world_id, branches)
+    }
+
     pub fn add_pin(
         &self,
         scope: &AnnotationScope,
@@ -1141,6 +1190,312 @@ impl AnnotationStore {
         tx.commit()?;
         Ok(result)
     }
+}
+
+type PortableSchemaObject = (String, String, String, Option<Vec<String>>);
+fn portable_schema_objects(connection: &Connection) -> AnnotationResult<Vec<PortableSchemaObject>> {
+    let mut statement = connection
+        .prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")?;
+    let mut rows = statement.query([])?;
+    let mut objects = Vec::new();
+    while let Some(row) = rows.next()? {
+        if objects.len() >= 128 {
+            return Err(AnnotationError::IncompatibleDatabase);
+        }
+        let sql = match row.get_ref(3)? {
+            rusqlite::types::ValueRef::Null => None,
+            _ => Some(
+                crate::game_portable_schema::sql_tokens(&portable_record(row, 3)?)
+                    .map_err(|_| AnnotationError::IncompatibleDatabase)?,
+            ),
+        };
+        objects.push((
+            portable_record(row, 0)?,
+            portable_record(row, 1)?,
+            portable_record(row, 2)?,
+            sql,
+        ));
+    }
+    Ok(objects)
+}
+fn check_portable_schema(connection: &Connection) -> AnnotationResult<()> {
+    let application: i32 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if application != APPLICATION_ID || version != SCHEMA_VERSION {
+        return Err(AnnotationError::IncompatibleDatabase);
+    }
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(SCHEMA)?;
+    let actual = portable_schema_objects(connection)?;
+    if actual == portable_schema_objects(&expected)? {
+        return Ok(());
+    }
+    // Canonical v1 tables gained a final DEFAULT 0 column through ALTER TABLE;
+    // SQLite also puts that column after the deletion table's primary-key
+    // constraint and does not invent the fresh-v2 foreign key. Generate that
+    // exact supported variant, preserving every original constraint and literal.
+    // Broad string deletion/lowercasing would accept altered CHECK literals.
+    let legacy = Connection::open_in_memory()?;
+    let schema = SCHEMA
+        .lines()
+        .map(|line| {
+            if line.starts_with("CREATE TABLE annotations(")
+                || line.starts_with("CREATE TABLE annotation_deletions(")
+            {
+                line.replace(
+                    ",change_seq INTEGER NOT NULL REFERENCES annotation_changes(change_seq)",
+                    "",
+                )
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    legacy.execute_batch(&schema)?;
+    legacy.execute_batch("ALTER TABLE annotations ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0; ALTER TABLE annotation_deletions ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0;")?;
+    if actual == portable_schema_objects(&legacy)? {
+        Ok(())
+    } else {
+        Err(AnnotationError::IncompatibleDatabase)
+    }
+}
+fn check_portable_integrity(connection: &Connection) -> AnnotationResult<()> {
+    let result: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    let invalid: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |row| row.get(0),
+    )?;
+    if result != "ok" || invalid {
+        return Err(AnnotationError::Database);
+    }
+    Ok(())
+}
+fn portable_record(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<String> {
+    match row.get_ref(column)? {
+        rusqlite::types::ValueRef::Text(bytes) if bytes.len() <= 1024 * 1024 => {
+            std::str::from_utf8(bytes)
+                .map(str::to_owned)
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        }
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+fn portable_anchor<'a>(
+    world_id: &str,
+    branch: &str,
+    head: Option<&str>,
+    branches: &[(&AnnotationScope, &'a ValidatedHistory)],
+) -> AnnotationResult<&'a ValidatedHistory> {
+    if !valid_id(branch) || head.is_some_and(|head| !valid_id(head)) {
+        return Err(AnnotationError::InvalidScope);
+    }
+    let (_, history) = branches
+        .iter()
+        .find(|(scope, _)| scope.context.world_id == world_id && scope.context.branch_id == branch)
+        .ok_or(AnnotationError::InvalidScope)?;
+    if head.is_some_and(|head| !history.contains_turn(head)) {
+        return Err(AnnotationError::InvisibleSource);
+    }
+    Ok(history)
+}
+fn validate_portable_rows(
+    connection: &Connection,
+    world_id: &str,
+    branches: &[(&AnnotationScope, &ValidatedHistory)],
+) -> AnnotationResult<()> {
+    let watermark: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(change_seq),0) FROM annotation_changes",
+        [],
+        |row| row.get(0),
+    )?;
+    let invalid_changes: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM annotation_changes WHERE change_seq<=0) OR
+         EXISTS(SELECT change_seq FROM (SELECT change_seq FROM annotations UNION ALL SELECT change_seq FROM annotation_deletions UNION ALL SELECT change_seq FROM summary_revisions) GROUP BY change_seq HAVING count(*)!=1) OR
+         ((SELECT count(*) FROM annotation_changes)!=(SELECT count(*) FROM annotations)+(SELECT count(*) FROM annotation_deletions)+(SELECT count(*) FROM summary_revisions))",
+        [], |row| row.get(0),
+    )?;
+    if invalid_changes || watermark < 0 {
+        return Err(AnnotationError::Database);
+    }
+    let mut branch_ids = BTreeSet::new();
+    for (scope, history) in branches {
+        scope.validate(history)?;
+        if scope.context.world_id != world_id
+            || !branch_ids.insert(&scope.context.branch_id)
+            || scope.branch_path.iter().any(|access| {
+                access
+                    .through_change_seq
+                    .is_some_and(|seq| seq > watermark as u64)
+            })
+        {
+            return Err(AnnotationError::InvalidScope);
+        }
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,kind,world_id,origin_branch,created_head,created_at_ms,record,change_seq FROM annotations",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let row_world: String = row.get(2)?;
+        let branch: String = row.get(3)?;
+        let head: Option<String> = row.get(4)?;
+        let created: i64 = row.get(5)?;
+        let raw = portable_record(row, 6)?;
+        let seq: i64 = row.get(7)?;
+        if !valid_id(&id) || row_world != world_id || created < 0 || seq <= 0 {
+            return Err(AnnotationError::Database);
+        }
+        let history = portable_anchor(world_id, &branch, head.as_deref(), branches)?;
+        match kind.as_str() {
+            "pin" => {
+                let pin: PinnedFact = decode(&raw)?;
+                if pin.id != id
+                    || pin.world_id != row_world
+                    || pin.origin_branch_id != branch
+                    || pin.created_head_turn_id != head
+                    || pin.created_at_ms != created
+                    || pin.change_seq != seq as u64
+                {
+                    return Err(AnnotationError::Database);
+                }
+                // Stale or now-hidden pins remain inert and are filtered by the
+                // normal player knowledge compiler after import.
+            }
+            "bookmark" => {
+                let bookmark: Bookmark = decode(&raw)?;
+                let position = history
+                    .turn_position(&bookmark.turn_id)
+                    .ok_or(AnnotationError::InvisibleSource)?;
+                let at = head
+                    .as_deref()
+                    .and_then(|head| history.turn_position(head))
+                    .unwrap_or(0);
+                if bookmark.id != id
+                    || bookmark.world_id != row_world
+                    || bookmark.origin_branch_id != branch
+                    || bookmark.created_head_turn_id != head
+                    || bookmark.created_at_ms != created
+                    || bookmark.change_seq != seq as u64
+                    || !valid_text(&bookmark.label, 256, true)
+                    || position > at
+                {
+                    return Err(AnnotationError::Database);
+                }
+            }
+            _ => return Err(AnnotationError::Database),
+        }
+    }
+    drop(rows);
+    drop(statement);
+    let mut statement = connection.prepare(
+        "SELECT annotation_id,world_id,origin_branch,at_head,at_head_key,created_at_ms,change_seq FROM annotation_deletions",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let row_world: String = row.get(1)?;
+        let branch: String = row.get(2)?;
+        let head: Option<String> = row.get(3)?;
+        let head_key: String = row.get(4)?;
+        if row_world != world_id
+            || !valid_id(&id)
+            || head_key != head.as_deref().unwrap_or("")
+            || row.get::<_, i64>(5)? < 0
+            || row.get::<_, i64>(6)? <= 0
+        {
+            return Err(AnnotationError::Database);
+        }
+        let history = portable_anchor(world_id, &branch, head.as_deref(), branches)?;
+        let (origin, anchor, source_seq): (String, Option<String>, i64) = connection.query_row(
+            "SELECT origin_branch,created_head,change_seq FROM annotations WHERE id=?1 AND world_id=?2",
+            params![id, world_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let (scope, _) = branches
+            .iter()
+            .find(|(scope, _)| scope.context.branch_id == branch)
+            .ok_or(AnnotationError::InvalidScope)?;
+        let delete_position = head
+            .as_deref()
+            .and_then(|head| history.turn_position(head))
+            .unwrap_or(0);
+        let source_position = anchor
+            .as_deref()
+            .and_then(|head| history.turn_position(head))
+            .unwrap_or(0);
+        if !scope.sees_anchor(history, &origin, anchor.as_deref(), source_seq as u64)
+            || source_position > delete_position
+            || source_seq >= row.get::<_, i64>(6)?
+        {
+            return Err(AnnotationError::InvisibleSource);
+        }
+    }
+    drop(rows);
+    drop(statement);
+    let mut statement =
+        connection.prepare("SELECT operation_id,created_at_ms FROM summary_operations")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let current = read_operation(connection, &id)?;
+        let history = portable_anchor(
+            world_id,
+            &current.origin_branch_id,
+            current.created_head_turn_id.as_deref(),
+            branches,
+        )?;
+        if current.world_id != world_id
+            || current.created_at_ms < 0
+            || current.created_at_ms != row.get::<_, i64>(1)?
+            || !visible_sources(history, &current.sources)
+        {
+            return Err(AnnotationError::Database);
+        }
+        let through = current
+            .created_head_turn_id
+            .as_deref()
+            .and_then(|head| history.turn_position(head))
+            .unwrap_or(0);
+        if current
+            .sources
+            .last()
+            .is_some_and(|source| source.sequence > through)
+        {
+            return Err(AnnotationError::InvisibleSource);
+        }
+        let mut revisions = connection.prepare(
+            "SELECT change_seq,record FROM summary_revisions WHERE operation_id=?1 ORDER BY change_seq",
+        )?;
+        let mut revisions = revisions.query([&id])?;
+        let mut last = None;
+        while let Some(revision) = revisions.next()? {
+            let value: SummaryOperation = decode(&portable_record(revision, 1)?)?;
+            validate_operation(&value)?;
+            if value.plan != current.plan
+                || value.world_id != current.world_id
+                || value.origin_branch_id != current.origin_branch_id
+                || value.created_head_turn_id != current.created_head_turn_id
+                || value.sources != current.sources
+                || value.source_range_sha256 != current.source_range_sha256
+                || value.created_at_ms != current.created_at_ms
+                || value.change_seq != revision.get::<_, i64>(0)? as u64
+                || value
+                    .finished_at_ms
+                    .is_some_and(|finished| finished < value.created_at_ms)
+            {
+                return Err(AnnotationError::Database);
+            }
+            last = Some(value);
+        }
+        if last.as_ref() != Some(&current) {
+            return Err(AnnotationError::Database);
+        }
+    }
+    Ok(())
 }
 
 fn insert_annotation(
