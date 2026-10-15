@@ -5,7 +5,7 @@ use lishi_core::{
     game_annotations::{AnnotationScope, AnnotationStore, AnnotationView, SummaryOperation},
     game_context::{
         compile_context, CompiledContext, ContextBudget, ContextFragment, ContextFragmentKind,
-        ContextFragmentStatus, ContextRules, ContextScope, ContextTrace,
+        ContextFragmentStatus, ContextRules, ContextTrace,
     },
     game_context_log::TraceStore,
     game_knowledge::{
@@ -26,7 +26,7 @@ use std::{
 
 struct IndexCache {
     index: MemoryIndex,
-    head: Option<Option<String>>,
+    head: Option<(String, Option<String>)>,
     visible_turn_ids: Vec<String>,
 }
 pub(super) struct GameMemoryService {
@@ -52,9 +52,6 @@ pub struct AnnotationsReply {
     annotations: AnnotationView,
     operations: Vec<SummaryOperation>,
 }
-pub(super) fn context_scope(view: &WorldViewV2) -> AnnotationScope {
-    AnnotationScope::single(ContextScope::from_view(view))
-}
 fn error(value: impl std::fmt::Display) -> GameCommandError {
     GameCommandError::new(value.to_string())
 }
@@ -68,8 +65,9 @@ fn checked_view(
     store: &GameStoreV2,
     world_id: &str,
     expected_head: Option<&str>,
+    branch: &str,
 ) -> Result<WorldViewV2, GameCommandError> {
-    let view = store.view()?;
+    let view = store.selected_view(branch)?;
     if view.setup.world_id != world_id || view.head_turn_id.as_deref() != expected_head {
         return Err(GameCommandError::new("game_stale_head"));
     }
@@ -154,14 +152,14 @@ impl GameMemoryService {
             .cache
             .lock()
             .map_err(|_| GameCommandError::new("memory_unavailable"))?;
-        if cache.head.as_ref() != Some(&view.head_turn_id) {
-            let receipt = store.rebuild_memory_index(&mut cache.index)?;
+        if cache.head.as_ref() != Some(&(view.branch_id.clone(), view.head_turn_id.clone())) {
+            let receipt = store.selected_rebuild(&view.branch_id, &mut cache.index)?;
             if receipt.scope.head_turn_id != view.head_turn_id || receipt.scope.state != view.state
             {
                 return Err(GameCommandError::new("game_stale_head"));
             }
             cache.visible_turn_ids = receipt.scope.visible_turn_ids;
-            cache.head = Some(view.head_turn_id.clone());
+            cache.head = Some((view.branch_id.clone(), view.head_turn_id.clone()));
         }
         let IndexCache {
             index,
@@ -192,7 +190,7 @@ impl GameMemoryService {
         // a SHA string stored in the same disposable cache.
         if !page.fragments.is_empty() {
             let mut verified = std::collections::BTreeSet::new();
-            let scope = store.visit_committed_turns(|turn, _, _| {
+            let scope = store.selected_visit(&view.branch_id, |turn, _, _| {
                 for fragment in page
                     .fragments
                     .iter()
@@ -217,10 +215,11 @@ impl GameMemoryService {
     }
     pub(super) fn annotation_reply(
         &self,
+        store: &GameStoreV2,
         view: &WorldViewV2,
         history: &ValidatedHistory,
     ) -> Result<AnnotationsReply, GameCommandError> {
-        let scope = context_scope(view);
+        let scope = store.selected_annotation_scope(view)?;
         Ok(AnnotationsReply {
             world_id: view.setup.world_id.clone(),
             branch_id: view.branch_id.clone(),
@@ -232,6 +231,7 @@ impl GameMemoryService {
                 .map_err(error)?,
         })
     }
+    #[cfg(test)]
     pub(super) fn compile(
         &self,
         store: &GameStoreV2,
@@ -239,9 +239,31 @@ impl GameMemoryService {
         request: &GameTurnRequest,
         budget: ContextBudget,
     ) -> Result<CompiledContext, GameCommandError> {
-        let history = store.knowledge_history()?;
-        let scope = context_scope(view);
-        let mut fragments = Vec::new();
+        self.compile_with_rules(store, view, request, budget, ContextRules::v2())
+    }
+    #[cfg(test)]
+    pub(super) fn compile_with_rules(
+        &self,
+        store: &GameStoreV2,
+        view: &WorldViewV2,
+        request: &GameTurnRequest,
+        budget: ContextBudget,
+        rules: ContextRules<'_>,
+    ) -> Result<CompiledContext, GameCommandError> {
+        self.compile_with_evidence(store, view, request, budget, rules, &[])
+    }
+    pub(super) fn compile_with_evidence(
+        &self,
+        store: &GameStoreV2,
+        view: &WorldViewV2,
+        request: &GameTurnRequest,
+        budget: ContextBudget,
+        rules: ContextRules<'_>,
+        evidence: &[ContextFragment],
+    ) -> Result<CompiledContext, GameCommandError> {
+        let history = store.selected_history(&view.branch_id)?;
+        let scope = store.selected_annotation_scope(view)?;
+        let mut fragments = evidence.to_vec();
         let annotations = self.annotations.view(&scope, &history).map_err(error)?;
         let pins = annotations
             .pins
@@ -293,16 +315,8 @@ impl GameMemoryService {
                 relevance: 0,
             });
         }
-        let compiled = compile_context(
-            view,
-            request,
-            &history,
-            ContextRules::v2(),
-            budget,
-            &pins,
-            &fragments,
-        )
-        .map_err(error)?;
+        let compiled = compile_context(view, request, &history, rules, budget, &pins, &fragments)
+            .map_err(error)?;
         self.record_trace(&compiled.trace)?;
         Ok(compiled)
     }
@@ -388,12 +402,23 @@ fn annotation_id() -> Result<String, GameCommandError> {
 }
 
 impl GameService {
+    #[cfg(test)]
     pub(super) fn compile_context_prompt(
         &self,
         route: &StoreRoute,
         view: &super::WorldReply,
         request: &GameTurnRequest,
         budget: ContextBudget,
+    ) -> Result<(String, Option<Arc<GameMemoryService>>), GameCommandError> {
+        self.compile_context_prompt_with_research(route, view, request, budget, None)
+    }
+    pub(super) fn compile_context_prompt_with_research(
+        &self,
+        route: &StoreRoute,
+        view: &super::WorldReply,
+        request: &GameTurnRequest,
+        budget: ContextBudget,
+        preflight: Option<ContextFragment>,
     ) -> Result<(String, Option<Arc<GameMemoryService>>), GameCommandError> {
         match (route, view) {
             (StoreRoute::V1(_), super::WorldReply::V1(view)) => Ok((
@@ -402,7 +427,23 @@ impl GameService {
             )),
             (StoreRoute::V2(store), super::WorldReply::V2(view)) => {
                 let memory = self.memory(&view.setup.world_id)?;
-                let compiled = memory.compile(store, view, request, budget)?;
+                let history = store.selected_history(&view.branch_id)?;
+                let mut evidence =
+                    super::research_commands::fragments(self, store, view, &history)?;
+                evidence.extend(preflight);
+                if store.branches_enabled()? {
+                    let ids =
+                        super::research_commands::allowed_sources(self, store, view, &history)?;
+                    store.allow_research_sources(&request.operation_id, &ids)?;
+                }
+                let compiled = memory.compile_with_evidence(
+                    store,
+                    view,
+                    request,
+                    budget,
+                    ContextRules::v2(),
+                    &evidence,
+                )?;
                 Ok((compiled.prompt, Some(memory)))
             }
             _ => Err(GameCommandError::new("game_invalid_protocol")),
@@ -430,6 +471,7 @@ impl GameService {
         &self,
         world_id: &str,
         expected_head: Option<&str>,
+        branch: &str,
         mutate: impl FnOnce(
             &GameMemoryService,
             &WorldViewV2,
@@ -446,30 +488,32 @@ impl GameService {
             return Err(GameCommandError::new("game_busy"));
         }
         let store = v2(&store)?;
-        let view = checked_view(store, world_id, expected_head)?;
-        let history = store.knowledge_history()?;
+        let view = checked_view(store, world_id, expected_head, branch)?;
+        let history = store.selected_history(&view.branch_id)?;
         let memory = self.memory(world_id)?;
-        let scope = context_scope(&view);
+        let scope = store.selected_annotation_scope(&view)?;
         mutate(&memory, &view, &history, &scope)?;
-        memory.annotation_reply(&view, &history)
+        memory.annotation_reply(store, &view, &history)
     }
 }
 
 #[tauri::command]
 pub async fn get_game_context_trace(
     world_id: String,
+    branch_id: Option<String>,
     operation_id: String,
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<Option<ContextTrace>, GameCommandError> {
     let service = Arc::clone(service.inner());
     blocking(move || {
         let route = service.store(&world_id, false)?;
-        let history = v2(&route)?.knowledge_history()?;
+        let branch = branch_id.as_deref().unwrap_or("main");
+        let history = v2(&route)?.selected_history(branch)?;
         let memory = service.memory(&world_id)?;
         let trace = memory.traces.get(&operation_id).map_err(error)?;
         if let Some(trace) = &trace {
             if trace.world_id != world_id
-                || trace.branch_id != "main"
+                || trace.branch_id != branch
                 || trace
                     .head_turn_id
                     .as_deref()
@@ -486,6 +530,7 @@ pub async fn get_game_context_trace(
 #[tauri::command]
 pub async fn query_game_memory(
     world_id: String,
+    branch_id: Option<String>,
     expected_head_turn_id: Option<String>,
     query: MemoryQuery,
     service: tauri::State<'_, Arc<GameService>>,
@@ -494,8 +539,13 @@ pub async fn query_game_memory(
     blocking(move || {
         let route = service.store(&world_id, false)?;
         let store = v2(&route)?;
-        let view = checked_view(store, &world_id, expected_head_turn_id.as_deref())?;
-        let history = store.knowledge_history()?;
+        let view = checked_view(
+            store,
+            &world_id,
+            expected_head_turn_id.as_deref(),
+            branch_id.as_deref().unwrap_or("main"),
+        )?;
+        let history = store.selected_history(&view.branch_id)?;
         let memory = service.memory(&world_id)?;
         let page = memory.query(store, &view, &history, &query)?;
         Ok(MemoryReply {
@@ -510,6 +560,7 @@ pub async fn query_game_memory(
 #[tauri::command]
 pub async fn get_game_annotations(
     world_id: String,
+    branch_id: Option<String>,
     expected_head_turn_id: Option<String>,
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<AnnotationsReply, GameCommandError> {
@@ -517,16 +568,24 @@ pub async fn get_game_annotations(
     blocking(move || {
         let route = service.store(&world_id, false)?;
         let store = v2(&route)?;
-        let view = checked_view(store, &world_id, expected_head_turn_id.as_deref())?;
-        service
-            .memory(&world_id)?
-            .annotation_reply(&view, &store.knowledge_history()?)
+        let view = checked_view(
+            store,
+            &world_id,
+            expected_head_turn_id.as_deref(),
+            branch_id.as_deref().unwrap_or("main"),
+        )?;
+        service.memory(&world_id)?.annotation_reply(
+            store,
+            &view,
+            &store.selected_history(&view.branch_id)?,
+        )
     })
     .await
 }
 #[tauri::command]
 pub async fn pin_game_fact(
     world_id: String,
+    branch_id: Option<String>,
     expected_head_turn_id: Option<String>,
     fact_key: FactKey,
     service: tauri::State<'_, Arc<GameService>>,
@@ -536,6 +595,7 @@ pub async fn pin_game_fact(
         service.annotation_action(
             &world_id,
             expected_head_turn_id.as_deref(),
+            branch_id.as_deref().unwrap_or("main"),
             |memory, _, history, scope| {
                 memory
                     .annotations
@@ -550,6 +610,7 @@ pub async fn pin_game_fact(
 #[tauri::command]
 pub async fn bookmark_game_turn(
     world_id: String,
+    branch_id: Option<String>,
     expected_head_turn_id: Option<String>,
     turn_id: String,
     label: String,
@@ -560,6 +621,7 @@ pub async fn bookmark_game_turn(
         service.annotation_action(
             &world_id,
             expected_head_turn_id.as_deref(),
+            branch_id.as_deref().unwrap_or("main"),
             |memory, _, history, scope| {
                 memory
                     .annotations
@@ -574,6 +636,7 @@ pub async fn bookmark_game_turn(
 #[tauri::command]
 pub async fn remove_game_annotation(
     world_id: String,
+    branch_id: Option<String>,
     expected_head_turn_id: Option<String>,
     annotation_id: String,
     service: tauri::State<'_, Arc<GameService>>,
@@ -583,6 +646,7 @@ pub async fn remove_game_annotation(
         service.annotation_action(
             &world_id,
             expected_head_turn_id.as_deref(),
+            branch_id.as_deref().unwrap_or("main"),
             |memory, _, history, scope| {
                 memory
                     .annotations
@@ -768,7 +832,7 @@ mod tests {
             assert_eq!(page.fragments.len(), 1, "{query}");
             assert_eq!(page.fragments[0].source.sequence, expected, "{query}");
         }
-        let scope = context_scope(&view);
+        let scope = store.selected_annotation_scope(&view).unwrap();
         memory
             .annotations
             .add_pin(
@@ -832,7 +896,7 @@ mod tests {
         drop(memory);
         let reopened =
             GameMemoryService::open(&temporary.path().join("memory"), &setup.world_id).unwrap();
-        let annotations = reopened.annotation_reply(&view, &history).unwrap();
+        let annotations = reopened.annotation_reply(&store, &view, &history).unwrap();
         assert_eq!(annotations.annotations.pins.len(), 1);
         assert_eq!(
             annotations.annotations.bookmarks[0].turn_id,

@@ -789,6 +789,12 @@ fn safe_error_code(code: &str) -> bool {
             | "game_provider_missing"
             | "game_provider_failed"
             | "game_context_too_large"
+            | "game_context_invalid_budget"
+            | "game_context_invalid_input"
+            | "game_context_stale_scope"
+            | "game_context_uncommitted_fragment"
+            | "game_context_invisible_source"
+            | "game_context_unknown_fact"
             | "game_worker_failed"
             | "game_cancelled"
             | "game_database"
@@ -825,6 +831,16 @@ fn safe_error_code(code: &str) -> bool {
             | "game_protagonist_dead"
             | "game_provider_stale"
     )
+}
+
+/// Only predefined diagnostic codes enter immutable operation records. New
+/// optional subsystems cannot leave a formal operation active on error.
+pub fn persisted_game_error_code(code: &str) -> &str {
+    if safe_error_code(code) {
+        code
+    } else {
+        "game_provider_failed"
+    }
 }
 
 const SCHEMA: &str = "

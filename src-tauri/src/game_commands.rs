@@ -22,8 +22,14 @@ use std::{
 };
 use tauri::ipc::Channel;
 
+#[path = "game_branch_commands.rs"]
+pub mod branch_commands;
+#[path = "game_fast_forward_commands.rs"]
+pub mod fast_forward_commands;
 #[path = "game_memory_service.rs"]
 pub mod memory_service;
+#[path = "game_research_commands.rs"]
+pub mod research_commands;
 #[path = "game_runtime.rs"]
 mod runtime;
 #[path = "game_summary_commands.rs"]
@@ -78,6 +84,8 @@ pub struct GameService {
     stores: Mutex<BTreeMap<String, Arc<StoreRoute>>>,
     memory_directory: PathBuf,
     memories: memory_service::MemoryServices,
+    research: Mutex<Option<Arc<lishi_core::game_research_store::ResearchStore>>>,
+    research_path: PathBuf,
     pub providers: Arc<ProviderStore>,
     secrets: Arc<dyn SecretStore>,
     profile_busy: Arc<AtomicBool>,
@@ -99,12 +107,31 @@ impl GameService {
             stores: Mutex::new(BTreeMap::new()),
             memory_directory: directory.join("memory"),
             memories: Mutex::new(BTreeMap::new()),
+            research: Mutex::new(None),
+            research_path: directory.join("research.sqlite"),
             providers: Arc::new(ProviderStore::open(directory.join("game-settings.sqlite"))?),
             secrets,
             profile_busy: Arc::new(AtomicBool::new(false)),
             probe_busy: Arc::new(AtomicBool::new(false)),
             active: Mutex::new(None),
         })
+    }
+    fn research(
+        &self,
+    ) -> Result<Arc<lishi_core::game_research_store::ResearchStore>, GameCommandError> {
+        let mut guard = self
+            .research
+            .lock()
+            .map_err(|_| GameCommandError::new("research_unavailable"))?;
+        if let Some(store) = guard.as_ref() {
+            return Ok(Arc::clone(store));
+        }
+        let store = Arc::new(
+            lishi_core::game_research_store::ResearchStore::open_sidecar(&self.research_path)
+                .map_err(|e| GameCommandError::new(e.to_string()))?,
+        );
+        *guard = Some(Arc::clone(&store));
+        Ok(store)
     }
     fn store(&self, id: &str, create: bool) -> Result<Arc<StoreRoute>, GameCommandError> {
         if !(8..=128).contains(&id.len())
@@ -223,13 +250,22 @@ impl GameService {
             (_, Err(_)) => Err(GameCommandError::new("game_migration_unconfirmed")),
         }
     }
+    #[cfg(test)]
     fn actor_view_sync(
         &self,
         world_id: &str,
         actor_id: &str,
     ) -> Result<serde_json::Value, GameCommandError> {
+        self.actor_view_branch_sync(world_id, actor_id, "main")
+    }
+    fn actor_view_branch_sync(
+        &self,
+        world_id: &str,
+        actor_id: &str,
+        branch_id: &str,
+    ) -> Result<serde_json::Value, GameCommandError> {
         let store = self.store(world_id, false)?;
-        let history = store.knowledge_history()?;
+        let history = store.knowledge_history_branch(branch_id)?;
         if history.world_id() != world_id || history.current_state().protagonist_id != actor_id {
             return Err(GameCommandError::new("game_invalid_request"));
         }
@@ -431,30 +467,71 @@ pub async fn create_game_world(
     game_protocol::validate_setup(&setup)?;
     let service = Arc::clone(service.inner());
     blocking(move || {
+        let active = service
+            .active
+            .lock()
+            .map_err(|_| GameCommandError::new("game_unavailable"))?;
+        if active.is_some() {
+            return Err(GameCommandError::new("game_busy"));
+        }
         let store = service.store(&setup.world_id, true)?;
-        store.create_world(&setup)
+        let created = store.create_world(&setup)?;
+        if let StoreRoute::V2(core) = store.as_ref() {
+            core.enable_branches(&service.backups, None)?;
+            return store.view();
+        }
+        Ok(created)
     })
     .await
 }
 #[tauri::command]
 pub async fn get_game_world(
     world_id: String,
+    branch_id: Option<String>,
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<WorldReply, GameCommandError> {
     let service = Arc::clone(service.inner());
-    blocking(move || service.store(&world_id, false)?.view()).await
+    blocking(move || {
+        service
+            .store(&world_id, false)?
+            .view_branch(branch_id.as_deref().unwrap_or("main"))
+    })
+    .await
 }
 #[tauri::command]
 pub async fn set_game_policy(
     world_id: String,
     policy: String,
+    branch_id: Option<String>,
+    expected_head_turn_id: Option<String>,
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<WorldReply, GameCommandError> {
     let service = Arc::clone(service.inner());
     blocking(move || {
+        let active = service
+            .active
+            .lock()
+            .map_err(|_| GameCommandError::new("game_unavailable"))?;
+        if active.is_some() {
+            return Err(GameCommandError::new("game_busy"));
+        }
         let store = service.store(&world_id, false)?;
+        let branch = branch_id.as_deref().unwrap_or("main");
+        let view = store.view_branch(branch)?;
+        if view.head_turn_id() != expected_head_turn_id.as_deref() {
+            return Err(GameCommandError::new("game_stale_head"));
+        }
+        if let StoreRoute::V2(s) = store.as_ref() {
+            if s.branches_enabled()? {
+                return Ok(WorldReply::V2(Box::new(s.update_policy_branch(
+                    branch,
+                    expected_head_turn_id.as_deref(),
+                    &policy,
+                )?)));
+            }
+        }
         store.update_policy(&policy)?;
-        store.view()
+        store.view_branch(branch)
     })
     .await
 }
@@ -473,10 +550,14 @@ pub async fn upgrade_game_world(
 pub async fn get_game_actor_view(
     world_id: String,
     actor_id: String,
+    branch_id: Option<String>,
     service: tauri::State<'_, Arc<GameService>>,
 ) -> Result<serde_json::Value, GameCommandError> {
     let service = Arc::clone(service.inner());
-    blocking(move || service.actor_view_sync(&world_id, &actor_id)).await
+    blocking(move || {
+        service.actor_view_branch_sync(&world_id, &actor_id, branch_id.as_deref().unwrap_or("main"))
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -547,12 +628,12 @@ async fn run_turn(
     let store = Arc::clone(&lease.store);
     let request_copy = request.clone();
     let view = blocking(move || {
-        let view = store.view()?;
+        let view = store.view_branch(&request_copy.branch_id)?;
         if view.protagonist_dead() {
             return Err(GameCommandError::new("game_protagonist_dead"));
         }
         store.begin(&request_copy)?;
-        store.view()
+        store.view_branch(&request_copy.branch_id)
     })
     .await?;
     progress.phase("pending");
@@ -571,11 +652,12 @@ async fn run_turn(
             ProviderKind::Compatible=>{
                 #[cfg(target_os="android")]
                 if !crate::android_tls::is_ready(){return Err(GameCommandError::new("model_tls_unavailable"))}
+                let research_hint=research_commands::preflight(Arc::clone(&lease.service),Arc::clone(&lease.store),&request,lease.cancel.clone()).await?;
                 let profile_store=Arc::clone(&lease.service.providers);
                 let frozen=blocking(move||profile_store.stored()?.ok_or_else(||GameCommandError::new("game_provider_missing"))).await?;
                 let budget=frozen.config.context_budget;
                 let prompt_store=Arc::clone(&lease.store);let prompt_view=view.clone();let prompt_request=request.clone();let prompt_service=Arc::clone(&lease.service);
-                let (prompt,memory)=blocking(move||prompt_service.compile_context_prompt(&prompt_store,&prompt_view,&prompt_request,budget)).await?;
+                let (prompt,memory)=blocking(move||prompt_service.compile_context_prompt_with_research(&prompt_store,&prompt_view,&prompt_request,budget,research_hint)).await?;
                 let (profile,key)=profile_work(Arc::clone(&lease.service),|s|saved_credential(&s)).await?;
                 if profile.config.revision!=frozen.config.revision {return Err(GameCommandError::new("game_provider_stale"))}
                 let policy=if profile.config.allow_insecure_http{SavedEndpointPolicy::ExplicitHttp}else{SavedEndpointPolicy::HttpsOnly};
@@ -622,10 +704,11 @@ async fn run_turn(
             };
             let store = Arc::clone(&lease.store);
             let id = lease.id.clone();
-            let persisted_code = code.clone();
+            let persisted_code =
+                lishi_core::game_store::persisted_game_error_code(&code).to_owned();
             let view = blocking(move || {
                 store.finish_uncommitted(&id, status, Some(&persisted_code))?;
-                store.view()
+                store.view_operation(&id)
             })
             .await?;
             progress.send(
@@ -648,7 +731,7 @@ async fn run_turn(
                 GameOperationStatus::Cancelled,
                 Some("game_cancelled"),
             )?;
-            return store.view();
+            return store.view_operation(&id);
         }
         // The hook runs inside the short transaction immediately before commit.
         store.commit_with_hook(&id, &output, || {
@@ -684,7 +767,7 @@ async fn run_turn(
             } else {
                 error.code
             };
-            let safe_code = code.clone();
+            let safe_code = lishi_core::game_store::persisted_game_error_code(&code).to_owned();
             let status = if cancelled {
                 GameOperationStatus::Cancelled
             } else {
@@ -692,7 +775,7 @@ async fn run_turn(
             };
             let view = blocking(move || {
                 store.finish_uncommitted(&id, status, Some(&safe_code))?;
-                store.view()
+                store.view_operation(&id)
             })
             .await?;
             progress.send(
@@ -1883,3 +1966,7 @@ mod tests {
         assert_eq!(view["headTurnId"], request.operation_id);
     }
 }
+
+#[cfg(test)]
+#[path = "game_commands/milestone_tests.rs"]
+mod milestone_tests;

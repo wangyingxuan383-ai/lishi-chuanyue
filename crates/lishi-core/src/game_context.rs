@@ -419,7 +419,8 @@ pub fn compile_context(
             || fragment.body.trim().is_empty()
             || fragment.body.contains('\0')
             || fragment.body.len() > MAX_FRAGMENT_BYTES
-            || fragment.source_turn_ids.is_empty()
+            || (fragment.source_turn_ids.is_empty()
+                && fragment.kind != ContextFragmentKind::HistoricalEvidence)
             || fragment.source_turn_ids.len() > MAX_SOURCE_TURNS
         {
             return Err(ContextError::new(ContextErrorCode::InvalidInput));

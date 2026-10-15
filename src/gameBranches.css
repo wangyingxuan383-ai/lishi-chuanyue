@@ -1,0 +1,15 @@
+.game-branches { min-width: 0; max-width: 100%; padding: 21px 24px; margin: 18px 0; border: 1px solid var(--game-border, #d8ddd0); border-radius: 12px; background: var(--game-paper, #fffef9); overflow-wrap: anywhere; }
+.game-branches h2 { margin: 0; }
+.game-branches button { white-space: normal; overflow-wrap: anywhere; }
+.game-branches-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.game-branch-card { min-width: 0; padding: 14px; border: 1px solid #dae2d0; border-radius: 9px; background: #f8faf3; }
+.game-branch-card--selected { border-color: #85a572; background: #edf4e6; }
+.game-branch-card-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; }
+.game-branch-card-top > strong, .game-branch-card-top > span { min-width: 0; }
+.game-branch-card > small { display: block; color: var(--game-muted, #6a756c); margin-top: 5px; font-size: 11px; overflow-wrap: anywhere; }
+.game-branches-controls { padding: 14px 0; border-top: 1px solid #e0e6d7; }
+.game-branches-controls > summary { font-weight: 600; }
+.game-branches .game-branches-check { display: flex; gap: 9px; align-items: center; font-weight: 400; }
+.game-branches .game-branches-check input { width: 18px; height: 18px; min-height: 18px; margin: 0; flex: 0 0 18px; padding: 0; }
+.game-branches-pagination { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; font-size: 12px; }
+@media (max-width: 600px) { .game-branches { padding: 17px 15px; } .game-branches-list { grid-template-columns: minmax(0, 1fr); } }

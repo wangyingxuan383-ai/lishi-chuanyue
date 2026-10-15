@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use super::{
     blocking,
-    memory_service::{context_scope, AnnotationsReply, GameMemoryService},
+    memory_service::{AnnotationsReply, GameMemoryService},
     profile_work, saved_credential, ActiveTurn, GameCommandError, GameService, StoreRoute,
 };
 use lishi_core::{
@@ -102,6 +102,7 @@ enum PreparedContent {
     Deferred,
 }
 
+#[allow(clippy::too_many_arguments)] // Native scope, frozen provider and operation budget are explicit.
 fn prepare_summary(
     service: &GameService,
     route: &StoreRoute,
@@ -110,6 +111,7 @@ fn prepare_summary(
     operation_id: &str,
     source_turn_ids: &[String],
     provider_kind: ProviderKind,
+    branch: &str,
 ) -> Result<PreparedSummary, GameCommandError> {
     let store = match route {
         StoreRoute::V2(store) => store,
@@ -125,15 +127,15 @@ fn prepare_summary(
     if wanted.len() != source_turn_ids.len() {
         return Err(GameCommandError::new("annotations_invalid_input"));
     }
-    let view = store.view()?;
+    let view = store.selected_view(branch)?;
     if view.setup.world_id != world_id || view.head_turn_id.as_deref() != expected_head {
         return Err(GameCommandError::new("game_stale_head"));
     }
-    let history = Arc::new(store.knowledge_history()?);
+    let history = Arc::new(store.selected_history(branch)?);
     // Read the entire audited path. UI's recent 100 turns are never sources.
     let mut originals = Vec::new();
     let mut source_bytes = 0usize;
-    let complete = store.visit_committed_turns(|turn, _, _| {
+    let complete = store.selected_visit(branch, |turn, _, _| {
         if wanted.contains(&turn.turn_id) {
             source_bytes = source_bytes
                 .checked_add(turn.narrative.len())
@@ -188,7 +190,7 @@ fn prepare_summary(
         prompt_version: SUMMARY_PROMPT_VERSION,
     };
     let memory = service.memory(world_id)?;
-    let scope = context_scope(&view);
+    let scope = store.selected_annotation_scope(&view)?;
     memory
         .annotations
         .begin_summary(&scope, &history, &plan, &sources)
@@ -280,12 +282,13 @@ fn stream_failure(code: Option<StreamErrorCode>) -> SummaryFailure {
     }
 }
 
-async fn run_summary(
+async fn run_summary_branch(
     mut lease: SummaryLease,
     world_id: String,
     expected_head: Option<String>,
     source_turn_ids: Vec<String>,
     provider_kind: ProviderKind,
+    branch: String,
 ) -> Result<AnnotationsReply, GameCommandError> {
     let service = Arc::clone(&lease.service);
     let route = Arc::clone(&lease.store);
@@ -299,6 +302,7 @@ async fn run_summary(
             &id,
             &source_turn_ids,
             provider_kind,
+            &branch,
         )
     })
     .await?;
@@ -406,7 +410,7 @@ async fn run_summary(
     let reply = blocking(move || {
         // The shared native operation lease prevents head changes during HTTP;
         // repeat the comparison before publishing any derived fragment.
-        let current = route.view()?;
+        let current = route.view_branch(&view.branch_id)?;
         if current.head_turn_id() != view.head_turn_id.as_deref()
             || current.setup().world_id != view.setup.world_id
             || !matches!(&current, super::WorldReply::V2(current) if current.branch_id == view.branch_id)
@@ -487,7 +491,7 @@ async fn run_summary(
                 }
             }
         }
-        memory.annotation_reply(&view, &history)
+        {let StoreRoute::V2(store)=route.as_ref() else{return Err(GameCommandError::new("game_upgrade_required"));}; memory.annotation_reply(store,&view, &history)}
     })
     .await?;
     lease.done = true;
@@ -497,6 +501,7 @@ async fn run_summary(
 #[tauri::command]
 pub async fn create_game_summary(
     world_id: String,
+    branch_id: Option<String>,
     expected_head_turn_id: Option<String>,
     operation_id: String,
     source_turn_ids: Vec<String>,
@@ -510,17 +515,28 @@ pub async fn create_game_summary(
     let lease = SummaryLease::acquire(service, route, &operation_id)?;
     // IPC receiver loss detaches this owned task; explicit cancellation still
     // reaches it through cancel_game_turn's shared operation token.
-    tauri::async_runtime::spawn(run_summary(
+    tauri::async_runtime::spawn(run_summary_branch(
         lease,
         world_id,
         expected_head_turn_id,
         source_turn_ids,
         provider_kind,
+        branch_id.unwrap_or_else(|| "main".into()),
     ))
     .await
     .map_err(|_| GameCommandError::new("game_worker_failed"))?
 }
 
+#[cfg(test)]
+async fn run_summary(
+    lease: SummaryLease,
+    world_id: String,
+    head: Option<String>,
+    sources: Vec<String>,
+    provider: ProviderKind,
+) -> Result<AnnotationsReply, GameCommandError> {
+    run_summary_branch(lease, world_id, head, sources, provider, "main".into()).await
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1050,7 +1066,7 @@ mod tests {
         let view = store.view().unwrap();
         let reply = json(
             &prepared
-                .annotation_reply(&view, &store.knowledge_history().unwrap())
+                .annotation_reply(store, &view, &store.knowledge_history().unwrap())
                 .unwrap(),
         );
         assert_eq!(reply["operations"][0]["status"], "completed");

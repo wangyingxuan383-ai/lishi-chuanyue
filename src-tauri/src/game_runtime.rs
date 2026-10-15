@@ -127,7 +127,7 @@ impl StoreRoute {
             .schema_version
         {
             1 => Ok(Self::V1(GameStore::open(path)?)),
-            2 => Ok(Self::V2(GameStoreV2::open(path)?)),
+            2 | 3 => Ok(Self::V2(GameStoreV2::open(path)?)),
             _ => Err(GameCommandError::new("game_incompatible_schema")),
         }
     }
@@ -139,6 +139,25 @@ impl StoreRoute {
             Self::V1(store) => WorldReply::V1(Box::new(store.view()?)),
             Self::V2(store) => WorldReply::V2(Box::new(store.view()?)),
         })
+    }
+    pub fn view_branch(&self, id: &str) -> Result<WorldReply, GameCommandError> {
+        match self {
+            Self::V2(s) => Ok(WorldReply::V2(Box::new(s.selected_view(id)?))),
+            Self::V1(_) if id == "main" => self.view(),
+            _ => Err(GameCommandError::new("game_invalid_request")),
+        }
+    }
+    pub fn view_operation(&self, id: &str) -> Result<WorldReply, GameCommandError> {
+        match self {
+            Self::V2(s) => self.view_branch(&s.operation_branch(id)?),
+            Self::V1(_) => self.view(),
+        }
+    }
+    pub fn knowledge_history_branch(&self, id: &str) -> Result<ValidatedHistory, GameCommandError> {
+        match self {
+            Self::V2(s) => Ok(s.selected_history(id)?),
+            _ => Err(GameCommandError::new("game_upgrade_required")),
+        }
     }
     pub fn create_world(&self, setup: &WorldSetup) -> Result<WorldReply, GameCommandError> {
         let opening = game_provider::opening_narrative(setup);
@@ -218,12 +237,6 @@ impl StoreRoute {
             WorldReply::V1(_) => OutputRoute::V1(game_protocol::parse_output(raw)?),
             WorldReply::V2(_) => OutputRoute::V2(game_protocol_v2::parse_output_v2(raw)?),
         })
-    }
-    pub fn knowledge_history(&self) -> Result<ValidatedHistory, GameCommandError> {
-        match self {
-            Self::V2(s) => Ok(s.knowledge_history()?),
-            Self::V1(_) => Err(GameCommandError::new("game_invalid_protocol")),
-        }
     }
     pub fn commit_with_hook<F: FnOnce() -> Result<(), GameStoreError>>(
         &self,

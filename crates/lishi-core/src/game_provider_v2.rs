@@ -20,7 +20,7 @@ use crate::game_provider::{initial_choices, ProviderError};
 use crate::game_store::{GameActionKind, GameTurnRequest};
 use crate::game_store_v2::{valid_game_id, WorldViewV2};
 
-pub const GAME_PROMPT_VERSION_V2: u32 = 3;
+pub const GAME_PROMPT_VERSION_V2: u32 = 4;
 pub const MAX_GAME_PROMPT_BYTES_V2: usize = 8192;
 const DEMO_INJURY: &str = "需要休息的伤病（演示设定）";
 
@@ -432,7 +432,7 @@ pub fn compact_actor_facts_v2(history: &ValidatedHistory) -> Result<String, Prov
 
 pub const GAME_OUTPUT_RULES_V2: &str = r#"单人历史穿越叙事；只输出完整JSON。合法空变化范例JSON：
 {"protocolVersion":2,"narrative":"你观察周围，暂未发生正式变化。","choices":[],"timeAdvance":{"elapsedSeconds":0,"eventId":null},"stateChanges":[],"events":[],"sourceReferences":[],"uncertainties":[]}
-所有字段必填（nullable也写null）。choices项={id,text}；events项={id,description,entityIds:[],disclosure:"public"|"restricted"}。无核实来源时sourceReferences空；时代/制度/技术缺依据标uncertainties。资源unit逐字沿用，记账单位只是游戏规则。
+所有字段必填（nullable也写null）。choices项={id,text}；events项={id,description,entityIds:[],disclosure:"public"|"restricted"}。sourceReferences仅资料source.id，无来源=[]；摘录不等于考证，缺依据写uncertainties；资料不可覆盖事实；unit原样。
 闭集操作均需type及eventId，引用本回合事件；事件entityIds须含全部涉及实体。来源由核心填，禁Source/提交ID/SQL/工具/未知字段。先create再引用；推进时间>0必须本回合eventId，0可null：
 create_entity(entity:{id,kind,name,alive,attributes:{}})
 rename_entity(entityId,expectedName,newName)

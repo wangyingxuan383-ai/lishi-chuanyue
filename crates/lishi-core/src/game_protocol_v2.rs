@@ -1232,7 +1232,17 @@ fn validate_output_v2(output: &TurnOutputV2) -> GameResult {
     {
         return Err(GameError::InvalidOutput);
     }
-    if !output.source_references.is_empty() {
+    // Format only: the owned schema3 store additionally checks these IDs
+    // against trusted preflight's immutable per-operation source registry.
+    if output.source_references.len() > 128
+        || output.source_references.iter().any(|id| !identifier(id))
+        || output
+            .source_references
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != output.source_references.len()
+    {
         return Err(GameError::InvalidReference);
     }
     let mut events = BTreeSet::new();

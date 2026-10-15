@@ -55,7 +55,7 @@ export interface ObservedResource { ownerId: string; key: string; unit: string; 
 export interface ObservedRelationship { fromId: string; toId: string; kind: string; strength: number }
 export interface ActorObservedFact { factKey: FactKey; value: unknown }
 export interface GameActorView {
-  worldId: string; headTurnId: string | null; actorId: string;
+  worldId: string; branchId: string; headTurnId: string | null; actorId: string;
   entities: ActorKnownEntity[]; knowledge: ActorKnowledge[]; observedFacts: ActorObservedFact[];
 }
 export interface GameStateV2 {
@@ -84,7 +84,7 @@ export interface GameOperation {
   actionText: string; status: GameStatus; errorCode: string | null; createdAtMs: number;
 }
 export interface GameWorld {
-  setup: WorldSetup; branchId: "main"; headTurnId: string | null; turnCount: number;
+  setup: WorldSetup; branchId: string; headTurnId: string | null; turnCount: number;
   state: GameState; openingNarrative: string; openingChoices: GameChoice[];
   turns: GameTurn[]; latestOperation: GameOperation | null; narrativePolicy: string;
 }
@@ -96,7 +96,7 @@ export interface GameWorldList { worlds: WorldSummary[]; unavailableCount: numbe
 export interface GamePreset { presetId: string; name: string; setup: WorldSetup }
 export type ProviderKind = "demo" | "compatible";
 export interface GameTurnRequest {
-  operationId: string; worldId: string; branchId: "main";
+  operationId: string; worldId: string; branchId: string;
   expectedHeadTurnId: string | null; actionKind: GameActionKind; actionText: string;
 }
 export type GameEvent = {
@@ -444,8 +444,8 @@ function parseOperation(value: unknown): GameOperation | null {
   return { operationId: value.operationId, expectedHeadTurnId: value.expectedHeadTurnId, actionKind: value.actionKind,
     actionText: value.actionText, status: value.status, errorCode: value.errorCode, createdAtMs: value.createdAtMs };
 }
-function parseWorld(value: unknown): GameWorld {
-  if (!record(value) || value.branchId !== "main" || !nullableId(value.headTurnId) || !count(value.turnCount) ||
+export function parseWorld(value: unknown): GameWorld {
+  if (!record(value) || !(value.branchId === "main" || (typeof value.branchId === "string" && /^[A-Za-z0-9_-]{8,128}$/.test(value.branchId))) || !nullableId(value.headTurnId) || !count(value.turnCount) ||
     !text(value.openingNarrative) || !text(value.narrativePolicy, 8192) || !list(value.turns, 100)) throw formatError();
   const turns = value.turns.map((turn): GameTurn => {
     if (!record(turn) || !id(turn.turnId) || !nullableId(turn.parentTurnId) || !actionKind(turn.actionKind) ||
@@ -454,7 +454,7 @@ function parseWorld(value: unknown): GameWorld {
       actionText: turn.actionText, narrative: turn.narrative, choices: parseChoices(turn.choices),
       state: parseGameState(turn.state), createdAtMs: turn.createdAtMs };
   });
-  return { setup: parseSetup(value.setup), branchId: "main", headTurnId: value.headTurnId, turnCount: value.turnCount,
+  return { setup: parseSetup(value.setup), branchId: value.branchId, headTurnId: value.headTurnId, turnCount: value.turnCount,
     state: parseGameState(value.state), openingNarrative: value.openingNarrative,
     openingChoices: parseChoices(value.openingChoices), turns, latestOperation: parseOperation(value.latestOperation), narrativePolicy: value.narrativePolicy };
 }
@@ -549,7 +549,8 @@ function parseObservedValue(fact: FactKey, value: unknown): void {
     case "location": requireFormat(entityId(value)); break;
   }
 }
-export function parseGameActorView(value: unknown): GameActorView {
+export function parseGameActorView(value: unknown, branchId = "main"): GameActorView {
+  requireFormat(branchId === "main" || /^[A-Za-z0-9_-]{8,128}$/.test(branchId));
   const view = shape(value, ["worldId", "headTurnId", "actorId", "entities", "knowledge", "observedFacts"]);
   if (!commitId(view.worldId) || !(view.headTurnId === null || commitId(view.headTurnId)) || !entityId(view.actorId) ||
     !list(view.entities, 512) || !list(view.knowledge, 4096) || !list(view.observedFacts, 16384)) throw formatError();
@@ -571,7 +572,7 @@ export function parseGameActorView(value: unknown): GameActorView {
     const o = shape(observed, ["factKey", "value"]); const factKey = parseFactKey(o.factKey); parseObservedValue(factKey, o.value); return { factKey, value: o.value };
   });
   requireFormat(unique(observedFacts.map((o) => o.factKey)));
-  return { worldId: view.worldId, headTurnId: view.headTurnId, actorId: view.actorId, entities, knowledge, observedFacts };
+  return { worldId: view.worldId, branchId, headTurnId: view.headTurnId, actorId: view.actorId, entities, knowledge, observedFacts };
 }
 
 export async function listGameWorlds(): Promise<GameWorldList> {
@@ -590,9 +591,9 @@ export async function createGameWorld(setup: WorldSetup): Promise<GameWorld> {
   if (value.setup.worldId !== setup.worldId) throw formatError();
   return value;
 }
-export async function getGameWorld(worldId: string): Promise<GameWorld> {
-  const value = parseWorld(await call("get_game_world", { worldId }));
-  if (value.setup.worldId !== worldId) throw formatError();
+export async function getGameWorld(worldId: string, branchId = "main"): Promise<GameWorld> {
+  const value = parseWorld(await call("get_game_world", { worldId, branchId }));
+  if (value.setup.worldId !== worldId || value.branchId !== branchId) throw formatError();
   return value;
 }
 export async function upgradeGameWorld(worldId: string, expectedHeadTurnId: string | null): Promise<GameWorld> {
@@ -600,8 +601,8 @@ export async function upgradeGameWorld(worldId: string, expectedHeadTurnId: stri
   if (value.setup.worldId !== worldId || value.state.protocolVersion !== 2 || value.headTurnId !== expectedHeadTurnId) throw formatError();
   return value;
 }
-export async function getGameActorView(worldId: string, actorId: string): Promise<GameActorView> {
-  const value = parseGameActorView(await call("get_game_actor_view", { worldId, actorId }));
+export async function getGameActorView(worldId: string, actorId: string, branchId = "main"): Promise<GameActorView> {
+  const value = parseGameActorView(await call("get_game_actor_view", { worldId, actorId, branchId }), branchId);
   if (value.worldId !== worldId || value.actorId !== actorId) throw formatError();
   return value;
 }
@@ -614,7 +615,7 @@ export async function startGameTurn(request: GameTurnRequest, providerKind: Prov
     else if (event.operationId === request.operationId) onEvent(event);
   };
   const value = parseWorld(await call("start_game_turn", { request, providerKind, onEvent: channel }));
-  if (value.setup.worldId !== request.worldId) throw formatError();
+  if (value.setup.worldId !== request.worldId || value.branchId !== request.branchId) throw formatError();
   return value;
 }
 export async function cancelGameTurn(operationId: string): Promise<{ operationId: string; state: "cancel_requested" | "finished" | "not_found" }> {
@@ -622,9 +623,9 @@ export async function cancelGameTurn(operationId: string): Promise<{ operationId
   if (!record(value) || value.operationId !== operationId || (value.state !== "cancel_requested" && value.state !== "finished" && value.state !== "not_found")) throw formatError();
   return { operationId, state: value.state };
 }
-export async function setGamePolicy(worldId: string, policy: string): Promise<GameWorld> {
-  const value = parseWorld(await call("set_game_policy", { worldId, policy }));
-  if (value.setup.worldId !== worldId) throw formatError();
+export async function setGamePolicy(worldId: string, policy: string, branchId = "main", expectedHeadTurnId?: string | null): Promise<GameWorld> {
+  const value = parseWorld(await call("set_game_policy", { worldId, policy, branchId, ...(expectedHeadTurnId === undefined ? {} : { expectedHeadTurnId }) }));
+  if (value.setup.worldId !== worldId || value.branchId !== branchId || (expectedHeadTurnId !== undefined && value.headTurnId !== expectedHeadTurnId)) throw formatError();
   return value;
 }
 export async function getGameProvider(): Promise<GameProviderProfile> { return parseProfile(await call("get_game_provider")); }

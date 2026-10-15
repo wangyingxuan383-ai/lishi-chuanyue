@@ -12,6 +12,74 @@ use lishi_core::{
 };
 use rusqlite::{params, Connection};
 
+#[test]
+fn opening_research_evidence_logs_without_a_fictional_game_turn_source() {
+    use lishi_core::game_context::{ContextFragment, ContextFragmentKind, ContextFragmentStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup();
+    let store = GameStoreV2::open(dir.path().join("world.sqlite")).unwrap();
+    store
+        .create_world_v2(&setup, &initial_state_v2(&setup).unwrap(), "开局", &[])
+        .unwrap();
+    let view = store.view().unwrap();
+    let history = store.knowledge_history().unwrap();
+    let request = GameTurnRequest {
+        operation_id: "opening-research-turn".into(),
+        world_id: setup.world_id,
+        branch_id: "main".into(),
+        expected_head_turn_id: None,
+        action_kind: GameActionKind::Action,
+        action_text: "核对历史资料".into(),
+    };
+    let evidence = ContextFragment {
+        id: "opening-adopted-source".into(),
+        scope: ContextScope::from_view(&view),
+        kind: ContextFragmentKind::HistoricalEvidence,
+        status: ContextFragmentStatus::Committed,
+        source_turn_ids: vec![],
+        body: "来源为独立研究记录，并非未来游戏回合；缺少资料时保留未知。".into(),
+        relevance: 1,
+    };
+    let compiled = compile_context(
+        &view,
+        &request,
+        &history,
+        ContextRules::v2(),
+        ContextBudget::default(),
+        &[],
+        &[evidence],
+    )
+    .unwrap();
+    let path = dir.path().join("trace.sqlite");
+    let log = TraceStore::open_sidecar(&path).unwrap();
+    log.record(&compiled.trace).unwrap();
+    assert_eq!(
+        log.get(&request.operation_id).unwrap(),
+        Some(compiled.trace.clone())
+    );
+    drop(log);
+    assert_eq!(
+        TraceStore::open_sidecar(path)
+            .unwrap()
+            .get(&request.operation_id)
+            .unwrap(),
+        Some(compiled.trace.clone())
+    );
+    let mut invalid = compiled.trace;
+    let optional = invalid
+        .sections
+        .iter_mut()
+        .find(|s| s.kind == ContextSectionKind::HistoricalEvidence)
+        .unwrap();
+    optional.kind = ContextSectionKind::RelatedMemory;
+    assert_eq!(
+        TraceStore::open_sidecar(dir.path().join("bad.sqlite"))
+            .unwrap()
+            .record(&invalid),
+        Err(TraceLogError::InvalidTrace)
+    );
+}
+
 fn setup() -> WorldSetup {
     WorldSetup {
         world_id: "trace-world-0001".into(),

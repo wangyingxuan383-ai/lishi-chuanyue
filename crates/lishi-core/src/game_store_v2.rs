@@ -29,6 +29,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::game_protocol::{validate_setup, Choice, WorldSetup, MAX_CHOICES, MAX_NARRATIVE_BYTES};
 
+#[path = "game_branches.rs"]
+pub mod branches;
+#[path = "game_fast_forward_store.rs"]
+pub mod fast_forward;
+
 pub const GAME_SCHEMA_VERSION_V2: i32 = 2;
 pub const MAX_ACTION_BYTES: usize = 16 * 1024;
 pub const MAX_POLICY_BYTES: usize = 8 * 1024;
@@ -141,7 +146,7 @@ impl GameStoreV2 {
         let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let application: i32 =
             connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        if !matches!(version, 0 | GAME_SCHEMA_VERSION_V2)
+        if !matches!(version, 0 | GAME_SCHEMA_VERSION_V2 | 3)
             || (version != 0 && application != APPLICATION_ID)
         {
             return Err(GameStoreError::IncompatibleSchema);
@@ -155,6 +160,11 @@ impl GameStoreV2 {
             if has_tables || application != 0 {
                 return Err(GameStoreError::IncompatibleSchema);
             }
+        }
+        // Reject foreign/malformed existing schemas before journal settings can
+        // change their files. In particular a naked user_version=3 is no proof.
+        if version != 0 {
+            check_schema(&connection)?;
         }
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
@@ -175,7 +185,16 @@ impl GameStoreV2 {
             row.get::<_, bool>(0)
         })? {
             // Validate the complete chain before changing recovery status.
-            view_connection(&connection)?;
+            if version == 3 {
+                let ids:Vec<String>={
+                    let mut statement=connection.prepare("SELECT branch_id FROM game_branches")?;
+                    let values=statement.query_map([],|r|r.get(0))?.collect::<Result<_,_>>()?;
+                    values
+                };
+                for id in ids { branches::read_context(&connection, &id)?; }
+            } else {
+                view_connection(&connection)?;
+            }
         } else if connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM game_operations) OR EXISTS(SELECT 1 FROM game_turns) OR EXISTS(SELECT 1 FROM game_migrations)",
             [], |row| row.get::<_, bool>(0),
@@ -189,10 +208,14 @@ impl GameStoreV2 {
             [],
         )?;
         transaction.commit()?;
-        Ok(Self {
+        let store = Self {
             connection: Mutex::new(connection),
             _owner_lock: owner_lock,
-        })
+        };
+        if version == 3 {
+            store.recover_fast_forward_jobs()?;
+        }
+        Ok(store)
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, GameStoreError> {
@@ -268,7 +291,11 @@ impl GameStoreV2 {
     pub fn view(&self) -> Result<WorldViewV2, GameStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let view = view_connection(&transaction)?;
+        let view = if branches::enabled(&transaction)? {
+            branches::read_context(&transaction, "main")?.view
+        } else {
+            view_connection(&transaction)?
+        };
         transaction.commit()?;
         Ok(view)
     }
@@ -283,6 +310,9 @@ impl GameStoreV2 {
         &self,
         mut visitor: impl FnMut(CommittedTurnV2, u64, &str) -> Result<(), GameStoreError>,
     ) -> Result<CommittedHistoryScope, GameStoreError> {
+        if self.branches_enabled()? {
+            return self.visit_committed_turns_branch("main", visitor);
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let mut visible_turn_ids = Vec::new();
@@ -302,6 +332,9 @@ impl GameStoreV2 {
         &self,
         index: &mut MemoryIndex,
     ) -> Result<GameMemoryIndexReceipt, GameStoreError> {
+        if self.branches_enabled()? {
+            return self.rebuild_memory_index_branch("main", index);
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let header = read_header(&transaction)?;
@@ -348,6 +381,9 @@ impl GameStoreV2 {
     /// derived from committed raw records within one SQLite read transaction,
     /// never from the recent UI window or an unverified converted head snapshot.
     pub fn knowledge_history(&self) -> Result<ValidatedHistory, GameStoreError> {
+        if self.branches_enabled()? {
+            return self.knowledge_history_branch("main");
+        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         // Release the UI's recent snapshot window before building the compact
@@ -441,6 +477,9 @@ impl GameStoreV2 {
     }
 
     pub fn begin(&self, request: &GameTurnRequest) -> Result<(), GameStoreError> {
+        if self.branches_enabled()? {
+            return self.begin_branch(request);
+        }
         if !valid_game_id(&request.operation_id)
             || !valid_game_id(&request.world_id)
             || request.branch_id != "main"
@@ -580,6 +619,9 @@ impl GameStoreV2 {
         output: &TurnOutputV2,
         before_commit: F,
     ) -> Result<WorldViewV2, GameStoreError> {
+        if self.branches_enabled()? {
+            return self.commit_branch_with_hook(operation_id, output, before_commit);
+        }
         let mut connection = self.connection()?;
         view_connection(&connection)?;
         let operation: GameOperation =
@@ -595,6 +637,9 @@ impl GameStoreV2 {
         let candidate = candidate.ok_or(GameStoreError::InvalidTransition)?;
         let parsed = parse_output_v2(&candidate).map_err(|_| GameStoreError::InvalidOutput)?;
         if &parsed != output {
+            return Err(GameStoreError::InvalidOutput);
+        }
+        if !output.source_references.is_empty() {
             return Err(GameStoreError::InvalidOutput);
         }
         // Pure validation completes before opening the short write transaction.
@@ -675,6 +720,10 @@ impl GameStoreV2 {
     /// OOC only changes the future narration policy. It creates no turn and
     /// cannot edit the opening, current facts, historical time, or head.
     pub fn update_policy(&self, policy: &str) -> Result<WorldViewV2, GameStoreError> {
+        if self.branches_enabled()? {
+            let head = self.view()?.head_turn_id;
+            return self.update_policy_branch("main", head.as_deref(), policy);
+        }
         if !valid_text(policy, MAX_POLICY_BYTES, true) {
             return Err(GameStoreError::InvalidRequest);
         }
@@ -1178,10 +1227,11 @@ fn check_operations(
 }
 
 fn check_schema(connection: &Connection) -> Result<(), GameStoreError> {
-    if connection.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?
-        != GAME_SCHEMA_VERSION_V2
-        || connection.pragma_query_value(None, "application_id", |row| row.get::<_, i32>(0))?
-            != APPLICATION_ID
+    if !matches!(
+        connection.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?,
+        GAME_SCHEMA_VERSION_V2 | 3
+    ) || connection.pragma_query_value(None, "application_id", |row| row.get::<_, i32>(0))?
+        != APPLICATION_ID
         || connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))? != "ok"
         || connection
             .prepare("PRAGMA foreign_key_check")?
@@ -1210,6 +1260,9 @@ fn check_schema(connection: &Connection) -> Result<(), GameStoreError> {
     )?;
     if !has_receipts {
         return Err(GameStoreError::IncompatibleSchema);
+    }
+    if branches::enabled(connection)? {
+        branches::check_tables(connection)?;
     }
     Ok(())
 }
@@ -1247,6 +1300,12 @@ fn safe_error_code(code: &str) -> bool {
             | "game_provider_missing"
             | "game_provider_failed"
             | "game_context_too_large"
+            | "game_context_invalid_budget"
+            | "game_context_invalid_input"
+            | "game_context_stale_scope"
+            | "game_context_uncommitted_fragment"
+            | "game_context_invisible_source"
+            | "game_context_unknown_fact"
             | "game_worker_failed"
             | "game_cancelled"
             | "game_database"

@@ -159,6 +159,7 @@ fn validate_trace(trace: &ContextTrace) -> TraceLogResult<()> {
                 || (section.kind == ContextSectionKind::PinnedFact
                     && section.source_turn_count != 0)
                 || (section.kind != ContextSectionKind::PinnedFact
+                    && section.kind != ContextSectionKind::HistoricalEvidence
                     && section.source_turn_count == 0)
             {
                 return Err(TraceLogError::InvalidTrace);

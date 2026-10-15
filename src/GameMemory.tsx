@@ -163,7 +163,7 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
     setEntityId(""); setSelectedFact(""); setFactFilter(""); setError(null); setNotice(null); setCancelState("idle");
     setReading(enabled);
     if (!enabled) return;
-    void getGameAnnotations(world.setup.worldId, world.headTurnId).then((incoming) => {
+    void getGameAnnotations(world.setup.worldId, world.headTurnId, world.branchId).then((incoming) => {
       if (stillCurrent(scope) && readRevision.current === revision && matches(incoming)) setAnnotations(incoming);
     }).catch((cause: unknown) => {
       if (stillCurrent(scope) && readRevision.current === revision) setError(describeMemoryError(cause));
@@ -172,7 +172,7 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
     });
   }, [scope, enabled]);
 
-  const view = actorView?.worldId === world.setup.worldId && actorView.headTurnId === world.headTurnId && actorView.actorId === world.state.protagonistId ? actorView : null;
+  const view = actorView?.worldId === world.setup.worldId && actorView.branchId === world.branchId && actorView.headTurnId === world.headTurnId && actorView.actorId === world.state.protagonistId ? actorView : null;
   const facts = useMemo(() => factOptions(view), [view]);
   const factMap = new Map(facts.map((option) => [option.value, option]));
   const filteredFacts = facts.filter((option) => option.label.toLocaleLowerCase("zh-CN").includes(factFilter.trim().toLocaleLowerCase("zh-CN")));
@@ -201,7 +201,7 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
     const revision = ++readRevision.current;
     setReading(true); setError(null);
     try {
-      const incoming = await getGameAnnotations(world.setup.worldId, world.headTurnId);
+      const incoming = await getGameAnnotations(world.setup.worldId, world.headTurnId, world.branchId);
       if (stillCurrent(frozenScope) && readRevision.current === revision && matches(incoming)) {
         setAnnotations(incoming);
         if (!incoming.operations.some((operation) => operation.status === "pending" || operation.status === "running")) {
@@ -220,7 +220,7 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
     const revision = ++traceRevision.current;
     setTraceLoading(true); setError(null);
     try {
-      const incoming = await getGameContextTrace(world.setup.worldId, operation.operationId, operation.expectedHeadTurnId);
+      const incoming = await getGameContextTrace(world.setup.worldId, operation.operationId, operation.expectedHeadTurnId, world.branchId);
       if (stillCurrent(frozenScope) && currentTraceKey.current === frozenTraceKey && traceRevision.current === revision) {
         if (incoming === null || incoming.branchId === world.branchId) { setContextTrace(incoming); setTraceRead(true); }
       }
@@ -241,7 +241,7 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
     const revision = ++searchRevision.current;
     setSearching(true); setError(null); setNotice(null);
     try {
-      const incoming = await queryGameMemory(world.setup.worldId, world.headTurnId, request);
+      const incoming = await queryGameMemory(world.setup.worldId, world.headTurnId, request, world.branchId);
       if (stillCurrent(frozenScope) && searchRevision.current === revision && matches(incoming)) {
         setMemory(incoming); setSubmittedQuery(request);
       }
@@ -272,13 +272,13 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
   function saveBookmark(turnId: string, sequence: number) {
     const label = bookmarkLabel.trim() || t("memory.bookmarkDefault", { sequence });
     if (bytes(label) > 2048) { setError(t("memory.bookmarkTooLong")); return; }
-    void mutate("bookmark", () => bookmarkGameTurn(world.setup.worldId, world.headTurnId, turnId, label), "memory.bookmarkSaved");
+    void mutate("bookmark", () => bookmarkGameTurn(world.setup.worldId, world.headTurnId, turnId, label, world.branchId), "memory.bookmarkSaved");
   }
   function makeSummary(sourceTurnIds: string[]) {
     if (!sourceTurnIds.length) return;
     if (sourceTurnIds.length > 512) { setError(t("memory.error.large")); return; }
     const operationId = crypto.randomUUID();
-    void mutate("summary", () => createGameSummary(world.setup.worldId, world.headTurnId, operationId, sourceTurnIds, provider), "memory.summaryCreated", operationId);
+    void mutate("summary", () => createGameSummary(world.setup.worldId, world.headTurnId, operationId, sourceTurnIds, provider, world.branchId), "memory.summaryCreated", operationId);
   }
   async function cancelSummary() {
     if (!enabled || !activeSummaryId || cancelState === "requesting" || cancelState === "requested") return;
@@ -343,11 +343,11 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
       </select>
       {filteredFacts.length > visibleFacts.length && <p className="game-muted game-small">{t("memory.factsLimited", { count: visibleFacts.length })}</p>}
       <button type="button" className="game-secondary game-memory-spaced" disabled={cannotWrite || !chosenFact}
-        onClick={() => { if (chosenFact) void mutate("pin", () => pinGameFact(world.setup.worldId, world.headTurnId, chosenFact.key), "memory.pinSaved"); }}>{t(currentWrite?.kind === "pin" ? "memory.working" : "memory.pin")}</button>
+        onClick={() => { if (chosenFact) void mutate("pin", () => pinGameFact(world.setup.worldId, world.headTurnId, chosenFact.key, world.branchId), "memory.pinSaved"); }}>{t(currentWrite?.kind === "pin" ? "memory.working" : "memory.pin")}</button>
       {currentAnnotations ? currentAnnotations.annotations.pins.length ? <ul className="game-memory-list">{currentAnnotations.annotations.pins.map((pin) => <li key={pin.id}>
         <div><span>{factMap.get(factId(pin.factKey))?.label ?? t("memory.factReference", { key: factId(pin.factKey) })}</span>
           <small>{t("memory.sourceNode", { id: pin.createdHeadTurnId ?? t("memory.initialNode") })}</small></div>
-        <button type="button" className="game-secondary game-danger" disabled={cannotWrite} onClick={() => void mutate("remove", () => removeGameAnnotation(world.setup.worldId, world.headTurnId, pin.id), "memory.removed")}>{t("memory.remove")}</button>
+        <button type="button" className="game-secondary game-danger" disabled={cannotWrite} onClick={() => void mutate("remove", () => removeGameAnnotation(world.setup.worldId, world.headTurnId, pin.id, world.branchId), "memory.removed")}>{t("memory.remove")}</button>
       </li>)}</ul> : <p className="game-muted game-small">{t("memory.pinsEmpty")}</p> : <p className="game-muted game-small">{t("memory.annotationsWaiting")}</p>}
     </details>
 
@@ -358,7 +358,7 @@ export function GameMemory({ world, actorView, busy, beginWrite, endWrite }: Gam
         return <li key={bookmark.id}><div><span>{bookmark.label || (sequence === null ? t("memory.sourceId", { id: bookmark.turnId }) : t("memory.turn", { sequence }))}</span>
           <small>{t("memory.sourceId", { id: bookmark.turnId })}</small>
           {original && <details><summary>{t("memory.original")}</summary><p className="game-memory-body">{original.narrative}</p></details>}</div>
-          <button type="button" className="game-secondary game-danger" disabled={cannotWrite} onClick={() => void mutate("remove", () => removeGameAnnotation(world.setup.worldId, world.headTurnId, bookmark.id), "memory.removed")}>{t("memory.remove")}</button></li>;
+          <button type="button" className="game-secondary game-danger" disabled={cannotWrite} onClick={() => void mutate("remove", () => removeGameAnnotation(world.setup.worldId, world.headTurnId, bookmark.id, world.branchId), "memory.removed")}>{t("memory.remove")}</button></li>;
       })}</ul> : <p className="game-muted game-small">{t("memory.bookmarksEmpty")}</p> : <p className="game-muted game-small">{t("memory.annotationsWaiting")}</p>}
     </details>
 

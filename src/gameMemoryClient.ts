@@ -252,26 +252,26 @@ async function call(command: string, args: Record<string, unknown>): Promise<unk
   }
 }
 export function describeMemoryError(error: unknown): string { return error instanceof MemoryError ? error.message : t("memory.error.unknown"); }
-function bound<T extends { worldId: string; headTurnId: string | null }>(envelope: T, worldId: string, head: string | null): T {
-  check(envelope.worldId === worldId && envelope.headTurnId === head); return envelope;
+function bound<T extends { worldId: string; branchId: string; headTurnId: string | null }>(envelope: T, worldId: string, head: string | null, branchId: string): T {
+  check(envelope.worldId === worldId && envelope.branchId === branchId && envelope.headTurnId === head); return envelope;
 }
-export async function queryGameMemory(worldId: string, expectedHeadTurnId: string | null, query: MemoryQuery): Promise<MemoryEnvelope> {
-  return bound(parseMemoryEnvelope(await call("query_game_memory", { worldId, expectedHeadTurnId, query })), worldId, expectedHeadTurnId);
+export async function queryGameMemory(worldId: string, expectedHeadTurnId: string | null, query: MemoryQuery, branchId = "main"): Promise<MemoryEnvelope> {
+  return bound(parseMemoryEnvelope(await call("query_game_memory", { worldId, expectedHeadTurnId, query, branchId })), worldId, expectedHeadTurnId, branchId);
 }
-export async function getGameAnnotations(worldId: string, expectedHeadTurnId: string | null): Promise<AnnotationEnvelope> {
-  return bound(parseAnnotationEnvelope(await call("get_game_annotations", { worldId, expectedHeadTurnId })), worldId, expectedHeadTurnId);
+export async function getGameAnnotations(worldId: string, expectedHeadTurnId: string | null, branchId = "main"): Promise<AnnotationEnvelope> {
+  return bound(parseAnnotationEnvelope(await call("get_game_annotations", { worldId, expectedHeadTurnId, branchId })), worldId, expectedHeadTurnId, branchId);
 }
-async function mutate(command: string, worldId: string, expectedHeadTurnId: string | null, extra: Record<string, unknown>): Promise<AnnotationEnvelope> {
-  return bound(parseAnnotationEnvelope(await call(command, { worldId, expectedHeadTurnId, ...extra })), worldId, expectedHeadTurnId);
+async function mutate(command: string, worldId: string, expectedHeadTurnId: string | null, extra: Record<string, unknown>, branchId: string): Promise<AnnotationEnvelope> {
+  return bound(parseAnnotationEnvelope(await call(command, { worldId, expectedHeadTurnId, branchId, ...extra })), worldId, expectedHeadTurnId, branchId);
 }
-export function pinGameFact(worldId: string, head: string | null, factKey: FactKey): Promise<AnnotationEnvelope> { return mutate("pin_game_fact", worldId, head, { factKey }); }
-export function bookmarkGameTurn(worldId: string, head: string | null, turnId: string, label: string): Promise<AnnotationEnvelope> { return mutate("bookmark_game_turn", worldId, head, { turnId, label }); }
-export function removeGameAnnotation(worldId: string, head: string | null, annotationId: string): Promise<AnnotationEnvelope> { return mutate("remove_game_annotation", worldId, head, { annotationId }); }
-export function createGameSummary(worldId: string, head: string | null, operationId: string, sourceTurnIds: string[], providerKind: ProviderKind): Promise<AnnotationEnvelope> {
-  return mutate("create_game_summary", worldId, head, { operationId, sourceTurnIds, providerKind });
+export function pinGameFact(worldId: string, head: string | null, factKey: FactKey, branchId = "main"): Promise<AnnotationEnvelope> { return mutate("pin_game_fact", worldId, head, { factKey }, branchId); }
+export function bookmarkGameTurn(worldId: string, head: string | null, turnId: string, label: string, branchId = "main"): Promise<AnnotationEnvelope> { return mutate("bookmark_game_turn", worldId, head, { turnId, label }, branchId); }
+export function removeGameAnnotation(worldId: string, head: string | null, annotationId: string, branchId = "main"): Promise<AnnotationEnvelope> { return mutate("remove_game_annotation", worldId, head, { annotationId }, branchId); }
+export function createGameSummary(worldId: string, head: string | null, operationId: string, sourceTurnIds: string[], providerKind: ProviderKind, branchId = "main"): Promise<AnnotationEnvelope> {
+  return mutate("create_game_summary", worldId, head, { operationId, sourceTurnIds, providerKind }, branchId);
 }
-export async function getGameContextTrace(worldId: string, operationId: string, expectedHeadTurnId: string | null): Promise<GameContextTrace | null> {
-  const trace = parseGameContextTrace(await call("get_game_context_trace", { worldId, operationId }));
-  check(trace === null || (trace.worldId === worldId && trace.operationId === operationId && trace.headTurnId === expectedHeadTurnId));
+export async function getGameContextTrace(worldId: string, operationId: string, expectedHeadTurnId: string | null, branchId = "main"): Promise<GameContextTrace | null> {
+  const trace = parseGameContextTrace(await call("get_game_context_trace", { worldId, operationId, branchId }));
+  check(trace === null || (trace.worldId === worldId && trace.branchId === branchId && trace.operationId === operationId && trace.headTurnId === expectedHeadTurnId));
   return trace;
 }

@@ -12,11 +12,16 @@ import {
 import { gameT as t, type GameMessageKey } from "./gameMessages";
 import "./game.css";
 import GameMemory from "./GameMemory";
+import GameResearch from "./GameResearch";
+import GameBranches from "./GameBranches";
+import GameFastForward from "./GameFastForward";
+import { branchT as bt } from "./gameBranchMessages";
+import type { BranchCard, RewriteAction } from "./gameBranchClient";
 
 type DisplayPhase = GameStatus | "starting" | "unconfirmed" | "notStarted";
 type WriteKind = "create" | "turn" | "policy" | "provider" | "providerTest" | "providerDelete" | "preset" | "upgrade" | "annotation" | null;
 interface LocalTurn {
-  worldId: string; operationId: string; sequence: number;
+  worldId: string; branchId: string; operationId: string; sequence: number;
   phase: DisplayPhase; draft: string; actionKind: GameActionKind; actionText: string;
 }
 type SetupForm = Omit<WorldSetup, "worldId" | "eraYear"> & { eraYear: string };
@@ -197,6 +202,9 @@ export default function Game() {
   const [actorLoading, setActorLoading] = useState(false);
   const [actorError, setActorError] = useState<string | null>(null);
   const [actorRevision, setActorRevision] = useState(0);
+  const [branchCard, setBranchCard] = useState<BranchCard | null>(null);
+  const [branchStatusKnown, setBranchStatusKnown] = useState(false);
+  const [rewritePrefill, setRewritePrefill] = useState<RewriteAction | null>(null);
   const [providerKind, setProviderKind] = useState<ProviderKind>("demo");
   const [profile, setProfile] = useState<GameProviderProfile | null>(null);
   const [endpoint, setEndpoint] = useState("");
@@ -210,6 +218,7 @@ export default function Game() {
   const mounted = useRef(true);
   const worldRef = useRef<GameWorld | null>(null);
   const selectedId = useRef<string | null>(null);
+  const selectedBranch = useRef("main");
   const localRef = useRef<LocalTurn | null>(null);
   const profileRef = useRef<GameProviderProfile | null>(null);
   const writeRef = useRef(false);
@@ -223,9 +232,9 @@ export default function Game() {
   }, []);
 
   const applyWorld = useCallback((incoming: GameWorld) => {
-    if (!mounted.current || selectedId.current !== incoming.setup.worldId) return;
+    if (!mounted.current || selectedId.current !== incoming.setup.worldId || selectedBranch.current !== incoming.branchId) return;
     const previous = worldRef.current;
-    if (previous?.setup.worldId === incoming.setup.worldId) {
+    if (previous?.setup.worldId === incoming.setup.worldId && previous.branchId === incoming.branchId) {
       // A late query cannot roll back a committed head or a confirmed terminal operation.
       if (previous.turnCount > incoming.turnCount) return;
       if (previous.turnCount === incoming.turnCount && previous.state.protocolVersion === 2 && incoming.state.protocolVersion === 1) return;
@@ -245,7 +254,7 @@ export default function Game() {
       }
       setLocal({ ...current });
     } else if (operation && !writeRef.current && (!current || isGameTerminal(current.phase) || current.phase === "notStarted")) {
-      const restored: LocalTurn = { worldId: incoming.setup.worldId, operationId: operation.operationId, sequence: -1,
+      const restored: LocalTurn = { worldId: incoming.setup.worldId, branchId: incoming.branchId, operationId: operation.operationId, sequence: -1,
         phase: operation.status, draft: "", actionKind: operation.actionKind, actionText: operation.actionText };
       localRef.current = restored;
       setLocal(restored);
@@ -254,13 +263,14 @@ export default function Game() {
       setCancelState("idle");
       if (operation.status === "failed") setError(describeGameCode(operation.errorCode));
     }
-    setLibrary((currentLibrary) => ({ ...currentLibrary, worlds: currentLibrary.worlds.map((summary) => summary.worldId === incoming.setup.worldId
+    if (incoming.branchId === "main") setLibrary((currentLibrary) => ({ ...currentLibrary, worlds: currentLibrary.worlds.map((summary) => summary.worldId === incoming.setup.worldId
       ? { worldId: incoming.setup.worldId, title: incoming.setup.title, country: incoming.setup.country,
         eraYear: incoming.setup.eraYear, protagonistName: incoming.setup.protagonistName, headTurnId: incoming.headTurnId, turnCount: incoming.turnCount } : summary) }));
   }, []);
 
   function selectWorld(incoming: GameWorld) {
     selectedId.current = incoming.setup.worldId;
+    selectedBranch.current = incoming.branchId;
     worldRef.current = null;
     localRef.current = null;
     setLocal(null);
@@ -270,6 +280,7 @@ export default function Game() {
     setUpgradeMessage(null);
     setActorView(null);
     setActorError(null);
+    setBranchCard(null); setBranchStatusKnown(false); setRewritePrefill(null);
     setError(null);
     applyWorld(incoming);
     setShowSetup(false);
@@ -315,28 +326,33 @@ export default function Game() {
 
   const refreshWorld = useCallback(async (silent = false) => {
     const worldId = selectedId.current;
+    const branchId = selectedBranch.current;
     if (!native || !worldId || queryRef.current) return;
     queryRef.current = true;
     setQuerying(true);
     try {
-      const stored = await getGameWorld(worldId);
-      if (selectedId.current === worldId) {
+      const stored = await getGameWorld(worldId, branchId);
+      if (selectedId.current === worldId && selectedBranch.current === branchId) {
         applyWorld(stored);
         if (!silent && stored.latestOperation?.status !== "failed") setError(null);
         // A missing operation does not prove a lost IPC request never reached a
         // worker. Keep an unknown local result blocked instead of replaying it.
       }
-    } catch (caught: unknown) { if (mounted.current && selectedId.current === worldId) setError(describeGameError(caught)); }
+    } catch (caught: unknown) { if (mounted.current && selectedId.current === worldId && selectedBranch.current === branchId) setError(describeGameError(caught)); }
     finally { queryRef.current = false; if (mounted.current) setQuerying(false); }
   }, [native, applyWorld]);
 
   const persistedActive = world?.latestOperation && !isGameTerminal(world.latestOperation.status);
-  const localActive = local && local.worldId === world?.setup.worldId &&
+  const localActive = local && local.worldId === world?.setup.worldId && local.branchId === world?.branchId &&
     (local.phase === "starting" || local.phase === "pending" || local.phase === "generating" || local.phase === "validating" || local.phase === "unconfirmed");
   const busy = writeKind !== null || Boolean(persistedActive) || Boolean(localActive);
   const protagonist = world?.state.entities.find((entity) => entity.id === world.state.protagonistId);
   const dead = protagonist?.alive === false;
+  const archived = Boolean(branchCard && branchCard.branchId === world?.branchId && branchCard.archived);
+  const branchReady = branchStatusKnown && (branchCard === null ? world?.branchId === "main" : branchCard.branchId === world?.branchId && branchCard.headTurnId === world.headTurnId);
+  const currentActorView = actorView && world && actorView.worldId === world.setup.worldId && actorView.branchId === world.branchId && actorView.headTurnId === world.headTurnId ? actorView : null;
   const canAct = native && world !== null && !loading && !querying && !busy && !dead &&
+    branchReady && !archived &&
     (providerKind === "demo" || Boolean(profile?.configured));
 
   useEffect(() => {
@@ -344,18 +360,18 @@ export default function Game() {
       setActorView(null); setActorError(null); setActorLoading(false); return;
     }
     let stopped = false;
-    const worldId = world.setup.worldId, head = world.headTurnId, actorId = world.state.protagonistId;
+    const worldId = world.setup.worldId, branchId = world.branchId, head = world.headTurnId, actorId = world.state.protagonistId;
     setActorView(null); setActorError(null); setActorLoading(true);
-    void getGameActorView(worldId, actorId).then((incoming) => {
+    void getGameActorView(worldId, actorId, branchId).then((incoming) => {
       if (!stopped && mounted.current && worldRef.current?.setup.worldId === worldId &&
-        worldRef.current.headTurnId === head && incoming.headTurnId === head) setActorView(incoming);
+        worldRef.current.branchId === branchId && incoming.branchId === branchId && worldRef.current.headTurnId === head && incoming.headTurnId === head) setActorView(incoming);
       else if (!stopped && mounted.current) setActorError(t("game.error.stale"));
     }).catch((caught: unknown) => { if (!stopped && mounted.current) setActorError(describeGameError(caught)); })
       .finally(() => { if (!stopped && mounted.current) setActorLoading(false); });
     return () => { stopped = true; };
     // A policy/provider change cannot change which committed facts were known.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [native, world?.setup.worldId, world?.headTurnId, world?.state.protocolVersion, actorRevision]);
+  }, [native, world?.setup.worldId, world?.branchId, world?.headTurnId, world?.state.protocolVersion, actorRevision]);
 
   useEffect(() => {
     if (!native || !world || !busy || loading) return;
@@ -364,7 +380,7 @@ export default function Game() {
     const poll = async () => { if (stopped) return; await refreshWorld(true); if (!stopped) timer = setTimeout(() => void poll(), 1000); };
     timer = setTimeout(() => void poll(), 1000);
     return () => { stopped = true; clearTimeout(timer); };
-  }, [native, world?.setup.worldId, busy, loading, refreshWorld]);
+  }, [native, world?.setup.worldId, world?.branchId, busy, loading, refreshWorld]);
 
   async function openWorld(worldId: string) {
     if (!native || writeRef.current || busy || loading) return;
@@ -411,7 +427,7 @@ export default function Game() {
   }
 
   function receiveEvent(operation: LocalTurn, event: GameEvent) {
-    if (!mounted.current || localRef.current !== operation || selectedId.current !== operation.worldId || event.operationId !== operation.operationId) return;
+    if (!mounted.current || localRef.current !== operation || selectedId.current !== operation.worldId || selectedBranch.current !== operation.branchId || event.operationId !== operation.operationId) return;
     const persisted = worldRef.current?.latestOperation;
     const confirmedTerminal = persisted?.operationId === operation.operationId && isGameTerminal(persisted.status) ? persisted.status : null;
     if (event.sequence <= operation.sequence) return;
@@ -435,7 +451,7 @@ export default function Game() {
     const frozenWorld = worldRef.current;
     if (!canAct || !frozenWorld || (actionKind === "action" && !actionText.trim()) || actionText.length > 32768) return;
     if (!reserveWrite("turn")) return;
-    const operation: LocalTurn = { worldId: frozenWorld.setup.worldId, operationId: crypto.randomUUID(), sequence: -1,
+    const operation: LocalTurn = { worldId: frozenWorld.setup.worldId, branchId: frozenWorld.branchId, operationId: crypto.randomUUID(), sequence: -1,
       phase: "starting", draft: "", actionKind, actionText };
     localRef.current = operation;
     setLocal({ ...operation });
@@ -443,14 +459,14 @@ export default function Game() {
     setCancelState("idle");
     const frozenProviderKind = providerKind;
     try {
-      const stored = await startGameTurn({ operationId: operation.operationId, worldId: operation.worldId, branchId: "main",
+      const stored = await startGameTurn({ operationId: operation.operationId, worldId: operation.worldId, branchId: frozenWorld.branchId,
         expectedHeadTurnId: frozenWorld.headTurnId, actionKind, actionText }, frozenProviderKind,
         (event) => receiveEvent(operation, event), () => {
           if (mounted.current && localRef.current === operation && !isGameTerminal(operation.phase)) setError(t("game.error.event"));
         });
       if (mounted.current && localRef.current === operation) {
         applyWorld(stored);
-        if (stored.latestOperation?.operationId === operation.operationId && stored.latestOperation.status === "committed" && action === actionText) setAction("");
+        if (stored.latestOperation?.operationId === operation.operationId && stored.latestOperation.status === "committed" && action === actionText) { setAction(""); setRewritePrefill(null); }
       }
     } catch (caught: unknown) {
       if (mounted.current && localRef.current === operation) {
@@ -482,12 +498,12 @@ export default function Game() {
   }
   async function savePolicy() {
     const frozen = worldRef.current;
-    if (!frozen || policy.length > 8192 || !reserveWrite("policy")) return;
+    if (!frozen || archived || policy.length > 8192 || !reserveWrite("policy")) return;
     const frozenPolicy = policy;
     setPolicyMessage(null);
     try {
-      const stored = await setGamePolicy(frozen.setup.worldId, frozenPolicy);
-      if (mounted.current) { applyWorld(stored); setPolicyMessage(t("game.policySaved")); }
+      const stored = await setGamePolicy(frozen.setup.worldId, frozenPolicy, frozen.branchId, frozen.headTurnId);
+      if (mounted.current && selectedId.current === frozen.setup.worldId && selectedBranch.current === frozen.branchId) { applyWorld(stored); setPolicyMessage(t("game.policySaved")); }
     } catch (caught: unknown) { if (mounted.current) setPolicyMessage(describeGameError(caught)); }
     finally { releaseWrite(); }
   }
@@ -497,7 +513,7 @@ export default function Game() {
     setUpgradeMessage(null); setError(null);
     try {
       const upgraded = await upgradeGameWorld(frozen.setup.worldId, frozen.headTurnId);
-      if (mounted.current && selectedId.current === frozen.setup.worldId) {
+      if (mounted.current && selectedId.current === frozen.setup.worldId && selectedBranch.current === frozen.branchId) {
         applyWorld(upgraded); setUpgradeMessage(t("game.longState.upgraded"));
       }
     } catch (caught: unknown) { if (mounted.current) setError(describeGameError(caught)); }
@@ -551,7 +567,8 @@ export default function Game() {
 
   const latestTurn = world?.turns.at(-1);
   const choices = latestTurn?.choices ?? world?.openingChoices ?? [];
-  const phase = local && world && local.worldId === world.setup.worldId ? local.phase : world?.latestOperation?.status;
+  const currentLocal = local && world && local.worldId === world.setup.worldId && local.branchId === world.branchId ? local : null;
+  const phase = currentLocal?.phase ?? world?.latestOperation?.status;
   const retry = world?.latestOperation;
   const canRetry = retry && (retry.status === "failed" || retry.status === "cancelled" || retry.status === "interrupted");
   const diagnostics = providerTest?.diagnostics;
@@ -652,31 +669,42 @@ export default function Game() {
           </section>
           <section className="game-composer" aria-labelledby="game-action-label">
             <div aria-live="polite">{phase && <p className={`game-phase game-phase--${phase}`}>{t(phaseKeys[phase])}</p>}{cancelState === "requested" && <p className="game-muted game-small">{t("game.cancelRequested")}</p>}</div>
-            {local?.draft && local.phase !== "committed" && <div className="game-draft"><h3>{t("game.draftHeading")}</h3><p className="game-muted game-small">{t("game.draftHelp")}</p><div className="game-narrative">{local.draft}</div></div>}
+            {currentLocal?.draft && currentLocal.phase !== "committed" && <div className="game-draft"><h3>{t("game.draftHeading")}</h3><p className="game-muted game-small">{t("game.draftHelp")}</p><div className="game-narrative">{currentLocal.draft}</div></div>}
             {choices.length > 0 && !dead && <div className="game-choices"><h3>{t("game.choicesHeading")}</h3>{choices.map((choice) => <button type="button" className="game-choice" key={`${world.headTurnId ?? "opening"}:${choice.id}`} disabled={!canAct} onClick={() => void submitTurn("action", choice.text)}>{choice.text}<span aria-hidden="true">↗</span></button>)}</div>}
-            <label id="game-action-label" htmlFor="game-action">{t("game.actionLabel")}</label><textarea id="game-action" rows={4} value={action} maxLength={32768} placeholder={t("game.actionPlaceholder")} disabled={busy || dead} onChange={(event) => setAction(event.target.value)} aria-describedby="game-action-help" />
+            {archived && <p className="game-notice">{bt("branches.archivedHelp")}</p>}
+            {rewritePrefill?.actionKind === "continue" && <p className="game-notice">{bt("branches.rewriteContinue")}</p>}
+            <label id="game-action-label" htmlFor="game-action">{t("game.actionLabel")}</label><textarea id="game-action" rows={4} value={action} maxLength={32768} placeholder={t("game.actionPlaceholder")} disabled={busy || dead || archived} onChange={(event) => setAction(event.target.value)} aria-describedby="game-action-help" />
             <p id="game-action-help" className="game-muted game-small">{t("game.actionHelp")}</p>
             <div className="game-actions"><button type="button" className="game-primary" disabled={!canAct || !action.trim()} onClick={() => void submitTurn("action", action)}>{t(writeKind === "turn" ? "game.actionBusy" : "game.actionSubmit")}</button>
               <button type="button" className="game-secondary" disabled={!canAct} onClick={() => void submitTurn("continue", "")}>{t("game.continue")}</button>
-              {(writeKind === "turn" || persistedActive || localActive) && <button type="button" className="game-secondary" disabled={cancelState !== "idle"} onClick={() => void cancelTurn()}>{t(cancelState === "idle" ? "game.cancel" : "game.cancelling")}</button>}
+              {(writeKind === "turn" || (writeKind !== "annotation" && (persistedActive || localActive))) && <button type="button" className="game-secondary" disabled={cancelState !== "idle"} onClick={() => void cancelTurn()}>{t(cancelState === "idle" ? "game.cancel" : "game.cancelling")}</button>}
             </div>
             {canRetry && <div className="game-retry"><button type="button" className="game-secondary" disabled={!canAct} onClick={() => void submitTurn(retry.actionKind, retry.actionText)}>{t("game.retry")}</button><p className="game-muted game-small">{t("game.retryHelp")}</p></div>}
             {dead && <p className="game-notice">{t("game.stateDeadHelp")}</p>}
             <p className="game-save-notice">{t("game.saveNotice")}</p>
           </section>
           <details className="game-policy"><summary>{t("game.policyHeading")}</summary><p className="game-muted">{t("game.policyHelp")}</p>
-            <label htmlFor="game-policy-input">{t("game.policyLabel")}</label><textarea id="game-policy-input" value={policy} maxLength={8192} rows={3} disabled={busy} onChange={(event) => { setPolicy(event.target.value); setPolicyMessage(null); }} />
-            <button type="button" className="game-secondary" disabled={!native || busy || policy === world.narrativePolicy} onClick={() => void savePolicy()}>{t(writeKind === "policy" ? "game.policySaving" : "game.policySave")}</button>
+            <label htmlFor="game-policy-input">{t("game.policyLabel")}</label><textarea id="game-policy-input" value={policy} maxLength={8192} rows={3} disabled={busy || archived} onChange={(event) => { setPolicy(event.target.value); setPolicyMessage(null); }} />
+            <button type="button" className="game-secondary" disabled={!native || busy || archived || policy === world.narrativePolicy} onClick={() => void savePolicy()}>{t(writeKind === "policy" ? "game.policySaving" : "game.policySave")}</button>
             {policyMessage && <p className="game-notice" role="status">{policyMessage}</p>}
           </details>
         </div>
         {world.state.protocolVersion === 1
           ? <LegacyWorldStatePanel state={world.state} upgradeDisabled={!native || busy || loading || querying} upgrading={writeKind === "upgrade"} onUpgrade={() => void enableLongState()} />
-          : <LongStatePanel world={world} view={actorView} loading={actorLoading || busy || !native} error={actorError} onRefresh={() => { if (native && !busy) setActorRevision((value) => value + 1); }} />}
+          : <LongStatePanel world={world} view={currentActorView} loading={actorLoading || busy || !native} error={actorError} onRefresh={() => { if (native && !busy) setActorRevision((value) => value + 1); }} />}
       </div>}
-      {world && <GameMemory key={`${world.setup.worldId}:${world.branchId}`} world={world} actorView={actorView} busy={busy || loading || querying}
+      {world && <GameBranches key={world.setup.worldId} world={world} actorView={currentActorView} busy={busy || loading || querying}
+        beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite}
+        onCurrentBranch={(card) => { setBranchCard(card); setBranchStatusKnown(true); }}
+        onSelect={(incoming, card, originalAction) => { generation.current++; selectWorld(incoming); setBranchCard(card); setBranchStatusKnown(true); setRewritePrefill(originalAction); if (originalAction) setAction(originalAction.actionText); }} />}
+      {world && <GameMemory key={"memory:"+world.setup.worldId+":"+world.branchId} world={world} actorView={currentActorView} busy={busy || loading || querying}
         beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} />}
-      <footer className="game-footer">{t("game.stateArchivedHelp")}</footer>
+      {world && <GameFastForward key={"fast:"+world.setup.worldId+":"+world.branchId} world={world} busy={busy || loading || querying} archived={archived}
+        branchesEnabled={branchCard !== null} providerKind={providerKind} providerConfigured={Boolean(profile?.configured)}
+        beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} onWorld={applyWorld} />}
+      {world && <GameResearch key={"research:"+world.setup.worldId+":"+world.branchId} world={world} busy={busy || loading || querying} disabled={archived} branchesEnabled={branchCard!==null}
+        beginWrite={() => reserveWrite("annotation")} endWrite={releaseWrite} />}
+      <footer className="game-footer">{bt("branches.footer")}</footer>
     </main>
   );
 }

@@ -27,7 +27,7 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldMetadata, GameStoreE
     db.execute_batch("PRAGMA query_only=ON;BEGIN DEFERRED;")?;
     let version: i32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let app: i32 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    if !matches!(version, 1 | 2) || app != 0x4c495348 {
+    if !matches!(version, 1..=3) || app != 0x4c495348 {
         return Err(GameStoreError::IncompatibleSchema);
     }
     let count: i64 = db.query_row("SELECT count(*) FROM game_world", [], |r| r.get(0))?;

@@ -15,13 +15,13 @@
 
 ## 当前实际情况
 
-截至2026-10-14，M02核心/Windows闭环已验收；M03已实现长期状态、中文记忆、固定提醒、书签、来源可重建回顾、上下文预算与脱敏详情。最终workspace308项通过，原生300回合持久化管线另行通过；Windows及Android固定v2十回合已实测。新协议真实模型抽样仍遇503，不能据此认定模型叙事质量通过。M04分支与快进、M05研究正在推进。Android系统文件选择器边界及release独立未验收。详见[M03验证](docs/validation/M03.md)。
+截至2026-10-15，已推进至M05工程门槛：长期状态与记忆、世界线分叉/重写/更正/归档、分段快进与决策暂停、独立历史研究/缓存/来源和冻结采用已接入。Windows实际操作与冷启动、固定十线和300回合、原生故障回归通过；两端debug构建通过。按用户范围停在M06之前，正式备份包、稳定化与真实模型长局尚未开始；新Android界面和真实Brave服务未实测。详见[M03验证](docs/validation/M03.md)及[M04/M05验证](docs/validation/M04_M05.md)。
 
 文档工作、代码构建和设备验收分别记录，真实完成情况只维护在[任务台账](docs/TASKS.md)；当前工作现场与下一步见[现场状态](docs/STATE.md)。用户已完成部分无线真机验收，当前要求先开发、稍后复测；D024允许M02核心/Windows先行，Android设备证据依实际结果登记。
 
 开发命令与精确工具版本见[开发说明](docs/DEVELOPMENT.md)。可用 `pnpm dev` 预览界面；普通浏览器会提示原生未连接，不能在浏览器中验证 Rust 功能或游玩。
 
-Windows原生入口为`target/debug/lishi-app.exe`。打开后创建世界，默认固定规则演示；在“AI接口设置”保存服务后选择“自定义AI接口”才联网。默认要求HTTPS，用户明确选择时可启用HTTP，并会显示Key明文传输说明。失败不会改正式事实，也不会自动重试。
+Windows开发入口为`target/debug/lishi-app.exe`，先按开发说明启动Vite1420服务。打开后创建世界，默认固定规则演示；在“AI接口设置”保存服务后选择“自定义AI接口”才联网。默认要求HTTPS，用户明确选择时可启用HTTP，并会显示Key明文传输说明。失败不会改正式事实，也不会自动重试。
 
 游戏世界分别保存在应用私有目录内的SQLite，生产Key另由平台加密保存；测试笔记/技术恢复库保持独立。APK路径、使用入口和限制见开发说明；[正式回合契约](docs/contracts/TURN_V1.md)说明当前存档与输出边界。
 
@@ -42,6 +42,8 @@ Windows原生入口为`target/debug/lishi-app.exe`。打开后创建世界，默
 | [M01 设备清单](docs/validation/M01_DEVICE_CHECKLIST.md) | 六项设备门槛及当前证据 | 核对真机剩余验收 |
 | [Android 实测](docs/validation/ANDROID_DEVICE.md) | 无线设备、窗口修复、测试与限制 | 核对手机结果 |
 | [M03 草稿](docs/contracts/M03_ENTITIES_DRAFT.md) | v2实体/知识/迁移的设计依据，实际实现见M03验证 | 继续长期状态任务 |
+| [M04/M05契约](docs/contracts/M04_M05.md) | 世界线、快进作业、研究和引用的实施契约 | 继续相关核心与传输工作 |
+| [M04/M05验证](docs/validation/M04_M05.md) | 原生/Windows/固定故障、UI与两端产物证据 | 核对新功能与未验证边界 |
 | [M03 验证](docs/validation/M03.md) | 长期状态、300回合、检索、回顾、真实样本与限制 | 核对长期游玩工程证据 |
 | [M02 验证](docs/validation/M02.md) | 固定/真实短局、原子状态、Windows重开与产物 | 核对当前可玩闭环 |
 | [正式回合 v1](docs/contracts/TURN_V1.md) | 实体/时间/资源与模型输出规则 | 实现Provider、状态、存档或迁移 |
