@@ -163,6 +163,77 @@ await page.getByText("继续游玩").waitFor();
 await shot("08-home");
 check("home lists the world after reload", (await page.locator(".card").count()) >= 1);
 
+// Edits are a single reversible change after the latest turn.
+await page.locator(".card").first().click();
+await page.locator(".dock .choice").first().waitFor();
+await page.locator(".send-btn").click();
+await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+const clockBeforeEdit = await page.locator(".topbar .subtitle").textContent();
+const choicesBeforeEdit = await page.locator(".choice").allTextContents();
+await page.getByRole("button", { name: "角色" }).click();
+await page.getByRole("button", { name: "修改", exact: true }).click();
+await page.getByLabel("钱", { exact: true }).fill("500");
+await shot("09-panel-edit");
+check("edit panel fits phone width", !(await page.evaluate(() => document.querySelector(".panel").scrollWidth > innerWidth)));
+await page.getByRole("button", { name: "保存修改" }).click();
+await page.getByRole("button", { name: "修改", exact: true }).waitFor();
+await page.getByRole("button", { name: "关闭", exact: true }).click();
+await page.locator(".edit-line", { hasText: "你修改了：钱" }).waitFor();
+check("panel saves a readable edit in the story", true);
+check("editing keeps time and choices", await page.locator(".topbar .subtitle").textContent() === clockBeforeEdit && JSON.stringify(await page.locator(".choice").allTextContents()) === JSON.stringify(choicesBeforeEdit));
+check("regenerate stays on the preceding turn", (await page.locator(".turn").last().getByRole("button", { name: "重说" }).count()) === 1);
+await shot("10-edit-saved");
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "撤销", exact: true }).click();
+await page.locator(".edit-line").waitFor({ state: "detached" });
+check("undo removes the edit from the story", true);
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "重做", exact: true }).click();
+await page.locator(".edit-line").waitFor();
+check("redo restores the edit", true);
+await page.getByRole("button", { name: "重说", exact: true }).click();
+await page.locator(".edit-line", { hasText: "（已沿用）" }).waitFor({ timeout: 20000 });
+await page.getByRole("button", { name: "角色" }).click();
+check("regenerating carries the edit to the new version", (await page.locator(".stat").first().textContent()).includes("500"));
+await page.getByRole("button", { name: "修改", exact: true }).click();
+await page.getByRole("button", { name: "保存修改" }).click();
+await page.getByRole("button", { name: "修改", exact: true }).waitFor();
+await page.getByRole("button", { name: "关闭", exact: true }).click();
+check("saving unchanged panel adds no edit", (await page.locator(".edit-line").count()) === 1);
+
+// Reading an earlier turn is restored when reopening the world.
+for (let i = 0; i < 3; i++) {
+  await page.locator(".send-btn").click();
+  await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+}
+await page.locator(".story").evaluate((el) => { el.scrollTop = 0; });
+await page.getByRole("button", { name: "回到底部 ↓" }).waitFor();
+await page.waitForTimeout(500);
+const readTurn = await page.locator(".turn").first().getAttribute("data-node-id");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".card").first().click();
+await page.getByRole("button", { name: "回到底部 ↓" }).waitFor();
+check("reopening restores the earlier reading position", await page.locator(".story").evaluate((el) => el.scrollTop < 30) && await page.locator(".turn").first().getAttribute("data-node-id") === readTurn);
+await shot("11-reading-restored");
+await page.locator(".send-btn").click();
+await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+check("new generation follows the bottom again", (await page.getByRole("button", { name: "回到底部 ↓" }).count()) === 0);
+
+// Developer call history is only shown after enabling developer mode.
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.getByRole("button", { name: "设置", exact: true }).click();
+check("call history hidden outside developer mode", (await page.getByText("调用记录", { exact: true }).count()) === 0);
+await page.getByLabel(/开发者模式/).check();
+await page.getByText("调用记录", { exact: true }).waitFor();
+await page.locator(".item-row").first().waitFor();
+const callText = await page.locator(".item-row").first().textContent();
+check("developer mode shows recent call details", /\d{2}-\d{2}.*\d{2}:\d{2}/.test(callText) && callText.includes("回合") && callText.includes("fake-normal") && callText.includes("输入") && callText.includes("输出") && callText.includes("首字") && callText.includes("总计") && callText.includes("成功"));
+check("call history has at most 30 rows", (await page.locator(".item-row").count()) <= 30);
+await page.getByText("调用记录", { exact: true }).scrollIntoViewIfNeeded();
+await shot("12-call-history");
+await page.getByLabel(/开发者模式/).uncheck();
+check("disabling developer mode hides call history", (await page.getByText("调用记录", { exact: true }).count()) === 0);
+
 // No horizontal overflow, no page errors.
 check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
 check("no page errors", errors.length === 0, errors.join(" | "));

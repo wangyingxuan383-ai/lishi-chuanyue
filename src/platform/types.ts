@@ -85,6 +85,7 @@ export interface Platform {
     importText(): Promise<string | null>;
   };
   system: {
+    requestNotifications(): Promise<boolean>;
     /** The handler returns true when it consumed the back press. */
     onBack(handler: () => boolean): () => void;
   };

@@ -36,6 +36,6 @@ export async function createMemoryPlatform(llm?: Platform["llm"]): Promise<Platf
       get: unsupported,
     },
     files: { exportText: unsupported, importText: unsupported },
-    system: { onBack: () => () => {} },
+    system: { requestNotifications: async () => true, onBack: () => () => {} },
   };
 }

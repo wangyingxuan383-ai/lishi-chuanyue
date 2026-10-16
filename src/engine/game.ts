@@ -260,6 +260,18 @@ export class Game {
 
   // ---------- turns ----------
 
+  async editState(worldId: string, patch: TurnRecord, summary: string): Promise<tree.Cursor> {
+    const c = await tree.cursor(this.repo, worldId);
+    const state = await this.repo.getState(c.head.id);
+    const world = (await this.repo.getWorld(worldId))!;
+    const era = eraContext(world.eraId, state);
+    const applied = applyRecord(state, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency }, { advanceTime: false });
+    return tree.append(this.repo, c, {
+      kind: "edit", narrative: "", actionText: summary, record: patch, choices: [],
+      state: applied.state, meta: { chips: applied.chips },
+    });
+  }
+
   /** A new turn after the current head. */
   play(worldId: string, action: PlayerAction, onEvent: (e: TurnEvent) => void): TurnHandle {
     return this.run(worldId, action, "turn", null, onEvent);
@@ -274,7 +286,18 @@ export class Game {
     let handle: ChatHandle | null = null;
     let stopped = false;
     const done = (async () => {
-      const c = await tree.cursor(this.repo, worldId);
+      let c = await tree.cursor(this.repo, worldId);
+      let edit: StoryNode | null = null;
+      if (kind === "variant") {
+        while (c.head.kind === "edit") {
+          edit = c.head;
+          c = { ...c, head: (await this.repo.getNode(c.head.parentId!))! };
+        }
+        if (!edit && c.head.lastChildId) {
+          const child = await this.repo.getNode(c.head.lastChildId);
+          if (child?.kind === "edit") edit = child;
+        }
+      }
       const world = (await this.repo.getWorld(worldId))!;
       // For a variant, the turn is re-played from the head's parent with the same action.
       const base = kind === "variant" ? (await this.repo.getNode(c.head.parentId!))! : c.head;
@@ -327,6 +350,7 @@ export class Game {
         return;
       }
       const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent);
+      if (edit) cursor.cursor = await this.editState(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
       await this.repo.setSetting("pending", null);
       onEvent({ type: "done", cursor: cursor.cursor, node: cursor.node, chips: cursor.chips });
     })();

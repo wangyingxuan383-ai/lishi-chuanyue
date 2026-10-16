@@ -37,9 +37,9 @@ function ChipRow({ chips }: { chips: Chip[] }) {
 
 function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; children?: React.ReactNode }) {
   const press = useLongPress(() => onMenu(node));
-  if (node.kind === "edit") return <div className="edit-line">你修改了记录</div>;
+  if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>你修改了：{node.actionText}</div>;
   return (
-    <div className="turn" {...press}>
+    <div className="turn" data-node-id={node.id} {...press}>
       {node.kind !== "opening" && node.actionMode === "write" && node.actionText && (
         <div className="turn-written"><StoryText text={node.actionText} /></div>
       )}
@@ -76,25 +76,45 @@ export default function Play({ worldId }: { worldId: string }) {
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
+  const [notificationStart, setNotificationStart] = useState<(() => void) | null>(null);
   const handle = useRef<TurnHandle | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const readingLoaded = useRef(false);
+  const restoreReading = useRef<string | null>(null);
+  const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const era = eraContext(world?.eraId ?? null, state);
+  const turn = [...nodes].reverse().find((n) => n.kind !== "edit");
 
   const refresh = useCallback(async (keepLimit = limit) => {
     const w = await game.repo.getWorld(worldId);
     if (!w) return pop();
     const c = await tree.cursor(game.repo, worldId);
     const path = await game.repo.path(c.head.id, keepLimit + 1);
+    const currentState = await game.repo.getState(c.head.id);
+    let latest = c.head;
+    while (latest.kind === "edit") latest = (await game.repo.getNode(latest.parentId!))!;
+    const currentVariants = await tree.variants(game.repo, latest);
+    const loaded = path.slice(-keepLimit);
+    if (!readingLoaded.current) {
+      const saved = await game.repo.getSetting<string | null>("reading:" + worldId, null);
+      readingLoaded.current = true;
+      if (loaded.some((n) => n.id === saved) && saved !== loaded.filter((n) => n.kind !== "edit").at(-1)?.id) {
+        restoreReading.current = saved;
+        follow.current = false;
+        setFollowing(false);
+      }
+    }
     setHasMore(path.length > keepLimit);
-    setNodes(path.slice(-keepLimit));
+    setNodes(loaded);
     setWorld(w);
     setCursor(c);
-    setState(await game.repo.getState(c.head.id));
-    setVariants(await tree.variants(game.repo, c.head));
+    setState(currentState);
+    setVariants(currentVariants);
   }, [game, worldId, limit, pop]);
 
   useEffect(() => { void refresh(); }, []);
+  useEffect(() => () => { if (readingTimer.current) clearTimeout(readingTimer.current); }, []);
 
   // Follow the bottom while the player is there; stop when they scroll up.
   const onScroll = () => {
@@ -102,13 +122,25 @@ export default function Play({ worldId }: { worldId: string }) {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     follow.current = atBottom;
     setFollowing(atBottom);
+    if (readingTimer.current) clearTimeout(readingTimer.current);
+    readingTimer.current = setTimeout(() => {
+      const top = el.getBoundingClientRect().top;
+      const turns = [...el.querySelectorAll<HTMLElement>(".turn[data-node-id]")];
+      const nearby = turns.find((n) => n.getBoundingClientRect().bottom > top);
+      if (nearby) void game.repo.setSetting("reading:" + worldId, nearby.dataset.nodeId);
+    }, 400);
   };
   const toBottom = (smooth = false) => {
     const el = scroller.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   };
   useLayoutEffect(() => {
-    if (follow.current) toBottom();
+    if (restoreReading.current) {
+      const el = scroller.current;
+      const target = el?.querySelector<HTMLElement>(`[data-node-id="${restoreReading.current}"]`);
+      if (target && el) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      restoreReading.current = null;
+    } else if (follow.current) toBottom();
   }, [nodes, gen?.text, gen?.phase, notice]);
 
   // Page came back from the background: replay what the stream cached meanwhile.
@@ -153,43 +185,64 @@ export default function Play({ worldId }: { worldId: string }) {
     }
   };
 
+  const beforeGenerating = async (start: () => void) => {
+    if (game.platform.name === "android" && !await game.repo.getSetting("notifAsked", false)) setNotificationStart(() => start);
+    else start();
+  };
+  const answerNotifications = async (allow: boolean) => {
+    const start = notificationStart;
+    setNotificationStart(null);
+    await game.repo.setSetting("notifAsked", true);
+    if (allow) await game.platform.system.requestNotifications().catch(() => false);
+    start?.();
+  };
+
   const send = (override?: { mode: ActionMode; text: string }) => {
     if (gen || !cursor) return;
     if (!game.llm) { push({ name: "setup" }); return; }
-    const mode = override?.mode ?? (input.trim() ? MODES[modeIndex].mode : "continue");
-    const text = override?.text ?? (mode === "continue" ? "" : input.trim());
-    const directorNote = !override && noteOpen && note.trim() ? note.trim() : null;
-    setNotice(null);
-    follow.current = true;
-    setFollowing(true);
-    setGen({ phase: "starting", text: "", action: { mode, text }, variant: false });
-    setInput("");
-    setNote("");
-    setNoteOpen(false);
-    setModeIndex(0);
-    handle.current = game.play(worldId, { mode, text, directorNote }, onEvent(override ? null : { mode, text, note: directorNote ?? "" }));
+    void beforeGenerating(() => {
+      const mode = override?.mode ?? (input.trim() ? MODES[modeIndex].mode : "continue");
+      const text = override?.text ?? (mode === "continue" ? "" : input.trim());
+      const directorNote = !override && noteOpen && note.trim() ? note.trim() : null;
+      setNotice(null);
+      follow.current = true;
+      setFollowing(true);
+      setGen({ phase: "starting", text: "", action: { mode, text }, variant: false });
+      setInput("");
+      setNote("");
+      setNoteOpen(false);
+      setModeIndex(0);
+      handle.current = game.play(worldId, { mode, text, directorNote }, onEvent(override ? null : { mode, text, note: directorNote ?? "" }));
+    });
   };
 
   const regenerate = (hint: string | null) => {
-    if (gen || !cursor?.head.parentId) return;
-    setNotice(null);
-    follow.current = true;
-    setGen({ phase: "starting", text: "", action: cursor.head.actionMode && cursor.head.actionMode !== "continue" ? { mode: cursor.head.actionMode, text: cursor.head.actionText ?? "" } : null, variant: true });
-    handle.current = game.regenerate(worldId, hint, onEvent(null));
+    if (gen || !turn?.parentId) return;
+    void beforeGenerating(() => {
+      setNotice(null);
+      follow.current = true;
+      setFollowing(true);
+      setGen({ phase: "starting", text: "", action: turn.actionMode && turn.actionMode !== "continue" ? { mode: turn.actionMode, text: turn.actionText ?? "" } : null, variant: true });
+      handle.current = game.regenerate(worldId, hint, onEvent(null));
+    });
   };
 
   const resume = () => {
     if (gen || !cursor) return;
-    setNotice(null);
-    setGen({ phase: "starting", text: cursor.head.narrative, action: null, variant: true });
-    handle.current = game.resumeInterrupted(worldId, onEvent(null));
+    void beforeGenerating(() => {
+      setNotice(null);
+      follow.current = true;
+      setFollowing(true);
+      setGen({ phase: "starting", text: cursor.head.narrative, action: null, variant: true });
+      handle.current = game.resumeInterrupted(worldId, onEvent(null));
+    });
   };
 
   const switchVariant = async (delta: number) => {
     if (!cursor || !variants) return;
     const next = variants.index + delta;
     if (next < 0 || next >= variants.count) return;
-    await tree.switchVariant(game.repo, cursor, next);
+    await tree.switchVariant(game.repo, { ...cursor, head: turn! }, next);
     await refresh();
   };
 
@@ -234,7 +287,7 @@ export default function Play({ worldId }: { worldId: string }) {
 
   const head = cursor.head;
   const place = state.places.find((p) => p.id === state.placeId)?.name ?? era.title;
-  const shown = gen?.variant ? nodes.slice(0, -1) : nodes;
+  const shown = gen?.variant ? nodes.slice(0, nodes.findIndex((n) => n.id === turn?.id)) : nodes;
   const mode = MODES[modeIndex];
   const dead = state.protagonist.stats.health <= 0 && world.settings.difficulty !== "宽松";
   const sendLabel = gen ? "停止" : input.trim() ? "发送" : "继续";
@@ -257,7 +310,7 @@ export default function Play({ worldId }: { worldId: string }) {
           <div className="story-inner">
             {hasMore && <button className="load-more ghost" onClick={loadMore}>加载更早的剧情</button>}
             {shown.map((node) => {
-              const isHead = node.id === head.id && !gen;
+              const isHead = node.id === turn?.id && !gen;
               return (
                 <TurnView key={node.id} node={node} onMenu={setMenuNode}>
                   {isHead && node.status === "interrupted" && (
@@ -300,9 +353,9 @@ export default function Play({ worldId }: { worldId: string }) {
       </div>
 
       <div className="dock">
-        {!gen && !dead && !typing && head.choices.length > 0 && head.status !== "interrupted" && (
+        {!gen && !dead && !typing && !!turn?.choices.length && turn.status !== "interrupted" && (
           <div className="choices">
-            {head.choices.map((choice) => <ChoiceButton key={choice} text={choice} onTap={() => send({ mode: "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}
+            {turn.choices.map((choice) => <ChoiceButton key={choice} text={choice} onTap={() => send({ mode: "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}
           </div>
         )}
         {noteOpen && mode.mode !== "direct" && (
@@ -386,7 +439,11 @@ export default function Play({ worldId }: { worldId: string }) {
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
       {sheet === "story" && <StorySheet world={world} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onClose={() => setSheet(null)} />}
-      {panel && <Panel state={state} era={era} onClose={() => setPanel(false)} />}
+      {panel && <Panel state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
+      {notificationStart && <Sheet title="允许通知吗？" onClose={() => void answerNotifications(false)}>
+        <p>切到后台时，故事会继续写完。允许通知后，写作期间通知栏会显示“正在写下一段…”。</p>
+        <div className="row"><button className="primary" onClick={() => void answerNotifications(true)}>允许</button><button onClick={() => void answerNotifications(false)}>不用了</button></div>
+      </Sheet>}
     </div>
   );
 }

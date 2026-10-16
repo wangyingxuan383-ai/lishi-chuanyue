@@ -13,6 +13,7 @@ export interface TurnRecord {
   place?: string | null;
   money?: number | string | null;
   stats?: { health?: number; energy?: number; fame?: number } | null;
+  setStats?: { money?: number; health?: number; energy?: number; fame?: number };
   items?: { name: string; delta: number | string; place?: string | null; unit?: string }[] | null;
   people?: { name: string; role?: string; attitude?: string; note?: string; alive?: boolean; aliases?: string[] }[] | null;
   status?: { op: string; name: string; detail?: string }[] | null;
@@ -65,6 +66,7 @@ export function applyRecord(
   before: WorldState,
   record: TurnRecord | null,
   ctx: { mode: ActionMode; difficulty: Difficulty; currency: Currency },
+  opts?: { advanceTime?: boolean },
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
   const chips: Chip[] = [];
@@ -73,9 +75,9 @@ export function applyRecord(
   const me = s.protagonist;
   const now = () => s.time.elapsedMinutes;
 
-  // Time: always advances; falls back to a default for the action mode.
+  // Edits keep the current time; turns fall back to the action's default.
   const parsed = parseDurationMinutes(record?.time ?? null);
-  const minutes = parsed ?? DEFAULT_MINUTES[ctx.mode];
+  const minutes = opts?.advanceTime === false ? 0 : parsed ?? DEFAULT_MINUTES[ctx.mode];
   if (parsed === null && record?.time != null) log.push(`时间“${record.time}”无法识别，按 ${minutes} 分钟计`);
   s.time.elapsedMinutes += minutes;
   if (minutes >= 15) chips.push({ text: describeMinutes(minutes), tone: "info" });
@@ -130,7 +132,13 @@ export function applyRecord(
     me.stats[key] = clamp(before + delta);
     if (me.stats[key] !== before) chips.push({ text: `${statNames[key]} ${delta > 0 ? "↑" : "↓"}`, tone: delta > 0 ? "gain" : "loss" });
   }
-  if (me.stats.health <= 0) {
+  if (opts?.advanceTime === false && record.setStats) {
+    for (const key of ["money", "health", "energy", "fame"] as const) {
+      const value = record.setStats[key];
+      if (value !== undefined) me.stats[key] = clamp(value, 0, key === "money" ? Infinity : 100);
+    }
+  }
+  if (me.stats.health <= 0 && opts?.advanceTime !== false) {
     if (ctx.difficulty === "宽松") {
       me.stats.health = 1;
       if (!me.statuses.some((x) => x.name === "昏迷")) me.statuses.push({ name: "昏迷", detail: "伤重昏迷", sinceMinute: now() });
@@ -194,7 +202,7 @@ export function applyRecord(
       } else if (!existing.aliases.includes(raw.name)) existing.aliases.push(raw.name);
     }
     if (raw.role) existing.role = raw.role;
-    if (raw.note) existing.notes = raw.note;
+    if (raw.note !== undefined) existing.notes = raw.note;
     existing.lastSeenMinute = now();
     const attitude = attitudeOf(raw.attitude);
     if (attitude && attitude !== existing.attitude) {
@@ -206,8 +214,11 @@ export function applyRecord(
       existing.alive = false;
       chips.push({ text: `${existing.name} 身故`, tone: "warn" });
     } else if (raw.alive === true && !existing.alive) {
-      log.push(`${existing.name} 已死亡，不能复活`);
-      notes.push(`${existing.name} 已经去世。`);
+      if (opts?.advanceTime === false) existing.alive = true;
+      else {
+        log.push(`${existing.name} 已死亡，不能复活`);
+        notes.push(`${existing.name} 已经去世。`);
+      }
     }
   }
 
@@ -244,6 +255,7 @@ export function applyRecord(
     if (!goal) { log.push(`目标“${raw.name}”不存在，${op} 已忽略`); continue; }
     if (op === "done") { goal.status = "完成"; chips.push({ text: `完成：${goal.name}`, tone: "gain" }); }
     else if (op === "fail") { goal.status = "失败"; chips.push({ text: `失败：${goal.name}`, tone: "loss" }); }
+    else if (op === "abandon") { goal.status = "放弃"; chips.push({ text: `放弃：${goal.name}`, tone: "info" }); }
     else if (raw.detail) goal.progress = raw.detail;
   }
 

@@ -4,6 +4,7 @@ mod document_picker;
 mod error;
 mod files;
 mod keep_alive;
+mod notifications;
 mod secret;
 mod secrets;
 mod sql;
@@ -23,6 +24,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(secret::init())
         .plugin(document_picker::init())
+        .plugin(notifications::init())
         .setup(|app| {
             #[cfg(target_os = "android")]
             android_tls::initialize(app)?;

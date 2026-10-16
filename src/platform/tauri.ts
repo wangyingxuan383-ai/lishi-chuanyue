@@ -65,6 +65,7 @@ export async function createTauriPlatform(): Promise<Platform> {
       importText: () => call("file_import_text"),
     },
     system: {
+      requestNotifications: () => call("plugin:notifications|request_notification_permission"),
       onBack(handler) {
         backHandlers.push(handler);
         listenBack();

@@ -30,6 +30,77 @@ async function play(game: Game, worldId: string, text: string, mode: "do" | "say
 }
 
 describe("Game", () => {
+  it("edits without advancing time and supports undo and redo", async () => {
+    const { game, worldId } = await setup([]);
+    const before = await tree.cursor(game.repo, worldId);
+    const c = await game.editState(worldId, {
+      time: "一夜",
+      setStats: { money: 500, health: 0, energy: 100, fame: 100 },
+      people: [{ name: "王掌柜", attitude: "友善", note: "记得这份人情", alive: false }],
+      items: [{ name: "银簪", delta: 1 }], status: [{ op: "add", name: "风寒", detail: "有些头疼" }],
+      goals: [{ op: "abandon", name: "三日内付清房钱九十文" }],
+    }, "钱 300 → 500等");
+    const state = await game.repo.getState(c.head.id);
+    expect(state.time.elapsedMinutes).toBe(0);
+    expect(c.head).toMatchObject({ kind: "edit", narrative: "", actionText: "钱 300 → 500等", choices: [] });
+    expect(c.head.meta.chips).not.toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining("过了") })]));
+    expect(state.protagonist.stats).toMatchObject({ money: 500, health: 0, energy: 100, fame: 100 });
+    expect(state.people[0]).toMatchObject({ attitude: "友善", notes: "记得这份人情", alive: false });
+    expect(state.protagonist.items.at(-1)?.name).toBe("银簪");
+    expect(state.protagonist.statuses[0].name).toBe("风寒");
+    expect(state.goals[0].status).toBe("放弃");
+    const undone = await tree.undo(game.repo, c);
+    expect(undone.head.id).toBe(before.head.id);
+    expect((await game.repo.getState(undone.head.id)).protagonist.stats.money).toBe(300);
+    const redone = await tree.redo(game.repo, undone);
+    expect(await game.repo.getState(redone.head.id)).toEqual(state);
+  });
+
+  it("reapplies the immediate edit after regenerating its preceding turn", async () => {
+    const { game, worldId } = await setup([
+      { text: "版本一。" + RECORD({ money: -10 }) },
+      { text: "版本二。" + RECORD({ money: -30 }) },
+    ]);
+    await play(game, worldId, "打听消息");
+    const patch = { setStats: { money: 500 }, items: [{ name: "银簪", delta: 1 }] };
+    await game.editState(worldId, patch, "钱 290 → 500、添加物品 银簪");
+    const events: TurnEvent[] = [];
+    await game.regenerate(worldId, null, (e) => events.push(e)).done;
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head.kind).toBe("edit");
+    expect(c.head.record).toEqual(patch);
+    expect(c.head.actionText).toBe("钱 290 → 500、添加物品 银簪（已沿用）");
+    const parent = (await game.repo.getNode(c.head.parentId!))!;
+    expect(parent.narrative).toBe("版本二。");
+    expect(parent.actionText).toBe("打听消息");
+    expect((await game.repo.getState(c.head.id)).protagonist.stats.money).toBe(500);
+    expect((await game.repo.getState(c.head.id)).time.elapsedMinutes).toBe(15);
+    expect(events.at(-1)).toMatchObject({ type: "done", cursor: { head: { id: c.head.id } } });
+  });
+
+  it("clamps edited stats and lets notes and deceased marks be cleared", async () => {
+    const { game, worldId } = await setup([]);
+    await game.editState(worldId, { people: [{ name: "王掌柜", note: "旧事", alive: false }] }, "王掌柜：已故");
+    const c = await game.editState(worldId, { setStats: { money: -1, health: 200, energy: -10, fame: 150 }, people: [{ name: "王掌柜", note: "", alive: true }] }, "修改");
+    const state = await game.repo.getState(c.head.id);
+    expect(state.protagonist.stats).toMatchObject({ money: 0, health: 100, energy: 0, fame: 100 });
+    expect(state.people[0]).toMatchObject({ notes: "", alive: true });
+  });
+
+  it("only carries the first edit immediately after the regenerated turn", async () => {
+    const { game, worldId } = await setup([
+      { text: "版本一。" + RECORD({}) }, { text: "版本二。" + RECORD({}) },
+    ]);
+    await play(game, worldId, "出门");
+    await game.editState(worldId, { setStats: { money: 500 } }, "钱 300 → 500");
+    await game.editState(worldId, { setStats: { money: 800 } }, "钱 500 → 800");
+    await game.regenerate(worldId, null, () => {}).done;
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head.actionText).toBe("钱 300 → 500（已沿用）");
+    expect((await game.repo.getState(c.head.id)).protagonist.stats.money).toBe(500);
+    expect((await game.repo.getNode(c.head.parentId!))!.kind).toBe("turn");
+  });
+
   it("creates a world from the opening record without spending time or money", async () => {
     const { game, worldId, events } = await setup([]);
     expect(events.at(-1)?.type).toBe("done");

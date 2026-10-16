@@ -171,6 +171,7 @@ export async function createWebPlatform(): Promise<Platform> {
       },
     },
     system: {
+      requestNotifications: async () => true,
       onBack(handler) {
         backHandlers.push(handler);
         return () => {
