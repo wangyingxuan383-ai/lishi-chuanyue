@@ -50,6 +50,8 @@ for (const relative of docFiles) {
   if (text.includes("\uFFFD")) failures.push(`Replacement character: ${relative}`);
   const fences = text.split(/\r?\n/).filter(line => /^\s*```/.test(line)).length;
   if (fences % 2) failures.push(`Unbalanced code fence: ${relative}`);
+  // Archived documents are frozen snapshots; their links point at the tagged legacy tree.
+  if (relative.startsWith(path.join("docs", "archive") + path.sep)) continue;
   const withoutCode = text.replace(/```[\s\S]*?```/g, "");
   for (const match of withoutCode.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)) {
     const raw = match[1].replace(/^<|>$/g, "");
@@ -72,7 +74,7 @@ const dependencies = new Map();
 const decisionIds = new Set([...decisions.matchAll(/^### ([DV]\d{3})\b/gm)].map(match => match[1]));
 const states = new Set(["待开始", "进行中", "待验收", "已完成", "受阻", "已取消"]);
 const required = ["目标/交付", "依赖", "状态", "负责人/范围", "验收", "实际成果", "证据", "阻塞", "更新时间", "完成时间", "关联决策"];
-for (const match of tasks.matchAll(/^### (M\d{2}-T\d{3}) ([^\r\n]+)\r?\n([\s\S]*?)(?=^### |^## |$(?![\s\S]))/gm)) {
+for (const match of tasks.matchAll(/^### ([MR]\d{2}-T\d{3}) ([^\r\n]+)\r?\n([\s\S]*?)(?=^### |^## |$(?![\s\S]))/gm)) {
   const [, id, , block] = match;
   if (taskIds.has(id)) failures.push(`Duplicate task: ${id}`);
   taskIds.add(id);
@@ -80,7 +82,7 @@ for (const match of tasks.matchAll(/^### (M\d{2}-T\d{3}) ([^\r\n]+)\r?\n([\s\S]*
   const state = /^- 状态：([^。\r\n]+)/m.exec(block)?.[1];
   if (!states.has(state)) failures.push(`Invalid task state: ${id}`);
   const dependencyText = /^- 依赖：(.+)$/m.exec(block)?.[1] ?? "";
-  dependencies.set(id, [...dependencyText.matchAll(/M\d{2}-T\d{3}/g)].map(item => item[0]));
+  dependencies.set(id, [...dependencyText.matchAll(/[MR]\d{2}-T\d{3}/g)].map(item => item[0]));
   const related = /^- 关联决策：(.+)$/m.exec(block)?.[1] ?? "";
   for (const item of related.matchAll(/[DV]\d{3}/g)) if (!decisionIds.has(item[0])) failures.push(`Unknown decision: ${id}/${item[0]}`);
   if (state === "已完成" && /^- 完成时间：[—-]/m.test(block)) failures.push(`Completed task lacks date: ${id}`);
