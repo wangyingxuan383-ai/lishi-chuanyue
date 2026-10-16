@@ -1,8 +1,22 @@
 import type { Platform } from "../../platform";
 import { MIGRATIONS } from "./migrations";
 
-/** Brings the database to the latest schema; backs up first when an upgrade is due. */
-export async function migrate(platform: Platform): Promise<number> {
+const running = new WeakMap<Platform, Promise<number>>();
+
+/**
+ * Brings the database to the latest schema; backs up first when an upgrade is
+ * due. Concurrent calls for the same platform share one run.
+ */
+export function migrate(platform: Platform): Promise<number> {
+  let run = running.get(platform);
+  if (!run) {
+    run = migrateOnce(platform).finally(() => running.delete(platform));
+    running.set(platform, run);
+  }
+  return run;
+}
+
+async function migrateOnce(platform: Platform): Promise<number> {
   await platform.sql.batch([{ sql: "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)" }]);
   const rows = await platform.sql.query("SELECT MAX(version) AS v FROM schema_version");
   const current = Number(rows[0]?.v ?? 0);

@@ -77,5 +77,7 @@ describe("urls", () => {
     expect(chatCompletionsUrl("https://api.x.com/v1/")).toBe("https://api.x.com/v1/chat/completions");
     expect(chatCompletionsUrl("https://x/api/v3/chat/completions")).toBe("https://x/api/v3/chat/completions");
     expect(serviceBase("http://1.2.3.4:8317/")).toBe("http://1.2.3.4:8317/v1");
+    expect(chatCompletionsUrl("https://generativelanguage.googleapis.com/v1beta/openai")).toBe("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions");
+    expect(chatCompletionsUrl("https://open.bigmodel.cn/api/paas/v4")).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions");
   });
 });

@@ -211,6 +211,19 @@ export class Repo {
     return (await this.q(`SELECT ${NODE_COLUMNS} FROM nodes WHERE parent_id = ? ORDER BY seq`, [nodeId])).map(toNode);
   }
 
+  /** Replaces a node's content and state in place (used to finish an interrupted turn). */
+  async completeNode(nodeId: string, fields: { narrative: string; record: unknown; choices: string[]; status: StoryNode["status"]; meta: Record<string, unknown> }, state: WorldState, extra: SqlStatement[] = []): Promise<StoryNode> {
+    await this.platform.sql.batch([
+      {
+        sql: "UPDATE nodes SET narrative = ?, record_json = ?, choices_json = ?, status = ?, meta_json = ? WHERE id = ?",
+        params: [fields.narrative, JSON.stringify(fields.record ?? null), JSON.stringify(fields.choices), fields.status, JSON.stringify(fields.meta), nodeId],
+      },
+      { sql: "UPDATE states SET state_json = ? WHERE node_id = ?", params: [JSON.stringify(state), nodeId] },
+      ...extra,
+    ]);
+    return (await this.getNode(nodeId))!;
+  }
+
   async updateNarrative(nodeId: string, narrative: string): Promise<void> {
     await this.q("UPDATE nodes SET narrative = ?, rewritten = 1 WHERE id = ?", [narrative, nodeId]);
   }
@@ -244,6 +257,19 @@ export class Repo {
 
   async setCurrentLine(worldId: string, lineId: string): Promise<void> {
     await this.q("UPDATE worlds SET current_line_id = ?, played_at = ? WHERE id = ?", [lineId, now(), worldId]);
+  }
+
+  // ---------- usage ----------
+  usageStatement(u: {
+    worldId: string | null; nodeId: string | null; purpose: string; model: string; promptTokens: number | null;
+    completionTokens: number | null; estimated: boolean; firstTokenMs: number | null; totalMs: number | null; outcome: string;
+  }): SqlStatement {
+    return {
+      sql: `INSERT INTO usage (id, world_id, node_id, purpose, model, prompt_tokens, completion_tokens, estimated, first_token_ms, total_ms, outcome, at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      params: [newId(), u.worldId, u.nodeId, u.purpose, u.model, u.promptTokens, u.completionTokens, u.estimated ? 1 : 0,
+        u.firstTokenMs === null ? null : Math.round(u.firstTokenMs), u.totalMs === null ? null : Math.round(u.totalMs), u.outcome, now()],
+    };
   }
 
   // ---------- settings ----------

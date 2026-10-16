@@ -1,0 +1,170 @@
+import { describe, expect, it } from "vitest";
+import { createMemoryPlatform } from "../platform/memory";
+import { Game, type TurnEvent } from "./game";
+import { RECORD, fakeLlm, reply, type Script } from "./testing/fakeLlm";
+import * as tree from "./tree";
+
+const LLM = { slot: "main", url: "https://x/v1/chat/completions", model: "m", auxModel: "aux", includeUsage: true };
+const OPENING = "你醒来，屋里很冷。\n天宝七载（戊子）冬月，第一日，辰时。\n门外王掌柜催房钱。" + RECORD({
+  place: "西市旁邸店", people: [{ name: "王掌柜", role: "邸店掌柜", attitude: "冷淡" }],
+  items: [{ name: "旧书", delta: 3 }], goals: [{ op: "add", name: "三日内付清房钱九十文" }],
+});
+
+async function setup(scripts: Script[]) {
+  const llm = fakeLlm([{ text: OPENING }, ...scripts]);
+  const platform = await createMemoryPlatform(llm);
+  const game = await Game.open(platform, LLM);
+  const events: TurnEvent[] = [];
+  const worldId = (await game.createWorld({
+    title: "长安", eraId: "tang-748",
+    opening: { protagonist: { name: "李安", gender: "男", age: 22, identity: "落第举子", situation: "欠房钱", origin: "历史系研究生" }, transmigration: "魂穿" },
+  }, (e) => events.push(e)))!;
+  return { llm, platform, game, worldId, events };
+}
+
+async function play(game: Game, worldId: string, text: string, mode: "do" | "say" | "continue" = "do") {
+  const events: TurnEvent[] = [];
+  await game.play(worldId, { mode, text }, (e) => events.push(e)).done;
+  return events;
+}
+
+describe("Game", () => {
+  it("creates a world from the opening record without spending time or money", async () => {
+    const { game, worldId, events } = await setup([]);
+    expect(events.at(-1)?.type).toBe("done");
+    const c = await tree.cursor(game.repo, worldId);
+    const state = await game.repo.getState(c.head.id);
+    expect(c.head.narrative).toContain("王掌柜催房钱");
+    expect(c.head.narrative).not.toContain("<record>");
+    expect(state.time.elapsedMinutes).toBe(0);
+    expect(state.protagonist.stats.money).toBe(300);
+    expect(state.people[0].name).toBe("王掌柜");
+    expect(state.goals[0].name).toBe("三日内付清房钱九十文");
+    expect(c.head.choices).toEqual(["甲", "乙", "丙"]);
+  });
+
+  it("plays a turn: streams text without the record, applies changes, records usage", async () => {
+    const { game, worldId, platform } = await setup([{ text: "你下楼买了两个胡饼。" + RECORD({ money: -6, items: [{ name: "胡饼", delta: 2 }] }) }]);
+    const events = await play(game, worldId, "买两个胡饼");
+    const texts = events.filter((e) => e.type === "text").map((e) => (e as { full: string }).full);
+    expect(texts.at(-1)).toBe("你下楼买了两个胡饼。\n\n");
+    expect(texts.join("")).not.toContain("record");
+    const done = events.at(-1) as Extract<TurnEvent, { type: "done" }>;
+    expect(done.chips.map((c) => c.text)).toContain("钱 −6 文");
+    const state = await game.repo.getState(done.node.id);
+    expect(state.protagonist.stats.money).toBe(294);
+    expect(state.time.elapsedMinutes).toBe(15);
+    const usage = await platform.sql.query("SELECT purpose, prompt_tokens FROM usage ORDER BY at");
+    expect(usage.map((u) => u.purpose)).toEqual(["opening", "turn"]);
+  });
+
+  it("falls back to extraction when the record is missing", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "你在街角坐了半个时辰，什么也没发生。" },
+      { text: '{"time":"半个时辰","log":"闲坐","choices":["起身"]}' },
+    ]);
+    const events = await play(game, worldId, "坐一会儿");
+    expect(events.some((e) => e.type === "organizing")).toBe(true);
+    const done = events.at(-1) as Extract<TurnEvent, { type: "done" }>;
+    expect(done.node.choices).toEqual(["起身"]);
+    expect(done.node.meta.extracted).toBe(true);
+    expect((await game.repo.getState(done.node.id)).time.elapsedMinutes).toBe(60);
+    expect(llm.calls[2].body.model).toBe("aux");
+  });
+
+  it("keeps the turn with no record when extraction also fails", async () => {
+    const { game, worldId } = await setup([{ text: "你发了会儿呆。" }, { text: "无法提取" }]);
+    const done = (await play(game, worldId, "发呆")).at(-1) as Extract<TurnEvent, { type: "done" }>;
+    expect(done.node.status).toBe("no_record");
+    expect(done.node.choices).toEqual([]);
+  });
+
+  it("retries once when the request fails before any data", async () => {
+    const { game, worldId, llm } = await setup([
+      [{ type: "error", kind: "http", status: 503 }],
+      { text: "这回顺利了。" + RECORD({}) },
+    ]);
+    const events = await play(game, worldId, "出门");
+    expect(events.at(-1)?.type).toBe("done");
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it("reports a failure before any text without saving a turn", async () => {
+    const { game, worldId } = await setup([
+      [{ type: "error", kind: "http", status: 401, message: "bad key" }],
+    ]);
+    const events = await play(game, worldId, "出门");
+    expect(events.at(-1)).toMatchObject({ type: "failed", reason: "auth", partialSaved: false });
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head.kind).toBe("opening");
+  });
+
+  it("saves partial text as an interrupted turn and can continue it", async () => {
+    const partial = reply("你推开门，风雪扑面。", { size: 3 }).slice(0, 3);
+    const { game, worldId } = await setup([
+      [...partial, { type: "error", kind: "timeout_idle" }],
+      { text: "你缩了缩脖子，走进雪里。" + RECORD({ time: "两刻" }) },
+    ]);
+    const events = await play(game, worldId, "出门");
+    expect(events.at(-1)).toMatchObject({ type: "failed", reason: "timeout", partialSaved: true });
+    let c = await tree.cursor(game.repo, worldId);
+    expect(c.head.status).toBe("interrupted");
+    expect(c.head.narrative).toBe("你推开门，风");
+
+    const more: TurnEvent[] = [];
+    await game.resumeInterrupted(worldId, (e) => more.push(e)).done;
+    c = await tree.cursor(game.repo, worldId);
+    expect(c.head.status).toBe("ok");
+    expect(c.head.narrative).toBe("你推开门，风你缩了缩脖子，走进雪里。");
+    expect((await game.repo.getState(c.head.id)).time.elapsedMinutes).toBe(30);
+  });
+
+  it("does not save a refused turn", async () => {
+    const { game, worldId } = await setup([{ text: "抱歉，我无法继续这个故事。" }]);
+    const events = await play(game, worldId, "动手");
+    expect(events.at(-1)).toMatchObject({ type: "failed", reason: "refused" });
+    expect((await tree.cursor(game.repo, worldId)).head.kind).toBe("opening");
+  });
+
+  it("treats a content_filter finish as refused", async () => {
+    const { game, worldId } = await setup([{ text: "……", finish: "content_filter" }]);
+    expect((await play(game, worldId, "动手")).at(-1)).toMatchObject({ reason: "refused" });
+  });
+
+  it("regenerates a sibling version with the same action", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "版本一。" + RECORD({}) },
+      { text: "版本二。" + RECORD({}) },
+    ]);
+    await play(game, worldId, "打听消息");
+    await game.regenerate(worldId, "写短一点", () => {}).done;
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head.narrative).toBe("版本二。");
+    expect(c.head.actionText).toBe("打听消息");
+    expect((await tree.variants(game.repo, c.head)).count).toBe(2);
+    expect(JSON.stringify(llm.calls[2].body)).toContain("写短一点");
+  });
+
+  it("passes last turn's corrections into the next prompt", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "你想买马。" + RECORD({ money: -9000, items: [{ name: "马", delta: 1 }] }) },
+      { text: "你转身离开。" + RECORD({}) },
+    ]);
+    await play(game, worldId, "买马");
+    await play(game, worldId, "走");
+    expect(JSON.stringify(llm.calls[2].body)).toContain("没有成交");
+  });
+
+  it("recovers a turn that finished while the app was killed", async () => {
+    const { game, worldId, platform } = await setup([]);
+    const c = await tree.cursor(game.repo, worldId);
+    const llm = platform.llm as ReturnType<typeof fakeLlm>;
+    llm.cache.set("dead", reply("你睡到天亮。" + RECORD({ time: "一夜" })));
+    await game.repo.setSetting("pending", { worldId, lineId: c.line.id, parentId: c.head.id, streamId: "dead", kind: "turn", action: { mode: "do", text: "睡觉" } });
+    expect(await game.recoverPending()).toBe(worldId);
+    const after = await tree.cursor(game.repo, worldId);
+    expect(after.head.narrative).toBe("你睡到天亮。");
+    expect((await game.repo.getState(after.head.id)).time.elapsedMinutes).toBe(720);
+    expect(await game.recoverPending()).toBeNull();
+  });
+});

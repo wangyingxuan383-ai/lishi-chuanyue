@@ -90,6 +90,8 @@ export interface ChatHandle {
   streamId: Promise<string>;
   result: Promise<ChatResult>;
   cancel(): void;
+  /** Replays events the page missed while it was paused in the background. */
+  catchUp(): Promise<void>;
 }
 
 export function streamChat(platform: Platform, request: ChatRequest, callbacks: ChatCallbacks = {}): ChatHandle {
@@ -106,6 +108,16 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
     fail = reject;
   });
 
+  // Events are numbered in arrival order so a replay from the native cache
+  // (catchUp) and late channel deliveries never apply the same event twice.
+  let processed = 0;
+  let channelIndex = 0;
+  const fromChannel = (event: StreamEvent) => {
+    const index = channelIndex++;
+    if (index < processed) return;
+    processed = index + 1;
+    onEvent(event);
+  };
   const onEvent = (event: StreamEvent) => {
     if (event.type === "data") {
       const chunk = parseChunk(event.data);
@@ -140,7 +152,7 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
   };
   const streamId = platform.llm.stream(
     { slot: request.slot, url: request.url, body, timeouts: request.timeouts ?? DEFAULT_TIMEOUTS },
-    onEvent,
+    fromChannel,
   );
   // A request refused before it starts (unbound URL, missing key) rejects here.
   streamId.catch((error) => {
@@ -153,15 +165,32 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
     streamId,
     result,
     cancel: () => void streamId.then((id) => platform.llm.cancel(id)),
+    async catchUp() {
+      const snapshot = await platform.llm.resume(await streamId).catch(() => null);
+      if (!snapshot) return;
+      for (const event of snapshot.events.slice(processed)) {
+        processed++;
+        onEvent(event);
+      }
+    },
   };
 }
 
-/** Accepts a root like https://host/v1 or a full .../chat/completions URL. */
+/**
+ * Accepts a bare host (https://api.x.com → /v1/chat/completions), a base with
+ * a path (…/v1, …/api/v3, …/v1beta/openai → + /chat/completions) or a full
+ * …/chat/completions URL.
+ */
 export function chatCompletionsUrl(base: string): string {
   const trimmed = base.trim().replace(/\/+$/, "");
   if (/\/chat\/completions$/.test(trimmed)) return trimmed;
-  if (/\/v\d+$/.test(trimmed)) return `${trimmed}/chat/completions`;
-  return `${trimmed}/v1/chat/completions`;
+  let path = "";
+  try {
+    path = new URL(trimmed).pathname.replace(/\/+$/, "");
+  } catch {
+    /* treat as host only */
+  }
+  return path ? `${trimmed}/chat/completions` : `${trimmed}/v1/chat/completions`;
 }
 
 /** The base a key is bound to: everything before /chat/completions. */
