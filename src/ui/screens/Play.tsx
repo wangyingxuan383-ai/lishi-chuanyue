@@ -71,6 +71,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "lines" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
+  const [typing, setTyping] = useState(false);
   const handle = useRef<TurnHandle | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -294,7 +295,7 @@ export default function Play({ worldId }: { worldId: string }) {
       </div>
 
       <div className="dock">
-        {!gen && !dead && head.choices.length > 0 && head.status !== "interrupted" && (
+        {!gen && !dead && !typing && head.choices.length > 0 && head.status !== "interrupted" && (
           <div className="choices">
             {head.choices.map((choice) => <ChoiceButton key={choice} text={choice} onTap={() => send({ mode: "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}
           </div>
@@ -308,6 +309,8 @@ export default function Play({ worldId }: { worldId: string }) {
             rows={1}
             value={input}
             disabled={dead}
+            onFocus={() => setTyping(true)}
+            onBlur={() => setTyping(false)}
             placeholder={dead ? "" : mode.placeholder}
             onChange={(e) => {
               const v = e.target.value;
