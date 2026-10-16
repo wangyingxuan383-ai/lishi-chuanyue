@@ -6,7 +6,7 @@ import type { EraContext } from "../era";
 import { formatMoney } from "../money";
 import type { ActionMode, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 
-export const PROMPT_VERSION = "turn-3";
+export const PROMPT_VERSION = "turn-4";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -158,7 +158,7 @@ export function turnMessages(input: TurnPromptInput): ChatMessage[] {
     ...historyMessages(input.history, budget),
     {
       role: "user",
-      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}`,
+      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
     },
   ];
 }
