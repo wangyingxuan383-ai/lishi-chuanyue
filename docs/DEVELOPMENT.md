@@ -1,43 +1,57 @@
 # 开发环境与命令
 
-> 更新：2026-10-16（Asia/Shanghai）。v3 的开发命令会在 R01 完成后重写；当前仍是 v2 代码，下面的工具基线来自 v2 实测（2026-10-12 核实），v3 继续沿用。v2 完整开发说明见[归档](archive/v2/DEVELOPMENT.md)。
+> 更新：2026-10-16（Asia/Shanghai），对应 R01。工具基线来自 v2 实测（2026-10-12 核实）并继续沿用；v2 完整开发说明见[归档](archive/v2/DEVELOPMENT.md)。
 
 ## 本机工具基线
 
 | 工具 | 版本 / 位置 |
 | --- | --- |
-| Node / npm | 24.19.0 / 11.17.0，`C:\Program Files\nodejs` |
-| pnpm | 11.25.0（`package.json` 的 `packageManager` 固定） |
-| Rust / Cargo | 1.99.0，用户 `.cargo/bin`；`rust-toolchain.toml` 固定版本与 Android target |
+| Node / npm | 24.19.0，`C:\Program Files\nodejs` |
+| pnpm | 11.25.0，经 corepack 使用（bash 中写 `corepack pnpm ...`；PowerShell 执行 Enter-Dev 后可直接用 `pnpm`） |
+| Rust / Cargo | 1.99.0；`rust-toolchain.toml` 固定版本与 Android target |
 | Windows C++ | VS 2022 BuildTools 17.14，`C:\DevTools\LishiBuildTools` |
-| WebView2 | 已安装 |
 | JDK | Temurin 17.0.20.1+1，`C:\Users\Windows11\AppData\Local\Programs\LishiToolchain\jdk-17.0.20.1+1` |
 | Android SDK | `C:\Users\Windows11\AppData\Local\Android\Sdk`；API 36、Build Tools 36.0.0、NDK 28.2.13676358 |
 | Gradle / AGP | wrapper 9.6.1 / AGP 9.3.3 |
-| 前端 / Tauri | React 19.3、TypeScript 7.0.2、Vite 8.3.4、Tauri CLI 2.12.2、`@tauri-apps/api` 2.12.3 |
+| 前端 | React 19.3、TypeScript 7.0.2、Vite 8.3.4、`@tauri-apps/api` 2.12.3、sql.js、vitest、playwright-core、tsx |
 
-机器相关路径放在不入 Git 的 `.private/toolchain.json`（`javaHome`、`androidHome`，可选 `javaProxyHost`/`javaProxyPort`），由 `scripts/Enter-Dev.ps1` 读取，只设置当前进程环境。
+机器相关路径放在不入 Git 的 `.private/toolchain.json`（`javaHome`、`androidHome`，可选 `javaProxyHost`/`javaProxyPort`），由 `scripts/Enter-Dev.ps1` 读取，只设置当前 PowerShell 进程的环境。
 
-## 当前可用命令（v2 代码，R01 后更新）
+## 常用命令
 
 ```powershell
-. .\scripts\Enter-Dev.ps1                 # 设置当前进程的 JAVA_HOME / ANDROID_HOME 等
+. .\scripts\Enter-Dev.ps1                 # JAVA_HOME / ANDROID_HOME / NDK_HOME / pnpm 垫片
 pnpm install --frozen-lockfile
+pnpm test                                  # vitest 单元测试
 pnpm build                                 # 类型检查 + 前端构建
-pnpm tauri build --no-bundle               # Windows 优化构建
-pnpm tauri android build --target aarch64 --apk --ci   # Android ARM64 APK
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                     # Rust 平台服务测试（只连本机测试服务）
+pnpm tauri build --debug --no-bundle       # Windows：target\debug\lishi-app.exe
+pnpm tauri android build --debug --target aarch64 --apk --ci   # Android debug APK
+.\scripts\Verify-AndroidPackage.ps1 -Profile debug -ApkPath src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk
 node scripts/check-docs.mjs                # 文档检查
 ```
 
-APK 签名与包检查：`scripts/Sign-AndroidPreview.ps1`、`scripts/Verify-AndroidPackage.ps1`（细节见[归档交付说明](archive/v2/RELEASE.md)）。
+## 浏览器开发台（日常开发主要用这个）
+
+1. 可选：复制 `.env.example` 为 `.env.local`，预填服务地址与模型（`.env.local` 不入 Git）。
+2. `corepack pnpm dev`，浏览器打开 `http://127.0.0.1:1420`，开发者工具切换为手机尺寸（393×852 或 360×800）。
+3. 在页面中填写服务地址、模型和 Key 并保存。Key 只保存在开发服务器本机的 `.cache/dev-secrets.json`（不入 Git），页面本身拿不到；请求经开发服务器中间件转发（只接受本机访问）。
+4. 不想花 token 时，用本地模拟模型：`node scripts/fake-llm.mjs`（端口 18800），服务地址填 `http://127.0.0.1:18800/v1`，模型选 `fake-normal` / `fake-slow` / `fake-http500` / `fake-stall` / `fake-nostream`，Key 随便填。
+
+自动化检查：
+
+- 手机尺寸：`node scripts/ui/devcheck.mjs`（需先启动模拟模型和 `pnpm dev`；截图在 `.cache/ui/`）。
+- Windows 原生：先以 `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9224'` 启动 `target\debug\lishi-app.exe`，再运行 `node scripts/ui/native-devcheck.mjs first|after-restart|cleanup`。
+
+## 评测
+
+- 评测脚本用 `node_modules/.bin/tsx` 运行，Key 读取开发台保存的 `.cache/dev-secrets.json`（槽位 `main`），不打印 Key。
+- 格式实验（R01-T004）：`node_modules/.bin/tsx scripts/eval/format-experiment.ts --model <模型> [--formats A,B,C] [--turns 20] [--max-calls 90]`，原始记录在 `.cache/eval/format-<时间>/`。
 
 ## 手机连接
 
 - 无线配对：`python scripts/Pair-AndroidQr.py` 生成二维码，手机“开发者选项 → 无线调试 → 使用二维码配对设备”扫码。
-- 小米手机 `adb install` 曾返回 `INSTALL_FAILED_USER_RESTRICTED`。R01-T005 将尝试开启“USB 安装”“USB 调试（安全设置）”；不行则用 `adb push` 把 APK 放到 `/sdcard/Download/`，由用户在文件管理器里点击安装。
-
-## v3 计划中的开发方式（R01 落地后在此更新）
-
-- **浏览器开发台**：`pnpm dev` 后在浏览器开发者工具中切换手机尺寸（393×852、360×800），用真实模型直接游玩；Key 放在本地 `.env.local`（不入 Git）。见 [PLAN_V3](PLAN_V3.md) 第 8.1 节与 D108。
-- **真机热更新**：尝试 `pnpm tauri android dev --host`（需 Vite 监听 `TAURI_DEV_HOST`）。
-- **评测**：`scripts/eval/`（R01-T004、R02-T009 建立）。
+- 小米手机 `adb install` 曾返回 `INSTALL_FAILED_USER_RESTRICTED`。可尝试在开发者选项中开启“USB 安装”“USB 调试（安全设置）”（R01-T005）；不行则 `adb push <apk> /sdcard/Download/`，由用户在文件管理器中点击安装。
+- 热更新尝试：`pnpm tauri android dev --host`（R01-T005 验证）。

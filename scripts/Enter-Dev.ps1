@@ -33,6 +33,15 @@ if (Test-Path -LiteralPath $AndroidHome) {
     $newPaths += Join-Path $AndroidHome 'cmdline-tools\latest\bin'
 }
 $env:PATH = ($newPaths -join ';') + ';' + $env:PATH
+# Tauri's beforeBuildCommand calls `pnpm`; provide a corepack shim when it is not on PATH.
+if (!(Get-Command pnpm -ErrorAction SilentlyContinue)) {
+    $shimDir = Join-Path $projectRoot '.cache\bin'
+    if (!(Test-Path -LiteralPath (Join-Path $shimDir 'pnpm.CMD'))) {
+        New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+        corepack enable pnpm --install-directory $shimDir | Out-Null
+    }
+    $env:PATH = $shimDir + ';' + $env:PATH
+}
 if (!$env:GRADLE_USER_HOME) {
     $env:GRADLE_USER_HOME = Join-Path $projectRoot '.cache\gradle'
 }

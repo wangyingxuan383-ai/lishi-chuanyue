@@ -67,12 +67,31 @@ pub async fn ensure_idle(app: &AppHandle) -> Result<(), &'static str> {
 
 #[cfg(target_os = "android")]
 pub async fn pick_import(app: &AppHandle) -> Result<Option<FilePath>, &'static str> {
+    ensure_idle(app).await?;
     let picker = app.state::<AndroidDocumentPicker<tauri::Wry>>();
     // Do not timeout/drop this future: Tauri 2.12.3's late native callback
     // unwraps sending to its receiver. Kotlin owns timeout and single resolution.
     let reply = picker
         .0
         .run_mobile_plugin_async("openDocument", serde_json::json!({}))
+        .await
+        .map_err(|_| "file_unavailable")?;
+    selected_document(reply)
+}
+
+#[cfg(target_os = "android")]
+pub async fn pick_export(
+    app: &AppHandle,
+    suggested_name: &str,
+) -> Result<Option<FilePath>, &'static str> {
+    ensure_idle(app).await?;
+    let picker = app.state::<AndroidDocumentPicker<tauri::Wry>>();
+    let reply = picker
+        .0
+        .run_mobile_plugin_async(
+            "createDocument",
+            serde_json::json!({"suggestedName": suggested_name}),
+        )
         .await
         .map_err(|_| "file_unavailable")?;
     selected_document(reply)
@@ -90,7 +109,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             #[cfg(target_os = "android")]
             {
                 let plugin =
-                    api.register_android_plugin("io.timejump.lishi", "DocumentPickerPlugin")?;
+                    api.register_android_plugin("io.timejump.chuanyue", "DocumentPickerPlugin")?;
                 app.manage(AndroidDocumentPicker(plugin));
             }
             #[cfg(not(target_os = "android"))]

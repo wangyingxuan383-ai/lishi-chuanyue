@@ -2,10 +2,10 @@
 # Rust calls this component through JNI; R8 cannot discover those references.
 -keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
 # Rust-only JNI entry and native plugin are not discovered by R8 call analysis.
--keep class io.timejump.lishi.SecretStorePlugin { *; }
--keep class io.timejump.lishi.RustSecretStoreBridge { *; }
+-keep class io.timejump.chuanyue.SecretStorePlugin { *; }
+-keep class io.timejump.chuanyue.RustSecretStoreBridge { *; }
 # Only Rust may open a selected SAF document through this worker-thread bridge.
--keep class io.timejump.lishi.RustFileAccessBridge { *; }
+-keep class io.timejump.chuanyue.RustFileAccessBridge { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #
@@ -26,3 +26,5 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+-keep class io.timejump.chuanyue.DocumentPickerPlugin { *; }

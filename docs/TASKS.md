@@ -77,15 +77,15 @@
 
 - 目标/交付：用户阅读 PLAN_V3，回答第 13 节问题（或接受默认值），提出修改意见。
 - 依赖：R00-T002、R00-T003。
-- 状态：待开始。
-- 负责人/范围：用户；Claude 根据答复更新 PLAN_V3 第 13 节、相关决策与任务。
+- 状态：已完成。
+- 负责人/范围：用户；Claude 根据答复更新 PLAN_V3 第 4.7、8.6、13 节与 D110、D114、D115。
 - 验收：第 13 节每个问题有答案或明确接受默认值；修改意见已反映到计划。
-- 实际成果：—
-- 证据：—
-- 阻塞：等待用户。
+- 实际成果：PLAN_V3 第 13 节结论列；第 4.7 节内容尺度挡位；第 8.6 节 Codex 分工；D110 确认、D114、D115。
+- 证据：用户 2026-10-16 回复“开始吧，内容尺度可以让玩家自行调整挡位”，并允许调用本机 Codex。
+- 阻塞：无。
 - 更新时间：2026-10-16。
-- 完成时间：—
-- 关联决策：D110。
+- 完成时间：2026-10-16。
+- 关联决策：D110、D114、D115。
 
 ## R01：技术底座与开发回路
 
@@ -93,12 +93,12 @@
 
 - 目标/交付：先在现有 Tauri 工程中建立最小的 v3 入口（新应用 ID、应用名、窗口标题、空白的 `src/engine`、`src/platform`、`src/ui`、`src/content` 骨架和一个“你好”页面），在 Windows 与手机上跑通；确认构建不受影响后，再删除 v2 游戏层与技术探针代码（保留在标签中），并按 PLAN_V3 第 11.1 节迁移可复用文件。
 - 依赖：R00-T004。
-- 状态：待开始。
-- 负责人/范围：待定；`src/`、`src-tauri/`、`crates/`、`package.json`、`Cargo.toml`、Tauri 配置、Android 工程包名。
+- 状态：待验收
+- 负责人/范围：Claude（前端、标识）+ Codex（Rust 删除与迁移）；范围同计划。
 - 验收：① 新入口 APK 能在用户手机上安装并与旧版 “Lishi Probe” 共存；② 删除旧代码后 `pnpm build`、`cargo build`、Android 构建均通过；③ 仓库中不再有 v2 游戏协议与探针页面；④ 复用文件能编译。
-- 实际成果：—
-- 证据：—
-- 阻塞：新应用 ID 与名称需 R00-T004 确认。
+- 实际成果：新标识 `io.timejump.chuanyue` / “历史穿越”；v2 前端与 `crates/lishi-core` 已删除；v3 骨架 `src/engine`、`src/platform`、`src/ui`、`src/content`；R01 自检页 `src/ui/DevCheck.tsx`。
+- 证据：[R01 验证](validation/R01.md)：`pnpm build`、`cargo build`/`cargo test`、Android debug APK 构建与包检查均通过。实施顺序有偏差：未先在手机上跑通新入口就删除了旧代码（构建已证明未受破坏）。待验收：新 APK 在手机上安装并与旧版共存。
+- 阻塞：需要用户手机（R01-T005 一并进行）。
 - 更新时间：2026-10-16。
 - 完成时间：—
 - 关联决策：D103、D110。
@@ -107,26 +107,26 @@
 
 - 目标/交付：实现 PLAN_V3 第 7.3 节的 `Platform` 接口类型与 `web-dev` 实现：sql.js（写入后防抖 1 秒持久化到 IndexedDB，含 backup）；开发服务器上的自写转发中间件（按 slot 注入 Key、转发到目标地址、关闭压缩并逐块转发、只监听 127.0.0.1）；开发用密钥保存到不入 Git 的 `.cache/dev-secrets.json`，`.env.local` 只做预填；文件导出导入（浏览器下载 / 选择）；Esc 模拟返回键。
 - 依赖：R01-T001。
-- 状态：待开始。
-- 负责人/范围：待定；`src/platform/`、`vite.config.ts` 与开发中间件、`.env.example`、`.gitignore`。
+- 状态：已完成
+- 负责人/范围：Claude；`src/platform/`、`devserver/`、`vite.config.ts`、`.env.example`、`scripts/fake-llm.mjs`、`scripts/ui/devcheck.mjs`。
 - 验收：浏览器 393×852 下对用户配置的模型发起一次流式请求并逐字显示（确认没有被缓冲成一次性输出）；刷新页面后数据仍在；`.env.local` 与 `.cache/dev-secrets.json` 不被 Git 跟踪；局域网其他设备无法访问转发中间件。
-- 实际成果：—
-- 证据：—
+- 实际成果：`src/platform/types.ts`、`web.ts`、`index.ts`；`devserver/bridge.ts`、`devserver/relay.ts`；本地模拟模型 `scripts/fake-llm.mjs`；手机尺寸检查 `scripts/ui/devcheck.mjs`。
+- 证据：[R01 验证](validation/R01.md)“浏览器开发台”一节：393×852、360×800 下 11 项通过，逐字流式采样 0→151 字，刷新后数据保留；`.env.local`、`.cache/` 均被 Git 忽略。局域网隔离为代码与配置检查，未用第二台设备实测。
 - 阻塞：—
 - 更新时间：2026-10-16。
-- 完成时间：—
+- 完成时间：2026-10-16
 - 关联决策：D103、D108。
 
 ### R01-T003 Rust 平台服务
 
 - 目标/交付：实现 SQL 桥（`sql_query`、`sql_batch` 事务、`sql_backup`）；密钥 set/has/remove（复用 v2 Keystore/DPAPI，增加服务地址前缀绑定）；模型流式传输（复用 v2 HTTP 客户端、有界读取、超时、取消、回显 Key 过滤，**删除 delta 白名单与载荷校验**，原样转发 `data:` 行；累计文本写入私有临时文件，提供 resume 与 listUnfinished）；模型列表 GET；文件导出导入（复用文档选择器）；返回键与前后台事件；实现 `Platform` 的 Tauri 版本。
 - 依赖：R01-T001。
-- 状态：待开始。
-- 负责人/范围：待定；`src-tauri/`、`crates/`（如保留）、`src/platform/tauri.ts`。
+- 状态：待验收
+- 负责人/范围：Codex（官方 provider，gpt-6.1-sol high）实现，Claude 核查与原生实测；`src-tauri/`、`crates/`（已删除）、`src/platform/tauri.ts`（Claude）。
 - 验收：`cargo test` 覆盖：SQL 桥事务回滚；流式转发中包含未知字段时不报错；取消；缓存与 resume；url 不以绑定地址开头时拒绝。Windows 原生窗口中完成一次真实流式请求、写库、重启可读；JS 侧任何接口都拿不到 Key 明文。
-- 实际成果：—
-- 证据：—
-- 阻塞：—
+- 实际成果：`src-tauri/src` 下 `sql.rs`、`credentials.rs`、`secrets.rs`、`secret/`、`stream.rs`、`files.rs`、`document_picker.rs`、`commands.rs`、`error.rs` 等；16 个命令与 [平台契约](contracts/PLATFORM.md) 一致；Kotlin 新增文档创建导出。
+- 证据：37 项 Rust 测试、clippy、fmt 主代理复跑通过；Windows 原生经 WebView2 调试端口实测：DPAPI 保存、流式、取消、未绑定地址拒绝、关闭重开保留（对象为本地模拟服务）。待验收：真实模型服务一次请求（R01-T004 时进行）、Android 真机运行（R01-T005）。
+- 阻塞：真实模型 Key 需用户在开发台配置；真机需用户手机。
 - 更新时间：2026-10-16。
 - 完成时间：—
 - 关联决策：D102、D103、D107。
@@ -135,12 +135,12 @@
 
 - 目标/交付：建立评测框架（Node 中运行引擎雏形，Platform 用内存 sql.js + 直连模型，有费用上限，报告摘要入 `docs/validation/`、原始数据入 `.cache/eval/`）；用 PLAN_V3 第 5.2 节三种候选格式各跑同一组 20 回合固定剧本（唐长安背景，含 v2 经验探针），比较记录块成功率、首字延迟、总耗时、token、状态准确度、正文质量；选定格式。
 - 依赖：R01-T002。
-- 状态：待开始。
-- 负责人/范围：待定；`scripts/eval/`、`docs/validation/R01_FORMAT.md`。
+- 状态：进行中
+- 负责人/范围：Claude；`scripts/eval/`、`docs/validation/R01_FORMAT.md`。
 - 验收：报告包含三组统计与人工抽查结论；选定格式满足 V101 通过标准，或说明为什么都不满足并给出调整方案；费用在事先登记的上限内。
-- 实际成果：—
-- 证据：—
-- 阻塞：需要可用的模型服务（用户当前中转或备用服务）。
+- 实际成果：评测框架 `scripts/eval/lib.ts`；格式实验 `scripts/eval/format-experiment.ts`（三种格式 × 20 个带自动探针的固定行动，含时间单位、动作范围、钱物、重复人物、目标等检查）。
+- 证据：已用本地模拟模型空跑通过（3 回合 × 3 格式，12 次调用）；真实模型实验尚未运行。
+- 阻塞：需要用户在浏览器开发台保存真实服务的 Key，并同意本次调用上限（约 80 次请求）。
 - 更新时间：2026-10-16。
 - 完成时间：—
 - 关联决策：D104、V101、V103。
@@ -345,7 +345,7 @@
 
 ### R02-T013 阅读设置、局内设置与开发者模式 v1
 
-- 目标/交付：阅读设置（字号、行距、白天 / 夜间）；本局设置（篇幅、选项数）；开发者模式开关及其页面：原始模型输出、记录解析日志（含修正 / 丢弃 / 新建的原因）、调用日志、提示词版本。
+- 目标/交付：阅读设置（字号、行距、白天 / 夜间）；本局设置（篇幅、选项数、内容尺度三项挡位，D114）；开发者模式开关及其页面：原始模型输出、记录解析日志（含修正 / 丢弃 / 新建的原因）、调用日志、提示词版本。
 - 依赖：R02-T005、R02-T007。
 - 状态：待开始。
 - 负责人/范围：待定；`src/ui/`。
@@ -355,7 +355,7 @@
 - 阻塞：—
 - 更新时间：2026-10-16。
 - 完成时间：—
-- 关联决策：D112。
+- 关联决策：D112、D114。
 
 ### R02-T014 提示词 v1 与评测扩展
 

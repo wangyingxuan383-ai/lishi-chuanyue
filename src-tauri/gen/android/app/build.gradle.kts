@@ -51,10 +51,10 @@ android {
     compileSdk = 36
     buildToolsVersion = "36.0.0"
     ndkVersion = "28.2.13676358"
-    namespace = "io.timejump.lishi"
+    namespace = "io.timejump.chuanyue"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "io.timejump.lishi"
+        applicationId = "io.timejump.chuanyue"
         minSdk = 24
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

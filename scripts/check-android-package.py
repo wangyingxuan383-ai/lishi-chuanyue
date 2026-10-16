@@ -197,10 +197,10 @@ def main():
                 defined.update(classes)
                 methods.update(members)
         required = {
-            "Lio/timejump/lishi/RustSecretStoreBridge;": ["loadForRust"],
-            "Lio/timejump/lishi/RustFileAccessBridge;": ["openFdForRust"],
-            "Lio/timejump/lishi/SecretStorePlugin;": ["save", "delete", "status"],
-            "Lio/timejump/lishi/DocumentPickerPlugin;": ["openDocument", "ensureIdle"],
+            "Lio/timejump/chuanyue/RustSecretStoreBridge;": ["loadForRust"],
+            "Lio/timejump/chuanyue/RustFileAccessBridge;": ["openFdForRust"],
+            "Lio/timejump/chuanyue/SecretStorePlugin;": ["save", "delete", "status"],
+            "Lio/timejump/chuanyue/DocumentPickerPlugin;": ["openDocument", "createDocument", "ensureIdle"],
         }
         for owner, members in required.items():
             if owner not in defined or any((owner, member) not in methods for member in members):
@@ -218,14 +218,14 @@ def main():
             if f"{name} -> {name}:" not in text:
                 raise ValueError("R8 mapping renamed required JNI/plugin class: " + name)
     code, manifest = run([tools / "aapt.exe", "dump", "badging", args.apk])
-    if code or "package: name='io.timejump.lishi'" not in manifest:
+    if code or "package: name='io.timejump.chuanyue'" not in manifest:
         raise ValueError("unexpected APK application ID")
     debuggable = "application-debuggable" in manifest
     if args.require_non_debuggable and debuggable:
         raise ValueError("release APK is debuggable")
     report = {
         "apk": str(args.apk.resolve()), "bytes": args.apk.stat().st_size, "sha256": digest(args.apk),
-        "applicationId": "io.timejump.lishi", "debuggable": debuggable,
+        "applicationId": "io.timejump.chuanyue", "debuggable": debuggable,
         "signatureV2": signed, "certificateSha256": cert, "zip16KiB": True, "elfLoads": loads,
         "nativeComparison": comparison, "packedNativeSha256": packed_hash, "packedNativeBytes": len(native),
         "requiredJniClasses": len(required), "requiredJniMethodDefinitions": sum(map(len, required.values())), "rustlsDexClasses": rustls,

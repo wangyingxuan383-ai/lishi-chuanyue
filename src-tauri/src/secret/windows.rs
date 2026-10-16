@@ -9,9 +9,7 @@ use std::ptr;
 use std::sync::atomic::{compiler_fence, Ordering};
 use std::sync::Mutex;
 
-use lishi_core::secrets::{
-    SecretSlot, SecretStore, SecretStoreError, SecretValue, MAX_SECRET_BYTES,
-};
+use crate::secrets::{SecretSlot, SecretStore, SecretStoreError, SecretValue, MAX_SECRET_BYTES};
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
@@ -19,7 +17,7 @@ use windows_sys::Win32::Security::Cryptography::{
 
 const MAGIC: &[u8] = b"LISHI-DPAPI\x01";
 const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
-const ENTROPY_NAMESPACE: &[u8] = b"io.timejump.lishi.secret.v1\0";
+const ENTROPY_NAMESPACE: &[u8] = b"io.timejump.chuanyue.secret.v1\0";
 
 pub struct WindowsSecretStore {
     directory: PathBuf,
@@ -317,10 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn tampering_wrong_slot_and_case_distinct_slots_are_handled() {
+    fn tampering_and_wrong_slot_are_handled() {
         let directory = tempfile::tempdir().unwrap();
         let store = WindowsSecretStore::open(directory.path().to_owned()).unwrap();
-        let source = SecretSlot::new("Model").unwrap();
+        let source = SecretSlot::new("other").unwrap();
         let destination = SecretSlot::new("model").unwrap();
         let value = fake_secret(directory.path());
         store.save(&source, &value).unwrap();

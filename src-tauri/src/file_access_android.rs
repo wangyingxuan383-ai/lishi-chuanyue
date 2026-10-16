@@ -38,7 +38,7 @@ pub fn open_document(
                     let loader = env
                         .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
                         .l()?;
-                    let name = env.new_string("io.timejump.lishi.RustFileAccessBridge")?;
+                    let name = env.new_string("io.timejump.chuanyue.RustFileAccessBridge")?;
                     let class = env
                         .call_method(
                             loader,

@@ -1905,35 +1905,24 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "lishi-app"
 version = "0.0.1"
 dependencies = [
+ "bytes",
+ "chrono",
  "jni 0.21.1",
  "jni 0.22.4",
- "lishi-core",
+ "reqwest",
+ "rusqlite",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tempfile",
  "tokio",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
-name = "lishi-core"
-version = "0.0.1"
-dependencies = [
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
  "tokio-util",
+ "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

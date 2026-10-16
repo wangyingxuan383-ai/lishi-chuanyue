@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lishi_core::secrets::{SecretSlot, SecretStore, SecretStoreError, SecretValue};
+use crate::secrets::{SecretSlot, SecretStore, SecretStoreError, SecretValue};
 use serde::{Deserialize, Deserializer, Serialize};
 use tauri::plugin::PluginHandle;
 use tauri::{AppHandle, Manager, Runtime};
@@ -130,7 +130,7 @@ impl<R: Runtime> SecretStore for AndroidSecretStore<R> {
                                 &[],
                             )?
                             .l()?;
-                        let name = env.new_string("io.timejump.lishi.RustSecretStoreBridge")?;
+                        let name = env.new_string("io.timejump.chuanyue.RustSecretStoreBridge")?;
                         let class = env
                             .call_method(
                                 loader,

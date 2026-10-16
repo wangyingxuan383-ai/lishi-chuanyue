@@ -1,17 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App";
-import { t } from "./i18n";
-import "./styles.css";
+import DevCheck from "./ui/DevCheck";
+import "./ui/styles/base.css";
 
-const container = document.getElementById("root");
-
-if (!container) {
-  throw new Error(t("probe.error.missingRoot"));
-}
-
-createRoot(container).render(
+createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <DevCheck />
   </StrictMode>,
 );

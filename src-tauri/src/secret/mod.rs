@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use lishi_core::secret_probe::SecretProbe;
-use lishi_core::secrets::SecretStore;
+use crate::secrets::SecretStore;
 #[cfg(not(target_os = "android"))]
-use lishi_core::secrets::{SecretSlot, SecretStoreError, SecretValue};
+use crate::secrets::{SecretSlot, SecretStoreError, SecretValue};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::Runtime;
 
@@ -47,7 +46,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             let store: Arc<dyn SecretStore> = {
                 use tauri::Manager;
                 let directory = app.path().app_data_dir()?.join("secrets");
-                match windows::WindowsSecretStore::open(directory) {
+                let opened = tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(
+                    move || windows::WindowsSecretStore::open(directory),
+                ))
+                .unwrap_or(Err(SecretStoreError::Unavailable));
+                match opened {
                     Ok(store) => Arc::new(store),
                     Err(error) => Arc::new(UnavailableStore(error)),
                 }
@@ -55,7 +58,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             #[cfg(target_os = "android")]
             let store: Arc<dyn SecretStore> = {
                 let handle =
-                    api.register_android_plugin("io.timejump.lishi", "SecretStorePlugin")?;
+                    api.register_android_plugin("io.timejump.chuanyue", "SecretStorePlugin")?;
                 Arc::new(android::AndroidSecretStore::new(handle, app.clone()))
             };
             #[cfg(not(any(target_os = "windows", target_os = "android")))]
@@ -65,7 +68,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             let _ = api;
             use tauri::Manager;
             app.manage(PlatformSecrets(Arc::clone(&store)));
-            app.manage(Arc::new(SecretProbe::new(store)?));
             Ok(())
         })
         .build()

@@ -7,11 +7,12 @@
     "jsx": "react-jsx",
     "strict": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
-    "types": ["vite/client", "node"]
+    "types": ["vite/client", "node", "vitest/config"]
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "devserver", "vite.config.ts"]
 }
