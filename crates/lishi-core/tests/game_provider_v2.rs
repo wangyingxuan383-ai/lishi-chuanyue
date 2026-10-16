@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lishi_core::{
     game_protocol::{EntityKind, GameError, WorldSetup},
@@ -109,7 +109,7 @@ fn current_prompt(store: &GameStoreV2, n: usize) -> Result<String, ProviderError
 }
 
 #[test]
-fn initial_and_ten_complete_demo_turns_compile_within_native_budget() {
+fn initial_and_ten_complete_demo_turns_compile_within_legacy_helper_budget() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("十回合.sqlite");
     let store = create(&path);
@@ -499,18 +499,18 @@ fn staged_or_failed_text_is_absent_and_world_outside_policy_remains_separate() {
 fn mandatory_fact_overflow_fails_instead_of_omitting_events() {
     let dir = tempfile::tempdir().unwrap();
     let store = create(&dir.path().join("budget.sqlite"));
-    for n in 0..3 {
+    for n in 0..8 {
         let id = format!("long-event-{n}");
         let mut output = scene(&id, &["player"], vec![]);
         output.events[0].description = "保留的正式事实".repeat(90);
         commit(&store, n, &output);
     }
-    assert_eq!(store.view().unwrap().state.events.len(), 3);
+    assert_eq!(store.view().unwrap().state.events.len(), 8);
     assert_eq!(
-        current_prompt(&store, 3),
+        current_prompt(&store, 8),
         Err(ProviderError::ContextTooLarge)
     );
-    assert_eq!(store.view().unwrap().turn_count, 3);
+    assert_eq!(store.view().unwrap().turn_count, 8);
 }
 
 #[test]
@@ -620,5 +620,156 @@ fn malformed_demo_input_and_dead_player_are_rejected_without_mutation() {
     assert_eq!(
         demo_output_v2(&dead, &request(1, "继续行动", None)),
         Err(GameError::InvalidEntity)
+    );
+}
+
+#[test]
+fn operation_example_binds_event_and_missing_event_is_rejected() {
+    let initial = initial_state_v2(&setup()).unwrap();
+    let rules = lishi_core::game_provider_v2::GAME_OUTPUT_RULES_V2;
+    let base = rules
+        .lines()
+        .find(|line| line.starts_with("{\"protocolVersion\":2"))
+        .unwrap();
+    let mut document: Value = serde_json::from_str(base).unwrap();
+    let examples: Vec<Value> =
+        serde_json::from_str(lishi_core::game_provider_v2::GAME_STATE_CHANGE_EXAMPLES_V2).unwrap();
+    let mut change = examples
+        .into_iter()
+        .find(|example| example["type"] == "move")
+        .unwrap();
+    // Fill the structural template from this actual fixture, never its placeholder IDs.
+    change["locationId"] = json!(initial.location_id);
+    change["eventId"] = json!("example-move");
+    document["stateChanges"] = json!([change]);
+    document["events"] = json!([{"id":"example-move","description":"核对当前位置","entityIds":["player","start-place"],"disclosure":"restricted"}]);
+    let raw = document.to_string();
+    let output = parse_output_v2(&raw).unwrap();
+    let next = apply_output_v2(
+        &initial,
+        &output,
+        &CommitContext {
+            operation_id: "schema-operation-example".into(),
+            turn_id: "schema-operation-example".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(next.resources, initial.resources);
+    assert_eq!(next.time, initial.time);
+    assert_eq!(next.events.len(), initial.events.len() + 1);
+    document["stateChanges"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("eventId");
+    assert_eq!(
+        parse_output_v2(&document.to_string()),
+        Err(GameError::InvalidOutput)
+    );
+}
+
+#[test]
+fn all_eighteen_prompt_operation_templates_are_complete_strict_contracts() {
+    use lishi_core::game_provider_v2::{GAME_OUTPUT_RULES_V2, GAME_STATE_CHANGE_EXAMPLES_V2};
+    let examples: Vec<Value> = serde_json::from_str(GAME_STATE_CHANGE_EXAMPLES_V2).unwrap();
+    assert_eq!(examples.len(), 18);
+    let expected_types = BTreeSet::from([
+        "create_entity",
+        "rename_entity",
+        "add_alias",
+        "set_attribute",
+        "set_life_status",
+        "move",
+        "change_resource",
+        "change_relationship",
+        "set_item_holding",
+        "change_item_quantity",
+        "add_condition",
+        "update_condition",
+        "resolve_condition",
+        "create_claim",
+        "assess_claim",
+        "record_knowledge",
+        "update_knowledge",
+        "observe_fact",
+    ]);
+    let mut actual_types = BTreeSet::new();
+    for example in &examples {
+        let kind = example["type"].as_str().unwrap();
+        assert!(
+            actual_types.insert(kind),
+            "duplicate operation template {kind}"
+        );
+        let parsed: StateChangeV2 = serde_json::from_value(example.clone())
+            .unwrap_or_else(|error| panic!("invalid {kind} template: {error}"));
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            *example,
+            "{kind} fields changed during strict roundtrip"
+        );
+        let fields = example.as_object().unwrap();
+        assert!(fields.contains_key("eventId"));
+        for field in fields.keys() {
+            let mut missing = fields.clone();
+            missing.remove(field);
+            assert!(
+                serde_json::from_value::<StateChangeV2>(Value::Object(missing)).is_err(),
+                "{kind} unexpectedly accepts missing {field}"
+            );
+        }
+        let mut unexpected = fields.clone();
+        unexpected.insert("unsupportedTemplateField".into(), Value::Null);
+        assert!(
+            serde_json::from_value::<StateChangeV2>(Value::Object(unexpected)).is_err(),
+            "{kind} unexpectedly accepts unknown field"
+        );
+        if let Some(holding) = fields.get("expectedHolding").and_then(Value::as_object) {
+            assert_eq!(holding.len(), 5);
+            for field in ["status", "holderId", "placeId", "quantity", "unit"] {
+                assert!(holding.contains_key(field), "{kind} lacks holding {field}");
+            }
+        }
+    }
+    assert_eq!(actual_types, expected_types);
+    assert!(GAME_OUTPUT_RULES_V2.contains(GAME_STATE_CHANGE_EXAMPLES_V2));
+    assert!(GAME_OUTPUT_RULES_V2.contains("首次登记新物品时expectedHolding:null"));
+}
+
+#[test]
+fn fresh_world_production_context_fits_unchanged_default_budget() {
+    use lishi_core::game_context::{compile_context, ContextBudget, ContextRules};
+    use lishi_core::game_provider_v2::GAME_PROMPT_VERSION_V2;
+    let dir = tempfile::tempdir().unwrap();
+    let store = create(&dir.path().join("生产默认预算.sqlite"));
+    store
+        .enable_branches(&dir.path().join("backup"), None)
+        .unwrap();
+    let view = store.selected_view("main").unwrap();
+    let request = request(0, "观察周围并打听短工机会，先了解条件再决定。", None);
+    let compiled = compile_context(
+        &view,
+        &request,
+        &store.selected_history("main").unwrap(),
+        ContextRules::v2(),
+        ContextBudget::default(),
+        &[],
+        &[],
+    )
+    .expect("ordinary new world must remain callable with the saved default budget");
+    assert_eq!(ContextBudget::default().max_input_bytes, 8192);
+    assert_eq!(ContextBudget::default().output_reserve_tokens, 4096);
+    assert_eq!(GAME_PROMPT_VERSION_V2, 8);
+    for rule in [
+        "一时辰=7200秒，半时辰=3600秒",
+        "正文/事件时长须与elapsedSeconds一致",
+        "十分钟勿写一刻",
+        "历史时长不确定用分钟",
+    ] {
+        assert!(compiled.prompt.contains(rule), "missing time rule: {rule}");
+    }
+    assert_eq!(compiled.trace.input_utf8_bytes, compiled.prompt.len());
+    assert!(compiled.prompt.len() <= 8192);
+    println!(
+        "fresh production context UTF-8 bytes: {}",
+        compiled.prompt.len()
     );
 }

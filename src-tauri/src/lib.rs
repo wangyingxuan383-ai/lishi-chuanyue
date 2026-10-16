@@ -166,6 +166,11 @@ pub fn run() {
             game_commands::save_game_preset,
             game_commands::save_commands::export_game_save,
             game_commands::call_commands::get_game_calls,
+            game_commands::cost_commands::get_game_prices,
+            game_commands::cost_commands::set_game_price,
+            game_commands::cost_commands::clear_game_price,
+            game_commands::cost_commands::get_game_cost_estimates,
+            game_commands::output_diagnostic_commands::get_game_output_diagnostic,
             game_commands::save_commands::import_game_save
         ])
         .run(tauri::generate_context!())

@@ -1,32 +1,26 @@
 # 当前工作现场
 
-> 2026-10-15（Asia/Shanghai）｜M06主要工程已接入，设备与真实模型验收仍保留。
+> 2026-10-16（Asia/Shanghai）｜M06工程、有限真实评测和双端优化预览已整理；手机门槛按用户要求稍后验收。
 
-用户在M05交付后授权继续M06；手机“先开发，稍后测”有效。本轮无ADB/安装/清数据/生产Key读取，0真实模型/Brave请求，无远程仓库、发布或上传。分支main，前一基线8e06b65，本轮M06实现随本文件同次保存本地Git；恢复用git status/git log定位提交与后续变化，不覆盖新变化。阅读顺序按AGENTS，状态唯一来源[TASKS](TASKS.md)。
+按AGENTS恢复，任务状态唯一来源[TASKS](TASKS.md)。工作分支main，上个基线4c22252；本轮源码/说明/脚本保存到本地Git，实际提交点和额外修改用git log -1 --oneline、git status核对。无远程仓库/上传发布，无本轮ADB、安装或清数据，原报告SHA256保持3326d3f7421820cd5a219682062ac4d19e8ac920a2aaacec2e431beae92f38c7。
 
 ## 最后确定成功的步骤
 
-- 七页持续挂载、忙碌返回/取消、每world/branch窗口草稿、输入快捷键、技术页懒加载保留Game。隔离UI141/141通过，四尺寸15图目检，零console错误/警告；操作见[使用说明](USER_GUIDE.md)。
-- 正式timejump：有界容器、一致世界/注释快照、冻结研究和可读剧情、只读精确schema/领域证明、整目录发布，同ID不覆盖。独立证据库保持水位101→102及旧子线隔离。pack15/portable12/save8通过，含旧v1两回合原始指纹、恶意schema、重复及发布前后真实强杀。D039及[M06契约](contracts/M06.md)。
-- 调用台账覆盖普通v1/v2、FF、AI回顾、连接测试，最多两次持久预留，实际0/1与中断未知分开；无Key/prompt/响应/endpoint、不进包。core7/native故障7/UI41通过；AI回顾最后接线七项顺序复测通过。D040；M06-T004已完成。
-- 全workspace418通过/0失败/0忽略/0过滤，含66原生及300回合长局（原生396.39秒）；最后summary接线七项复测通过。fmt/strict全workspace Clippy、64模块前端和两端debug构建通过。证据见[M06验证](validation/M06.md)。
-- Windows最终包关闭自有Vite1420后冷启动为tauri.localhost；七页、技术页返回、360px和调用记录按钮正常。七个既有world head/count逐一保持、Provider revision7保持、当前游戏模型台账0次。未对用户正式世界提交行动。
+- M03～M05及M06主要工程已实现：七页导航、长期记忆、世界线/快进、研究、正式timejump包、原子导入、持久调用台账和输出诊断。此前workspace418（含原生300回合）/UI141为基线；本轮Provider13/context9、诊断core4/native3/UI104、费用core10/native3/UI271及fmt/严格Clippy通过。不得把定向检查冒称全量重跑，见[M06验证](validation/M06.md)。
+- 真实唐748长局完成30个人工行动；36次主线生成含6拒绝，失败完整正式状态不变。另有摘要、分支、快进和默认预算时间样本各1次。**生成40次预算已用完，另3连接共43条单次HTTP；禁止本轮继续付费请求或自动重试。** 生成usage492124，实际服务单价未配置，费用未知。详见[真实记录](validation/M06_REAL_MODEL.md)。
+- 主线m06-eval-live-20261015-01快进后31回合/cash118/elapsed60540；作业m06-eval-fast-job-01在退房或续住前paused_decision，未扣10。子线m06-eval-scope-01从003分叉后4回合/cash100/elapsed3000，无父线后续信息/摘要污染；摘要16/16原文SHA匹配。最后短局m06-time-20261016在默认预算下8095/8192B，正确等3600秒且不消费；Prompt8仅定向补测，没有重跑最终版30回合。
+- Windows系统选择器好/坏/大/重复/取消、中文默认名导出及完整两分支/注释/资料往返通过；自定义文件名未验。最终费用版正常重启五视图、快进、43调用和Provider配置全等。见[选择器](validation/M06_WINDOWS_PICKER.md)。
+- 新增M06-T008本机单价/费用估算（D042），已通过核心/原生/隔离UI及Windows实际保存→重启→清除；只用m06-cost-fixture-only合成模型，已清除，价格revision2/空；真实服务单价始终未知。独立model-prices.sqlite不读Key、不改世界/Provider/原调用，不进正式包。见[费用验证](validation/M06_COSTS.md)。所有代理已交还，无活动写入。
 
-M03～M05已建立长期状态/300回合/十线隔离、分叉重写有限更正、分段快进/决策暂停、可选Brave/冻结来源，参见[M03](validation/M03.md)、[M04/M05](validation/M04_M05.md)。不要重复实现已验收核心。
+## 当前入口与配置
 
-## 产物与现场
+- Windows最新target/release/lishi-app.exe已验证普通启动；中断后复核该验证进程已退出，9224调试端口关闭。缓存.cache/m06-normal-process.json保留的是旧验证PID/哈希，不可当成当前进程。操作前重新核对运行状态和路径。旧debug不能代表本次版本；正常启动无需Vite，浏览器预览不能游玩原生世界。
+- 最新APK：.cache/deliverables/lishi-optimized-preview-20261016-v8-cost.apk，32955795B，含Prompt8/诊断/费用。两端优化r6及签名/DEX实际方法/R8/ZIP和ELF16KiB/native SHA检查通过，精确校验和见[交付说明](RELEASE.md)。旧v5/v7/v8无费用包保留，不能混用。仍io.timejump.lishi/0.0.1，手机名Lishi Probe，未安装新包。
+- **临时上下文预算已经CAS恢复，不能再覆盖配置**：Provider revision10，8192/16384/4096/512，模型gemini-3.8-flash-high与Key保持。长局在临时64KiB下测试，默认8KiB不能保证继续现有31回合；必要事实超限会拒绝，可按实际服务容量设置。
+- 证据在.cache/m06-*；APK、数据库、日志、签名和私人配置均忽略，不入Git。安全输出诊断仅内存64项，重启清空；正式世界/快进/调用持久保留。Key只由原生内部读取，不能写到脚本、文档、日志或导出。
 
-- Windows：target/debug/lishi-app.exe，35026432B，SHA d4a158b03006b9c68f0c070e3a39904f702a604f25c437c39707080eab5eab43。pnpm tauri build --debug --no-bundle已内置界面，可直接运行；普通cargo/tauri dev可能仍依赖Vite，见[开发说明](DEVELOPMENT.md)。
-- Android ARM64 debug：src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk，527311837B，SHA 352b5685de6f6acb9614d6d17a9cc965a2738b3047b410992870c9dc44aa5e86。签名v2、ZIP16KiB、四段ELF0x4000、包内外so一致；未安装。手机仍旧M03包，新布局/正式包迁移未真机验收。
-- 代理writer全部结束，root整合；自有4177/UI浏览器、1420和最终9224 QA进程均已关闭，缓存PID只作历史证据，操作前须核实实际exe路径。恢复不自动操作手机/生产API。
-- 本轮实现与文档统一本地提交；秘密、真实DB、诊断和构建物排除Git。证据.cache/m06-*可供本机复查，永久结论已写验证文档。原报告SHA3326D3F7421820CD5A219682062AC4D19E8AC920A2AAACEC2E431BEAE92F38C7不变。
+## 待验收与可执行下一步
 
-## 未完成与下一步
-
-1. M06-T001/T002/T003待验收：工程已接入，剩新包手机IME/旋转/后台、系统选择器好/坏/大/取消及Android↔Windows正式包迁移。M01-T006设备门槛仍未结束；仅在用户恢复手机测试后用短清单验收，不重复催测。
-2. M06-T005进行中：固定回归与离线证据齐全，待上述前置实际验收后完成综合结论。下一轮先选择明确缺口；无新变化/失败时不重跑已过300回合、全量构建或真实请求。
-3. M06-T006尚未开始真实评测：新v4/FF/AI回顾及真实Brave未验收，此前新协议请求503。先确认服务和有限样本预算，再执行明确一次评测，不自动轮询/跨服务重试，不以mock当真实质量。
-4. M06-T007正式交付尚未开始：debug可用，release/R8、版本/签名/应用名策略及保数据升级后续独立验收；无许可证选择或发布授权。
-5. 已知范围：更正仅姓名/本人可知cash；未实现完整史历、分支合并、同ID覆盖恢复、压缩/更大包、单价估算和游戏stage启动回收。强杀stage不可见、正常失败会清理；SAF失败可留外部部分文件。物理断电无实测。
-
-可安全重做node scripts/check-docs.mjs，定向cargo测试见契约。正常Windows启动不带CDP参数，无需Vite。
+1. M06-T001/T002/T003/T005/T006/T007及M01设备尾项仍待验收，T008工程门槛见台账。用户最新选择“先完成其他工作，手机稍后测”，现在不连接或催测。手机可测时：记录旧world/head和配置状态，先导出备份，再安装同证书预览；核对旧档/中文输入/后台锁屏及终止恢复、系统选择器好坏取消大包、Android↔Windows同一正式包迁移。不得卸载/清数据换取通过。
+2. 用户体验无新反馈；保留004动作范围、015条件精度、025时长及子线措辞问题。Prompt8针对性样本成功，不保证任意叙事可靠。真实Brave、其他时代均未执行，不以唐748样本代表全历史；实际费用需用户自行填价，估算不是历史账单。扩大真实样本前登记新范围/有限预算，不复用operation_id。
+3. 后续收到手机结果或具体质量问题，先按相关任务追加复现/证据，再修复和定向检查；不要无原因重复300回合或模型生成。stage启动回收、同ID克隆/覆盖、压缩等限制见契约。公开许可证、长期发行签名、Windows安装器和localhost入口留M07，尚未开始。

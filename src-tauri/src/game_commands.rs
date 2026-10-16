@@ -12,7 +12,7 @@ use lishi_core::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -26,10 +26,14 @@ use tauri::ipc::Channel;
 pub mod branch_commands;
 #[path = "game_call_commands.rs"]
 pub mod call_commands;
+#[path = "game_cost_commands.rs"]
+pub mod cost_commands;
 #[path = "game_fast_forward_commands.rs"]
 pub mod fast_forward_commands;
 #[path = "game_memory_service.rs"]
 pub mod memory_service;
+#[path = "game_output_diagnostic_commands.rs"]
+pub mod output_diagnostic_commands;
 #[path = "game_research_commands.rs"]
 pub mod research_commands;
 #[path = "game_runtime.rs"]
@@ -95,6 +99,9 @@ pub struct GameService {
     world_research: Mutex<BTreeMap<String, Arc<lishi_core::game_research_store::ResearchStore>>>,
     call_log: Mutex<Option<Arc<lishi_core::game_call_log::CallLog>>>,
     call_log_path: PathBuf,
+    prices: Mutex<Option<Arc<lishi_core::game_cost::PriceStore>>>,
+    prices_path: PathBuf,
+    output_diagnostics: Mutex<VecDeque<output_diagnostic_commands::GameOutputDiagnostic>>,
     pub providers: Arc<ProviderStore>,
     secrets: Arc<dyn SecretStore>,
     profile_busy: Arc<AtomicBool>,
@@ -127,6 +134,9 @@ impl GameService {
             world_research: Mutex::new(BTreeMap::new()),
             call_log: Mutex::new(None),
             call_log_path: directory.join("model-calls.sqlite"),
+            prices: Mutex::new(None),
+            prices_path: directory.join("model-prices.sqlite"),
+            output_diagnostics: Mutex::new(VecDeque::new()),
             providers: Arc::new(ProviderStore::open(directory.join("game-settings.sqlite"))?),
             secrets,
             profile_busy: Arc::new(AtomicBool::new(false)),
@@ -719,10 +729,12 @@ async fn run_turn(
                         .unwrap_or_else(||"game_provider_failed".into());return Err(GameCommandError::new(code));
                 }
                 lease.service.providers.record_streaming(profile.config.revision,Capability::Supported)?;
-                StoreRoute::parse_output(&view,&result.stream.text)?
+                let parsed=StoreRoute::parse_output(&view,&result.stream.text);
+                if parsed.is_err() { output_diagnostic_commands::record(&lease.service,&request,&result.stream.text,&view); }
+                parsed?
             }
         };
-        output.validate_against(&view,&request.operation_id)?;
+        output_diagnostic_commands::validate_and_record(&lease.service,&request,&output,&view)?;
         if lease.cancel.is_cancelled(){return Err(GameCommandError::new("game_cancelled"))}
         // Never stream raw JSON or reasoning. Display only a decoded, still
         // provisional narrative; the state is updated solely by SQL commit.

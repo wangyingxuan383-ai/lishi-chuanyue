@@ -2,11 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { hasGameCore } from "./gameClient";
 import { getGameCalls, type CallAttempt } from "./gameCallClient";
 import { callT as t } from "./gameCallMessages";
+import GameOutputDiagnostic from "./GameOutputDiagnostic";
+import GameCostSettings, { GameCostAmount } from "./GameCostSettings";
+import type { CostReply } from "./gameCostClient";
 
 export default function GameCallHistory() {
   const [entries, setEntries] = useState<CallAttempt[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const [estimates, setEstimates] = useState<CostReply | null>(null);
   const working = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -22,6 +26,7 @@ export default function GameCallHistory() {
     <p className="game-muted game-small">{t("help")}</p><p className="game-muted game-small">{t("budget")}</p>
     <button type="button" className="game-secondary" disabled={!hasGameCore() || loading} onClick={() => void read()}>{t(loading ? "loading" : "read")}</button>
     {error && <p role="alert" className="game-error">{t("error")}</p>}
+    <GameCostSettings attempts={entries} estimates={estimates} onEstimates={setEstimates} />
     {entries?.length === 0 && <p role="status" className="game-muted">{t("empty")}</p>}
     {entries?.map(entry => <article key={entry.operationId + ":" + entry.sequence} className="game-call-entry">
       <p><strong>{entry.model}</strong> · {t(entry.state)}<br /><small>{new Date(entry.createdAtMs).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })}</small></p>
@@ -30,7 +35,8 @@ export default function GameCallHistory() {
         <div><dt>{t("http")}</dt><dd>{number(entry.httpStatus)}</dd></div><div><dt>{t("elapsed")}</dt><dd>{number(entry.elapsedMs)}</dd></div></dl>
       <details><summary>{t("details")}</summary><dl className="game-state-summary">
         {([["world", entry.worldId], ["branch", entry.branchId], ["operation", entry.operationId], ["prompt", entry.promptVersion], ["diagnostic", entry.errorCode ?? t("unknown")]] as const).map(([key, value]) => <div key={key}><dt>{t(key)}</dt><dd>{value}</dd></div>)}
-      </dl></details></article>)}
+        <GameCostAmount attempt={entry} reply={estimates} />
+      </dl><GameOutputDiagnostic attempt={entry} /></details></article>)}
     <p className="game-muted game-small">{t("cost")}</p><p className="game-muted game-small">{t("noEndpoint")}</p>
   </details>;
 }

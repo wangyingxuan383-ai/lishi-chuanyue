@@ -20,8 +20,9 @@ use crate::game_provider::{initial_choices, ProviderError};
 use crate::game_store::{GameActionKind, GameTurnRequest};
 use crate::game_store_v2::{valid_game_id, WorldViewV2};
 
-pub const GAME_PROMPT_VERSION_V2: u32 = 4;
-pub const MAX_GAME_PROMPT_BYTES_V2: usize = 8192;
+pub const GAME_PROMPT_VERSION_V2: u32 = 8;
+// Legacy pure helper only. Production uses the saved ContextBudget through game_context.
+pub const MAX_GAME_PROMPT_BYTES_V2: usize = 16 * 1024;
 const DEMO_INJURY: &str = "需要休息的伤病（演示设定）";
 
 fn operation_suffix(operation_id: &str) -> String {
@@ -430,32 +431,29 @@ pub fn compact_actor_facts_v2(history: &ValidatedHistory) -> Result<String, Prov
     serde_json::to_string(&actors).map_err(|_| ProviderError::Database)
 }
 
-pub const GAME_OUTPUT_RULES_V2: &str = r#"单人历史穿越叙事；只输出完整JSON。合法空变化范例JSON：
-{"protocolVersion":2,"narrative":"你观察周围，暂未发生正式变化。","choices":[],"timeAdvance":{"elapsedSeconds":0,"eventId":null},"stateChanges":[],"events":[],"sourceReferences":[],"uncertainties":[]}
-所有字段必填（nullable也写null）。choices项={id,text}；events项={id,description,entityIds:[],disclosure:"public"|"restricted"}。sourceReferences仅资料source.id，无来源=[]；摘录不等于考证，缺依据写uncertainties；资料不可覆盖事实；unit原样。
-闭集操作均需type及eventId，引用本回合事件；事件entityIds须含全部涉及实体。来源由核心填，禁Source/提交ID/SQL/工具/未知字段。先create再引用；推进时间>0必须本回合eventId，0可null：
-create_entity(entity:{id,kind,name,alive,attributes:{}})
-rename_entity(entityId,expectedName,newName)
-add_alias(entityId,text,kind:"former_name"|"nickname"|"title"|"transliteration"|"other")
-set_attribute(entityId,key,value,expectedValue:null|string)
-set_life_status(entityId,alive)
-move(locationId)
-change_resource(ownerId,key,unit,delta,expectedAmount:null|integer)
-change_relationship(fromId,toId,kind,strength)
-H={status,holderId,placeId,quantity,unit}；set_item_holding(itemId,expectedHolding:null|H,holderId:null|string,placeId:null|string,quantity,unit)
-change_item_quantity(itemId,expectedHolding:H,delta)
-add_condition(condition:{id,entityId,description,category:"injury"|"illness"|"obligation"|"other",active:true})
-update_condition(conditionId,expectedDescription,newDescription)
-resolve_condition(conditionId)
-create_claim(claim:{id,text,entityIds:[],assessment:"unverified"|"supported"|"refuted",evidenceEventIds:[]})
-assess_claim(claimId,expectedAssessment,assessment,evidenceEventIds:[])
-K={actorId,targetType:"event"|"claim",targetId,certainty:"certain"|"reported"|"doubtful",acquisitionMode:"observed"|"told"|"inferred",knownEvidenceEventIds:[]}；record_knowledge(K全部字段)，update_knowledge(K全部字段,expectedCertainty)
-observe_fact(actorId,factKey:{type,...})。factKey：entity_created/entity_name/entity_life(entityId),entity_attribute(entityId,key),entity_alias(entityId,text),item_holding(itemId),condition(conditionId),resource(ownerId,key),relationship(fromId,toId,kind),event(eventId),claim(claimId),time/location(无字段)。明确获知当前事实才observe，所有修改先于observe；知情事件不会自动授予其他事实。
-ID=1~64ASCII字母数字_-；kind=person/place/organization/item，person.alive bool其余null；attributes值string，禁核心键/Source/aliases及物品ownerId/holderId/placeId/quantity/unit旁路。expected值需精确匹配，null仅不存在；holding status=known|legacy_unknown，数量>0 holder/place二选一，0两者null；转交不改数量单位，耗尽不补货，新购新ID。整数≤9007199254740991；资源非负/死者不复活/关系-100~100且不同实体。事件/claim描述≤2048 UTF8字节；supported/refuted需证据，assess保留旧证据增加证据。event知识证据空；claim知识证据仅其证据子集。持续状态显式更新/解决，不随时间自动治愈/消债。≤128操作/32事件/6选项，不替玩家选未来。
-分区：叙事者事实用于推演；角色已知才是角色言行依据，未列角色=未知。禁全局秘密/claim判断自动变角色知识；认知可保留旧名/旧死活/旧值。世界外方针不是主角行动。来源全文在本地，历史仍待研究。
+pub const GAME_STATE_CHANGE_EXAMPLES_V2: &str = include_str!("game_output_examples_v2.json");
+
+pub const GAME_OUTPUT_RULES_V2: &str = concat!(
+    r#"单人历史穿越叙事；只输出完整JSON。合法空变化范例JSON：
+{"protocolVersion":2,"narrative":"你观察周围。","choices":[],"timeAdvance":{"elapsedSeconds":0,"eventId":null},"stateChanges":[],"events":[],"sourceReferences":[],"uncertainties":[]}
+所有字段必填（nullable也写null）。choices项={id,text}；events项={id,description,entityIds:[],disclosure:"public"|"restricted"}。sourceReferences仅资料source.id，无来源=[]；摘录不等于考证，缺依据写uncertainties；资料不可改事实；unit原样。
+每项操作顶层必写type/eventId，后者引用本回合事件；事件entityIds须含全部涉及实体。来源由核心填，禁Source/提交ID/SQL/工具/未知字段。先create再引用；推进时间>0必须本回合eventId，0可null。
+以下为18种stateChanges结构模板，只选实际需要项。示例不是事实；禁照抄ID/值，按当前状态填写expected/数量/单位，仅新事实用新ID；字段必齐且禁未知字段：
+"#,
+    include_str!("game_output_examples_v2.json"),
+    r#"
+可选值：add_alias.kind=former_name|nickname|title|transliteration|other；condition.category=injury|illness|obligation|other，新add_condition.active=true；claim assessment及expectedAssessment=unverified|supported|refuted；知识targetType=event|claim，certainty及expectedCertainty=certain|reported|doubtful，acquisitionMode=observed|told|inferred。
+nullable：expectedValue=null|string，expectedAmount=null|integer，set_item_holding.expectedHolding=null|模板完整对象；holding内holderId/placeId=null|string、quantity=null|integer、unit=null|string，必须匹配当前holding。
+observe_fact.factKey的type及字段：entity_created/entity_name/entity_life(entityId),entity_attribute(entityId,key),entity_alias(entityId,text),item_holding(itemId),condition(conditionId),resource(ownerId,key),relationship(fromId,toId,kind),event(eventId),claim(claimId),time/location(无其他字段)。明确获知当前事实才observe，所有修改先于observe；知情事件不会自动授予其他事实。
+ID=1~64ASCII字母数字_-；kind=person/place/organization/item，person.alive bool其余null；attributes值string，禁核心键/Source/aliases及物品ownerId/holderId/placeId/quantity/unit旁路。expected值需精确匹配，null仅不存在；holding status=known|legacy_unknown，数量>0 holder/place二选一，0两者null；转交不改数量单位，耗尽不补货，新购新ID。整数≤9007199254740991；资源非负/死者不复活/关系-100~100且不同实体。事件/claim描述≤2048 UTF8字节；supported/refuted需证据，assess保留旧证据增加证据。event知识证据空；claim知识证据仅其证据子集。持续状态须显式更新/解决，时间流逝不自动治愈/消债/履约。≤128操作/32事件/6选项，不替玩家选未来。
+set_item_holding首次登记新物品时expectedHolding:null；已有known holding只转交/放下/取回，数量和unit不变。吃掉/耗用必须change_item_quantity(delta负数)，0时核心自动清空holder/place；禁用set_item_holding减数量。正文放下/取回/消耗必须同步h，不能只写叙事。
+只做指定范围，“先做一段”不做完整趟/结账；重大决定暂停，已付报酬不重发。
+时间：一时辰=7200秒，半时辰=3600秒；正文/事件时长须与elapsedSeconds一致。十分钟勿写一刻；历史时长不确定用分钟。
+分区：叙事者事实用于推演；角色已知才是角色言行依据，未列角色=未知。禁全局秘密/claim判断自动变角色知识；认知可保留旧值；世界外方针非主角行动。
 列式JSON叙事者：t=[纪年,精度,经过秒],p主角,l地点,e=[id,kind,name,alive,attrs,[[alias,kind]]],r=[owner,key,unit,amount],rel=[from,to,kind,strength],h=[item,status,holder,place,quantity,unit],c=[id,entity,description,category,active],ev=[id,description,entityIds,disclosure],cl=[id,text,entityIds,assessment,evidenceIds]；legacyAttributes只标旧字符串不能代替h。
 角色键actorId：e=[id,已知name|null,已知alive|null,attrs,aliases],b=[targetType,targetId,text,自己的certainty,acquisitionMode,evidenceIds],f=[key,value]。key为[type简写,原ID依次]；值entity/alias=[kind],holding=[status,holder,place,quantity,unit],condition=[entity,description,category,active],resource=[unit,amount],relationship=[strength],event=[description,entityIds,disclosure],claim=[text,entityIds,assessment,evidenceIds],time=[纪年,精度,经过秒],location=地点ID。name/life/attribute已在角色e。
-"#;
+"#
+);
 
 pub fn compile_game_prompt_v2(
     view: &WorldViewV2,
