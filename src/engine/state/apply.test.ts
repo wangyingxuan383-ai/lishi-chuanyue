@@ -63,9 +63,32 @@ describe("applyRecord", () => {
     expect(r.notes[0]).toContain("没有成交");
   });
 
+  it("cancels unaffordable purchases on hard difficulty too", () => {
+    const r = apply(sampleState(5), { money: -30, items: [{ name: "斗笠", delta: 1 }] }, "残酷");
+    expect(r.state.protagonist.stats).toMatchObject({ money: 5, debt: 0 });
+    expect(r.state.protagonist.items).toHaveLength(0);
+    expect(chipTexts(r)).toContain("钱不够，这笔没付成");
+  });
+
+  it("never moves time backwards", () => {
+    const s = sampleState();
+    s.time.elapsedMinutes = 600;
+    expect(apply(s, { time: -120 }).state.time.elapsedMinutes).toBe(615);
+    expect(apply(s, { time: "-两个时辰" }).state.time.elapsedMinutes).toBeGreaterThanOrEqual(600);
+  });
+
+  it("keeps one goal across different phrasings", () => {
+    let s = apply(sampleState(), { goals: [{ op: "add", name: "三日内还清三贯钱" }] }).state;
+    for (const name of ["还清三贯钱", "三日内还清三贯钱的债", " 三日内 还清三贯钱 "]) {
+      s = apply(s, { goals: [{ op: "add", name }, { op: "progress", name, detail: name }] }).state;
+    }
+    expect(s.goals).toHaveLength(1);
+  });
+
   it("records debt on easy difficulty", () => {
     const r = apply(sampleState(10), { money: -30 }, "宽松");
     expect(r.state.protagonist.stats).toMatchObject({ money: 0, debt: 20 });
+    expect(chipTexts(r)).toContain("钱不够，赊欠 20 文");
   });
 
   it("consumes only what exists", () => {
@@ -74,6 +97,18 @@ describe("applyRecord", () => {
     const r = apply(s, { items: [{ name: "胡饼", delta: -3 }, { name: "银锭", delta: -1 }] });
     expect(r.state.protagonist.items).toHaveLength(0);
     expect(r.notes.join()).toContain("银锭");
+  });
+
+  it("moves an item to another place without changing its count, and gives items away", () => {
+    const s = sampleState();
+    s.protagonist.items.push({ name: "铜镜", quantity: 1, unit: "面", place: null, note: "" }, { name: "胡饼", quantity: 3, unit: "个", place: null, note: "" });
+    const moved = apply(s, { items: [{ name: "铜镜", delta: 0, place: "邸店客房" }, { name: "胡饼", delta: -2 }] });
+    expect(moved.state.protagonist.items).toEqual([
+      expect.objectContaining({ name: "铜镜", quantity: 1, place: "邸店客房" }),
+      expect.objectContaining({ name: "胡饼", quantity: 1 }),
+    ]);
+    expect(chipTexts(moved)).toEqual(expect.arrayContaining(["失 胡饼×2"]));
+    expect(apply(moved.state, { items: [{ name: "铜镜", delta: 0, place: null }] }).state.protagonist.items[0].place).toBeNull();
   });
 
   it("merges people by name variants and never revives the dead", () => {

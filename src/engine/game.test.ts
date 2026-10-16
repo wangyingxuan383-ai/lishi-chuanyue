@@ -201,6 +201,24 @@ describe("Game", () => {
     expect(llm.calls).toHaveLength(3);
   });
 
+  it.each([
+    [{ type: "error", kind: "http", status: 429 } as const, "quota"],
+    [{ type: "error", kind: "timeout_first" } as const, "timeout"],
+    [{ type: "error", kind: "network", message: "reset" } as const, "network"],
+  ])("gives up after one retry: %o", async (error, reason) => {
+    const { game, worldId, llm } = await setup([[error], [error]]);
+    const events = await play(game, worldId, "出门");
+    expect(events.at(-1)).toMatchObject({ type: "failed", reason, partialSaved: false });
+    expect(llm.calls).toHaveLength(3);
+    expect((await tree.cursor(game.repo, worldId)).head.kind).toBe("opening");
+  });
+
+  it("reports an empty reply without saving a turn", async () => {
+    const { game, worldId } = await setup([{ text: "" }]);
+    expect((await play(game, worldId, "出门")).at(-1)).toMatchObject({ type: "failed", reason: "empty" });
+    expect((await tree.cursor(game.repo, worldId)).head.kind).toBe("opening");
+  });
+
   it("reports a failure before any text without saving a turn", async () => {
     const { game, worldId } = await setup([
       [{ type: "error", kind: "http", status: 401, message: "bad key" }],
@@ -265,6 +283,21 @@ describe("Game", () => {
     await play(game, worldId, "买马");
     await play(game, worldId, "走");
     expect(JSON.stringify(llm.calls[2].body)).toContain("没有成交");
+  });
+
+  it("continues from a rewritten passage", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "掌柜冷着脸。" + RECORD({}) },
+      { text: "你接着往下说。" + RECORD({}) },
+    ]);
+    await play(game, worldId, "求情");
+    const c = await tree.cursor(game.repo, worldId);
+    await game.repo.updateNarrative(c.head.id, "掌柜叹了口气，答应宽限三日。");
+    expect((await tree.cursor(game.repo, worldId)).head).toMatchObject({ narrative: "掌柜叹了口气，答应宽限三日。", rewritten: true });
+    await play(game, worldId, "道谢");
+    const prompt = JSON.stringify(llm.calls[2].body);
+    expect(prompt).toContain("答应宽限三日");
+    expect(prompt).not.toContain("掌柜冷着脸");
   });
 
   it("recovers a turn that finished while the app was killed", async () => {
