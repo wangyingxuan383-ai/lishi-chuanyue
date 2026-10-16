@@ -5,6 +5,7 @@ import type { World } from "../../engine/types";
 import { useApp } from "../app/context";
 import { MenuSheet } from "../components/Sheet";
 import { useLongPress } from "../components/useLongPress";
+import { fromSetup } from "./openingDraft";
 
 interface WorldCard {
   world: World;
@@ -65,6 +66,12 @@ export default function Home() {
   useEffect(() => { void load(); }, []);
 
   const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup" }));
+  const again = async (worldId: string) => {
+    const setup = await game.setupOf(worldId);
+    if (!setup) return;
+    await game.repo.setSetting("newgameDraft", fromSetup(setup));
+    start();
+  };
 
   return (
     <div className="screen">
@@ -96,6 +103,7 @@ export default function Home() {
           onClose={() => setMenuFor(null)}
           items={[
             { label: "继续游玩", onSelect: () => push({ name: "play", worldId: menuFor.world.id }) },
+            { label: "用同样设定再开一局", onSelect: () => void again(menuFor.world.id) },
             {
               label: "删除这个世界", danger: true,
               onSelect: async () => {

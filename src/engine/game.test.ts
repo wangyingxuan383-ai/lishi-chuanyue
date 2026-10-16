@@ -117,6 +117,16 @@ describe("Game", () => {
     expect(c.head.choices).toEqual(["甲", "乙", "丙"]);
   });
 
+  it("returns the setup a world began with", async () => {
+    const { game, worldId } = await setup([]);
+    await game.repo.updateSettings(worldId, { ...(await game.repo.getWorld(worldId))!.settings, rules: "多写对话" });
+    expect(await game.setupOf(worldId)).toMatchObject({
+      title: "长安", eraId: "tang-748", settings: { premise: "天宝七载，长安。", rules: "多写对话" },
+      protagonist: { name: "李安", gender: "男", age: 22, identity: "你是落第举子，欠房钱。" },
+      arrival: "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: "" },
+    });
+  });
+
   it("uses the opening's purse, date and hour", async () => {
     const llm = fakeLlm([{ text: "你醒在汴京。" + RECORD({ money: "二百两", date: "宣和四年春二月", hour: 9, currency: [{ name: "文", value: 1 }, { name: "两", value: 1000 }], goals: [{ op: "add", name: "活下去" }] }) }]);
     const game = await Game.open(await createMemoryPlatform(llm), LLM);

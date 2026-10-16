@@ -2,70 +2,32 @@
 // protagonist, let the AI or yourself write the first scene. Templates are
 // inspiration that fill the fields; everything stays editable.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TEMPLATES, pickRandom, templateName, type Arrival, type OpeningTemplate } from "../../content/templates";
+import { TEMPLATES, pickRandom, type Arrival, type OpeningTemplate } from "../../content/templates";
 import { ERAS } from "../../content/eras";
-import type { NewWorld, TurnEvent } from "../../engine/game";
+import type { TurnEvent } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
-import { DEFAULT_SETTINGS, type Intensity, type Perspective, type WorldSettings } from "../../engine/types";
+import type { Intensity, Perspective, WorldSettings } from "../../engine/types";
 import { newId } from "../../engine/db/repo";
 import { useApp, useBack } from "../app/context";
+import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
+import { ARRIVALS, EMPTY, ORIGINS, fromTemplate, parseShare, shareText, toNewWorld, type Draft } from "./openingDraft";
 
-interface Draft {
-  templateId: string | null;
-  lockedGender: "男" | "女" | null;
-  title: string;
-  eraId: string | null;
-  premise: string;
-  name: string;
-  gender: "男" | "女";
-  age: string;
-  identity: string;
-  arrival: Arrival;
-  origin: string;
-  openingMode: "ai" | "player";
-  hint: string;
-  openingText: string;
-  settings: Pick<WorldSettings, "perspective" | "style" | "length" | "choiceCount" | "intensity" | "essentials" | "rules">;
-}
+/** "唐 · 天宝七载" → "唐" */
+const dynastyOf = (t: OpeningTemplate) => t.era.split(" · ")[0];
+/** Filter chips: dynasties with at least three templates, the rest under 其他. */
+const GROUPS = (() => {
+  const counts = new Map<string, number>();
+  for (const t of TEMPLATES) counts.set(dynastyOf(t), (counts.get(dynastyOf(t)) ?? 0) + 1);
+  return [...counts].filter(([, n]) => n >= 3).map(([d]) => d);
+})();
 
-const EMPTY: Draft = {
-  templateId: null, lockedGender: null, title: "", eraId: null, premise: "", name: "", gender: "男", age: "",
-  identity: "", arrival: "魂穿", origin: "历史系研究生", openingMode: "ai", hint: "", openingText: "",
-  settings: {
-    perspective: DEFAULT_SETTINGS.perspective, style: DEFAULT_SETTINGS.style, length: DEFAULT_SETTINGS.length,
-    choiceCount: DEFAULT_SETTINGS.choiceCount, intensity: DEFAULT_SETTINGS.intensity, essentials: "", rules: "",
-  },
-};
-
-const ORIGINS = ["历史系研究生", "程序员", "外科医生", "中学语文老师", "律师", "工程师", "厨师", "退伍军人"];
-const ARRIVALS: Arrival[] = ["魂穿", "身穿", "投胎", "不穿越"];
 const TIPS = [
   "故事设定会一直交给 AI，相当于你写给它的开局提示词。",
   "游戏中可以用“写”模式亲手写一段剧情，AI 会顺着往下写。",
   "长按任意一段可以改写，或回到那里另走一条路。",
   "本局设置里随时可以改故事设定、要点和给 AI 的规则。",
 ];
-
-function fromTemplate(t: OpeningTemplate, keep: Draft, gender?: "男" | "女"): Draft {
-  const g = t.gender ?? gender ?? keep.gender;
-  return {
-    ...keep,
-    templateId: t.id,
-    lockedGender: t.gender,
-    title: t.title,
-    eraId: t.eraId,
-    premise: t.premise,
-    name: templateName(t, g),
-    gender: g,
-    age: String(t.age),
-    identity: t.identity,
-    arrival: t.arrival ?? "魂穿",
-    openingMode: "ai",
-    hint: t.openingHint,
-    openingText: "",
-  };
-}
 
 interface UserTemplate { id: string; name: string; draft: Draft }
 
@@ -76,6 +38,9 @@ export default function NewGame() {
   const [mine, setMine] = useState<UserTemplate[]>([]);
   const [idea, setIdea] = useState("");
   const [allTemplates, setAllTemplates] = useState(false);
+  const [group, setGroup] = useState("全部");
+  const [sheet, setSheet] = useState<"menu" | "import" | null>(null);
+  const [pasted, setPasted] = useState("");
   const [assisting, setAssisting] = useState(false);
   const [phase, setPhase] = useState<"form" | "loading" | "thinking" | "writing" | "organizing">("form");
   const [text, setText] = useState("");
@@ -149,15 +114,7 @@ export default function NewGame() {
     setError(null);
     setText(d.openingMode === "player" ? d.openingText : "");
     setPhase(d.openingMode === "player" ? "organizing" : "loading");
-    const input: NewWorld = {
-      title: d.title,
-      eraId: d.eraId,
-      settings: { ...d.settings, premise: d.premise },
-      protagonist: { name: d.name.trim(), gender: d.lockedGender ?? d.gender, age: Number(d.age) || null, identity: d.identity.trim() },
-      arrival: d.arrival,
-      origin: d.arrival === "不穿越" ? "" : d.origin,
-      opening: d.openingMode === "player" ? { mode: "player", text: d.openingText } : { mode: "ai", hint: d.hint },
-    };
+    const input = toNewWorld(d);
     const onEvent = (e: TurnEvent) => {
       if (e.type === "thinking") setPhase("thinking");
       else if (e.type === "text") { setPhase("writing"); setText(e.full); }
@@ -187,6 +144,22 @@ export default function NewGame() {
     toast("已保存到“我的开局”");
   };
 
+  const share = async () => {
+    await navigator.clipboard?.writeText(shareText(draft));
+    toast("已复制开局设定，可以发给朋友");
+  };
+  const exportFile = async () => {
+    if (await game.platform.files.exportText(`开局-${draft.title || "未命名"}.txt`, shareText(draft)).catch(() => false)) toast("已保存");
+  };
+  const importFrom = (text: string | null) => {
+    const next = text ? parseShare(text) : null;
+    if (!next) { toast("没有找到开局设定，请粘贴完整的分享文字"); return false; }
+    setDraft(next);
+    setError(null);
+    toast(`已导入「${next.title || "开局设定"}」`);
+    return true;
+  };
+
   const ready = draft.identity.trim() && draft.name.trim() && (draft.openingMode === "ai" || draft.openingText.trim());
 
   if (phase !== "form") {
@@ -204,6 +177,11 @@ export default function NewGame() {
   }
   if (!loaded) return null;
 
+  const shownTemplates = group === "全部" ? (allTemplates ? TEMPLATES : TEMPLATES.slice(0, 6))
+    : group === "我的" ? []
+    : group === "其他" ? TEMPLATES.filter((t) => !GROUPS.includes(dynastyOf(t)))
+    : TEMPLATES.filter((t) => dynastyOf(t) === group);
+
   const intensity = (key: keyof WorldSettings["intensity"], label: string) => (
     <div className="row" style={{ flexWrap: "wrap" }}>
       <span className="muted" style={{ minWidth: 84 }}>{label}</span>
@@ -219,25 +197,29 @@ export default function NewGame() {
         <button className="icon-btn" aria-label="返回" onClick={pop}>‹</button>
         <div className="title"><h1>新的故事</h1></div>
         <button className="ghost" onClick={randomStart}>随便穿</button>
+        <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}>⋯</button>
       </div>
       <div className="screen-body stack">
         {error && <div className="notice">{error}</div>}
 
         <section className="stack" style={{ gap: 8 }}>
           <span className="muted">灵感（点一下填入，之后都能改）</span>
+          <div className="segmented" role="group" aria-label="灵感分类">
+            {["全部", ...GROUPS, "其他", ...(mine.length ? ["我的"] : [])].map((g) => <button key={g} aria-pressed={group === g} onClick={() => setGroup(g)}>{g}</button>)}
+          </div>
           <div className="template-row">
-            {mine.map((m) => (
+            {(group === "全部" || group === "我的") && mine.map((m) => (
               <button key={m.id} className="template-card" onClick={() => { setDraft({ ...EMPTY, ...m.draft }); toast(`已填入「${m.name}」`); }}>
                 <b>{m.name}</b><small>我的开局</small>
               </button>
             ))}
-            {(allTemplates ? TEMPLATES : TEMPLATES.slice(0, 6)).map((t) => (
+            {shownTemplates.map((t) => (
               <button key={t.id} className={`template-card${draft.templateId === t.id ? " selected" : ""}`} onClick={() => useTemplate(t)}>
                 <b>{t.title}</b><small>{t.era}</small>
               </button>
             ))}
           </div>
-          {!allTemplates && <button className="ghost" onClick={() => setAllTemplates(true)}>查看全部 {TEMPLATES.length} 个灵感</button>}
+          {group === "全部" && !allTemplates && <button className="ghost" onClick={() => setAllTemplates(true)}>查看全部 {TEMPLATES.length} 个灵感</button>}
         </section>
 
         <section className="stack" style={{ gap: 8 }}>
@@ -338,6 +320,26 @@ export default function NewGame() {
         </div>
         {!ready && <p className="muted" style={{ margin: 0, textAlign: "center" }}>填好名字和身份就能开始{draft.openingMode === "player" ? "（还要写下开场）" : ""}。</p>}
       </div>
+      {sheet === "menu" && (
+        <MenuSheet
+          onClose={() => setSheet(null)}
+          items={[
+            { label: "复制开局设定（发给朋友）", onSelect: () => void share() },
+            { label: "保存为文件", onSelect: () => void exportFile() },
+            { label: "导入开局设定", onSelect: () => { setPasted(""); setSheet("import"); } },
+            { label: "从文件导入", onSelect: async () => { importFrom(await game.platform.files.importText().catch(() => null)); } },
+            { label: "清空重填", danger: true, onSelect: () => { setDraft({ ...EMPTY, settings: draft.settings }); toast("已清空"); } },
+          ]}
+        />
+      )}
+      {sheet === "import" && (
+        <Sheet title="导入开局设定" onClose={() => setSheet(null)}>
+          <textarea rows={6} value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="粘贴朋友分享的整段开局设定" aria-label="分享文字" />
+          <div className="row" style={{ marginTop: 10 }}>
+            <button className="primary grow" disabled={!pasted.trim()} onClick={() => { if (importFrom(pasted)) setSheet(null); }}>导入</button>
+          </div>
+        </Sheet>
+      )}
     </div>
   );
 }

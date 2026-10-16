@@ -12,6 +12,7 @@ import { useApp, useBack } from "../app/context";
 import { Panel } from "../components/Panel";
 import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
+import { fromSetup } from "./openingDraft";
 import { useLongPress } from "../components/useLongPress";
 
 const PAGE = 30;
@@ -55,7 +56,7 @@ function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: Sto
 }
 
 export default function Play({ worldId }: { worldId: string }) {
-  const { game, push, toast, devMode, pop } = useApp();
+  const { game, push, replace, toast, devMode, pop } = useApp();
   const [world, setWorld] = useState<World | null>(null);
   const [cursor, setCursor] = useState<tree.Cursor | null>(null);
   const [nodes, setNodes] = useState<StoryNode[]>([]);
@@ -434,6 +435,12 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
+            { label: "用同样设定再开一局", hidden: !!gen, onSelect: async () => {
+              const setup = await game.setupOf(worldId);
+              if (!setup) return;
+              await game.repo.setSetting("newgameDraft", fromSetup(setup));
+              replace({ name: "newgame" });
+            } },
             { label: "回到首页", onSelect: () => pop() },
           ]}
         />

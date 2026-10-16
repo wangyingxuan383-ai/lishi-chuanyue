@@ -184,6 +184,12 @@ export class Repo {
     return rows[0] ? toNode(rows[0]) : null;
   }
 
+  /** The world's opening node. */
+  async opening(worldId: string): Promise<StoryNode | null> {
+    const rows = await this.q(`SELECT ${NODE_COLUMNS} FROM nodes WHERE world_id = ? AND kind = 'opening' ORDER BY seq LIMIT 1`, [worldId]);
+    return rows[0] ? toNode(rows[0]) : null;
+  }
+
   async getState(nodeId: string): Promise<WorldState> {
     const rows = await this.q("SELECT state_json FROM states WHERE node_id = ?", [nodeId]);
     if (!rows[0]) throw new Error(`missing state for node ${nodeId}`);

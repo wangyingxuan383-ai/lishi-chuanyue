@@ -10,6 +10,7 @@ const results = [];
 const check = (name, ok, detail = "") => results.push(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 const browser = await chromium.launch({ channel: "msedge" });
 const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -35,6 +36,8 @@ await page.getByRole("button", { name: "保存，开始穿越" }).click();
 // New game: templates fill fields, gender locks when the identity implies it.
 await page.getByRole("button", { name: "随便穿" }).waitFor();
 await shot("02-newgame");
+const formScreens = await page.evaluate(() => document.documentElement.scrollHeight / innerHeight);
+check("whole new-story form within four screens", formScreens <= 4, `${formScreens.toFixed(1)} 屏`);
 await page.locator(".template-card", { hasText: "相府庶女" }).click();
 check("template fills premise and identity", (await page.getByLabel(/故事设定/).inputValue()).includes("平康坊") && (await page.getByLabel("身份与处境").inputValue()).includes("庶女"));
 check("gender locked by identity", (await page.textContent("body")).includes("性别：女（由身份决定）"));
@@ -42,6 +45,11 @@ await page.getByRole("button", { name: /查看全部/ }).click();
 check("all templates listed", (await page.locator(".template-card").count()) >= 18);
 await page.locator(".template-card", { hasText: "留洋归来" }).click();
 check("neutral identity offers a gender choice", (await page.getByRole("button", { name: "男", exact: true }).count()) === 1);
+const groups = page.getByRole("group", { name: "灵感分类" });
+await groups.getByRole("button", { name: "明", exact: true }).click();
+const mingCards = await page.locator(".template-card").allTextContents();
+check("dynasty filter shows only that dynasty", mingCards.length >= 4 && mingCards.every((t) => t.includes("明 ·")), `${mingCards.length} cards`);
+await groups.getByRole("button", { name: "全部", exact: true }).click();
 
 // AI assist fills only empty fields.
 await page.getByLabel(/故事设定/).fill("");
@@ -50,6 +58,19 @@ await page.getByRole("button", { name: "AI 帮我补全" }).click();
 await page.getByText("已补全空着的部分").waitFor({ timeout: 15000 });
 check("assist fills the empty premise", (await page.getByLabel(/故事设定/).inputValue()).includes("宣和七年"));
 check("assist keeps the filled identity", (await page.getByLabel("身份与处境").inputValue()).includes("留学归来"));
+
+// Opening setups can be pasted in and copied out for sharing.
+await page.getByRole("button", { name: "开局菜单" }).click();
+await page.getByRole("button", { name: "导入开局设定" }).click();
+await page.getByLabel("分享文字").fill(`朋友发来的：\n<<<LISHI-OPENING\n${JSON.stringify({ v: 1, title: "赤壁小吏", premise: "建安十三年冬，江东。曹军压境。", name: "周平", gender: "男", age: "24", identity: "你是柴桑城里的一个小吏。", arrival: "不穿越" })}\nLISHI-OPENING>>>`);
+await page.getByRole("button", { name: "导入", exact: true }).click();
+await page.getByText("已导入「赤壁小吏」").waitFor();
+check("pasted setup imported", (await page.getByLabel(/故事设定/).inputValue()).includes("建安十三年") && (await page.getByRole("button", { name: "不穿越" }).getAttribute("aria-pressed")) === "true");
+await page.getByRole("button", { name: "开局菜单" }).click();
+await page.getByRole("button", { name: "复制开局设定（发给朋友）" }).click();
+await page.getByText("已复制开局设定，可以发给朋友").waitFor();
+const copied = await page.evaluate(() => navigator.clipboard.readText());
+check("setup copied as shareable text", copied.startsWith("【历史穿越 · 开局设定】赤壁小吏") && copied.includes("<<<LISHI-OPENING"));
 
 // A player-written opening on a fresh template.
 await page.locator(".template-card", { hasText: "落第举子" }).click();
@@ -171,6 +192,18 @@ await page.reload();
 await page.getByText("继续游玩").waitFor();
 await shot("08-home");
 check("home lists the world after reload", (await page.locator(".card").count()) >= 1);
+
+// "再来一局同样设定" from the home long-press menu.
+const cardBox = await page.locator(".card").first().boundingBox();
+await page.mouse.move(cardBox.x + 30, cardBox.y + 20);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+await page.getByRole("button", { name: "用同样设定再开一局" }).click();
+await page.getByRole("button", { name: "随便穿" }).waitFor();
+check("same setup again prefills the new story", (await page.getByLabel(/故事设定/).inputValue()).length > 0 && (await page.getByLabel("名字").inputValue()).length > 0 && (await page.textContent("body")).includes("（由身份决定）"));
+await page.getByRole("button", { name: "返回" }).click();
+await page.getByText("继续游玩").waitFor();
 
 // Edits are a single reversible change after the latest turn.
 await page.locator(".card").first().click();

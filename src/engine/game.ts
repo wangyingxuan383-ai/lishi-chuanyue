@@ -259,6 +259,7 @@ export class Game {
         parentId: null, kind: "opening", narrative, record, choices: record.choices ?? [], state: applied.state,
         meta: {
           promptVersion: PROMPT_VERSION, model, playerWritten: input.opening.mode === "player",
+          setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "" },
           firstTokenMs: result?.firstTokenMs, totalMs: result?.totalMs, usage: result?.usage, raw: result?.text,
         },
       },
@@ -266,6 +267,21 @@ export class Game {
     if (result) await this.platform.sql.batch([this.usage(world.id, node.id, "opening", result, "ok", model)]);
     onEvent({ type: "done", cursor: await tree.cursor(this.repo, world.id), node, chips: [] });
     return world.id;
+  }
+
+  /** How a world began, for "再来一局同样设定": the opening's protagonist and arrival with the world's current settings. */
+  async setupOf(worldId: string): Promise<NewWorld | null> {
+    const world = await this.repo.getWorld(worldId);
+    const opening = world ? await this.repo.opening(worldId) : null;
+    if (!world || !opening) return null;
+    const me = (await this.repo.getState(opening.id)).protagonist;
+    const setup = (opening.meta.setup ?? {}) as { arrival?: Arrival; hint?: string };
+    return {
+      title: world.title, eraId: eraPack(world.eraId)?.id ?? null, settings: world.settings,
+      protagonist: { name: me.name, gender: me.gender, age: me.age, identity: me.identity },
+      arrival: setup.arrival ?? (me.origin ? "魂穿" : "不穿越"), origin: me.origin,
+      opening: opening.meta.playerWritten ? { mode: "player", text: opening.narrative } : { mode: "ai", hint: setup.hint ?? "" },
+    };
   }
 
   // ---------- turns ----------
