@@ -1,7 +1,7 @@
 // The play screen (PLAN_V3 §4.3–4.4): story stream, choices, input bar,
 // regenerate/variants, long-press menu, stop/interrupt, character panel.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { getEra } from "../../content/eras";
+import { eraContext } from "../../engine/era";
 import { formatClock } from "../../engine/calendar/clock";
 import type { TurnEvent, TurnHandle } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
@@ -18,6 +18,7 @@ const PAGE = 30;
 const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
   { mode: "do", label: "做", placeholder: "写下你要做的事…" },
   { mode: "say", label: "说", placeholder: "写下你要说的话…" },
+  { mode: "write", label: "写", placeholder: "亲手写一段剧情，AI 会顺着往下写…" },
   { mode: "direct", label: "导演", placeholder: "给叙事者的幕后要求，如“这段写紧张些”…" },
 ];
 const HINTS = ["写短一点", "写长一点", "换个结果", "让对方拒绝", "多些对话", "节奏快一些"];
@@ -39,7 +40,10 @@ function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: Sto
   if (node.kind === "edit") return <div className="edit-line">你修改了记录</div>;
   return (
     <div className="turn" {...press}>
-      {node.kind !== "opening" && node.actionMode !== "continue" && node.actionText && (
+      {node.kind !== "opening" && node.actionMode === "write" && node.actionText && (
+        <div className="turn-written"><StoryText text={node.actionText} /></div>
+      )}
+      {node.kind !== "opening" && node.actionMode !== "continue" && node.actionMode !== "write" && node.actionText && (
         <div className={`turn-action ${node.actionMode ?? ""}`}>{node.actionText}</div>
       )}
       {node.kind !== "opening" && node.actionMode === "continue" && <div className="turn-action continue">（继续）</div>}
@@ -68,14 +72,14 @@ export default function Play({ worldId }: { worldId: string }) {
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "lines" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
   const handle = useRef<TurnHandle | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
-  const era = getEra(world?.eraId ?? "tang-748");
+  const era = eraContext(world?.eraId ?? null, state);
 
   const refresh = useCallback(async (keepLimit = limit) => {
     const w = await game.repo.getWorld(worldId);
@@ -242,7 +246,7 @@ export default function Play({ worldId }: { worldId: string }) {
         <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
         <div className="title">
           <h1 style={{ fontSize: 15 }}>{place}</h1>
-          <div className="subtitle">{era.startLabel} · {formatClock(era.startHour, state.time.elapsedMinutes)}</div>
+          <div className="subtitle">{era.startLabel ? `${era.startLabel} · ` : ""}{formatClock(era.startHour, state.time.elapsedMinutes)}</div>
         </div>
         <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>
         <button className="icon-btn" aria-label="更多" onClick={() => setSheet("more")}>⋯</button>
@@ -277,7 +281,8 @@ export default function Play({ worldId }: { worldId: string }) {
             })}
             {gen && (
               <div className="turn">
-                {gen.action && gen.action.mode !== "continue" && gen.action.text && <div className={`turn-action ${gen.action.mode}`}>{gen.action.text}</div>}
+                {gen.action?.mode === "write" && gen.action.text && <div className="turn-written"><StoryText text={gen.action.text} /></div>}
+                {gen.action && gen.action.mode !== "continue" && gen.action.mode !== "write" && gen.action.text && <div className={`turn-action ${gen.action.mode}`}>{gen.action.text}</div>}
                 {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line">{statusText || "　"}</p>}
                 {gen.text && statusText && <p className="status-line">{statusText}</p>}
               </div>
@@ -372,12 +377,14 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: async () => { await tree.redo(game.repo, cursor); await refresh(); } },
             { label: "附加幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
             { label: "世界线", onSelect: () => setSheet("lines") },
+            { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
             { label: "回到首页", onSelect: () => pop() },
           ]}
         />
       )}
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
+      {sheet === "story" && <StorySheet world={world} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onClose={() => setSheet(null)} />}
       {panel && <Panel state={state} era={era} onClose={() => setPanel(false)} />}
     </div>
@@ -433,6 +440,25 @@ function LinesSheet({ worldId, current, onClose, onSwitch }: { worldId: string; 
   );
 }
 
+function StorySheet({ world, onSave, onClose }: { world: World; onSave: (p: Partial<World["settings"]>) => void; onClose: () => void }) {
+  const s = world.settings;
+  const [premise, setPremise] = useState(s.premise);
+  const [essentials, setEssentials] = useState(s.essentials);
+  const [rules, setRules] = useState(s.rules);
+  const [directive, setDirective] = useState(s.directive);
+  return (
+    <Sheet title="故事设定与要点" onClose={onClose}>
+      <div className="stack">
+        <label>故事设定（AI 每一段都会参考）<textarea rows={6} value={premise} onChange={(e) => setPremise(e.target.value)} /></label>
+        <label>要点（必须一直记住的事，每行一条）<textarea rows={4} value={essentials} onChange={(e) => setEssentials(e.target.value)} placeholder="比如：王掌柜其实是主角的远房舅舅" /></label>
+        <label>叙事方针（文风和节奏）<textarea rows={2} value={directive} onChange={(e) => setDirective(e.target.value)} placeholder="比如：节奏快一些，多写市井人物" /></label>
+        <label>给 AI 的额外规则<textarea rows={3} value={rules} onChange={(e) => setRules(e.target.value)} placeholder="比如：不要让主角轻易获得权力" /></label>
+        <button className="primary" onClick={() => onSave({ premise, essentials, rules, directive })}>保存</button>
+      </div>
+    </Sheet>
+  );
+}
+
 function WorldSettingsSheet({ world, onChange, onClose }: { world: World; onChange: (p: Partial<World["settings"]>) => void; onClose: () => void }) {
   const s = world.settings;
   const levels: Intensity[] = ["含蓄", "写实", "浓烈"];
@@ -454,6 +480,10 @@ function WorldSettingsSheet({ world, onChange, onClose }: { world: World; onChan
         <span className="muted">建议选项数量</span>
         <div className="segmented">
           {[0, 2, 3, 4].map((n) => <button key={n} aria-pressed={s.choiceCount === n} onClick={() => onChange({ choiceCount: n })}>{n === 0 ? "不要" : n}</button>)}
+        </div>
+        <span className="muted">叙述视角</span>
+        <div className="segmented">
+          {([["你", "你"], ["我", "我"], ["他", "他 / 她"]] as const).map(([v, l]) => <button key={v} aria-pressed={s.perspective === v} onClick={() => onChange({ perspective: v })}>{l}</button>)}
         </div>
         <span className="muted">文风</span>
         <div className="segmented">

@@ -20,6 +20,10 @@ export interface TurnRecord {
   log?: string | null;
   risk?: string | null;
   choices?: string[] | null;
+  /** Opening only: date label, hour of day and the era's currency units. */
+  date?: string | null;
+  hour?: number | null;
+  currency?: { name: string; value: number }[] | null;
 }
 
 export type ChipTone = "gain" | "loss" | "info" | "warn";
@@ -38,7 +42,7 @@ export interface ApplyResult {
   minutes: number;
 }
 
-const DEFAULT_MINUTES: Record<ActionMode, number> = { do: 15, say: 5, continue: 30, direct: 30 };
+const DEFAULT_MINUTES: Record<ActionMode, number> = { do: 15, say: 5, write: 30, continue: 30, direct: 30 };
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
 const STAT_SOFT_CAP = 40;
 

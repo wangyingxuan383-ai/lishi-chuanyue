@@ -16,8 +16,9 @@ async function setup(scripts: Script[]) {
   const game = await Game.open(platform, LLM);
   const events: TurnEvent[] = [];
   const worldId = (await game.createWorld({
-    title: "长安", eraId: "tang-748",
-    opening: { protagonist: { name: "李安", gender: "男", age: 22, identity: "落第举子", situation: "欠房钱", origin: "历史系研究生" }, transmigration: "魂穿" },
+    title: "长安", eraId: "tang-748", settings: { premise: "天宝七载，长安。" },
+    protagonist: { name: "李安", gender: "男", age: 22, identity: "你是落第举子，欠房钱。" },
+    arrival: "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: "" },
   }, (e) => events.push(e)))!;
   return { llm, platform, game, worldId, events };
 }
@@ -41,6 +42,46 @@ describe("Game", () => {
     expect(state.people[0].name).toBe("王掌柜");
     expect(state.goals[0].name).toBe("三日内付清房钱九十文");
     expect(c.head.choices).toEqual(["甲", "乙", "丙"]);
+  });
+
+  it("uses the opening's purse, date and hour", async () => {
+    const llm = fakeLlm([{ text: "你醒在汴京。" + RECORD({ money: "二百两", date: "宣和四年春二月", hour: 9, currency: [{ name: "文", value: 1 }, { name: "两", value: 1000 }], goals: [{ op: "add", name: "活下去" }] }) }]);
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "", eraId: null, settings: { premise: "北宋宣和年间，汴京。" },
+      protagonist: { name: "赵某", gender: "男", age: 17, identity: "你是官家的第十七子。" },
+      arrival: "魂穿", origin: "程序员", opening: { mode: "ai", hint: "宫宴" },
+    }, () => {}))!;
+    const c = await tree.cursor(game.repo, worldId);
+    const state = await game.repo.getState(c.head.id);
+    expect(state.protagonist.stats.money).toBe(200000);
+    expect(state.time).toMatchObject({ start: "宣和四年春二月", startHour: 9, elapsedMinutes: 0 });
+    expect(state.era.currency?.units[0].name).toBe("两");
+    expect((await game.repo.getWorld(worldId))!.title).toBe("赵某的故事");
+    expect(JSON.stringify(llm.calls[0].body)).toContain("北宋宣和年间，汴京。");
+  });
+
+  it("keeps a player-written opening verbatim and extracts its state", async () => {
+    const llm = fakeLlm([{ text: '{"time":"0","money":50,"place":"破庙","people":[{"name":"老乞丐","attitude":"友善"}],"choices":["起身"],"log":"开场"}' }]);
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "破庙", eraId: "tang-748", settings: {},
+      protagonist: { name: "阿九", gender: "女", age: 15, identity: "你是流落街头的孤女。" },
+      arrival: "不穿越", origin: "", opening: { mode: "player", text: "雨夜，破庙。阿九缩在神像后面。" },
+    }, () => {}))!;
+    const c = await tree.cursor(game.repo, worldId);
+    const state = await game.repo.getState(c.head.id);
+    expect(c.head.narrative).toBe("雨夜，破庙。阿九缩在神像后面。");
+    expect(state.protagonist.stats.money).toBe(50);
+    expect(state.people[0].name).toBe("老乞丐");
+    expect(c.head.choices).toEqual(["起身"]);
+    expect(llm.calls[0].body.model).toBe("aux");
+  });
+
+  it("treats a written passage as part of the story", async () => {
+    const { game, worldId, llm } = await setup([{ text: "掌柜愣住了。" + RECORD({}) }]);
+    await game.play(worldId, { mode: "write", text: "你忽然掏出一锭金子拍在柜上。" }, () => {}).done;
+    expect(JSON.stringify(llm.calls[1].body)).toContain("玩家以作者身份亲手写下了接下来的情节");
   });
 
   it("plays a turn: streams text without the record, applies changes, records usage", async () => {

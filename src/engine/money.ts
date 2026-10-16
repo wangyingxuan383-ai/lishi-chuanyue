@@ -22,9 +22,9 @@ export function formatMoney(amount: number, currency: Currency): string {
   for (const unit of currency.units) {
     const n = Math.floor(rest / unit.value);
     rest -= n * unit.value;
-    if (n) parts.push(`${n} ${unit.name}`);
+    if (n) parts.push(`${n} ${unit.name}`.trim());
   }
-  return sign + (parts.length ? parts.join(" ") : `0 ${currency.units[currency.units.length - 1].name}`);
+  return sign + (parts.length ? parts.join(" ") : `0 ${currency.units[currency.units.length - 1].name}`.trim());
 }
 
 

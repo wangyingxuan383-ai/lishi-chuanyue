@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getEra } from "../../content/eras";
+import { eraContext } from "../../engine/era";
 import { formatClock } from "../../engine/calendar/clock";
 import type { World } from "../../engine/types";
 import { useApp } from "../app/context";
@@ -12,6 +12,7 @@ interface WorldCard {
   lastLine: string;
   clock: string;
   turns: number;
+  era: string;
 }
 
 function relative(iso: string): string {
@@ -33,7 +34,7 @@ function WorldItem({ card, onOpen, onMenu }: { card: WorldCard; onOpen: () => vo
   return (
     <button className="card" {...press}>
       <h3>{card.world.title}</h3>
-      <p>{getEra(card.world.eraId).title} · {card.protagonist} · {card.clock}</p>
+      <p>{card.era} · {card.protagonist} · {card.clock}</p>
       <p style={{ marginTop: 6 }}>{card.lastLine}</p>
       <p style={{ marginTop: 6, fontSize: 12 }}>{card.turns} 回合 · {relative(card.world.playedAt)}</p>
     </button>
@@ -54,10 +55,10 @@ export default function Home() {
       const head = await game.repo.getNode(line.nodeId);
       const state = await game.repo.getState(line.nodeId);
       const path = await game.repo.path(line.nodeId);
-      const era = getEra(world.eraId);
+      const era = eraContext(world.eraId, state);
       out.push({
         world, protagonist: state.protagonist.name, lastLine: lastSentence(head?.narrative ?? ""),
-        clock: formatClock(era.startHour, state.time.elapsedMinutes), turns: path.length - 1,
+        clock: formatClock(era.startHour, state.time.elapsedMinutes), turns: path.length - 1, era: era.startLabel || era.title,
       });
     }
     setCards(out);

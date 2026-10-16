@@ -1,7 +1,7 @@
 // Character & world panel (PLAN_V3 §4.5). Read-only in this first version;
 // editing via correction nodes follows in R02-T011.
 import { useState } from "react";
-import type { EraDraft } from "../../content/eras";
+import type { EraContext } from "../../engine/era";
 import { clockParts } from "../../engine/calendar/clock";
 import { formatMoney } from "../../engine/money";
 import type { WorldState } from "../../engine/types";
@@ -24,7 +24,7 @@ function Stat({ label, value, n }: { label: string; value: string; n?: number })
   );
 }
 
-export function Panel({ state, era, onClose }: { state: WorldState; era: EraDraft; onClose: () => void }) {
+export function Panel({ state, era, onClose }: { state: WorldState; era: EraContext; onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("我");
   useBack(() => { onClose(); return true; });
   const me = state.protagonist;
@@ -60,7 +60,7 @@ export function Panel({ state, era, onClose }: { state: WorldState; era: EraDraf
               )) : <p className="muted">无</p>}
             </div>
             <div className="stack" style={{ gap: 4 }}>
-              <p className="muted" style={{ margin: 0 }}>{era.startLabel} · 第 {c.day} 日 {c.shichen}时{place ? ` · ${place}` : ""}</p>
+              <p className="muted" style={{ margin: 0 }}>{era.startLabel ? `${era.startLabel} · ` : ""}第 {c.day} 日 {c.shichen}时{place ? ` · ${place}` : ""}</p>
               {me.origin && <p className="muted" style={{ margin: 0 }}>穿越前：{me.origin}</p>}
             </div>
           </div>

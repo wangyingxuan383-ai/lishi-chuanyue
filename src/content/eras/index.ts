@@ -7,4 +7,4 @@ export function getEra(id: string): EraDraft {
   return ERAS.find((e) => e.id === id) ?? TANG_748;
 }
 
-export type { EraDraft, EraIdentity } from "./types";
+export type { EraDraft } from "./types";

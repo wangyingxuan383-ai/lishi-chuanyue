@@ -1,16 +1,21 @@
 // The game session: opening, turns, variants, stop/interrupt, the extraction
 // fallback, refusals and crash recovery (docs/PLAN_V3.md §5.1). UI code talks
 // to this class only; it never touches SQL or the network directly.
-import { getEra, type EraDraft } from "../content/eras";
+import { eraContext, eraPack, type EraContext } from "./era";
 import type { Platform, SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
 import { ChatError, parseChunk, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "./llm/chat";
 import { isRefusal } from "./llm/refusal";
-import { continueMessages, extractMessages, openingMessages, PROMPT_VERSION, turnMessages, type OpeningInput } from "./prompt/turn";
+import {
+  assistMessages, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION, turnMessages,
+  type Arrival, type SetupDraft,
+} from "./prompt/turn";
+import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
+import { parseMoney } from "./money";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS, type ActionMode, type StoryNode, type WorldSettings, type WorldState } from "./types";
 
@@ -32,6 +37,17 @@ export type TurnEvent =
   | { type: "organizing" }
   | { type: "done"; cursor: tree.Cursor; node: StoryNode; chips: Chip[] }
   | { type: "failed"; reason: FailReason; status?: number; detail?: string; partialSaved: boolean; cursor?: tree.Cursor };
+
+export interface NewWorld {
+  title: string;
+  eraId: string | null;
+  /** premise, essentials, rules, perspective and the usual play settings. */
+  settings: Partial<WorldSettings>;
+  protagonist: { name: string; gender: string; age: number | null; identity: string };
+  arrival: Arrival;
+  origin: string;
+  opening: { mode: "ai"; hint: string } | { mode: "player"; text: string };
+}
 
 export interface PlayerAction {
   mode: ActionMode;
@@ -132,7 +148,7 @@ export class Game {
   }
 
   /** The 补记 fallback: extracts a record from the narrative with the auxiliary model. */
-  private async extract(era: EraDraft, state: WorldState, action: string, narrative: string): Promise<{ record: TurnRecord | null; result: ChatResult | null }> {
+  private async extract(era: EraContext, state: WorldState, action: string, narrative: string): Promise<{ record: TurnRecord | null; result: ChatResult | null }> {
     try {
       const result = await this.call(extractMessages({ era, state, action, narrative }), { aux: true, timeouts: EXTRACT_TIMEOUT });
       return { record: parseRecord(`<record>${result.text}`).record, result };
@@ -143,59 +159,101 @@ export class Game {
 
   // ---------- opening ----------
 
-  async createWorld(
-    input: { title: string; eraId: string; settings?: Partial<WorldSettings>; opening: Omit<OpeningInput, "era" | "settings"> },
-    onEvent: (e: TurnEvent) => void,
-  ): Promise<string | null> {
-    const era = getEra(input.eraId);
-    const settings = { ...DEFAULT_SETTINGS, ...input.settings };
-    const p = input.opening.protagonist;
-    const initial: WorldState = {
-      version: 1,
-      time: { start: era.startLabel, elapsedMinutes: 0 },
-      placeId: null,
-      protagonist: {
-        name: p.name, aliases: [], age: p.age, gender: p.gender, identity: p.identity, origin: p.origin, cheat: "",
-        stats: { money: era.startMoney, debt: 0, health: 80, energy: 70, fame: 10 }, statuses: [], items: [],
-      },
-      people: [], places: [], cards: [], goals: [], era: { packId: era.id }, deviations: [],
-    };
-    const splitter = new RecordSplitter();
-    let shown = "";
-    let result: ChatResult;
+  /** Expands a rough idea into a full setup; fields the player filled are kept. */
+  async assist(idea: string, current: Partial<SetupDraft>): Promise<Partial<SetupDraft> | null> {
     try {
-      result = await this.call(openingMessages({ era, settings, ...input.opening }), {
-        onThinking: () => onEvent({ type: "thinking" }),
-        onText: (delta) => {
-          const visible = splitter.push(delta);
-          if (visible) { shown += visible; onEvent({ type: "text", delta: visible, full: shown }); }
-        },
-      });
-    } catch (error) {
-      onEvent({ type: "failed", ...failReason(error), partialSaved: false });
+      const result = await this.call(assistMessages(idea, current), { aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
+      const value = lenientJson(result.text) as Partial<SetupDraft> | null;
+      await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.llm!.auxModel || this.llm!.model)]);
+      return value;
+    } catch {
       return null;
     }
-    const { narrative, recordText } = splitter.finish();
-    let record = parseRecord(recordText).record;
-    if (!record) {
+  }
+
+  async createWorld(input: NewWorld, onEvent: (e: TurnEvent) => void): Promise<string | null> {
+    const pack = eraPack(input.eraId);
+    const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
+    const p = input.protagonist;
+    const initial: WorldState = {
+      version: 1,
+      time: { start: pack?.startLabel ?? "", startHour: pack?.startHour, elapsedMinutes: 0 },
+      placeId: null,
+      protagonist: {
+        name: p.name, aliases: [], age: p.age, gender: p.gender, identity: p.identity,
+        origin: input.arrival === "不穿越" ? "" : input.origin, cheat: "",
+        stats: { money: 0, debt: 0, health: 80, energy: 70, fame: 10 }, statuses: [], items: [],
+      },
+      people: [], places: [], cards: [], goals: [], era: { packId: pack?.id ?? null }, deviations: [],
+    };
+    const era = eraContext(pack?.id ?? null, initial);
+    const opening = { era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "" };
+
+    let narrative: string;
+    let record: TurnRecord | null;
+    let result: ChatResult | null = null;
+    if (input.opening.mode === "player") {
+      // The player wrote the opening: keep it verbatim and only extract the state.
+      narrative = input.opening.text.trim();
       onEvent({ type: "organizing" });
-      record = (await this.extract(era, initial, "（开场）", narrative)).record;
+      try {
+        result = await this.call(openingExtractMessages({ ...opening, text: narrative }), { aux: true, timeouts: EXTRACT_TIMEOUT });
+        record = parseRecord(`<record>${result.text}`).record;
+      } catch (error) {
+        onEvent({ type: "failed", ...failReason(error), partialSaved: false });
+        return null;
+      }
+    } else {
+      const splitter = new RecordSplitter();
+      let shown = "";
+      try {
+        result = await this.call(openingMessages(opening), {
+          onThinking: () => onEvent({ type: "thinking" }),
+          onText: (delta) => {
+            const visible = splitter.push(delta);
+            if (visible) { shown += visible; onEvent({ type: "text", delta: visible, full: shown }); }
+          },
+        });
+      } catch (error) {
+        onEvent({ type: "failed", ...failReason(error), partialSaved: false });
+        return null;
+      }
+      const split = splitter.finish();
+      narrative = split.narrative;
+      record = parseRecord(split.recordText).record;
+      if (!record) {
+        onEvent({ type: "organizing" });
+        record = (await this.extract(era, initial, "（开场）", narrative)).record;
+      }
     }
     if (!record) {
       onEvent({ type: "failed", reason: "no_record", partialSaved: false });
       return null;
     }
-    delete record.money;
-    const applied = applyRecord(initial, record, { mode: "do", difficulty: settings.difficulty, currency: era.currency });
+
+    // Opening-only fields: date, hour, currency and the starting purse (an absolute amount).
+    if (record.date) initial.time.start = record.date;
+    if (record.hour != null) initial.time.startHour = record.hour;
+    if (!pack && record.currency?.length) initial.era.currency = { units: record.currency };
+    const startEra = eraContext(pack?.id ?? null, initial);
+    const purse = record.money != null ? parseMoney(record.money, startEra.currency) : null;
+    initial.protagonist.stats.money = Math.max(0, purse ?? pack?.startMoney ?? 0);
+    const { money: _m, time: _t, date: _d, hour: _h, currency: _c, ...rest } = record;
+    const applied = applyRecord(initial, rest, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency });
     applied.state.time.elapsedMinutes = 0;
+
+    const model = this.llm!.model;
     const { world, node } = await this.repo.createWorld({
-      title: input.title, eraId: era.id, settings,
+      title: input.title.trim() || `${p.name || "无名"}的故事`, eraId: pack?.id ?? "free", settings,
       opening: {
         parentId: null, kind: "opening", narrative, record, choices: record.choices ?? [], state: applied.state,
-        meta: { promptVersion: PROMPT_VERSION, model: this.llm!.model, firstTokenMs: result.firstTokenMs, totalMs: result.totalMs, usage: result.usage, raw: result.text },
+        meta: {
+          promptVersion: PROMPT_VERSION, model, playerWritten: input.opening.mode === "player",
+          firstTokenMs: result?.firstTokenMs, totalMs: result?.totalMs, usage: result?.usage, raw: result?.text,
+        },
       },
     });
-    await this.platform.sql.batch([this.usage(world.id, node.id, "opening", result, "ok", this.llm!.model)]);
+    if (result) await this.platform.sql.batch([this.usage(world.id, node.id, "opening", result, "ok", model)]);
     onEvent({ type: "done", cursor: await tree.cursor(this.repo, world.id), node, chips: [] });
     return world.id;
   }
@@ -218,14 +276,14 @@ export class Game {
     const done = (async () => {
       const c = await tree.cursor(this.repo, worldId);
       const world = (await this.repo.getWorld(worldId))!;
-      const era = getEra(world.eraId);
       // For a variant, the turn is re-played from the head's parent with the same action.
       const base = kind === "variant" ? (await this.repo.getNode(c.head.parentId!))! : c.head;
       const action: PlayerAction = actionIn ?? { mode: c.head.actionMode ?? "continue", text: c.head.actionText ?? "", directorNote: c.head.directorNote };
       const state = await this.repo.getState(base.id);
+      const era = eraContext(world.eraId, state);
       const history = await this.repo.path(base.id, 40);
       const messages = turnMessages({
-        era, settings: world.settings, state, history, mode: action.mode, text: action.text,
+        era, settings: world.settings, protagonistName: state.protagonist.name, state, history, mode: action.mode, text: action.text,
         directorNote: action.directorNote, notes: (base.meta.notes as string[] | undefined) ?? [], rewriteHint: hint,
       });
 
@@ -286,7 +344,7 @@ export class Game {
 
   private async commit(
     c: tree.Cursor, base: StoryNode, kind: "turn" | "variant", action: PlayerAction, narrative: string,
-    recordIn: TurnRecord | null, issues: string[], state: WorldState, era: EraDraft, settings: WorldSettings,
+    recordIn: TurnRecord | null, issues: string[], state: WorldState, era: EraContext, settings: WorldSettings,
     result: ChatResult & { attempts: number }, onEvent: (e: TurnEvent) => void,
   ): Promise<{ cursor: tree.Cursor; node: StoryNode; chips: Chip[] }> {
     let record = recordIn;
@@ -332,10 +390,10 @@ export class Game {
       const node = c.head;
       if (node.status !== "interrupted" || !node.parentId) return;
       const world = (await this.repo.getWorld(worldId))!;
-      const era = getEra(world.eraId);
       const state = await this.repo.getState(node.parentId);
+      const era = eraContext(world.eraId, state);
       const base = (node.meta.messages as ChatMessage[] | undefined) ?? turnMessages({
-        era, settings: world.settings, state, history: await this.repo.path(node.parentId, 40),
+        era, settings: world.settings, protagonistName: state.protagonist.name, state, history: await this.repo.path(node.parentId, 40),
         mode: node.actionMode ?? "continue", text: node.actionText ?? "",
       });
       const splitter = new RecordSplitter();
@@ -397,8 +455,8 @@ export class Game {
     const c = await tree.cursor(this.repo, pending.worldId);
     const base = (await this.repo.getNode(pending.parentId))!;
     const world = (await this.repo.getWorld(pending.worldId))!;
-    const era = getEra(world.eraId);
     const state = await this.repo.getState(base.id);
+    const era = eraContext(world.eraId, state);
     const { narrative, recordText } = splitter.finish();
     const cur = { ...c, head: pending.kind === "variant" ? c.head : base };
     if (finished) {

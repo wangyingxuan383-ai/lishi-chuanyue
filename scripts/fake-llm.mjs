@@ -15,7 +15,7 @@ const portArg = process.argv.indexOf("--port");
 const port = portArg > 0 ? Number(process.argv[portArg + 1]) : 18800;
 
 const OPENING_RECORD = {
-  time: "一刻", place: "西市旁邸店", log: "在邸店醒来，掌柜催讨房钱",
+  time: "一刻", place: "西市旁邸店", log: "在邸店醒来，掌柜催讨房钱", date: "天宝七载冬月十七", hour: 7, money: 300,
   people: [{ name: "王掌柜", role: "邸店掌柜", attitude: "冷淡", note: "催讨房钱九十文" }],
   items: [{ name: "旧书", delta: 3 }, { name: "换洗衣", delta: 1 }],
   goals: [{ op: "add", name: "三日内付清房钱九十文", kind: "主线" }],
@@ -35,7 +35,9 @@ ${JSON.stringify(r)}
 </record>`;
   if (prompt.includes("只回复两个字")) return "你好";
   if (prompt.includes("请写这部小说的开场")) return TEXT + record(OPENING_RECORD);
-  if (prompt.includes("你是互动小说的记录员")) return JSON.stringify({ time: "一刻", log: "补记", choices: ["继续"] });
+  if (prompt.includes("你帮玩家构思")) return JSON.stringify({ title: "汴京小吏", premise: "北宋宣和七年，汴京。金兵南下在即，朝野却仍歌舞升平。", name: "沈默", gender: "男", age: 26, identity: "你是开封府的一名小吏，掌管户籍文书。", arrival: "魂穿", origin: "历史系研究生", hint: "府衙里，上官让你连夜誊抄一份名册。", essentials: "主角知道靖康之变将至" });
+  if (prompt.includes("玩家亲手写了开场")) return JSON.stringify({ time: "0", date: "某年某月", hour: 20, money: 12, place: "破庙", people: [{ name: "老乞丐", role: "乞丐", attitude: "友善" }], goals: [{ op: "add", name: "熬过今夜" }], log: "开场", choices: ["生火取暖", "去庙外看看", "问老乞丐话"] });
+  if (prompt.includes("互动小说的记录员")) return JSON.stringify({ time: "一刻", log: "补记", choices: ["继续"] });
   // Pick the scripted turn from the conversation length so runs are repeatable.
   const assistants = (request.messages ?? []).filter((m) => m.role === "assistant").length;
   const t = TURNS[Math.max(0, assistants - 1) % TURNS.length];

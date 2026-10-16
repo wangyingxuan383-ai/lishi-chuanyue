@@ -149,6 +149,17 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
     return [{ op: str(o.op) ?? "progress", name, ...(str(o.detail) ? { detail: str(o.detail) } : {}), ...(str(o.kind) ? { kind: str(o.kind) } : {}) }];
   });
 
+  if (str(v.date)) r.date = str(v.date);
+  const hour = Number(v.hour);
+  if (v.hour !== undefined && Number.isInteger(hour) && hour >= 0 && hour < 24) r.hour = hour;
+  const units = arr(v.currency).flatMap((u) => {
+    const o = u as Record<string, unknown>;
+    const name = str(o?.name);
+    const value = Number(o?.value);
+    return name && Number.isFinite(value) && value > 0 ? [{ name, value: Math.round(value) }] : [];
+  });
+  if (units.length) r.currency = units.sort((a, b) => b.value - a.value);
+
   if (str(v.log)) r.log = str(v.log);
   if (str(v.risk)) r.risk = str(v.risk);
   r.choices = arr(v.choices)

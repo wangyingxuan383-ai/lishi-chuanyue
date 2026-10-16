@@ -1,12 +1,12 @@
-// Prompt v1 for opening, turns, continue/direct and the extraction fallback.
+// Prompts for opening, turns, the extraction fallback and the setup assistant.
 // Changes are logged in ./CHANGES.md together with eval results.
-import type { EraDraft } from "../../content/eras";
 import type { ChatMessage } from "../llm/chat";
 import { clockParts } from "../calendar/clock";
+import type { EraContext } from "../era";
 import { formatMoney } from "../money";
-import type { ActionMode, StoryNode, WorldSettings, WorldState } from "../types";
+import type { ActionMode, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 
-export const PROMPT_VERSION = "turn-2";
+export const PROMPT_VERSION = "turn-3";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -17,6 +17,12 @@ const INTENSITY_TEXT = {
 } as const;
 
 export const CLICHES = ["指节泛白", "嘴角勾起", "一抹弧度", "眼中闪过一丝", "空气仿佛凝固", "五味杂陈", "心中一凛", "不由得", "仿佛", "一丝不易察觉"];
+
+const PERSPECTIVE: Record<Perspective, (name: string) => string> = {
+  你: () => "用第二人称“你”称呼主角",
+  我: () => "用第一人称“我”，“我”就是主角",
+  他: (name) => `用第三人称，以主角的名字“${name}”或“他/她”称呼主角，像写小说一样`,
+};
 
 const RECORD_FIELDS = `{"time":"本回合经过的时长，如：一刻 / 半个时辰 / 两个时辰 / 一夜 / 三天",
  "place":"主角到了新的地点才写，写地点名",
@@ -36,40 +42,58 @@ ${RECORD_FIELDS}
 记录必须与正文一致：正文里付了钱、得到或失去东西、受伤、结识人物，记录里都要写；正文没有发生的，记录里不要写。人物、物品、目标沿用【当前】中的原名。
 items 只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写。people 只写本回合真正出场或打过交道的人。`;
 
-function rules(era: EraDraft, settings: WorldSettings): string {
+const OPENING_EXTRA = `开场的记录块另有要求：
+- "date"：故事开始时的日期，写成这个时代的说法，如“天宝七载冬月十七”“宣和四年春二月”“公元前44年三月十四日”；
+- "hour"：开场时刻，0～23 的整数；
+- "money"：主角此刻身上的钱（不是增减，是总数，整数，单位为最小货币单位），要符合主角的身份——皇子与乞丐差别很大；
+- "currency"：这个时代的货币单位，从大到小，如 [{"name":"贯","value":1000},{"name":"文","value":1}] 或 [{"name":"两","value":1000},{"name":"钱","value":100},{"name":"文","value":1}] 或 [{"name":"denarius","value":16},{"name":"as","value":1}]；
+- goals 里用 op "add" 写出第一个目标；people 写出开场出现或与主角密切相关的人物；items 写出主角随身真正有的东西；place 写出当前地点。`;
+
+export interface StoryContext {
+  era: EraContext;
+  settings: WorldSettings;
+  protagonistName: string;
+}
+
+function systemPrompt(ctx: StoryContext): string {
+  const { era, settings } = ctx;
   const i = settings.intensity;
-  return `你是一部历史穿越互动小说的叙事者，玩家扮演穿越到古代的主角。
+  const premise = settings.premise.trim();
+  const rules = settings.rules.trim();
+  const eraBlock = era.excerpt ?? "【时代】以【故事设定】为准。称谓、货币、器物、制度要符合那个时代；拿不准的细节写得模糊些，不编造确切数字、人名和官职。";
+  return `你是一部历史互动小说的作者兼叙事者。玩家扮演主角，你负责写出世界、其他人物和剧情。
 【写作要求】
-- 用第二人称“你”。先写画面、声音、气味和动作，少用总结句；对话简短、口吻符合人物身份。叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，人物对白带时代口吻。每回合${LENGTH[settings.length]}。
+- ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}。先写画面、声音、气味和动作，少用总结句；对话简短、口吻符合人物身份。叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，人物对白带时代口吻。每回合${LENGTH[settings.length]}。
 - 只写到玩家需要做决定为止：不替玩家说话，不替玩家做行动以外的决定，不擅自把玩家没说要做完的事做完。玩家说“先试一下”“先问问”，就只写试一下、问一下的结果。
 - 玩家的行动可能失败。行动有难度或风险时，按情理决定成败，失败也要写出后果。
 - 其他人物有自己的目的、脾气和处境，不围着主角转；态度变化要有缘由。
 - 涉及钱和物品时，只能使用【当前】中列出的数量，正文写清具体数目；钱不够就买不成、付不起。
-- 拿不准的历史细节写得模糊些，不编造确切数字、人名和官职。
-- 不要使用这些时代错误：${era.taboos.join("；")}。
+- 主角的性别、身份以【当前】为准，前后保持一致。${era.taboos.length ? `\n- 不要使用这些时代错误：${era.taboos.join("；")}。` : ""}
 - 避免套话和重复上一回合的开头与句式。不要用：${CLICHES.slice(0, 6).join("、")}。
 - 内容尺度：${INTENSITY_TEXT.violence[i.violence]}；${INTENSITY_TEXT.romance[i.romance]}；${INTENSITY_TEXT.darkness[i.darkness]}。
 - 每回合结尾留一个自然的行动点。${settings.choiceCount > 0 ? `在记录里给出 ${settings.choiceCount} 个简短、彼此不同的建议行动（各不超过二十字）` : "记录里的 choices 写空数组 []"}。
-
-${era.promptExcerpt}
+${premise ? `\n【故事设定】（玩家写的，始终遵守）\n${premise}\n` : ""}${rules ? `\n【玩家给你的额外规则】（始终遵守）\n${rules}\n` : ""}
+${eraBlock}
 
 ${RECORD_SPEC}`;
 }
 
-export function renderState(state: WorldState, era: EraDraft): string {
+const level = (n: number, words: string[]) => words[Math.min(words.length - 1, Math.floor((100 - n) / (100 / words.length)))];
+
+export function renderState(state: WorldState, era: EraContext): string {
   const me = state.protagonist;
   const c = clockParts(era.startHour, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name ?? "（未记录）";
   const items = me.items.map((i) => `${i.name}×${i.quantity}${i.unit}${i.place ? `（放在${i.place}）` : ""}`).join("、") || "无";
   const statuses = me.statuses.map((s) => `${s.name}${s.detail ? `：${s.detail}` : ""}`).join("；") || "无";
   const people = state.people
-    .map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对你${p.attitude}${p.alive ? "" : "，已死"}${p.notes ? `；${p.notes}` : ""}`)
+    .map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${p.notes ? `；${p.notes}` : ""}`)
     .join("\n") || "无";
   const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
-  const level = (n: number, words: string[]) => words[Math.min(words.length - 1, Math.floor((100 - n) / (100 / words.length)))];
-  return `【当前】${era.startLabel} 第 ${c.day} 日 ${c.shichen}时（约 ${String(c.hour).padStart(2, "0")}:${String(c.minute).padStart(2, "0")}）· ${place}
-主角：${me.name}，${me.age ?? "?"}岁，${me.identity}${me.origin ? `（穿越前是${me.origin}）` : ""}
-可用的钱：${formatMoney(me.stats.money, era.currency)}（共 ${me.stats.money} 文）${me.stats.debt ? `；欠债 ${formatMoney(me.stats.debt, era.currency)}` : ""}
+  const smallest = era.currency.units[era.currency.units.length - 1].name;
+  return `【当前】${era.startLabel ? `${era.startLabel}起 ` : ""}第 ${c.day} 日 ${c.shichen}时（约 ${String(c.hour).padStart(2, "0")}:${String(c.minute).padStart(2, "0")}）· ${place}
+主角：${me.name}，${me.gender}${me.age ? `，${me.age}岁` : ""}，${me.identity}${me.origin ? `（穿越前是${me.origin}）` : ""}
+可用的钱：${formatMoney(me.stats.money, era.currency)}（共 ${me.stats.money} ${smallest}）${me.stats.debt ? `；欠债 ${formatMoney(me.stats.debt, era.currency)}` : ""}
 身体：健康${level(me.stats.health, ["康健", "微恙", "带伤", "重伤", "垂危"])}，精力${level(me.stats.energy, ["充沛", "尚可", "疲惫", "力竭"])}
 身上的伤病与状态：${statuses}
 行囊：${items}
@@ -81,13 +105,12 @@ ${people}
 const ACTION_TEXT: Record<ActionMode, (text: string) => string> = {
   do: (t) => `【玩家行动】${t}`,
   say: (t) => `【玩家说】${/^[“"「]/.test(t) ? t : `“${t}”`}`,
+  write: (t) => `【玩家以作者身份亲手写下了接下来的情节，视为已经发生，不要复述，直接接着往下写】\n${t}`,
   direct: (t) => `【玩家没有行动，只给叙事者一个幕后要求，照做但不要在正文中提及】${t}\n主角只做等待、观察这类被动动作，由他人和环境推动剧情。`,
   continue: () => "【玩家选择继续】主角只做等待、观察这类被动动作，由他人和环境推动剧情，小幅推进时间。",
 };
 
-export interface TurnPromptInput {
-  era: EraDraft;
-  settings: WorldSettings;
+export interface TurnPromptInput extends StoryContext {
   state: WorldState;
   /** Committed story so far on the current path, oldest first (opening included). */
   history: StoryNode[];
@@ -118,8 +141,13 @@ function historyMessages(history: StoryNode[], budget: number): ChatMessage[] {
   return pairs.flat();
 }
 
+function essentialsBlock(settings: WorldSettings): string {
+  const lines = settings.essentials.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  return lines.length ? `\n【要点，必须记住】\n- ${lines.join("\n- ")}` : "";
+}
+
 export function turnMessages(input: TurnPromptInput): ChatMessage[] {
-  const system = rules(input.era, input.settings);
+  const system = systemPrompt(input);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
   const notes = input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : "";
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
@@ -130,47 +158,74 @@ export function turnMessages(input: TurnPromptInput): ChatMessage[] {
     ...historyMessages(input.history, budget),
     {
       role: "user",
-      content: `${renderState(input.state, input.era)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}`,
+      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}`,
     },
   ];
 }
 
 // ---------- opening ----------
 
-export interface OpeningInput {
-  era: EraDraft;
-  settings: WorldSettings;
-  protagonist: { name: string; gender: string; age: number; identity: string; situation: string; origin: string };
-  transmigration: "魂穿" | "身穿" | "投胎";
+export type Arrival = "魂穿" | "身穿" | "投胎" | "不穿越";
+
+export interface OpeningInput extends StoryContext {
+  protagonist: { name: string; gender: string; age: number | null; identity: string };
+  arrival: Arrival;
+  origin: string;
+  /** What the player wants the first scene to show (may be empty). */
+  hint: string;
+}
+
+function protagonistLine(input: OpeningInput): string {
+  const p = input.protagonist;
+  const how = {
+    魂穿: `现代人的意识在${p.name}身上醒来，原主的记忆会一段段涌上来`,
+    身穿: "连人带衣物穿越而来，没有这个时代的户籍与身份，周围人只当是来历不明的外乡人",
+    投胎: `带着前世记忆重生为${p.name}，此刻正是记忆完全苏醒的一天`,
+    不穿越: "",
+  }[input.arrival];
+  return `主角：${p.name || "（由你取一个符合时代的名字）"}，${p.gender}${p.age ? `，${p.age}岁` : ""}。${p.identity}
+${input.arrival === "不穿越" ? "主角就是这个时代土生土长的人，没有穿越。" : `穿越方式：${input.arrival}——${how}。穿越前，主角是${input.origin || "一个普通的现代人"}。`}`;
 }
 
 export function openingMessages(input: OpeningInput): ChatMessage[] {
-  const p = input.protagonist;
-  const how = {
-    魂穿: `你在现代的意识醒来时，已身处${p.name}的身体里，原主的记忆会一段段涌上来`,
-    身穿: "你连人带衣物穿越而来，没有这个时代的户籍与身份，周围人只当你是来历不明的外乡人",
-    投胎: `你带着前世记忆重生为${p.name}，此刻正是记忆完全苏醒的一天`,
-  }[input.transmigration];
+  const arrivalSteps = input.arrival === "不穿越"
+    ? "1. 从一个具体的场景切入，先写画面与动作，不要先交代背景。"
+    : `1. 先写醒来时的感官（冷暖、气味、声音、身体的不适），不要先解释。\n${input.arrival === "身穿" ? "2. 写主角意识到自己身处何时何地，周围人如何看待这个来历不明的人。" : "2. 写原主的记忆或眼前的线索，交代姓名、身份与处境。"}`;
   return [
-    { role: "system", content: rules(input.era, input.settings) },
+    { role: "system", content: systemPrompt(input) },
     {
       role: "user",
       content: `请写这部小说的开场。
-主角：${p.name}，${p.gender}，${p.age}岁，${p.identity}。处境：${p.situation}
-穿越方式：${input.transmigration}——${how}。穿越前，主角是${p.origin}。
-开场要求：
-1. 先写醒来时的感官（冷暖、气味、声音、身体的不适），不要先解释。
-2. 第二段开头单独一行写出当下的时间，格式如“${input.era.startLabel}，第一日，辰时”。
-3. 写原主的记忆或眼前的线索，交代姓名、身份、处境${input.transmigration === "身穿" ? "（身穿则写主角意识到自己身处何时何地）" : ""}。
-4. 以一个迫在眉睫的麻烦收尾，留给玩家决定。
-记录块额外要求：goals 里用 op "add" 写出第一个目标；people 里写出开场出现的人物；items 写出主角身上的随身物品（数量用 delta）；place 写出当前地点；不要写 money（初始钱数已经由程序设定为 ${formatMoney(input.era.startMoney, input.era.currency)}，正文提到钱数时与此一致）。`,
+${protagonistLine(input)}
+${input.hint ? `玩家希望开场：${input.hint}\n` : ""}开场要求：
+${arrivalSteps}
+3. 在开场中自然地点出当下的时间。
+4. 以一个迫在眉睫的情境收尾，留给玩家决定。
+${OPENING_EXTRA}${input.era.packId ? `\n本时代的货币已经确定：${input.era.currency.units.map((u) => u.name).join("、")}，currency 可以省略。` : ""}`,
+    },
+  ];
+}
+
+/** The player wrote the opening themselves: only extract the starting state. */
+export function openingExtractMessages(input: OpeningInput & { text: string }): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: `你是这部互动小说的记录员。玩家亲手写了开场。根据【故事设定】【主角】和【开场正文】，只输出一个 JSON 对象，记录故事开始时的状态。字段如下（没有的省略）：
+${RECORD_FIELDS}
+${OPENING_EXTRA}
+time 写 "0"。只输出 JSON，不要输出其他文字。`,
+    },
+    {
+      role: "user",
+      content: `【故事设定】\n${input.settings.premise || "（未写）"}\n\n【主角】\n${protagonistLine(input)}\n\n【开场正文】\n${input.text}`,
     },
   ];
 }
 
 // ---------- extraction fallback (补记) ----------
 
-export function extractMessages(input: { era: EraDraft; state: WorldState; action: string; narrative: string }): ChatMessage[] {
+export function extractMessages(input: { era: EraContext; state: WorldState; action: string; narrative: string }): ChatMessage[] {
   return [
     {
       role: "system",
@@ -189,5 +244,43 @@ export function continueMessages(base: ChatMessage[], partial: string): ChatMess
     ...base,
     { role: "assistant", content: partial },
     { role: "user", content: "上一段回复被中断了。请从中断处直接接着写（不要重复已写的内容），写完正文后照常输出记录块，记录块要涵盖整段回复中发生的变化。" },
+  ];
+}
+
+// ---------- setup assistant ----------
+
+export interface SetupDraft {
+  title: string;
+  premise: string;
+  name: string;
+  gender: string;
+  age: number | null;
+  identity: string;
+  arrival: Arrival;
+  origin: string;
+  hint: string;
+  essentials: string;
+}
+
+/** Turns a rough idea (and whatever the player already filled in) into a complete setup. */
+export function assistMessages(idea: string, current: Partial<SetupDraft>): ChatMessage[] {
+  const filled = Object.entries(current).filter(([, v]) => v !== undefined && v !== null && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join("\n");
+  return [
+    {
+      role: "system",
+      content: `你帮玩家构思一部历史互动小说的开局。玩家给出一个想法和已经填好的字段，你补全其余字段，并让整体协调、有戏剧张力。已经填好的字段原样保留，不要改写。只输出一个 JSON 对象：
+{"title":"故事标题（十字以内）",
+ "premise":"故事设定：时代、地点、时局与这个故事的核心冲突，150～300字，用第二人称或客观叙述",
+ "name":"主角名字，符合时代",
+ "gender":"男 或 女",
+ "age":年龄整数,
+ "identity":"主角的身份与处境，以“你是”开头，80～150字，包含一个迫在眉睫的麻烦",
+ "arrival":"魂穿 / 身穿 / 投胎 / 不穿越",
+ "origin":"穿越前是谁（不穿越则为空字符串）",
+ "hint":"开场第一幕的场景，一句话",
+ "essentials":"需要一直记住的要点，每行一条，最多五条"}
+性别必须与身份一致（公主、宫女是女，皇子、驸马是男）。只输出 JSON。`,
+    },
+    { role: "user", content: `玩家的想法：${idea || "（没有写，请你自由发挥一个有意思的开局）"}\n\n已经填好的字段：\n${filled || "（无）"}` },
   ];
 }

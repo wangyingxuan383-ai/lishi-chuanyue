@@ -187,3 +187,11 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .segmented button { min-height: 38px; padding: 6px 14px; }
 .segmented button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: var(--bg); padding: 10px; border-radius: 8px; }
+
+/* ---------- new game ---------- */
+.template-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.template-card { display: grid; gap: 2px; text-align: left; padding: 10px 12px; }
+.template-card b { font-size: 15px; font-weight: 600; }
+.template-card small { font-size: 12px; color: var(--muted); }
+.template-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+.turn-written { border-left: 3px solid var(--accent-soft); padding-left: 10px; margin-bottom: 6px; }

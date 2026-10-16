@@ -32,37 +32,86 @@ await page.getByText(/连接成功/).waitFor();
 check("setup: models + connection test", true);
 await page.getByRole("button", { name: "保存，开始穿越" }).click();
 
-// New game.
+// New game: templates fill fields, gender locks when the identity implies it.
 await page.getByRole("button", { name: "随便穿" }).waitFor();
 await shot("02-newgame");
-await page.getByRole("button", { name: "出发" }).click();
-await page.getByText("穿越中…").waitFor({ timeout: 5000 }).catch(() => {});
+await page.locator(".template-card", { hasText: "相府庶女" }).click();
+check("template fills premise and identity", (await page.getByLabel(/故事设定/).inputValue()).includes("平康坊") && (await page.getByLabel("身份与处境").inputValue()).includes("庶女"));
+check("gender locked by identity", (await page.textContent("body")).includes("性别：女（由身份决定）"));
+await page.getByRole("button", { name: /查看全部/ }).click();
+check("all templates listed", (await page.locator(".template-card").count()) >= 18);
+await page.locator(".template-card", { hasText: "留洋归来" }).click();
+check("neutral identity offers a gender choice", (await page.getByRole("button", { name: "男", exact: true }).count()) === 1);
+
+// AI assist fills only empty fields.
+await page.getByLabel(/故事设定/).fill("");
+await page.getByLabel(/一句话想法/).fill("靖康之变前，我是汴京小吏");
+await page.getByRole("button", { name: "AI 帮我补全" }).click();
+await page.getByText("已补全空着的部分").waitFor({ timeout: 15000 });
+check("assist fills the empty premise", (await page.getByLabel(/故事设定/).inputValue()).includes("宣和七年"));
+check("assist keeps the filled identity", (await page.getByLabel("身份与处境").inputValue()).includes("留学归来"));
+
+// A player-written opening on a fresh template.
+await page.locator(".template-card", { hasText: "落第举子" }).click();
+await page.getByRole("button", { name: "我自己写" }).click();
+await page.getByLabel("开场正文").fill("雨夜，破庙。你缩在神像后面，听见外面有脚步声。");
+await page.getByRole("button", { name: "开始" }).click();
+await page.locator(".dock .choice").first().waitFor({ timeout: 20000 });
+check("player-written opening kept verbatim", (await page.textContent(".story")).includes("雨夜，破庙。你缩在神像后面"));
+check("opening state extracted", (await page.locator(".choice").first().textContent()) === "生火取暖");
+await page.getByRole("button", { name: "返回" }).click();
+
+// An AI-written opening via one-tap random start.
+await page.getByRole("button", { name: "开始穿越" }).click();
+await page.getByRole("button", { name: "随便穿" }).click();
 await page.locator(".dock .choice").first().waitFor({ timeout: 20000 });
 await shot("03-opening");
 check("opening streamed and choices shown", (await page.locator(".choice").count()) === 3);
 check("record not visible", !(await page.textContent("body")).includes("<record"));
 
+// "写" mode: the player writes narrative directly.
+await page.locator(".mode-btn").click();
+await page.locator(".mode-btn").click();
+check("third mode is 写", (await page.locator(".mode-btn").textContent()) === "写");
+await page.locator(".inputbar textarea").fill("一阵风吹开了窗，烛火摇晃。");
+await page.locator(".send-btn").click();
+await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+check("written passage shown as narrative", (await page.locator(".turn-written").count()) === 1);
+
+// Story settings editable mid-game.
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "故事设定与要点" }).click();
+await page.getByRole("textbox", { name: /要点/ }).fill("王掌柜其实是主角的舅舅");
+await page.getByRole("button", { name: "保存" }).click();
+await page.getByText("已保存，从下一段开始生效").waitFor();
+check("story settings saved", true);
+
 // Free action with streaming.
+await page.locator(".mode-btn").click(); // back to 做
 await page.locator(".inputbar textarea").fill("推开门出去看看");
 check("send button says 发送", (await page.locator(".send-btn").textContent()) === "发送");
 await page.locator(".send-btn").click();
 await page.getByRole("button", { name: "停止" }).waitFor();
 await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
 await shot("04-turn");
-const body1 = await page.textContent("body");
-check("turn appended with player action", body1.includes("推开门出去看看") && body1.includes("王掌柜叉着腰"));
+check("turn appended with player action", (await page.textContent("body")).includes("推开门出去看看"));
 
-// Choice tap → money chip.
-await page.locator(".choice", { hasText: "先付三十文" }).click();
-await page.locator(".chip", { hasText: "钱 −30 文" }).waitFor({ timeout: 20000 });
-check("choice submits and shows money chip", true);
+// The scripted fake replies rotate: this turn paid 30 coins.
+check("money chip after paying", (await page.locator(".chip", { hasText: /钱 −30/ }).count()) === 1);
+
+// Choice tap → the next scripted turn introduces a person.
+await page.locator(".choice").first().click();
+await page.locator(".chip", { hasText: "结识 货栈管事" }).waitFor({ timeout: 20000 });
+check("choice submits and shows a new-person chip", true);
 
 // Continue (empty input).
 check("send button says 继续 when empty", (await page.locator(".send-btn").textContent()) === "继续");
+const turnsBefore = await page.locator(".turn").count();
 await page.locator(".send-btn").click();
-await page.locator(".chip", { hasText: "结识 货栈管事" }).waitFor({ timeout: 20000 });
+await page.getByRole("button", { name: "停止" }).waitFor();
+await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
 await shot("05-continue");
-check("continue turn produced a new person chip", true);
+check("continue adds a turn", (await page.locator(".turn").count()) === turnsBefore + 1);
 
 // Regenerate → variants 1/2 ... 2/2.
 await page.getByRole("button", { name: "重说" }).click();
@@ -75,7 +124,7 @@ check("regenerate keeps both versions", true);
 await page.getByRole("button", { name: "角色" }).click();
 await page.getByRole("tab", { name: /人物/ }).click();
 const panelText = await page.textContent(".panel");
-check("panel lists people", panelText.includes("王掌柜") && panelText.includes("货栈管事"));
+check("panel lists people", panelText.includes("货栈管事"));
 await page.getByRole("tab", { name: /行囊/ }).click();
 check("panel lists items", (await page.textContent(".panel")).includes("旧书"));
 await shot("06-panel");

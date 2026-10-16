@@ -5,6 +5,9 @@ import { chatCompletionsUrl } from "../../src/engine/llm/chat.ts";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
 import { createMemoryPlatform } from "../../src/platform/memory.ts";
 import { formatClock } from "../../src/engine/calendar/clock.ts";
+import { TEMPLATES, templateName } from "../../src/content/templates.ts";
+import { eraContext } from "../../src/engine/era.ts";
+import { formatMoney } from "../../src/engine/money.ts";
 import { nodePlatform, serviceBaseUrl } from "./lib.ts";
 
 const arg = (name: string, fallback?: string) => {
@@ -13,6 +16,7 @@ const arg = (name: string, fallback?: string) => {
 };
 const model = arg("model")!;
 const actions = (arg("turns", "先看看屋里有什么|“掌柜，房钱再宽限两日。”|出门去西市找活干|（继续）") as string).split("|");
+const templateId = arg("template", "tang-scholar")!;
 
 const platform = await createMemoryPlatform(nodePlatform().llm);
 const game = await Game.open(platform, { slot: "main", url: chatCompletionsUrl(serviceBaseUrl()), model, includeUsage: true });
@@ -22,9 +26,12 @@ const log = (e: TurnEvent) => {
 };
 
 const t0 = performance.now();
+const t = TEMPLATES.find((x) => x.id === templateId)!;
+const gender = t.gender ?? "女";
 const worldId = await game.createWorld({
-  title: "长安", eraId: "tang-748",
-  opening: { protagonist: { name: "李安", gender: "男", age: 22, identity: "落第举子", situation: "陇西人，春闱落第后滞留长安，客居西市旁邸店，欠房钱九十文，掌柜限三日结清。", origin: "历史系研究生" }, transmigration: "魂穿" },
+  title: t.title, eraId: t.eraId, settings: { premise: t.premise },
+  protagonist: { name: templateName(t, gender), gender, age: t.age, identity: t.identity },
+  arrival: t.arrival ?? "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: t.openingHint },
 }, log);
 if (!worldId) process.exit(1);
 
@@ -40,8 +47,8 @@ async function show(label: string) {
 }
 await show(`开场（${Math.round(performance.now() - t0)}ms）`);
 for (const a of actions) {
-  const mode = a === "（继续）" ? "continue" : /^[“"]/.test(a) ? "say" : "do";
-  await game.play(worldId, { mode, text: mode === "continue" ? "" : a }, log).done;
+  const mode = a === "（继续）" ? "continue" : /^[“"]/.test(a) ? "say" : a.startsWith("写：") ? "write" : "do";
+  await game.play(worldId, { mode, text: mode === "continue" ? "" : a.replace(/^写：/, "") }, log).done;
   await show(a);
 }
 const { cursor } = await import("../../src/engine/tree.ts");

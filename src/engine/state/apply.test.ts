@@ -13,6 +13,7 @@ describe("money", () => {
   it("formats and parses Tang coins", () => {
     expect(formatMoney(1200, TANG_CURRENCY)).toBe("1 贯 200 文");
     expect(formatMoney(0, TANG_CURRENCY)).toBe("0 文");
+    expect(formatMoney(30, { units: [{ name: "", value: 1 }] })).toBe("30");
     expect(parseMoney("三贯二百文", TANG_CURRENCY)).toBe(3200);
     expect(parseMoney("-2文", TANG_CURRENCY)).toBe(-2);
     expect(parseMoney("一贯半", TANG_CURRENCY)).toBe(1500);

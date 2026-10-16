@@ -1,6 +1,7 @@
 // Core game types. See docs/PLAN_V3.md §6.
 
-export type ActionMode = "do" | "say" | "direct" | "continue";
+/** do/say: the protagonist acts; write: the player writes narrative directly; direct: instruction to the narrator. */
+export type ActionMode = "do" | "say" | "write" | "direct" | "continue";
 export type NodeKind = "opening" | "turn" | "fastforward" | "edit";
 export type NodeStatus = "ok" | "interrupted" | "no_record";
 export type Attitude = "仇视" | "敌意" | "冷淡" | "一般" | "友善" | "亲近" | "生死之交";
@@ -70,18 +71,29 @@ export interface Protagonist {
 
 export interface WorldState {
   version: 1;
-  time: { start: string; elapsedMinutes: number }; // start: era-pack date label of minute 0
+  /** start: date label of minute 0 (e.g. "宣和四年春二月初三"); startHour: hour of day at minute 0. */
+  time: { start: string; startHour?: number; elapsedMinutes: number };
   placeId: string | null;
   protagonist: Protagonist;
   people: Person[];
   places: Place[];
   cards: Card[];
   goals: Goal[];
-  era: { packId: string };
+  /** packId is null for free-form worlds; currency may be set by the opening. */
+  era: { packId: string | null; currency?: { units: { name: string; value: number }[] } };
   deviations: string[];
 }
 
+export type Perspective = "你" | "我" | "他";
+
 export interface WorldSettings {
+  /** The story premise the player wrote (or a template filled in); in every prompt. */
+  premise: string;
+  /** Facts the narrator must always keep in mind (Plot Essentials), one per line. */
+  essentials: string;
+  /** Extra instructions to the narrator, written by the player. */
+  rules: string;
+  perspective: Perspective;
   length: "短" | "中" | "长";
   choiceCount: number;
   style: "白话" | "半文半白";
@@ -91,6 +103,10 @@ export interface WorldSettings {
 }
 
 export const DEFAULT_SETTINGS: WorldSettings = {
+  premise: "",
+  essentials: "",
+  rules: "",
+  perspective: "你",
   length: "中",
   choiceCount: 3,
   style: "白话",
