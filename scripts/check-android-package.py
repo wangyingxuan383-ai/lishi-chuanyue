@@ -199,6 +199,8 @@ def main():
         required = {
             "Lio/timejump/chuanyue/RustSecretStoreBridge;": ["loadForRust"],
             "Lio/timejump/chuanyue/RustFileAccessBridge;": ["openFdForRust"],
+            "Lio/timejump/chuanyue/GenerationService;": ["start", "stop", "onStartCommand", "onTimeout"],
+            "Lio/timejump/chuanyue/GenerationService$Companion;": ["start", "stop"],
             "Lio/timejump/chuanyue/SecretStorePlugin;": ["save", "delete", "status"],
             "Lio/timejump/chuanyue/DocumentPickerPlugin;": ["openDocument", "createDocument", "ensureIdle"],
         }

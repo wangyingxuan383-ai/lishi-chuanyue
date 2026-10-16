@@ -75,7 +75,9 @@ async fn server(
 
 fn service() -> (tempfile::TempDir, Arc<Streams>) {
     let dir = tempfile::tempdir().unwrap();
-    let service = Arc::new(Streams::open(dir.path().into()).unwrap());
+    let mut service = Streams::open(dir.path().into()).unwrap();
+    service.keep_alive = Arc::new(KeepAlive::new(|_| {}));
+    let service = Arc::new(service);
     (dir, service)
 }
 
@@ -120,6 +122,10 @@ async fn collect(
     .await
     .expect("stream terminates locally");
     service.cancel(id).await.unwrap();
+    assert_eq!(
+        service.keep_alive.count(),
+        service.active.lock().unwrap().len()
+    );
     assert!(events.last().is_some_and(StreamEvent::terminal));
     events
 }
@@ -617,4 +623,140 @@ async fn premature_connection_close_is_a_network_error() {
     sleep(Duration::from_millis(50)).await;
     task.abort();
     assert_kind(&collect(&service, &id, rx).await, "network");
+}
+
+async fn gated_server(
+    status: u16,
+    body: &'static str,
+) -> (String, tokio::sync::oneshot::Sender<()>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/chat", listener.local_addr().unwrap());
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        let _ = socket.read(&mut buffer).await;
+        if gate.await.is_ok() {
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (url, release, task)
+}
+
+#[tokio::test]
+async fn concurrent_done_error_cancel_and_ack_share_one_service_lease() {
+    let (dir, _) = service();
+    let transitions = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&transitions);
+    let mut streams = Streams::open(dir.path().into()).unwrap();
+    streams.keep_alive = Arc::new(KeepAlive::new(move |on| recorded.lock().unwrap().push(on)));
+    let service = Arc::new(streams);
+    let (url, done_gate, done_task) = gated_server(200, "data: [DONE]\n").await;
+    let (done_id, done_rx) = start(&service, url, timeouts()).await;
+    let (url, error_gate, error_task) = gated_server(503, "unavailable").await;
+    let (error_id, error_rx) = start(&service, url, timeouts()).await;
+    let (url, _cancel_gate, cancel_task) = gated_server(200, "unused").await;
+    let (cancel_id, cancel_rx) = start(&service, url, timeouts()).await;
+    let (url, _ack_gate, ack_task) = gated_server(200, "unused").await;
+    let (ack_id, ack_rx) = start(&service, url, timeouts()).await;
+    assert_eq!(service.keep_alive.count(), 4);
+    assert_eq!(*transitions.lock().unwrap(), [true]);
+
+    done_gate.send(()).unwrap();
+    assert_eq!(
+        collect(&service, &done_id, done_rx).await.last(),
+        Some(&StreamEvent::Done)
+    );
+    assert_eq!(service.keep_alive.count(), 3);
+    error_gate.send(()).unwrap();
+    assert_kind(&collect(&service, &error_id, error_rx).await, "http");
+    assert_eq!(service.keep_alive.count(), 2);
+    service.cancel(&cancel_id).await.unwrap();
+    assert_kind(&collect(&service, &cancel_id, cancel_rx).await, "cancelled");
+    assert_eq!(service.keep_alive.count(), 1);
+    assert_eq!(*transitions.lock().unwrap(), [true]);
+    service.ack(ack_id.clone()).await.unwrap();
+    assert_kind(&collect(&service, &ack_id, ack_rx).await, "cancelled");
+    assert!(service.resume(&ack_id).unwrap().is_none());
+    assert_eq!(service.keep_alive.count(), 0);
+    assert_eq!(*transitions.lock().unwrap(), [true, false]);
+
+    // Repeated cleanup and a later generation cannot underflow or skip start.
+    for id in [done_id, error_id, cancel_id, ack_id] {
+        service.cancel(&id).await.unwrap();
+        service.ack(id).await.unwrap();
+    }
+    let id = service
+        .start(
+            "unused".into(),
+            json!({}),
+            timeouts(),
+            None,
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+    service.cancel(&id).await.unwrap();
+    assert_eq!(service.keep_alive.count(), 0);
+    assert_eq!(*transitions.lock().unwrap(), [true, false, true, false]);
+    done_task.await.unwrap();
+    error_task.await.unwrap();
+    cancel_task.abort();
+    ack_task.abort();
+}
+
+#[tokio::test]
+async fn panicking_event_delivery_releases_count_and_cancel_waiters() {
+    let (_dir, service) = service();
+    let id = service
+        .start(
+            "unused".into(),
+            json!({}),
+            timeouts(),
+            None,
+            Arc::new(|_| panic!("simulated event delivery panic")),
+        )
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), service.cancel(&id))
+        .await
+        .expect("panic cleanup releases waiters")
+        .unwrap();
+    assert_eq!(service.keep_alive.count(), 0);
+    assert!(!service.resume(&id).unwrap().unwrap().active);
+    service.ack(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn aborting_unpolled_stream_guard_releases_registration_and_lease() {
+    let (_dir, service) = service();
+    let id = "1234567890abcdef".to_owned();
+    let control = Active {
+        cancel: CancellationToken::new(),
+        finished: CancellationToken::new(),
+    };
+    service
+        .active
+        .lock()
+        .unwrap()
+        .insert(id.clone(), control.clone());
+    let guard = ActiveStream {
+        service: Arc::clone(&service),
+        id: id.clone(),
+        control: control.clone(),
+        lease: Some(service.keep_alive.acquire()),
+    };
+    let task = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(control.finished.is_cancelled());
+    assert!(!service.active.lock().unwrap().contains_key(&id));
+    assert_eq!(service.keep_alive.count(), 0);
 }

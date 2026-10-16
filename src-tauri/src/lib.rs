@@ -3,6 +3,7 @@ mod credentials;
 mod document_picker;
 mod error;
 mod files;
+mod keep_alive;
 mod secret;
 mod secrets;
 mod sql;
@@ -25,6 +26,8 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "android")]
             android_tls::initialize(app)?;
+            #[cfg(target_os = "android")]
+            keep_alive::initialize(app);
             let data = app.path().app_data_dir()?;
             let cache = app.path().app_cache_dir()?;
             let secrets = Arc::clone(&app.state::<secret::PlatformSecrets>().0);

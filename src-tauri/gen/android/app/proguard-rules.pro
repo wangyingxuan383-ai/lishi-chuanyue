@@ -6,6 +6,9 @@
 -keep class io.timejump.chuanyue.RustSecretStoreBridge { *; }
 # Only Rust may open a selected SAF document through this worker-thread bridge.
 -keep class io.timejump.chuanyue.RustFileAccessBridge { *; }
+# GenerationService itself exposes @JvmStatic start/stop to Rust through JNI.
+-keep class io.timejump.chuanyue.GenerationService { *; }
+-keep class io.timejump.chuanyue.GenerationService$Companion { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #

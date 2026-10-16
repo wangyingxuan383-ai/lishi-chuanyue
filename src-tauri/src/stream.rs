@@ -1,5 +1,6 @@
 use crate::{
     error::{blocking, io_error, PlatformError, Result},
+    keep_alive::{self, KeepAlive, Lease},
     secrets::SecretValue,
 };
 use reqwest::{header, Client, RequestBuilder, Response};
@@ -13,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::{sleep_until, Instant};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_HTTP_ERROR: usize = 8 * 1024;
@@ -92,6 +93,31 @@ pub type EventSink = Arc<dyn Fn(StreamEvent) + Send + Sync>;
 pub struct Streams {
     directory: PathBuf,
     active: Mutex<HashMap<String, Active>>,
+    keep_alive: Arc<KeepAlive>,
+}
+
+// Owned from registration until terminal delivery. Drop also runs on task
+// abort/unwind, or when the start future is dropped during registration.
+struct ActiveStream {
+    service: Arc<Streams>,
+    id: String,
+    control: Active,
+    lease: Option<Lease>,
+}
+
+impl Drop for ActiveStream {
+    fn drop(&mut self) {
+        let mut active = self
+            .service
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        active.remove(&self.id);
+        drop(self.lease.take());
+        drop(active);
+        // cancel/ack waiters must observe both map cleanup and lease release.
+        self.control.finished.cancel();
+    }
 }
 
 fn valid_id(id: &str) -> bool {
@@ -126,6 +152,7 @@ impl Streams {
         Ok(Self {
             directory,
             active: Mutex::new(HashMap::new()),
+            keep_alive: keep_alive::shared(),
         })
     }
 
@@ -236,45 +263,53 @@ impl Streams {
         };
         let registered = control.clone();
         let registration_id = id.clone();
-        blocking(move || {
+        let lifecycle = blocking(move || {
             let mut active = service.active.lock().map_err(|_| io_error())?;
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(service.path(&registration_id)?)
                 .map_err(|_| io_error())?;
-            active.insert(registration_id, registered);
-            Ok(())
+            let lease = service.keep_alive.acquire();
+            active.insert(registration_id.clone(), registered.clone());
+            drop(active);
+            Ok(ActiveStream {
+                service,
+                id: registration_id,
+                control: registered,
+                lease: Some(lease),
+            })
         })
         .await?;
         let service = Arc::clone(self);
         tokio::spawn(async move {
+            let _lifecycle = lifecycle;
             let emitter = Emitter {
                 service,
                 id: task_id,
                 sink,
             };
-            let outcome = match key {
-                Some(key) => receive(&url, body, timeouts, &key, &control.cancel, &emitter).await,
-                None => Err(StreamEvent::error(if control.cancel.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "no_secret"
-                })),
-            };
+            let receiver = emitter.clone();
+            // Isolate a receiver panic so the supervisor can cache a terminal
+            // error. The outer RAII guard also covers a panic during delivery.
+            let outcome = AbortOnDropHandle::new(tokio::spawn(async move {
+                match key {
+                    Some(key) => {
+                        receive(&url, body, timeouts, &key, &control.cancel, &receiver).await
+                    }
+                    None => Err(StreamEvent::error(if control.cancel.is_cancelled() {
+                        "cancelled"
+                    } else {
+                        "no_secret"
+                    })),
+                }
+            }))
+            .await
+            .unwrap_or_else(|_| Err(StreamEvent::error("network")));
             let terminal = outcome.err().unwrap_or(StreamEvent::Done);
             if let Err(event) = emitter.emit(terminal).await {
                 (emitter.sink)(event);
             }
-            // Also release waiters if cache I/O failed.
-            let service = Arc::clone(&emitter.service);
-            let id = emitter.id.clone();
-            let _ = blocking(move || {
-                service.active.lock().map_err(|_| io_error())?.remove(&id);
-                Ok(())
-            })
-            .await;
-            control.finished.cancel();
         });
         Ok(id)
     }
@@ -314,6 +349,7 @@ impl Streams {
     }
 }
 
+#[derive(Clone)]
 struct Emitter {
     service: Arc<Streams>,
     id: String,

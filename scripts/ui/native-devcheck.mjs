@@ -1,18 +1,21 @@
 // Drives the native Windows app through WebView2's debugging port.
 //   start:  $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9224'; target\debug\lishi-app.exe
 //   run:    node scripts/ui/native-devcheck.mjs [phase]   phase = first | after-restart | cleanup
+// Android: adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>; adb reverse tcp:18800 tcp:18800;
+//          set CDP_PORT=9333 EXPECT_PLATFORM=android
 // Needs scripts/fake-llm.mjs on :18800. Uses an obviously fake key.
 import { chromium } from "playwright-core";
 
 const phase = process.argv[2] ?? "first";
-const browser = await chromium.connectOverCDP("http://127.0.0.1:9224");
+const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.env.CDP_PORT ?? 9224}`);
 const page = browser.contexts()[0].pages().find((p) => p.url().includes("tauri.localhost")) ?? browser.contexts()[0].pages()[0];
 const results = [];
 const check = (name, ok, detail = "") => results.push(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 const body = () => page.textContent("body");
 
 await page.waitForFunction(() => /平台：(windows|android|other)/.test(document.body.innerText) && !document.body.innerText.includes("读取中"));
-check("native platform detected", /平台：windows/.test(await body()));
+const expected = process.env.EXPECT_PLATFORM ?? "windows";
+check(`native platform detected (${expected})`, (await body()).includes(`平台：${expected}`));
 
 if (phase === "first") {
   await page.getByLabel("服务地址").fill("http://127.0.0.1:18800/v1");

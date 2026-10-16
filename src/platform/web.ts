@@ -1,13 +1,13 @@
 // Browser dev harness: sql.js persisted to IndexedDB, secrets and model
 // requests through the local dev server (devserver/bridge.ts). Dev only.
-import initSqlJs, { type Database, type SqlValue } from "sql.js";
+import initSqlJs from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import { PlatformError, type Json, type Platform, type Row, type StreamEvent } from "./types";
+import { sqlJsSql } from "./sqljs";
+import { PlatformError, type Platform, type StreamEvent } from "./types";
 
 const IDB_NAME = "chuanyue-dev";
 const IDB_STORE = "files";
 const DB_KEY = "game.sqlite";
-const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 function idb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -35,51 +35,6 @@ async function idbPut(key: string, value: unknown): Promise<void> {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
-}
-
-async function idbKeys(): Promise<string[]> {
-  const db = await idb();
-  return new Promise((resolve, reject) => {
-    const request = db.transaction(IDB_STORE).objectStore(IDB_STORE).getAllKeys();
-    request.onsuccess = () => resolve(request.result.map(String));
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function toSql(value: Json): SqlValue {
-  if (value === null || typeof value === "string") return value;
-  if (typeof value === "boolean") return value ? 1 : 0;
-  if (typeof value === "number") return value;
-  throw new PlatformError("sql_param_type", "SQL 参数只能是标量");
-}
-
-function fromSql(value: SqlValue): Json {
-  if (value instanceof Uint8Array) throw new PlatformError("sql_blob_unsupported", "不支持 BLOB");
-  if (typeof value === "number" && Number.isInteger(value) && Math.abs(value) > MAX_SAFE) {
-    throw new PlatformError("sql_integer_range", "整数超出安全范围");
-  }
-  return value;
-}
-
-function run(db: Database, sql: string, params: Json[]): Row[] {
-  if (params.length === 0 && !/^\s*select/i.test(sql)) {
-    db.exec(sql);
-    return [];
-  }
-  const statement = db.prepare(sql);
-  try {
-    statement.bind(params.map(toSql));
-    const rows: Row[] = [];
-    while (statement.step()) {
-      const row = statement.getAsObject();
-      const out: Row = {};
-      for (const [key, value] of Object.entries(row)) out[key] = fromSql(value);
-      rows.push(out);
-    }
-    return rows;
-  } finally {
-    statement.free();
-  }
 }
 
 async function bridge<T>(path: string, body: unknown): Promise<T> {
@@ -121,35 +76,14 @@ export async function createWebPlatform(): Promise<Platform> {
 
   return {
     name: "web-dev",
-    sql: {
-      async query(sql, params = []) {
-        const rows = run(db, sql, params);
-        if (!/^\s*select/i.test(sql)) persist();
-        return rows;
-      },
-      async batch(statements) {
-        db.exec("BEGIN");
-        try {
-          for (const s of statements) run(db, s.sql, s.params ?? []);
-          db.exec("COMMIT");
-        } catch (error) {
-          db.exec("ROLLBACK");
-          throw error instanceof PlatformError ? error : new PlatformError("sql_failed", String(error));
-        }
-        persist();
-      },
+    sql: sqlJsSql(db, {
+      persist,
       async backup(label) {
         const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
         await idbPut(`backup/${name}`, db.export());
         return name;
       },
-      async listBackups() {
-        const keys = (await idbKeys()).filter((key) => key.startsWith("backup/"));
-        return keys
-          .map((key) => ({ name: key.slice(7), at: key.slice(7, 31), size: 0 }))
-          .sort((a, b) => b.name.localeCompare(a.name));
-      },
-    },
+    }),
     secrets: {
       set: (slot, value, boundBaseUrl) => bridge("secret/set", { slot, value, boundBaseUrl }),
       has: (slot) => bridge("secret/has", { slot }),
