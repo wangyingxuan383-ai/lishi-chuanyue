@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
+import { nowOf } from "./calendar/clock";
+import { eraContext } from "./era";
 import { Game, type TurnEvent } from "./game";
 import { RECORD, fakeLlm, reply, type Script } from "./testing/fakeLlm";
 import * as tree from "./tree";
@@ -108,7 +110,7 @@ describe("Game", () => {
     const state = await game.repo.getState(c.head.id);
     expect(c.head.narrative).toContain("王掌柜催房钱");
     expect(c.head.narrative).not.toContain("<record>");
-    expect(state.time.elapsedMinutes).toBe(0);
+    expect(state.time).toMatchObject({ start: "天宝七载 冬月十七", date: { era: "天宝", year: 7, month: 11, day: 17 }, startHour: 7, elapsedMinutes: 0 });
     expect(state.protagonist.stats.money).toBe(300);
     expect(state.people[0].name).toBe("王掌柜");
     expect(state.goals[0].name).toBe("三日内付清房钱九十文");
@@ -126,10 +128,31 @@ describe("Game", () => {
     const c = await tree.cursor(game.repo, worldId);
     const state = await game.repo.getState(c.head.id);
     expect(state.protagonist.stats.money).toBe(200000);
-    expect(state.time).toMatchObject({ start: "宣和四年春二月", startHour: 9, elapsedMinutes: 0 });
+    expect(state.time).toMatchObject({ start: "宣和四年 二月初一", date: { era: "宣和", year: 4, month: 2, day: 1, ceYear: null }, startHour: 9, elapsedMinutes: 0 });
     expect(state.era.currency?.units[0].name).toBe("两");
     expect((await game.repo.getWorld(worldId))!.title).toBe("赵某的故事");
     expect(JSON.stringify(llm.calls[0].body)).toContain("北宋宣和年间，汴京。");
+  });
+
+  it("counts dates from a structured opening date and adds a year at New Year", async () => {
+    const llm = fakeLlm([
+      { text: "你醒来，已是岁末。" + RECORD({ date: { era: "天宝", year: 7, month: 12, day: 29, ceYear: 748 }, hour: 20, goals: [{ op: "add", name: "过年" }] }) },
+      { text: "转眼过了年。" + RECORD({ time: "三天", choices: ["拜年"] }) },
+    ]);
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "", eraId: "tang-748", settings: {}, protagonist: { name: "李安", gender: "男", age: 22, identity: "你是落第举子。" },
+      arrival: "魂穿", origin: "", opening: { mode: "ai", hint: "" },
+    }, () => {}))!;
+    expect(JSON.stringify(llm.calls[0].body)).toContain("开局日期是天宝七载 冬月十七");
+    const events = await play(game, worldId, "等着过年");
+    expect(JSON.stringify(llm.calls[1].body)).toContain("【当前】天宝七载 腊月廿九 戌时（约 20:00）");
+    const done = events.at(-1) as Extract<TurnEvent, { type: "done" }>;
+    expect(done.chips.map((c) => c.text)).toEqual(expect.arrayContaining(["过了 3 天", "过年了，23 岁"]));
+    const state = await game.repo.getState((await tree.cursor(game.repo, worldId)).head.id);
+    expect(state.time).toMatchObject({ start: "天宝七载 腊月廿九", startHour: 20 });
+    expect(state.protagonist.age).toBe(23);
+    expect(nowOf(eraContext("tang-748", state).clock, state.time.elapsedMinutes).text).toBe("天宝八载 正月初三 · 戌时");
   });
 
   it("keeps a player-written opening verbatim and extracts its state", async () => {

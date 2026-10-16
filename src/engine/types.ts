@@ -1,4 +1,5 @@
 // Core game types. See docs/PLAN_V3.md §6.
+import type { GameDate } from "./calendar/date";
 
 /** do/say: the protagonist acts; write: the player writes narrative directly; direct: instruction to the narrator. */
 export type ActionMode = "do" | "say" | "write" | "direct" | "continue";
@@ -71,8 +72,12 @@ export interface Protagonist {
 
 export interface WorldState {
   version: 1;
-  /** start: date label of minute 0 (e.g. "宣和四年春二月初三"); startHour: hour of day at minute 0. */
-  time: { start: string; startHour?: number; elapsedMinutes: number };
+  /**
+   * date: the date at minute 0 (D119), null when the opening gave none, absent in old saves;
+   * start: how that date reads ("天宝七载 冬月十七", or the opening's own words such as "中平元年秋");
+   * startHour: hour of day at minute 0.
+   */
+  time: { start: string; date?: GameDate | null; startHour?: number; elapsedMinutes: number };
   placeId: string | null;
   protagonist: Protagonist;
   people: Person[];

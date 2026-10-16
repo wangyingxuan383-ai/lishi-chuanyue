@@ -1,7 +1,7 @@
 // Character & world panel (PLAN_V3 §4.5).
 import { useState } from "react";
 import type { EraContext } from "../../engine/era";
-import { clockParts } from "../../engine/calendar/clock";
+import { nowOf } from "../../engine/calendar/clock";
 import { formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
@@ -33,7 +33,7 @@ export function Panel({ state, era, onClose, onSave, busy }: { state: WorldState
   useBack(() => { if (saving) return true; if (editing) setDraft(null); else onClose(); return true; });
   const shown = draft ?? state;
   const me = shown.protagonist;
-  const c = clockParts(era.startHour, state.time.elapsedMinutes);
+  const now = nowOf(era.clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name;
   const active = shown.goals.filter((g) => g.status === "进行中");
   const finished = shown.goals.filter((g) => g.status !== "进行中");
@@ -130,7 +130,7 @@ export function Panel({ state, era, onClose, onSave, busy }: { state: WorldState
               {editing && <button onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}>＋ 添加状况</button>}
             </div>
             <div className="stack" style={{ gap: 4 }}>
-              <p className="muted" style={{ margin: 0 }}>{era.startLabel ? `${era.startLabel} · ` : ""}第 {c.day} 日 {c.shichen}时{place ? ` · ${place}` : ""}</p>
+              <p className="muted" style={{ margin: 0 }}>{now.text}{place ? ` · ${place}` : ""}</p>
               {me.origin && <p className="muted" style={{ margin: 0 }}>穿越前：{me.origin}</p>}
               {me.identity && <p className="muted" style={{ margin: "6px 0 0", lineHeight: 1.7 }}>{me.identity}</p>}
             </div>

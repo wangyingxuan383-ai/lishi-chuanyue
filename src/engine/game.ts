@@ -1,6 +1,7 @@
 // The game session: opening, turns, variants, stop/interrupt, the extraction
 // fallback, refusals and crash recovery (docs/PLAN_V3.md §5.1). UI code talks
 // to this class only; it never touches SQL or the network directly.
+import { formatDate, readDate } from "./calendar/date";
 import { eraContext, eraPack, type EraContext } from "./era";
 import type { Platform, SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
@@ -177,7 +178,7 @@ export class Game {
     const p = input.protagonist;
     const initial: WorldState = {
       version: 1,
-      time: { start: pack?.startLabel ?? "", startHour: pack?.startHour, elapsedMinutes: 0 },
+      time: { start: pack ? formatDate(pack.start.date, pack.calendar) : "", date: pack?.start.date ?? null, startHour: pack?.start.hour, elapsedMinutes: 0 },
       placeId: null,
       protagonist: {
         name: p.name, aliases: [], age: p.age, gender: p.gender, identity: p.identity,
@@ -232,15 +233,24 @@ export class Game {
     }
 
     // Opening-only fields: date, hour, currency and the starting purse (an absolute amount).
-    if (record.date) initial.time.start = record.date;
+    // The program counts every later date (D119); a pack's date stays when the opening gave no usable one.
+    const rules = pack?.calendar ?? {};
+    if (record.date != null) {
+      const date = readDate(record.date, rules);
+      if (date) {
+        initial.time.date = date;
+        initial.time.start = formatDate(date, rules);
+      } else if (!pack && typeof record.date === "string" && record.date.trim()) {
+        initial.time.start = record.date.trim();
+      }
+    }
     if (record.hour != null) initial.time.startHour = record.hour;
     if (!pack && record.currency?.length) initial.era.currency = { units: record.currency };
     const startEra = eraContext(pack?.id ?? null, initial);
     const purse = record.money != null ? parseMoney(record.money, startEra.currency) : null;
     initial.protagonist.stats.money = Math.max(0, purse ?? pack?.startMoney ?? 0);
     const { money: _m, time: _t, date: _d, hour: _h, currency: _c, ...rest } = record;
-    const applied = applyRecord(initial, rest, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency });
-    applied.state.time.elapsedMinutes = 0;
+    const applied = applyRecord(initial, rest, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency }, { advanceTime: false });
 
     const model = this.llm!.model;
     const { world, node } = await this.repo.createWorld({
@@ -265,7 +275,7 @@ export class Game {
     const state = await this.repo.getState(c.head.id);
     const world = (await this.repo.getWorld(worldId))!;
     const era = eraContext(world.eraId, state);
-    const applied = applyRecord(state, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency }, { advanceTime: false });
+    const applied = applyRecord(state, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock }, { advanceTime: false });
     return tree.append(this.repo, c, {
       kind: "edit", narrative: "", actionText: summary, record: patch, choices: [],
       state: applied.state, meta: { chips: applied.chips },
@@ -379,7 +389,7 @@ export class Game {
       extractResult = extracted.result;
       if (extracted.record) record = record ? { ...extracted.record, ...record, choices: extracted.record.choices } : extracted.record;
     }
-    const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency });
+    const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock });
     const model = this.llm!.model;
     const node = {
       kind: "turn" as const, actionMode: action.mode, actionText: action.text, directorNote: action.directorNote ?? null,
@@ -444,7 +454,7 @@ export class Game {
         record = (await this.extract(era, state, node.actionText ?? "", narrative)).record;
       }
       const action = { mode: node.actionMode ?? ("continue" as const), text: node.actionText ?? "" };
-      const applied = applyRecord(state, record, { mode: action.mode, difficulty: world.settings.difficulty, currency: era.currency });
+      const applied = applyRecord(state, record, { mode: action.mode, difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock });
       const updated = await this.repo.completeNode(node.id, {
         narrative, record, choices: record?.choices ?? [], status: record ? "ok" : "no_record",
         meta: { ...node.meta, messages: undefined, chips: applied.chips, notes: applied.notes, log: applied.log, resumed: true, usage: result.usage },

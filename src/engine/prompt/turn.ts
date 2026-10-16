@@ -1,12 +1,13 @@
 // Prompts for opening, turns, the extraction fallback and the setup assistant.
 // Changes are logged in ./CHANGES.md together with eval results.
 import type { ChatMessage } from "../llm/chat";
-import { clockParts } from "../calendar/clock";
+import { nowOf, timeOfDay } from "../calendar/clock";
+import { formatDate } from "../calendar/date";
 import type { EraContext } from "../era";
 import { formatMoney } from "../money";
 import type { ActionMode, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 
-export const PROMPT_VERSION = "turn-4";
+export const PROMPT_VERSION = "turn-5";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -43,7 +44,7 @@ ${RECORD_FIELDS}
 items 只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写。people 只写本回合真正出场或打过交道的人。`;
 
 const OPENING_EXTRA = `开场的记录块另有要求：
-- "date"：故事开始时的日期，写成这个时代的说法，如“天宝七载冬月十七”“宣和四年春二月”“公元前44年三月十四日”；
+- "date"：故事开始的日期，写成对象 {"era":"年号（西方背景写“公元”或“公元前”）","year":第几年,"month":月,"day":日,"ceYear":对应的公元年份（公元前为负数）}；中国背景用农历月日。如 {"era":"天宝","year":7,"month":11,"day":17,"ceYear":748}、{"era":"公元前","year":44,"month":3,"day":14,"ceYear":-44}。之后的日期由程序按经过的时间推算；
 - "hour"：开场时刻，0～23 的整数；
 - "money"：主角此刻身上的钱（不是增减，是总数，整数，单位为最小货币单位），要符合主角的身份——皇子与乞丐差别很大；
 - "currency"：这个时代的货币单位，从大到小，如 [{"name":"贯","value":1000},{"name":"文","value":1}] 或 [{"name":"两","value":1000},{"name":"钱","value":100},{"name":"文","value":1}] 或 [{"name":"denarius","value":16},{"name":"as","value":1}]；
@@ -68,7 +69,7 @@ function systemPrompt(ctx: StoryContext): string {
 - 玩家的行动可能失败。行动有难度或风险时，按情理决定成败，失败也要写出后果。
 - 其他人物有自己的目的、脾气和处境，不围着主角转；态度变化要有缘由。
 - 涉及钱和物品时，只能使用【当前】中列出的数量，正文写清具体数目；钱不够就买不成、付不起。
-- 主角的性别、身份以【当前】为准，前后保持一致。${era.taboos.length ? `\n- 不要使用这些时代错误：${era.taboos.join("；")}。` : ""}
+- 主角的性别、身份、年龄，以及日期和时辰，都以【当前】为准，前后保持一致。
 - 避免套话和重复上一回合的开头与句式。不要用：${CLICHES.slice(0, 6).join("、")}。
 - 内容尺度：${INTENSITY_TEXT.violence[i.violence]}；${INTENSITY_TEXT.romance[i.romance]}；${INTENSITY_TEXT.darkness[i.darkness]}。
 - 每回合结尾留一个自然的行动点。${settings.choiceCount > 0 ? `在记录里给出 ${settings.choiceCount} 个简短、彼此不同的建议行动（各不超过二十字）` : "记录里的 choices 写空数组 []"}。
@@ -82,7 +83,7 @@ const level = (n: number, words: string[]) => words[Math.min(words.length - 1, M
 
 export function renderState(state: WorldState, era: EraContext): string {
   const me = state.protagonist;
-  const c = clockParts(era.startHour, state.time.elapsedMinutes);
+  const now = nowOf(era.clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name ?? "（未记录）";
   const items = me.items.map((i) => `${i.name}×${i.quantity}${i.unit}${i.place ? `（放在${i.place}）` : ""}`).join("、") || "无";
   const statuses = me.statuses.map((s) => `${s.name}${s.detail ? `：${s.detail}` : ""}`).join("；") || "无";
@@ -91,7 +92,8 @@ export function renderState(state: WorldState, era: EraContext): string {
     .join("\n") || "无";
   const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
   const smallest = era.currency.units[era.currency.units.length - 1].name;
-  return `【当前】${era.startLabel ? `${era.startLabel}起 ` : ""}第 ${c.day} 日 ${c.shichen}时（约 ${String(c.hour).padStart(2, "0")}:${String(c.minute).padStart(2, "0")}）· ${place}
+  const when = now.date ? formatDate(now.date, era.clock.rules) : `${era.clock.label ? `${era.clock.label}起 ` : ""}第 ${now.day} 日`;
+  return `【当前】${when} ${timeOfDay(now)} · ${place}
 主角：${me.name}，${me.gender}${me.age ? `，${me.age}岁` : ""}，${me.identity}${me.origin ? `（穿越前是${me.origin}）` : ""}
 可用的钱：${formatMoney(me.stats.money, era.currency)}（共 ${me.stats.money} ${smallest}）${me.stats.debt ? `；欠债 ${formatMoney(me.stats.debt, era.currency)}` : ""}
 身体：健康${level(me.stats.health, ["康健", "微恙", "带伤", "重伤", "垂危"])}，精力${level(me.stats.energy, ["充沛", "尚可", "疲惫", "力竭"])}
@@ -187,6 +189,13 @@ function protagonistLine(input: OpeningInput): string {
 ${input.arrival === "不穿越" ? "主角就是这个时代土生土长的人，没有穿越。" : `穿越方式：${input.arrival}——${how}。穿越前，主角是${input.origin || "一个普通的现代人"}。`}`;
 }
 
+/** With an era pack, the opening date and currency are already known. */
+function packLine(era: EraContext): string {
+  if (!era.packId) return "";
+  const date = era.clock.date ? `开局日期是${formatDate(era.clock.date, era.clock.rules)}，除非【故事设定】另有说明，就用这个日期；` : "";
+  return `\n本时代资料已定：${date}货币为${era.currency.units.map((u) => u.name).join("、")}，currency 可以省略。`;
+}
+
 export function openingMessages(input: OpeningInput): ChatMessage[] {
   const arrivalSteps = input.arrival === "不穿越"
     ? "1. 从一个具体的场景切入，先写画面与动作，不要先交代背景。"
@@ -201,7 +210,7 @@ ${input.hint ? `玩家希望开场：${input.hint}\n` : ""}开场要求：
 ${arrivalSteps}
 3. 在开场中自然地点出当下的时间。
 4. 以一个迫在眉睫的情境收尾，留给玩家决定。
-${OPENING_EXTRA}${input.era.packId ? `\n本时代的货币已经确定：${input.era.currency.units.map((u) => u.name).join("、")}，currency 可以省略。` : ""}`,
+${OPENING_EXTRA}${packLine(input.era)}`,
     },
   ];
 }
@@ -213,7 +222,7 @@ export function openingExtractMessages(input: OpeningInput & { text: string }): 
       role: "system",
       content: `你是这部互动小说的记录员。玩家亲手写了开场。根据【故事设定】【主角】和【开场正文】，只输出一个 JSON 对象，记录故事开始时的状态。字段如下（没有的省略）：
 ${RECORD_FIELDS}
-${OPENING_EXTRA}
+${OPENING_EXTRA}${packLine(input.era)}
 time 写 "0"。只输出 JSON，不要输出其他文字。`,
     },
     {

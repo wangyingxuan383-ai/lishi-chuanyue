@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { eraContext } from "../../engine/era";
-import { formatClock } from "../../engine/calendar/clock";
+import { nowOf } from "../../engine/calendar/clock";
 import type { World } from "../../engine/types";
 import { useApp } from "../app/context";
 import { MenuSheet } from "../components/Sheet";
@@ -12,7 +12,6 @@ interface WorldCard {
   lastLine: string;
   clock: string;
   turns: number;
-  era: string;
 }
 
 function relative(iso: string): string {
@@ -34,7 +33,7 @@ function WorldItem({ card, onOpen, onMenu }: { card: WorldCard; onOpen: () => vo
   return (
     <button className="card" {...press}>
       <h3>{card.world.title}</h3>
-      <p>{card.era} · {card.protagonist} · {card.clock}</p>
+      <p>{card.protagonist} · {card.clock}</p>
       <p style={{ marginTop: 6 }}>{card.lastLine}</p>
       <p style={{ marginTop: 6, fontSize: 12 }}>{card.turns} 回合 · {relative(card.world.playedAt)}</p>
     </button>
@@ -58,7 +57,7 @@ export default function Home() {
       const era = eraContext(world.eraId, state);
       out.push({
         world, protagonist: state.protagonist.name, lastLine: lastSentence(head?.narrative ?? ""),
-        clock: formatClock(era.startHour, state.time.elapsedMinutes), turns: path.length - 1, era: era.startLabel || era.title,
+        clock: nowOf(era.clock, state.time.elapsedMinutes).text, turns: path.length - 1,
       });
     }
     setCards(out);

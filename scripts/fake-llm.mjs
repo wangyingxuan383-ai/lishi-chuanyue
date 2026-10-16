@@ -15,7 +15,7 @@ const portArg = process.argv.indexOf("--port");
 const port = portArg > 0 ? Number(process.argv[portArg + 1]) : 18800;
 
 const OPENING_RECORD = {
-  time: "一刻", place: "西市旁邸店", log: "在邸店醒来，掌柜催讨房钱", date: "天宝七载冬月十七", hour: 7, money: 300,
+  time: "一刻", place: "西市旁邸店", log: "在邸店醒来，掌柜催讨房钱", date: { era: "天宝", year: 7, month: 11, day: 17, ceYear: 748 }, hour: 7, money: 300,
   people: [{ name: "王掌柜", role: "邸店掌柜", attitude: "冷淡", note: "催讨房钱九十文" }],
   items: [{ name: "旧书", delta: 3 }, { name: "换洗衣", delta: 1 }],
   goals: [{ op: "add", name: "三日内付清房钱九十文", kind: "主线" }],

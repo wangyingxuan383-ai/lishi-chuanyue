@@ -4,9 +4,9 @@
 import { chatCompletionsUrl } from "../../src/engine/llm/chat.ts";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
 import { createMemoryPlatform } from "../../src/platform/memory.ts";
-import { formatClock } from "../../src/engine/calendar/clock.ts";
+import { nowOf } from "../../src/engine/calendar/clock.ts";
 import { TEMPLATES, templateName } from "../../src/content/templates.ts";
-import { eraContext } from "../../src/engine/era.ts";
+import { eraContext } from "../../src/engine/era/index.ts";
 import { formatMoney } from "../../src/engine/money.ts";
 import { nodePlatform, serviceBaseUrl } from "./lib.ts";
 
@@ -39,7 +39,8 @@ async function show(label: string) {
   const { cursor } = await import("../../src/engine/tree.ts");
   const c = await cursor(game.repo, worldId!);
   const s = await game.repo.getState(c.head.id);
-  console.log(`\n=== ${label} · ${formatClock(7, s.time.elapsedMinutes)} · 钱 ${s.protagonist.stats.money} 文 · ${c.head.meta.firstTokenMs ? `首字 ${Math.round(c.head.meta.firstTokenMs as number)}ms` : ""}`);
+  const era = eraContext((await game.repo.getWorld(worldId!))!.eraId, s);
+  console.log(`\n=== ${label} · ${nowOf(era.clock, s.time.elapsedMinutes).text} · 钱 ${formatMoney(s.protagonist.stats.money, era.currency)} · ${c.head.meta.firstTokenMs ? `首字 ${Math.round(c.head.meta.firstTokenMs as number)}ms` : ""}`);
   console.log(c.head.narrative);
   console.log("  标签:", ((c.head.meta.chips as { text: string }[]) ?? []).map((x) => x.text).join(" | "));
   console.log("  选项:", c.head.choices.join(" | "));

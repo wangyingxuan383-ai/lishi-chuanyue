@@ -1,6 +1,7 @@
 // Applies a model's turn record to the world state, change by change
 // (D104, D113). Invalid changes are corrected or dropped, never fatal; the
 // player sees what actually happened as chips, and the next prompt gets notes.
+import { newYearsBetween, type GameClock } from "../calendar/clock";
 import { parseDurationMinutes } from "../calendar/duration";
 import { formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
@@ -21,8 +22,8 @@ export interface TurnRecord {
   log?: string | null;
   risk?: string | null;
   choices?: string[] | null;
-  /** Opening only: date label, hour of day and the era's currency units. */
-  date?: string | null;
+  /** Opening only: the start date (an object for coerceDate, or words), hour of day and the era's currency units. */
+  date?: string | Record<string, unknown> | null;
   hour?: number | null;
   currency?: { name: string; value: number }[] | null;
 }
@@ -65,7 +66,7 @@ const clamp = (n: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
 export function applyRecord(
   before: WorldState,
   record: TurnRecord | null,
-  ctx: { mode: ActionMode; difficulty: Difficulty; currency: Currency },
+  ctx: { mode: ActionMode; difficulty: Difficulty; currency: Currency; clock?: GameClock },
   opts?: { advanceTime?: boolean },
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
@@ -81,6 +82,12 @@ export function applyRecord(
   if (parsed === null && record?.time != null) log.push(`时间“${record.time}”无法识别，按 ${minutes} 分钟计`);
   s.time.elapsedMinutes += minutes;
   if (minutes >= 15) chips.push({ text: describeMinutes(minutes), tone: "info" });
+  // Ages count the Chinese way (虚岁): everyone grows a year at New Year.
+  const newYears = ctx.clock ? newYearsBetween(ctx.clock, before.time.elapsedMinutes, s.time.elapsedMinutes) : 0;
+  if (newYears > 0) {
+    if (me.age != null) me.age += newYears;
+    chips.push({ text: `${newYears === 1 ? "过年了" : `过了 ${newYears} 个年`}${me.age != null ? `，${me.age} 岁` : ""}`, tone: "info" });
+  }
   if (!record) return { state: s, chips, notes, log: [...log, "本回合没有记录"], minutes };
 
   // Place

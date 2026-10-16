@@ -59,6 +59,15 @@ await page.getByRole("button", { name: "开始" }).click();
 await page.locator(".dock .choice").first().waitFor({ timeout: 20000 });
 check("player-written opening kept verbatim", (await page.textContent(".story")).includes("雨夜，破庙。你缩在神像后面"));
 check("opening state extracted", (await page.locator(".choice").first().textContent()) === "生火取暖");
+// The extract gave no usable date, so the era pack's start date applies; the hour comes from the opening.
+check("top bar shows the era date", (await page.textContent(".topbar .subtitle")) === "天宝七载 冬月十七 · 戌时");
+await page.getByRole("button", { name: "此时此地" }).click();
+await page.getByText("公元 748 年 · 戊子年").waitFor();
+check("time sheet shows CE year, season and age", (await page.textContent(".sheet")).includes("仲冬 · 冬至之月") && (await page.textContent(".sheet")).includes("岁（虚岁"));
+await page.waitForTimeout(400);
+await shot("02b-time");
+await page.keyboard.press("Escape");
+await page.getByText("公元 748 年 · 戊子年").waitFor({ state: "detached" });
 await page.getByRole("button", { name: "返回" }).click();
 
 // An AI-written opening via one-tap random start.

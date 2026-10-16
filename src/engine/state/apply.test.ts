@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TANG_748 } from "../../content/eras/tang-748";
 import { TANG_CURRENCY, formatMoney, parseMoney } from "../money";
 import { sampleState } from "../testing/fixtures";
 import type { Difficulty, WorldState } from "../types";
@@ -19,6 +20,16 @@ describe("money", () => {
     expect(parseMoney("一贯半", TANG_CURRENCY)).toBe(1500);
     expect(parseMoney(-30, TANG_CURRENCY)).toBe(-30);
     expect(parseMoney("若干", TANG_CURRENCY)).toBeNull();
+  });
+
+  it("formats and parses silver with copper", () => {
+    const silver = { units: [{ name: "两", value: 1000 }, { name: "文", value: 1 }] };
+    expect(formatMoney(3200, silver)).toBe("3 两 200 文");
+    expect(parseMoney("三两二百文", silver)).toBe(3200);
+    const weighed = { units: [{ name: "两", value: 1000 }, { name: "钱", value: 100 }, { name: "文", value: 1 }] };
+    expect(formatMoney(3250, weighed)).toBe("3 两 2 钱 50 文");
+    expect(parseMoney("二两五钱", weighed)).toBe(2500);
+    expect(formatMoney(-3200, silver)).toBe("−3 两 200 文");
   });
 });
 
@@ -156,5 +167,14 @@ describe("applyRecord", () => {
     const r = apply(sampleState(), { place: "西市货栈" });
     expect(r.state.places[0].name).toBe("西市货栈");
     expect(r.state.placeId).toBe(r.state.places[0].id);
+  });
+
+  it("grows the protagonist a year at each New Year (虚岁)", () => {
+    const clock = { date: { era: "天宝", year: 7, month: 12, day: 29, ceYear: 748, lunar: true }, hour: 20, label: "", rules: TANG_748.calendar };
+    const crossed = applyRecord(sampleState(), { time: "两天" }, { ...ctx(), clock });
+    expect(crossed.state.protagonist.age).toBe(23);
+    expect(crossed.chips.map((c) => c.text)).toContain("过年了，23 岁");
+    expect(applyRecord(sampleState(), { time: "一个时辰" }, { ...ctx(), clock }).state.protagonist.age).toBe(22);
+    expect(applyRecord(sampleState(), { time: "两天" }, ctx()).state.protagonist.age).toBe(22);
   });
 });

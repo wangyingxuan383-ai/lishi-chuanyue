@@ -149,7 +149,9 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
     return [{ op: str(o.op) ?? "progress", name, ...(str(o.detail) ? { detail: str(o.detail) } : {}), ...(str(o.kind) ? { kind: str(o.kind) } : {}) }];
   });
 
+  // Opening dates come as {era, year, month, day, ceYear} (turn-5) or as words (turn-4 and earlier).
   if (str(v.date)) r.date = str(v.date);
+  else if (v.date && typeof v.date === "object" && !Array.isArray(v.date)) r.date = v.date as Record<string, unknown>;
   const hour = Number(v.hour);
   if (v.hour !== undefined && Number.isInteger(hour) && hour >= 0 && hour < 24) r.hour = hour;
   const units = arr(v.currency).flatMap((u) => {

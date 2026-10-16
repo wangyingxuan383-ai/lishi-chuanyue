@@ -1,10 +1,7 @@
+// All era packs (D111). Add a pack here after it passes src/engine/era/validate.ts.
 import { TANG_748 } from "./tang-748";
-import type { EraDraft } from "./types";
+import type { EraPack } from "./types";
 
-export const ERAS: EraDraft[] = [TANG_748];
+export const ERAS: EraPack[] = [TANG_748];
 
-export function getEra(id: string): EraDraft {
-  return ERAS.find((e) => e.id === id) ?? TANG_748;
-}
-
-export type { EraDraft } from "./types";
+export type { EraPack } from "./types";

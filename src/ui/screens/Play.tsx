@@ -1,8 +1,8 @@
 // The play screen (PLAN_V3 §4.3–4.4): story stream, choices, input bar,
 // regenerate/variants, long-press menu, stop/interrupt, character panel.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { eraContext } from "../../engine/era";
-import { formatClock } from "../../engine/calendar/clock";
+import { nowOf, timeRows } from "../../engine/calendar/clock";
 import type { TurnEvent, TurnHandle } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
 import type { Chip } from "../../engine/state/apply";
@@ -72,7 +72,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
@@ -286,7 +286,9 @@ export default function Play({ worldId }: { worldId: string }) {
   if (!world || !cursor || !state) return <div className="screen-body"><p className="muted">正在读取…</p></div>;
 
   const head = cursor.head;
-  const place = state.places.find((p) => p.id === state.placeId)?.name ?? era.title;
+  const placeName = state.places.find((p) => p.id === state.placeId)?.name;
+  const place = placeName ?? era.title;
+  const now = nowOf(era.clock, state.time.elapsedMinutes);
   const shown = gen?.variant ? nodes.slice(0, nodes.findIndex((n) => n.id === turn?.id)) : nodes;
   const mode = MODES[modeIndex];
   const dead = state.protagonist.stats.health <= 0 && world.settings.difficulty !== "宽松";
@@ -297,10 +299,10 @@ export default function Play({ worldId }: { worldId: string }) {
     <div className="play">
       <div className="topbar">
         <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
-        <div className="title">
+        <button className="title" aria-label="此时此地" onClick={() => setSheet("time")}>
           <h1 style={{ fontSize: 15 }}>{place}</h1>
-          <div className="subtitle">{era.startLabel ? `${era.startLabel} · ` : ""}{formatClock(era.startHour, state.time.elapsedMinutes)}</div>
-        </div>
+          <div className="subtitle">{now.text}</div>
+        </button>
         <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>
         <button className="icon-btn" aria-label="更多" onClick={() => setSheet("more")}>⋯</button>
       </div>
@@ -435,6 +437,16 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "回到首页", onSelect: () => pop() },
           ]}
         />
+      )}
+      {sheet === "time" && (
+        <Sheet title="此时此地" onClose={() => setSheet(null)}>
+          <dl className="facts">
+            {placeName && <><dt>地点</dt><dd>{placeName}</dd></>}
+            {timeRows(era.clock, state.time.elapsedMinutes).map((r) => <Fragment key={r.label}><dt>{r.label}</dt><dd>{r.value}</dd></Fragment>)}
+            {state.protagonist.age != null && <><dt>年龄</dt><dd>{state.protagonist.age} 岁{now.date?.lunar ? "（虚岁，过年长一岁）" : ""}</dd></>}
+          </dl>
+          {era.packId && <p className="muted">时代资料：{era.title}</p>}
+        </Sheet>
       )}
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
       {sheet === "story" && <StorySheet world={world} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}

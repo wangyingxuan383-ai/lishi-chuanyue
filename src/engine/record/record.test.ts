@@ -95,6 +95,12 @@ describe("parseRecord", () => {
     check(record!);
   });
 
+  it("keeps a structured opening date", () => {
+    const { record } = parseRecord('{"time":"0","date":{"era":"天宝","year":7,"month":11,"day":17,"ceYear":748},"choices":["a"]}');
+    expect(record?.date).toEqual({ era: "天宝", year: 7, month: 11, day: 17, ceYear: 748 });
+    expect(parseRecord('{"time":"0","date":"宣和四年春二月","choices":["a"]}').record?.date).toBe("宣和四年春二月");
+  });
+
   it("returns null for hopeless input", () => {
     expect(parseRecord("<record>完全不是 JSON</record>").record).toBeNull();
     expect(lenientJson("[1,2]")).toBeNull();

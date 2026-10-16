@@ -74,6 +74,7 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 }
 .topbar h1 { font-size: 17px; margin: 0; font-weight: 600; }
 .topbar .title { flex: 1; min-width: 0; padding: 0 4px; }
+.topbar button.title { border: none; border-radius: 0; background: transparent; text-align: left; }
 .topbar .subtitle { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .icon-btn { min-width: var(--tap); padding: 0 10px; border: none; background: transparent; font-size: 18px; }
 
@@ -195,3 +196,8 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; backgro
 .template-card small { font-size: 12px; color: var(--muted); }
 .template-card.selected { border-color: var(--accent); background: var(--accent-soft); }
 .turn-written { border-left: 3px solid var(--accent-soft); padding-left: 10px; margin-bottom: 6px; }
+
+/* ---------- facts (label / value list) ---------- */
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 10px 16px; margin: 0 0 12px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }

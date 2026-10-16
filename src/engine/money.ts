@@ -38,7 +38,8 @@ export function parseMoney(input: unknown, currency: Currency): number | null {
   else if (/^[+＋]/.test(text)) text = text.slice(1);
   if (/^\d+$/.test(text)) return sign * Number(text);
   const names = [...currency.units.map((u) => u.name), ...Object.keys(currency.aliases ?? {})];
-  const pattern = new RegExp(`(\\d+(?:\\.\\d+)?|[零〇一二两俩三四五六七八九十百千]+)(${names.join("|")})(半)?`, "g");
+  // Lazy, so a unit named 两 is not read as the digit two ("三两二百文" = 3 两 + 200 文).
+  const pattern = new RegExp(`(\\d+(?:\\.\\d+)?|[零〇一二两俩三四五六七八九十百千]+?)(${names.join("|")})(半)?`, "g");
   let total = 0;
   let matched = false;
   for (const [, amountText, unitName, half] of text.matchAll(pattern)) {

@@ -2,8 +2,12 @@
 // which the player can edit. Classes and eras are deliberately varied.
 // Gender is fixed only when the identity implies it (公主, 皇子, 宫女…);
 // otherwise `gender` is null and every text stays gender-neutral.
+// Era packs contribute their identities; periods without a pack are written here.
+import { yearLabel } from "../engine/calendar/date";
+import { ERAS } from "./eras";
+import type { Arrival, EraPack } from "./eras/types";
 
-export type Arrival = "魂穿" | "身穿" | "投胎" | "不穿越";
+export type { Arrival } from "./eras/types";
 
 export interface OpeningTemplate {
   id: string;
@@ -27,43 +31,12 @@ export interface OpeningTemplate {
   tags: string[];
 }
 
-const TANG = { surnames: ["李", "崔", "卢", "郑", "王", "杨", "韦", "裴", "杜"], given: { 男: ["怀远", "子期", "元礼", "叔夜", "季明"], 女: ["婉", "十一娘", "玉真", "蕙", "素素"] } };
 const SONG = { surnames: ["赵", "王", "陈", "苏", "沈", "林", "周", "范"], given: { 男: ["彦章", "伯谦", "子瞻", "文渊", "仲宣"], 女: ["清照", "婉容", "素娥", "念奴", "惜惜"] } };
 const MING = { surnames: ["朱", "沈", "陆", "周", "徐", "顾", "方", "吴"], given: { 男: ["承恩", "子安", "怀德", "景行", "世卿"], 女: ["婉清", "如是", "小宛", "湘君", "绣娘"] } };
 const HAN = { surnames: ["袁", "荀", "陈", "司马", "孙", "周", "陆", "诸葛"], given: { 男: ["文远", "公瑾", "子敬", "伯言", "孝直"], 女: ["昭姬", "文君", "婉华", "令仪", "贞姜"] } };
 const QING = { surnames: ["沈", "周", "盛", "徐", "顾", "叶", "林"], given: { 男: ["怀瑾", "思远", "景澄", "伯安"], 女: ["佩玉", "静宜", "曼殊", "婉贞"] } };
 
-export const TEMPLATES: OpeningTemplate[] = [
-  {
-    id: "tang-prince", title: "被遗忘的皇子", era: "唐 · 天宝七载", eraId: "tang-748", gender: "男", age: 19, ...TANG,
-    surnames: ["李"],
-    premise: "天宝七载，长安。玄宗在位已三十余年，李林甫独揽朝政，杨氏兄妹权势日盛。皇子们被圈在十王宅里，名为尊贵，实同软禁。",
-    identity: "你是一位母家早已失势的庶出皇子，封了个空头郡王，住在十王宅最偏的院落里。宦官怠慢，兄弟提防，连俸禄都常被克扣。昨夜有人在你院中井里发现了一具宫女的尸体。",
-    openingHint: "清晨，内侍省的人已堵在院门口，要你给个说法。",
-    tags: ["宫廷", "权谋"],
-  },
-  {
-    id: "tang-chancellor-daughter", title: "相府庶女", era: "唐 · 天宝七载", eraId: "tang-748", gender: "女", age: 16, ...TANG,
-    premise: "天宝七载，长安平康坊。宰相府中嫡庶有别，后宅暗流汹涌；朝堂上，宰相正与杨家明争暗斗。",
-    identity: "你是宰相府中不受宠的庶女，生母早亡，在后宅谨小慎微地活着。嫡母刚为你定下一门亲事——对方是年过五旬、以暴虐闻名的边将。",
-    openingHint: "定亲的帖子刚送到你房里，下聘就在三日后。",
-    tags: ["后宅", "宫廷"],
-  },
-  {
-    id: "tang-scholar", title: "落第举子", era: "唐 · 天宝七载", eraId: "tang-748", gender: "男", age: 22, ...TANG,
-    premise: "天宝七载冬，长安西市。科场之外有行卷、温卷、权贵荐举；落第的士子滞留京城，靠投卷和替人写字度日。",
-    identity: "你是陇西来的落第举子，客居西市旁的邸店，欠了三日房钱九十文，掌柜限你今日结清。",
-    openingHint: "掌柜在门外催讨房钱。",
-    tags: ["市井", "科举"],
-  },
-  {
-    id: "tang-sogdian", title: "粟特商队的当家人", era: "唐 · 天宝七载", eraId: "tang-748", gender: null, age: 27, ...TANG,
-    surnames: ["康", "安", "史", "何", "石"],
-    premise: "天宝七载，长安西市。粟特商人往来于丝路，经营丝绢、香料与珠宝，也替权贵放债；边镇节度使与胡商关系微妙。",
-    identity: "你是一支粟特商队的当家人，前任当家人——你的长辈——刚在西市客栈暴毙，留下一屋子货、一叠借据和一群各怀心思的伙计。",
-    openingHint: "伙计们在灵前吵着要分家，债主也上门了。",
-    tags: ["经商", "悬疑"],
-  },
+const WRITTEN: OpeningTemplate[] = [
   {
     id: "song-prince", title: "官家的第十七子", era: "北宋 · 宣和年间", eraId: null, gender: "男", age: 17, ...SONG,
     surnames: ["赵"],
@@ -165,6 +138,25 @@ export const TEMPLATES: OpeningTemplate[] = [
     openingHint: "你在田埂上醒来，几个持戈的乡卒正朝你走来。",
     tags: ["身穿", "求生"],
   },
+];
+
+/** An era pack's identities as templates; the pack's premise fills in when an identity has none. */
+function fromPack(pack: EraPack): OpeningTemplate[] {
+  const era = `${pack.dynasty} · ${yearLabel(pack.start.date, pack.calendar)}`;
+  return pack.identities.map((i) => ({
+    id: i.id, title: i.title, era, eraId: pack.id, gender: i.gender, age: i.age, arrival: i.arrival,
+    premise: i.premise ?? pack.premise, identity: i.text, openingHint: i.hint,
+    surnames: i.surnames ?? pack.names.surnames, given: pack.names.given, tags: i.tags,
+  }));
+}
+
+/** Shown first: different classes, genders and dynasties. */
+const FEATURED = ["tang-prince", "tang-chancellor-daughter", "song-courtesan", "ming-jinyiwei", "tang-sogdian", "ming-refugee"];
+
+const ALL = [...ERAS.flatMap(fromPack), ...WRITTEN];
+export const TEMPLATES: OpeningTemplate[] = [
+  ...FEATURED.map((id) => ALL.find((t) => t.id === id)).filter((t): t is OpeningTemplate => !!t),
+  ...ALL.filter((t) => !FEATURED.includes(t.id)),
 ];
 
 export function pickRandom<T>(items: T[]): T {

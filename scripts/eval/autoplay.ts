@@ -5,7 +5,7 @@ import path from "node:path";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
 import { ChatError, chatCompletionsUrl, parseChunk, streamChat, type ChatUsage } from "../../src/engine/llm/chat.ts";
 import { CLICHES, PROMPT_VERSION } from "../../src/engine/prompt/turn.ts";
-import { eraPack } from "../../src/engine/era.ts";
+import { eraPack } from "../../src/engine/era/index.ts";
 import { cursor } from "../../src/engine/tree.ts";
 import type { ActionMode, StoryNode } from "../../src/engine/types.ts";
 import { TEMPLATES, templateName } from "../../src/content/templates.ts";
@@ -243,10 +243,7 @@ async function main() {
     if (a.includes(b) || b.includes(a) || (stripped(a) && stripped(a) === stripped(b))) suspectedDuplicates.push([a, b]);
   }
   const pack = eraPack(t.eraId);
-  const tabooKeywords = [...new Set((pack?.taboos ?? []).flatMap((taboo) => taboo.split(/[（(]/)[0].split(/[、，,]/).map((part) => {
-    const quoted = part.match(/[“「]([^”」]+)[”」]/)?.[1];
-    return quoted ?? part.replace(/^以(.+)作日常货币$/, "$1").replace(/等官名$|作为功名等级$/, "").trim();
-  })).filter(Boolean))];
+  const tabooKeywords = [...new Set((pack?.taboos ?? []).flatMap((taboo) => taboo.match ?? [taboo.name]))];
   const frequency = (words: string[]) => {
     const byWord = Object.fromEntries(words.map((word) => [word, entries.reduce((n, e) => n + e.narrative.split(word).length - 1, 0)]));
     const count = Object.values(byWord).reduce((a, b) => a + b, 0);
