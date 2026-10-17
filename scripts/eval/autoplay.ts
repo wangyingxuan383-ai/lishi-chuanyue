@@ -46,6 +46,8 @@ type Entry = {
   /** The hidden fortune of the turn and what the model said it was used for (R05-T002). */
   fortune: string | null;
   risk: { what: string; result?: string } | null;
+  /** Goal changes the record asked for, to check progress updates (R05-T003). */
+  goals: { op: string; name: string; detail?: string }[];
   failures: Failure[]; calls: Call[];
 };
 const BRANCHES = "子丑寅卯辰巳午未申酉戌亥";
@@ -236,9 +238,11 @@ async function main() {
     let clock: Entry["clock"] = null;
     let fortune: string | null = null;
     let risk: Entry["risk"] = null;
+    let goals: Entry["goals"] = [];
     if (saved) {
       fortune = saved.parentId ? ((await game.repo.getNode(saved.parentId))?.meta.fortune as string | undefined) ?? null : null;
       risk = (saved.record as { risk?: Entry["risk"] } | null)?.risk ?? null;
+      goals = ((saved.record as { goals?: Entry["goals"] } | null)?.goals ?? []).map((g) => ({ op: g.op, name: g.name, ...(g.detail ? { detail: g.detail } : {}) }));
       const state = await game.repo.getState(saved.id);
       const era = eraContext(t!.eraId, state);
       const now = nowOf(era.clock, state.time.elapsedMinutes);
@@ -253,7 +257,7 @@ async function main() {
         extracted: typeof saved?.meta.extracted === "boolean" ? saved.meta.extracted : null,
         log: (saved?.meta.log as string[]) ?? [], chips: (saved?.meta.chips as unknown[]) ?? [],
       },
-      clock, fortune, risk, failures, calls: calls.slice(callStart),
+      clock, fortune, risk, goals, failures, calls: calls.slice(callStart),
     };
   }
 
@@ -308,7 +312,7 @@ async function main() {
     } catch (error) {
       entry = {
         turn, mode: action.mode, action: action.text, narrative: "", firstTokenMs: null, totalMs: 0, modelTotalMs: null,
-        usage: null, status: null, meta: { extracted: null, log: [], chips: [] }, clock: null, fortune: null, risk: null, failures: [fromError(error)], calls: [],
+        usage: null, status: null, meta: { extracted: null, log: [], chips: [] }, clock: null, fortune: null, risk: null, goals: [], failures: [fromError(error)], calls: [],
       };
     }
     entry.calls = calls.slice(callStart);
@@ -416,7 +420,9 @@ async function main() {
     opening, entries,
   };
   const labels: Record<ActionMode, string> = { do: "做", say: "说", write: "写", direct: "导演", continue: "继续", skip: "过些日子" };
-  const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}；运势：${e.fortune ?? "（无）"}${e.risk ? `；风险：${e.risk.what}${e.risk.result ? ` · ${e.risk.result}` : ""}` : ""}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
+  const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}；运势：${e.fortune ?? "（无）"}${e.risk ? `；风险：${e.risk.what}${e.risk.result ? ` · ${e.risk.result}` : ""}` : ""}${e.goals?.length ? `
+
+目标变化：${e.goals.map((g) => `${g.op} ${g.name}${g.detail ? `（${g.detail}）` : ""}`).join("；")}` : ""}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
   fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n${chapterList.length ? `\n## 章节摘要\n\n${chapterList.map((c, i) => `### 第 ${i + 1} 章 · ${c.title}\n\n梗概：${c.gist}\n\n${c.summary}`).join("\n\n")}\n` : ""}${probes.questions.length ? `\n## 记忆探针（第 ${probeFrom}～${probeTo} 回合出题）\n\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}\n   标准答案：${x.a}${probes.rounds.map((r) => `\n   第 ${r.turn} 回合：${r.answers[i]}`).join("")}`).join("\n")}\n` : ""}`, "utf8");
