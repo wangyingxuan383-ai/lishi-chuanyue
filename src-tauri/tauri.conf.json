@@ -11,9 +11,32 @@
   },
   "app": {
     "windows": [
-      { "title": "历史穿越", "width": 1100, "height": 800, "minWidth": 360, "backgroundColor": "#efe5cf" }
+      {
+        "label": "main",
+        "title": "历史穿越",
+        "width": 1100,
+        "height": 800,
+        "minWidth": 420,
+        "minHeight": 600,
+        "center": true,
+        "dragDropEnabled": false,
+        "backgroundColor": "#efe5cf"
+      }
     ],
     "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:" }
   },
-  "bundle": { "active": true, "targets": ["nsis"], "icon": ["icons/icon.ico"] }
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "shortDescription": "历史穿越：AI 互动小说",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
 }

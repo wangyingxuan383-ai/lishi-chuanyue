@@ -9,6 +9,8 @@ mod secret;
 mod secrets;
 mod sql;
 mod stream;
+#[cfg(desktop)]
+mod window_state;
 
 #[cfg(target_os = "android")]
 mod android_tls;
@@ -44,6 +46,8 @@ pub fn run() {
             app.manage(services.0);
             app.manage(services.1);
             app.manage(services.2);
+            #[cfg(desktop)]
+            window_state::restore(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

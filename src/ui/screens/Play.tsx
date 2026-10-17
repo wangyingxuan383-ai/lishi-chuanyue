@@ -21,6 +21,8 @@ import { useLongPress } from "../components/useLongPress";
 import { useMouse, useWide } from "../components/useMedia";
 import { EndingCard, LifeSheet, useSealToast } from "../components/LifeSheet";
 import { PassageCardSheet } from "../components/ShareCard";
+import { useShortcuts } from "../components/useShortcuts";
+import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 
 const PAGE = 30;
@@ -113,7 +115,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | "toc" | "life" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | "toc" | "life" | "keys" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
   const wide = useWide();
@@ -439,6 +441,32 @@ export default function Play({ worldId }: { worldId: string }) {
     setWorld({ ...world, settings });
   };
 
+  // Desktop shortcuts (PLAN_V4 E): the same actions as the buttons, with the same conditions.
+  const ready = !!world && !!cursor && !!state;
+  const isDead = !!state && !!world && state.protagonist.stats.health <= 0 && world.settings.difficulty !== "宽松";
+  const pick = (i: number) => ({ inInputs: true, run: () => {
+    const choice = turn?.choices[i];
+    if (!ready || gen || isDead || !choice || turn?.status === "interrupted") return false;
+    send({ mode: "do", text: choice });
+  } });
+  const focusInput = { inInputs: true, run: () => { if (!inputBox.current || isDead) return false; inputBox.current.focus(); } };
+  const keys = () => setSheet("keys");
+  useShortcuts({
+    "Ctrl+Z": { run: () => { if (!ready || gen || !cursor!.head.parentId) return false; void undo(); } },
+    "Ctrl+Y": { run: () => { if (!ready || gen || !tree.canRedo(cursor!)) return false; void redo(); } },
+    "Ctrl+Shift+Z": { run: () => { if (!ready || gen || !tree.canRedo(cursor!)) return false; void redo(); } },
+    "Ctrl+R": { inInputs: true, run: () => { if (!ready || gen || !turn?.parentId || turn.kind === "opening") return false; regenerate(null); } },
+    "Ctrl+K": focusInput,
+    "/": focusInput,
+    "Ctrl+F": { inInputs: true, run: () => { if (!ready || gen) return false; setSheet("ask"); } },
+    "Ctrl+,": { inInputs: true, run: () => (gen ? (toast("正在写，先停止或等写完"), undefined) : push({ name: "settings" })) },
+    "F1": { inInputs: true, run: () => (gen ? (toast("正在写，先停止或等写完"), undefined) : push({ name: "guide" })) },
+    "Ctrl+Enter": { inInputs: true, run: () => { if (!ready || gen || isDead) return false; send(); } },
+    "Alt+1": pick(0), "Alt+2": pick(1), "Alt+3": pick(2), "Alt+4": pick(3),
+    "?": { run: keys },
+    "Ctrl+/": { inInputs: true, run: keys },
+  }, mouse);
+
   if (!world || !cursor || !state) return <div className="screen-body"><p className="muted">正在读取…</p></div>;
 
   const head = cursor.head;
@@ -468,13 +496,13 @@ export default function Play({ worldId }: { worldId: string }) {
     <div className={`play-layout${wide ? " wide" : ""}`}>
     <div className="play">
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
-        <button className="title" aria-label="此时此地" onClick={() => setSheet("time")}>
+        <button className="icon-btn" aria-label="返回" title="返回（Esc）" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
+        <button className="title" aria-label="此时此地" title="此时此地" onClick={() => setSheet("time")}>
           <h1>{place}</h1>
           <div className="subtitle">{now.text}</div>
         </button>
-        {!wide && <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>}
-        <button className="icon-btn" aria-label="更多" onClick={() => setSheet("more")}>⋯</button>
+        {!wide && <button className="icon-btn" aria-label="角色" title="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>}
+        <button className="icon-btn" aria-label="更多" title="更多" onClick={() => setSheet("more")}>⋯</button>
       </div>
 
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
@@ -493,18 +521,18 @@ export default function Play({ worldId }: { worldId: string }) {
                     <div className="turn-tools">
                       {variants && variants.count > 1 && (
                         <>
-                          <button className="ghost" aria-label="上一版" disabled={variants.index === 0} onClick={() => switchVariant(-1)}>‹</button>
+                          <button className="ghost" aria-label="上一版" title="上一版" disabled={variants.index === 0} onClick={() => switchVariant(-1)}>‹</button>
                           <span>{variants.index + 1}/{variants.count}</span>
-                          <button className="ghost" aria-label="下一版" disabled={variants.index === variants.count - 1} onClick={() => switchVariant(1)}>›</button>
+                          <button className="ghost" aria-label="下一版" title="下一版" disabled={variants.index === variants.count - 1} onClick={() => switchVariant(1)}>›</button>
                         </>
                       )}
-                      <RegenButton onTap={() => regenerate(null)} onLong={() => setSheet("hints")} />
-                      <button className="ghost" onClick={() => setSheet("hints")}>换个写法</button>
-                      <button className="ghost" aria-label="这一段还能做什么" onClick={() => setMenuNode(node)}>⋯</button>
+                      <RegenButton title={mouse ? "重说（Ctrl+R），右键选重说的要求" : undefined} onTap={() => regenerate(null)} onLong={() => setSheet("hints")} />
+                      <button className="ghost" title="重说时提个要求" onClick={() => setSheet("hints")}>换个写法</button>
+                      <button className="ghost" aria-label="这一段还能做什么" title={mouse ? "这一段还能做什么（也可以右键点这一段）" : undefined} onClick={() => setMenuNode(node)}>⋯</button>
                     </div>
                   )}
                   {isHead && pressTip && (
-                    <div className="tip">长按任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
+                    <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
                   )}
                 </TurnView>
               );
@@ -539,7 +567,7 @@ export default function Play({ worldId }: { worldId: string }) {
         {!dead && state.protagonist.statuses.some((x) => x.name === "垂危") && <p className="dying-note">你伤重垂危：再受重伤就会死去，先设法疗伤。</p>}
         {!gen && !dead && !(typing && (!mouse || input.trim())) && !!turn?.choices.length && turn.status !== "interrupted" && (
           <div className="choices">
-            {turn.choices.map((choice) => <ChoiceButton key={choice} text={choice} onTap={() => send({ mode: "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}
+            {turn.choices.map((choice, i) => <ChoiceButton key={choice} text={choice} title={mouse ? `${i < 4 ? `Alt+${i + 1} 选这个，` : ""}右键放进输入框改一改` : undefined} onTap={() => send({ mode: "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}
           </div>
         )}
         {noteOpen && mode.mode !== "direct" && (
@@ -560,7 +588,7 @@ export default function Play({ worldId }: { worldId: string }) {
             placeholder={dead ? "" : mode.placeholder}
             onKeyDown={(e) => {
               // On a desktop keyboard Enter sends and Shift+Enter starts a new line.
-              if (mouse && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!gen) send(); }
+              if (mouse && e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!gen) send(); }
             }}
             onChange={(e) => {
               const v = e.target.value;
@@ -570,7 +598,7 @@ export default function Play({ worldId }: { worldId: string }) {
               e.target.style.height = `${e.target.scrollHeight}px`;
             }}
           />
-          <button className={`send-btn ${gen ? "" : "primary"}`} disabled={dead && !gen} onClick={() => (gen ? handle.current?.stop() : send())}>{sendLabel}</button>
+          <button className={`send-btn ${gen ? "" : "primary"}`} title={mouse ? (gen ? "停止" : "Enter 发送，Shift+Enter 换行") : undefined} disabled={dead && !gen} onClick={() => (gen ? handle.current?.stop() : send())}>{sendLabel}</button>
         </div>
       </div>
 
@@ -653,6 +681,7 @@ export default function Play({ worldId }: { worldId: string }) {
       )}
       {sheet === "life" && <LifeSheet world={world} state={state} headId={head.id} dead={dead} onClose={() => setSheet(null)} />}
       {cardNode && <PassageCardSheet world={world} node={cardNode} onClose={() => setCardNode(null)} />}
+      {sheet === "keys" && <ShortcutsSheet onClose={() => setSheet(null)} />}
       {sheet === "ask" && <AskSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
@@ -667,17 +696,18 @@ export default function Play({ worldId }: { worldId: string }) {
         <MenuSheet
           onClose={() => setSheet(null)}
           items={[
-            { label: "撤销", hidden: !head.parentId || !!gen, onSelect: () => void undo() },
-            { label: "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: () => void redo() },
+            { label: mouse ? "撤销（Ctrl+Z）" : "撤销", hidden: !head.parentId || !!gen, onSelect: () => void undo() },
+            { label: mouse ? "重做（Ctrl+Y）" : "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: () => void redo() },
             { label: "过些日子", hidden: !!gen, onSelect: () => setSheet("skip") },
-            { label: "查一查", hidden: !!gen, onSelect: () => setSheet("ask") },
+            { label: mouse ? "查一查（Ctrl+F）" : "查一查", hidden: !!gen, onSelect: () => setSheet("ask") },
             { label: "幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
             { label: "目录与搜索", onSelect: () => setSheet("toc") },
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
             { label: "这一世小传", onSelect: () => setSheet("life") },
-            { label: "游玩指南", onSelect: () => push({ name: "guide" }) },
+            { label: mouse ? "游玩指南（F1）" : "游玩指南", onSelect: () => push({ name: "guide" }) },
+            { label: "快捷键", hidden: !mouse, onSelect: () => setSheet("keys") },
             { label: "查看上下文（开发者）", hidden: !devMode || !!gen, onSelect: async () => setContext(await game.previewContext(worldId)) },
             { label: "用同样设定再开一局", hidden: !!gen, onSelect: async () => {
               const setup = await game.setupOf(worldId);
@@ -785,14 +815,14 @@ function SkipSheet({ onStart, onClose }: { onStart: (text: string) => void; onCl
   );
 }
 
-function RegenButton({ onTap, onLong }: { onTap: () => void; onLong: () => void }) {
+function RegenButton({ onTap, onLong, title }: { onTap: () => void; onLong: () => void; title?: string }) {
   const press = useLongPress(onLong, onTap);
-  return <button className="ghost" {...press}>重说</button>;
+  return <button className="ghost" title={title} {...press}>重说</button>;
 }
 
-function ChoiceButton({ text, onTap, onLong }: { text: string; onTap: () => void; onLong: () => void }) {
+function ChoiceButton({ text, onTap, onLong, title }: { text: string; onTap: () => void; onLong: () => void; title?: string }) {
   const press = useLongPress(onLong, onTap);
-  return <button className="choice" {...press}>{text}</button>;
+  return <button className="choice" title={title} {...press}>{text}</button>;
 }
 
 function HintInput({ onSubmit }: { onSubmit: (hint: string) => void }) {
