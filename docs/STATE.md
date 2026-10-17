@@ -1,10 +1,10 @@
 # 当前工作现场
 
-> 更新：2026-10-17（Asia/Shanghai）· 阶段：**R02～R10 里不需要手机的工程都已完成，0.8.0 已发布到 GitHub 私有仓库，等用户在手机上试玩** · 分支：`main`（已推送到 https://github.com/wangyingxuan383-ai/lishi-chuanyue）
+> 更新：2026-10-17（Asia/Shanghai）· 阶段：**R02～R10 里不需要手机的工程都已完成，0.8.0 已发布到 GitHub 公开仓库，等用户在手机上试玩** · 分支：`main`（已推送到 https://github.com/wangyingxuan383-ai/lishi-chuanyue）
 
 ## 现在在哪
 
-- 0.8.0（预发布）：[GitHub 发布](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/tag/v0.8.0)，附安卓 APK 和 Windows 压缩包；APK 签名与包检查通过，Windows 程序本机能启动；**都还没在手机上装过**。仓库私有，许可证未定（D126）。
+- 0.8.0（预发布）：[GitHub 发布](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/tag/v0.8.0)，附安卓 APK 和 Windows 压缩包；APK 签名与包检查通过，Windows 程序本机能启动；**都还没在手机上装过**。仓库已公开（D127），没有放许可证：别人可以看、可以下载安装包，但没有授权使用代码；用户以后可以再选许可证。
 - R04-T005 长局评测已完成：评测 I 记忆探针 94%（远程 96%），第 100 回合输入约 11.7k token（[R04 评测](validation/R04_EVAL.md)）；审读发现的三个问题已改。剩下的改进想法在候选池里。
 - R09：视觉方向由 Claude 按用户授权选定（D125），全部界面、图标、启动页已重做（[设计规范](design/DESIGN_SPEC.md)）；T002、T003 待真机验收。
 - 阶段验收 R02～R10（试玩与问卷，D109、D118）都等用户在手机上试玩；R08 的 T001（系统选择器）、T002（生命周期）、T003（千回合真机测速）、T005（覆盖安装）差真机部分；R10-T001 等用户在 Windows 上试宽屏。
