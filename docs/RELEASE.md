@@ -71,6 +71,9 @@ Compress-Archive -Path target/release/lishi-app.exe -DestinationPath .cache/rele
 
 | 版本 | 文件 | 大小 | SHA-256 | 检查 | 手机验证 |
 | --- | --- | --- | --- | --- | --- |
+| 0.9.0（内部版本号 9000） | `.cache/release/chuanyue-0.9.0.apk`（不入 Git；[GitHub 发布](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/tag/v0.9.0)） | 23,449,427 字节 | `7890802f521b7c0d75ba4ba0c5ff9717f131da94d0aef654c5e2b4c2e44d083a` | 发行构建、调试证书签名；`Verify-AndroidPackage` 通过（非可调试、v2 签名且证书与参考包一致、16 KB 对齐、原生库一致） | 未验证 |
+| 0.9.0 Windows 安装包 | `.cache/release/chuanyue-0.9.0-windows-x64-setup.exe`（不入 Git） | 4,894,654 字节 | `8e17950eaae7e20ab7c17af46b9072cc4d9230c6159eca7de334e0d119685eb0` | NSIS 构建通过；未在本机实际安装 | — |
+| 0.9.0 Windows 便携版 | `.cache/release/chuanyue-0.9.0-windows-x64-portable.zip`（内含 `lishi-app.exe`，SHA-256 `85d1098beee6e9964d76d4fc2eae400d4126d7cb368e55c610b02af41ff7ed66`） | 6,560,215 字节 | `b9b9a2cdc07f33b2d6ef333c819b0f4541bd4aed062737a1da2d8aaff4880718` | 本机启动检查：窗口标题“历史穿越” | — |
 | 0.8.0（内部版本号 8000） | `.cache/release/chuanyue-0.8.0.apk`（不入 Git；[GitHub 发布](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/tag/v0.8.0)） | 22,855,395 字节 | `bd4d2754739168f6ffb4d68b301cb24578467dc593173dd8d65f859aa587fa53` | 通过：`io.timejump.chuanyue`、应用名“历史穿越”、不可调试、v2 签名且证书与本机调试包一致、ZIP 与原生库 16 KB 对齐、原生库与编译原件一致、6 个桥接类 14 个方法都在；自适应图标纸色背景 `#EFE5CF`；未做 R8 | 未装（暂时无法用手机） |
 | 0.8.0+ Windows 安装包（开发构建，未发布，2026-10-17） | `target/release/bundle/nsis/历史穿越_0.8.0_x64-setup.exe`（不入 Git） | 4,877,202 字节 | `c596e12d1aa6d407de10fb5eec15acb5dd0c83d9fa94dc10c52f758ef2b03bbc` | 构建通过；生成的 `installer.nsi` 确认：`currentUser` + `RequestExecutionLevel user`、语言 `SimpChinese`、开始菜单快捷方式、完成页桌面快捷方式勾选项；未在本机实际安装 | — |
 | 0.8.0 Windows | `.cache/release/chuanyue-0.8.0-windows-x64.zip`（内含 `lishi-app.exe`，SHA-256 `96195e35e4a56fd5d41d1425eebcb19e5658d49e709785b833282846f9f77335`） | 6,423,532 字节 | `22d8ef869cb182715ce20e62e2ad2774c7ef0c5214aa70da8f9650df795f23f8` | 本机启动检查：窗口标题“历史穿越”，能正常关闭 | — |
