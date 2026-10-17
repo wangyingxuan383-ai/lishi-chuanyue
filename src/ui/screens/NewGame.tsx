@@ -13,6 +13,7 @@ import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
 import { loadPlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { ARRIVALS, EMPTY, ORIGINS, fromTemplate, parseShare, shareText, toNewWorld, type Draft } from "./openingDraft";
+import { Icon } from "../components/Icon";
 
 /** "唐 · 天宝七载" → "唐" */
 const dynastyOf = (t: OpeningTemplate) => t.era.split(" · ")[0];
@@ -256,9 +257,9 @@ export default function NewGame() {
     return (
       <div className="screen">
         <div className="topbar">
-          <button className="icon-btn" aria-label="返回" onClick={pop}>‹</button>
+          <button className="icon-btn" aria-label="返回" onClick={pop}><Icon name="back" /></button>
           <div className="title"><h1>新的故事</h1></div>
-          <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}>⋯</button>
+          <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}><Icon name="more" /></button>
         </div>
         <div className="screen-body stack">
           {error && <div className="notice">{error}</div>}
@@ -303,9 +304,9 @@ export default function NewGame() {
   return (
     <div className="screen">
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={() => setStep("pick")}>‹</button>
+        <button className="icon-btn" aria-label="返回" onClick={() => setStep("pick")}><Icon name="back" /></button>
         <div className="title"><h1>{draft.title || "开局设定"}</h1></div>
-        <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}>⋯</button>
+        <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}><Icon name="more" /></button>
       </div>
       <div className="screen-body stack">
         {error && <div className="notice">{error}</div>}

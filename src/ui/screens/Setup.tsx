@@ -12,6 +12,7 @@ import {
 import { newId } from "../../engine/db/repo";
 import { useApp } from "../app/context";
 import { Sheet } from "../components/Sheet";
+import { Icon } from "../components/Icon";
 
 type Result = { ok: boolean; text: string } | null;
 
@@ -196,7 +197,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   return (
     <div className="screen">
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={first ? skip : pop}>‹</button>
+        <button className="icon-btn" aria-label="返回" onClick={first ? skip : pop}><Icon name="back" /></button>
         <div className="title"><h1>{first ? "连接 AI 服务" : existing ? "修改 AI 服务" : "添加 AI 服务"}</h1></div>
       </div>
       <div className="screen-body stack">

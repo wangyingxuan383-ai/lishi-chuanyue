@@ -13,11 +13,12 @@ import { BookmarkSheet, LinesSheet } from "../components/Lines";
 import { Panel } from "../components/Panel";
 import { RulesSheet } from "../components/RulesSheet";
 import { MenuSheet, Sheet } from "../components/Sheet";
-import { StoryText } from "../components/StoryText";
+import { StoryText, daypart, waitingLine } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
 import { useLongPress } from "../components/useLongPress";
 import { useMouse, useWide } from "../components/useMedia";
 import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
+import { Icon } from "../components/Icon";
 
 const PAGE = 30;
 const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
@@ -421,15 +422,15 @@ export default function Play({ worldId }: { worldId: string }) {
 
   return (
     <div className={`play-layout${wide ? " wide" : ""}`}>
-    <div className="play">
+    <div className="play" data-daypart={daypart(now.hour)}>
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
+        <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}><Icon name="back" /></button>
         <button className="title" aria-label="此时此地" onClick={() => setSheet("time")}>
           <h1>{place}</h1>
           <div className="subtitle">{now.text}</div>
         </button>
-        {!wide && <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>}
-        <button className="icon-btn" aria-label="更多" onClick={() => setSheet("more")}>⋯</button>
+        {!wide && <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)}><span className="name-seal" aria-hidden="true">{(state.protagonist.name.trim() || "我")[0]}</span></button>}
+        <button className="icon-btn" aria-label="更多" onClick={() => setSheet("more")}><Icon name="more" /></button>
       </div>
 
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
@@ -448,14 +449,14 @@ export default function Play({ worldId }: { worldId: string }) {
                     <div className="turn-tools">
                       {variants && variants.count > 1 && (
                         <>
-                          <button className="ghost" aria-label="上一版" disabled={variants.index === 0} onClick={() => switchVariant(-1)}>‹</button>
+                          <button className="ghost" aria-label="上一版" disabled={variants.index === 0} onClick={() => switchVariant(-1)}><Icon name="back" size={20} /></button>
                           <span>{variants.index + 1}/{variants.count}</span>
-                          <button className="ghost" aria-label="下一版" disabled={variants.index === variants.count - 1} onClick={() => switchVariant(1)}>›</button>
+                          <button className="ghost" aria-label="下一版" disabled={variants.index === variants.count - 1} onClick={() => switchVariant(1)}><Icon name="forward" size={20} /></button>
                         </>
                       )}
                       <RegenButton onTap={() => regenerate(null)} onLong={() => setSheet("hints")} />
                       <button className="ghost" onClick={() => setSheet("hints")}>换个写法</button>
-                      <button className="ghost" aria-label="这一段还能做什么" onClick={() => setMenuNode(node)}>⋯</button>
+                      <button className="ghost" aria-label="这一段还能做什么" onClick={() => setMenuNode(node)}><Icon name="more" size={20} /></button>
                     </div>
                   )}
                   {isHead && pressTip && (
@@ -468,7 +469,7 @@ export default function Play({ worldId }: { worldId: string }) {
               <div className="turn">
                 {gen.action?.mode === "write" && gen.action.text && <div className="turn-written"><StoryText text={gen.action.text} /></div>}
                 {gen.action && gen.action.mode !== "continue" && gen.action.mode !== "write" && gen.action.text && <div className={`turn-action ${gen.action.mode}`}>{gen.action.text}</div>}
-                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line"><span className="cursor-blink">{statusText || "落笔"}</span></p>}
+                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line"><span className="cursor-blink">{statusText || waitingLine(place, now.hour)}</span></p>}
                 {gen.text && statusText && <p className="status-line">{statusText}</p>}
                 {slow && <p className="status-line">还在写，稍等…（不想等可以点“停止”）</p>}
               </div>
@@ -485,7 +486,7 @@ export default function Play({ worldId }: { worldId: string }) {
               onAgain={async () => { const setup = await game.setupOf(worldId); if (!setup) return; await game.repo.setSetting("newgameDraft", fromSetup(setup)); replace({ name: "newgame" }); }} />}
           </div>
         </div>
-        {!following && <button className="to-bottom" onClick={() => { follow.current = true; setFollowing(true); toBottom(true); }}>回到底部 ↓</button>}
+        {!following && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = true; setFollowing(true); toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
       </div>
 
       <div className="dock">
@@ -498,7 +499,7 @@ export default function Play({ worldId }: { worldId: string }) {
         {noteOpen && mode.mode !== "direct" && (
           <div className="row director-row">
             <input className="director-note grow" value={note} onChange={(e) => setNote(e.target.value)} placeholder="幕后要求（只影响这一段）" aria-label="幕后要求" />
-            <button className="icon-btn" aria-label="去掉幕后要求" onClick={() => { setNote(""); setNoteOpen(false); }}>×</button>
+            <button className="icon-btn" aria-label="去掉幕后要求" onClick={() => { setNote(""); setNoteOpen(false); }}><Icon name="close" size={20} /></button>
           </div>
         )}
         <div className="inputbar">
@@ -599,7 +600,7 @@ export default function Play({ worldId }: { worldId: string }) {
                 <b>{m.label}</b><small>{MODE_NOTES[m.mode]}</small>
               </button>
             ))}
-            {!noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b>＋ 幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
+            {!noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b><Icon name="plus" size={16} />幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
           </div>
         </Sheet>
       )}

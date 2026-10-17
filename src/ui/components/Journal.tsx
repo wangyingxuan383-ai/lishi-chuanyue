@@ -6,6 +6,7 @@ import type { TurnRecord } from "../../engine/state/apply";
 import type { Chapter, StoryNode, TimelineEvent, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { Icon } from "./Icon";
 
 interface Row { chapter: Chapter; n: number; from: number; to: number; turns: StoryNode[] }
 
@@ -169,7 +170,7 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, onSave }: 
       <section className="stack" style={{ gap: 4 }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <b>天下大事</b>
-          <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => setEvent({ event: null })}>＋ 添加</button>
+          <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => setEvent({ event: null })}><Icon name="plus" size={18} />添加</button>
         </div>
         {timeline.length ? timeline.map((e) => (
           <button key={e.id} className="item-row codex-item" disabled={busy} style={e.atMinute !== null && e.atMinute <= now ? { opacity: 0.7 } : undefined} onClick={() => setEvent({ event: e })}>

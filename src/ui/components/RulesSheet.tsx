@@ -8,6 +8,7 @@ import { currencyIssues, formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { Icon } from "./Icon";
 
 export function RulesSheet({ state, era, busy, onSave, onClose }: {
   state: WorldState; era: EraContext; busy: boolean;
@@ -88,10 +89,10 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
             <input aria-label={`第 ${i + 1} 个单位名称`} className="grow" value={u.name} onChange={(e) => setUnits(units.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} placeholder="名称，如：两" />
             <span className="muted">=</span>
             <input aria-label={`第 ${i + 1} 个单位换算`} style={{ width: 96 }} inputMode="numeric" value={u.value} onChange={(e) => setUnits(units.map((x, j) => (j === i ? { ...x, value: e.target.value.replace(/\D/g, "") } : x)))} />
-            <button aria-label={`去掉${u.name || "这个单位"}`} disabled={units.length <= 1} onClick={() => setUnits(units.filter((_, j) => j !== i))}>−</button>
+            <button aria-label={`去掉${u.name || "这个单位"}`} disabled={units.length <= 1} onClick={() => setUnits(units.filter((_, j) => j !== i))}><Icon name="minus" size={20} /></button>
           </div>
         ))}
-        <button onClick={() => setUnits([...units, { name: "", value: "" }])}>＋ 添加单位</button>
+        <button onClick={() => setUnits([...units, { name: "", value: "" }])}><Icon name="plus" size={18} />添加单位</button>
         {unitProblems.length ? <p className="notice" style={{ margin: 0 }}>{unitProblems[0].message}</p>
           : <p className="muted" style={{ margin: 0 }}>你现在有 {formatMoney(state.protagonist.stats.money, { units: parsedUnits })}。</p>}
         <button className="primary" disabled={busy || saving || !dateOk || unitProblems.length > 0} onClick={() => void save()}>{summary.length ? "保存" : "关闭"}</button>
