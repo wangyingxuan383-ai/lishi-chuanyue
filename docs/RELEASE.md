@@ -1,6 +1,6 @@
 # 私人发行包（R08-T005）
 
-> 2026-10-17 · 只给用户自己的手机安装，不公开发布。任务状态见[任务台账](TASKS.md)。
+> 2026-10-17 · 只给用户自己用。0.8.0 起放在用户 GitHub 账户下的私有仓库（https://github.com/wangyingxuan383-ai/lishi-chuanyue）的 Releases 里，不公开（D126）。任务状态见[任务台账](TASKS.md)。
 
 ## 版本号
 
@@ -27,12 +27,26 @@ $env:LISHI_SIGNING_STORE_PASSWORD = 'android'
 - **检查内容**（`Verify-AndroidPackage.ps1`，不连手机、不读 Key）：应用 ID、不是可调试包、v2 签名且证书与参考包一致、ZIP 与 16 KB 对齐、包里的 ARM64 原生库与编译原件一致、关键的 Rust 桥接类都在。
 - v3 的发行包暂时不做 R8 精简（Tauri 默认），包会大一些；精简要等在手机上测过再开。
 
+Windows 版（单个程序，不做安装包）：
+
+```powershell
+pnpm tauri build --no-bundle    # 产物 target/release/lishi-app.exe
+Compress-Archive -Path target/release/lishi-app.exe -DestinationPath .cache/release/chuanyue-<版本>-windows-x64.zip
+```
+
+## 发布到 GitHub
+
+- **每次推送和发布都要先得到用户同意**（AGENTS.md；D126 只覆盖 0.8.0 这一次）。仓库是私有的，改成公开之前要先定许可证（[公开前检查](validation/R10_PUBLIC.md)）。
+- 推送前：暂存后跑 `node .cache/v3-edit/scan.mjs`，推送前跑全历史扫描 `node .cache/v3-edit/scan-history.mjs`（两个脚本在本机、不入 Git，只输出计数）。
+- 发布：给发布用的提交打标签 `v<版本>`，`gh release create v<版本> --prerelease --title "历史穿越 <版本>" --notes-file <说明> <apk> <zip>`；还没在手机上验证过的版本标为预发布。
+
 ## 给用户安装
 
 两种方式，**都不要先卸载**（卸载会删掉所有世界）：
 
 1. 手机和电脑无线配对后，由电脑执行 `adb -s <设备> install -r <apk>`（`-r` 表示覆盖安装、保留数据）。
 2. 把 apk 文件发到手机，在文件管理里点开安装；提示“更新”就对了，如果提示“签名不一致”就停下，不要卸载。
+3. 在手机浏览器里登录 GitHub，打开仓库的 Releases 下载 apk 再安装（私有仓库要先登录）；同样提示“更新”才继续。
 
 装好后检查：首页的世界都在、能继续游玩；设置里的 AI 服务还在（Key 存在系统的加密存储里，升级不会丢）；版本号显示为新的。
 
@@ -45,4 +59,6 @@ $env:LISHI_SIGNING_STORE_PASSWORD = 'android'
 
 | 版本 | 文件 | 大小 | SHA-256 | 检查 | 手机验证 |
 | --- | --- | --- | --- | --- | --- |
+| 0.8.0（内部版本号 8000） | `.cache/release/chuanyue-0.8.0.apk`（不入 Git；[GitHub 发布](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/tag/v0.8.0)） | 22,855,395 字节 | `bd4d2754739168f6ffb4d68b301cb24578467dc593173dd8d65f859aa587fa53` | 通过：`io.timejump.chuanyue`、应用名“历史穿越”、不可调试、v2 签名且证书与本机调试包一致、ZIP 与原生库 16 KB 对齐、原生库与编译原件一致、6 个桥接类 14 个方法都在；自适应图标纸色背景 `#EFE5CF`；未做 R8 | 未装（暂时无法用手机） |
+| 0.8.0 Windows | `.cache/release/chuanyue-0.8.0-windows-x64.zip`（内含 `lishi-app.exe`，SHA-256 `96195e35e4a56fd5d41d1425eebcb19e5658d49e709785b833282846f9f77335`） | 6,423,532 字节 | `22d8ef869cb182715ce20e62e2ad2774c7ef0c5214aa70da8f9650df795f23f8` | 本机启动检查：窗口标题“历史穿越”，能正常关闭 | — |
 | 0.5.0（内部版本号 5000） | `.cache/release/chuanyue-0.5.0.apk`（不入 Git） | 22,830,483 字节 | `085350e33b9f9684443afa3c999ad7b90f8689b4b4d121a1afd2b01e6e0666ed` | 通过：`io.timejump.chuanyue`、不可调试、v2 签名且证书与本机调试包一致、ZIP 与原生库 16 KB 对齐、原生库与编译原件一致、6 个桥接类 14 个方法都在；未做 R8 | 未装（无线 ADB 未连） |

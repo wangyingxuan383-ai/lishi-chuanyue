@@ -2,11 +2,17 @@
 
 一个装在手机里的“AI 穿越小说 + 人生模拟”：你穿越到某个历史时代，成为某个具体的人，用自然语言决定怎么活；AI 把你的选择写成故事，程序替你记住世界的一切。
 
-这是一个长期开发的个人项目，专注 Android 手机 App；Windows 用于开发调试；网页版在最后阶段评估。成熟后再考虑公开。
+这是一个长期开发的个人项目，专注 Android 手机 App；Windows 用于开发调试；网页版评估后建议暂不做。仓库目前是私有的，还没有选定许可证；成熟后再考虑公开。
+
+![纸张主题下的主要界面](docs/images/screens-paper.jpg)
+
+## 安装
+
+到本仓库的 [Releases](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases) 下载：手机用 `chuanyue-<版本>.apk`（Android 7 及以上，ARM64），电脑用 `chuanyue-<版本>-windows-x64.zip`。装过旧版的直接覆盖安装，**不要先卸载**（卸载会删掉所有世界）。第一次打开时，在设置里填自己的 AI 服务（OpenAI 兼容接口）和 Key。详见[私人发行包](docs/RELEASE.md)。
 
 ## 当前阶段
 
-**2026-10-17：v3 重构 · R02～R10 工程基本完成。** 开局（作者模式）、流式回合、重说与世界线、角色面板、自定义优先的设定集、长局记忆（章节摘要、相关旧事、人物来历）、过些日子、运势、天下大事、查一查、导出导入与备份、电脑宽屏都已做好，正在做长局评测和等集中试玩；视觉重设计（R09）的三个方向等用户选。v2 代码见标签 `legacy-v2-final`。
+**2026-10-17：v3 重构 · R02～R10 里不需要手机的工程都已完成，发布 0.8.0（预发布）。** 开局（作者模式）、流式回合、重说与世界线、角色面板、自定义优先的设定集、长局记忆（章节摘要、相关旧事、人物来历；150 回合评测记忆 94%）、过些日子、运势、天下大事、查一查、导出导入与备份、电脑宽屏、“宣纸书卷”的新样子都已做好，等手机上集中试玩与验收。v2 代码见标签 `legacy-v2-final`。
 
 当前进度和下一步见[现场状态](docs/STATE.md)；任务完成情况只看[任务台账](docs/TASKS.md)。
 
@@ -22,7 +28,7 @@
 | [变更记录](CHANGELOG.md) | 实际发生的重要变化 |
 | [开发说明](docs/DEVELOPMENT.md) | 工具、命令、手机连接 |
 | [私人发行包](docs/RELEASE.md) | 版本号、构建签名、给手机安装 |
-| [视觉方向](docs/design/VISUAL_DIRECTIONS.md) | R09 待选的三个视觉方向 |
+| [设计规范](docs/design/DESIGN_SPEC.md) | 选定的“宣纸书卷”样子：主题、字体、组件、动效、图标（候选方向的比较见[视觉方向](docs/design/VISUAL_DIRECTIONS.md)） |
 | [海外产品调研](docs/research/COMPETITORS_INTL.md) | AI Dungeon、SillyTavern、Voyage 等 |
 | [中文产品与题材调研](docs/research/COMPETITORS_CN.md) | 《崇祯》、太吾、星野、穿越题材、时代细节 |
 | [试玩问卷模板](docs/validation/PLAYTEST_TEMPLATE.md) | 每阶段用户试玩验收 |

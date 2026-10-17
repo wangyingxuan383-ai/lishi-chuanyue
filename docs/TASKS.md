@@ -849,11 +849,11 @@
 
 - 目标/交付：版本号规则；优化构建与签名（复用 v2 脚本）；覆盖安装保数据；安装说明。
 - 依赖：R08-T001、R08-T002。
-- 状态：进行中。发行包已构建、签名并通过包检查，等手机上覆盖安装验证。
+- 状态：进行中。0.5.0、0.8.0 发行包已构建、签名并通过包检查，等手机上覆盖安装验证。
 - 负责人/范围：Claude；`docs/RELEASE.md`、`scripts/Sign-AndroidPreview.ps1`（R8 改为可选）、版本号（`tauri.conf.json`、`package.json`、`Cargo.toml`）。依赖的 R08-T002（真机生命周期）还没做，先做不需要手机的部分。
 - 验收：从上一版本覆盖安装后世界与配置完整；包检查（签名、16KB 对齐）通过。
 - 实际成果：版本号规则（次版本跟阶段走，0.5 = R08；修订号每次给新包加一；安卓内部版本号由 Tauri 推算只增不减）；版本改为 0.5.0；发行包用本机调试证书签名以便与调试包互相覆盖安装、保留存档；[私人发行包](RELEASE.md)写明构建签名命令、检查内容、两种安装方式（都不要先卸载）、装好后的检查项。
-- 证据：`.cache/release/chuanyue-0.5.0.apk`（22,830,483 字节，SHA-256 `085350e3…`）：包名 `io.timejump.chuanyue`、versionName 0.5.0、versionCode 5000、不可调试、v2 签名且证书与本机调试包一致、ZIP 与原生库 16 KB 对齐、原生库与编译原件一致、桥接类齐全（`Verify-AndroidPackage.ps1`、`aapt2 dump badging`）。未验证：手机上从旧版覆盖安装后世界与配置是否完整；发行包连 HTTP 服务。
+- 证据：`.cache/release/chuanyue-0.5.0.apk`（22,830,483 字节，SHA-256 `085350e3…`）：包名 `io.timejump.chuanyue`、versionName 0.5.0、versionCode 5000、不可调试、v2 签名且证书与本机调试包一致、ZIP 与原生库 16 KB 对齐、原生库与编译原件一致、桥接类齐全（`Verify-AndroidPackage.ps1`、`aapt2 dump badging`）。0.8.0（2026-10-17，[GitHub 发布](https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/tag/v0.8.0)，私有）：`chuanyue-0.8.0.apk`（22,855,395 字节，SHA-256 `bd4d2754…`），versionName 0.8.0、versionCode 8000、应用名“历史穿越”，检查项同上全部通过；Windows `chuanyue-0.8.0-windows-x64.zip`（6,423,532 字节）本机启动正常。未验证：手机上从旧版覆盖安装后世界与配置是否完整；发行包连 HTTP 服务。
 - 阻塞：—
 - 更新时间：2026-10-17。
 - 完成时间：—
@@ -965,12 +965,12 @@
 
 - 目标/交付：用户决定代码许可证；检查内置卡组内容与第三方资料授权；清理秘密与私人数据；README 公开版。
 - 依赖：R09-T004。
-- 状态：受阻。本机能做的检查已完成，许可证、公开范围和放在哪里需要用户决定。
+- 状态：受阻。本机能做的检查已完成；用户同意上传到 GitHub，已建私有仓库并发布 0.8.0（D126）；许可证和是否公开需要用户决定。
 - 负责人/范围：Claude（检查与清单）+ 用户决定；`docs/validation/R10_PUBLIC.md`。
 - 验收：公开检查清单通过；未经用户同意不创建远程仓库、不上传。
 - 实际成果：[公开前检查](validation/R10_PUBLIC.md)：需要用户决定的事项（代码与内容许可证、公开哪些文档、名称、放在哪里）及建议；秘密与私人信息、依赖许可证、内容与素材的检查结果；用户决定之后的五步清单。
-- 证据：全部 80 个提交的文件和提交说明里没有开发台保存的 Key 与服务地址（只输出计数的扫描脚本）；`.cache`、`.env.local` 等已忽略，`output/` 未忽略但为空；前端与 Rust 依赖没有 GPL、AGPL（`pnpm licenses list`、`cargo metadata`）。
-- 阻塞：等用户决定许可证与公开范围；未经同意不创建远程仓库、不上传。
+- 证据：全部 80 个提交的文件和提交说明里没有开发台保存的 Key 与服务地址（只输出计数的扫描脚本）；`.cache`、`.env.local` 等已忽略，`output/` 里只有已忽略的 `output/playwright/`；上传前（2026-10-17）再扫全部提交：Key 与服务地址、局域网地址、手机序列号都没有，提交作者只有 Claude、Codex，`.cache/dev-secrets.json` 从未入库，仓库打包后 5.2 MB；前端与 Rust 依赖没有 GPL、AGPL（`pnpm licenses list`、`cargo metadata`）。
+- 阻塞：等用户决定许可证与公开范围；仓库（https://github.com/wangyingxuan383-ai/lishi-chuanyue）保持私有，之后每次推送、发布仍要用户同意。
 - 更新时间：2026-10-17。
 - 完成时间：—
 - 关联决策：D102。
