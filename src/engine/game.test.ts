@@ -696,7 +696,7 @@ describe("fortune", () => {
     game.random = () => dice.shift() ?? 0.5;
     const events = await play(game, worldId, "求掌柜赊账");
     const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
-    expect(done.chips).toContainEqual({ text: "🎲 大不顺 · 说服掌柜赊账 · 没成", tone: "loss" });
+    expect(done.chips).toContainEqual({ text: "签·大不顺 · 说服掌柜赊账 · 没成", tone: "loss" });
     expect(JSON.stringify(llm.calls[1].body)).toContain("【本回合运势（玩家看不到）】大不顺");
     await game.regenerate(worldId, null, () => {}).done;
     expect(JSON.stringify(llm.calls[2].body)).toContain("【本回合运势（玩家看不到）】大不顺");

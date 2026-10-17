@@ -1,6 +1,7 @@
 // The 人物 tab of the character panel: the people records (人物志, PLAN §4.5).
 // Each person opens on their own and can be edited or removed; every save
 // becomes an edit node that can be undone.
+import { useApp } from "../app/context";
 import { useState } from "react";
 import { agoText } from "../../engine/calendar/clock";
 import type { EraContext } from "../../engine/era";
@@ -16,6 +17,7 @@ const preview = (text: string, max = 40) => (text.length > max ? `${text.slice(0
 function Editor({ person, state, era, onClose, onSave }: {
   person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
 }) {
+  const { ask } = useApp();
   const [name, setName] = useState(person?.name ?? "");
   const [aliases, setAliases] = useState(person?.aliases.join("、") ?? "");
   const [role, setRole] = useState(person?.role ?? "");
@@ -37,8 +39,8 @@ function Editor({ person, state, era, onClose, onSave }: {
     const fields = { name: clean, aliases: splitNames(aliases), role: role.trim(), attitude, note: notes.trim(), origin: origin.trim(), alive };
     void run({ people: [person ? { id: person.id, ...fields } : fields] }, person ? `修改人物：${clean}` : `添加人物：${clean}`);
   };
-  const remove = () => {
-    if (!person || !confirm(`从人物表里删除“${person.name}”？之后可以撤销。`)) return;
+  const remove = async () => {
+    if (!person || !await ask({ title: `从人物表里删除“${person.name}”？`, message: "之后可以撤销。", confirm: "删除", danger: true })) return;
     void run({ people: [{ id: person.id, op: "remove", name: person.name }] }, `删除人物：${person.name}`);
   };
 

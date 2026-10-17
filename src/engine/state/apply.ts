@@ -206,7 +206,7 @@ export function applyRecord(
   // The fortune behind a risky action, shown so the outcome is not a black box (PLAN §5.5).
   if (record.risk?.what && ctx.fortune) {
     const result = record.risk.result;
-    chips.push({ text: `🎲 ${ctx.fortune} · ${record.risk.what}${result ? ` · ${RISK_TEXT[result]}` : ""}`, tone: result === "败" ? "loss" : result === "成" ? "gain" : "info" });
+    chips.push({ text: `签·${ctx.fortune} · ${record.risk.what}${result ? ` · ${RISK_TEXT[result]}` : ""}`, tone: result === "败" ? "loss" : result === "成" ? "gain" : "info" });
   }
 
   // Place

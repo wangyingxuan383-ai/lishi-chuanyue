@@ -16,7 +16,7 @@ function logLine(node: StoryNode, n: number): string {
 }
 
 function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId: string; onClose: () => void; onChanged: () => void }) {
-  const { game, toast } = useApp();
+  const { game, toast, ask } = useApp();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(row.chapter.title);
   const [gist, setGist] = useState(row.chapter.gist);
@@ -33,7 +33,7 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
     } finally { setBusy(false); }
   };
   const rewrite = async () => {
-    if (c.edited && !confirm("重写会换掉你改过的摘要。确定吗？")) return;
+    if (c.edited && !await ask({ title: "重写这一章的摘要？", message: "会换掉你改过的摘要。", confirm: "重写" })) return;
     setBusy(true);
     try {
       const next = await game.rewriteChapter(worldId, c.id);
@@ -43,7 +43,7 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
     } finally { setBusy(false); }
   };
   const remove = async () => {
-    if (!confirm("删除这一章的摘要？这几回合以后会重新写成一章。")) return;
+    if (!await ask({ title: "删除这一章的摘要？", message: "这几回合以后会重新写成一章。", confirm: "删除", danger: true })) return;
     await game.repo.deleteChapter(c.id);
     onChanged();
     onClose();

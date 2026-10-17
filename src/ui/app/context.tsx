@@ -33,8 +33,16 @@ export interface AppValue {
   push(r: Route): void;
   replace(r: Route): void;
   pop(): void;
-  toast(text: string): void;
+  /** A short message; with an action (e.g. 撤回) it stays a little longer. */
+  toast(text: string, action?: ToastAction): void;
+  /** The app's own confirmation (R11-T003): resolves true when the player confirms. */
+  ask(o: { title: string; message?: string; confirm: string; danger?: boolean }): Promise<boolean>;
+  /** The app's own name prompt: resolves the trimmed name, or null when cancelled. */
+  askName(o: { title: string; initial?: string; placeholder?: string; confirm?: string }): Promise<string | null>;
 }
+
+export interface ToastAction { label: string; run: () => void }
+export interface ToastState { text: string; action?: ToastAction }
 
 const AppContext = createContext<AppValue | null>(null);
 
@@ -59,13 +67,14 @@ export function useBack(handler: () => boolean, active = true) {
   }, [platform, active]);
 }
 
-export function useToast(): [string | null, (text: string) => void] {
-  const [text, setText] = useState<string | null>(null);
+export function useToast(): [ToastState | null, (text: string, action?: ToastAction) => void, () => void] {
+  const [toast, setToast] = useState<ToastState | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const show = useCallback((t: string) => {
-    setText(t);
+  const show = useCallback((text: string, action?: ToastAction) => {
+    setToast({ text, action });
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => setText(null), 2200);
+    timer.current = setTimeout(() => setToast(null), action ? 5000 : 2200);
   }, []);
-  return [text, show];
+  const clear = useCallback(() => { clearTimeout(timer.current); setToast(null); }, []);
+  return [toast, show, clear];
 }

@@ -1,6 +1,7 @@
 // The 设定 tab of the character panel: the world's 设定集 (PLAN §4.14, D121).
 // The era card, places and the other cards, each editable on its own; every
 // save becomes an edit node that can be undone.
+import { useApp } from "../app/context";
 import { useState } from "react";
 import type { EraContext } from "../../engine/era";
 import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
@@ -24,6 +25,7 @@ const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.tri
 const preview = (text: string, max = 60) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
 function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: WorldState; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void> }) {
+  const { ask } = useApp();
   const isEra = editing.type === "card" && editing.kind === "时代";
   const original = editing.type === "card" ? editing.card : editing.place;
   // The era card of an old save comes from its pack and is not stored yet.
@@ -50,8 +52,8 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
       void run({ cards: [stored ? { op: "update", id: original!.id, ...fields } : { op: "add", ...fields }] }, stored ? `修改${label}：${clean}` : `新建${label}：${clean}`);
     }
   };
-  const remove = () => {
-    if (!stored || !confirm(`删除${label}“${original!.name}”？之后可以撤销。`)) return;
+  const remove = async () => {
+    if (!stored || !await ask({ title: `删除${label}“${original!.name}”？`, message: "之后可以撤销。", confirm: "删除", danger: true })) return;
     void run(editing.type === "place" ? { places: [{ op: "remove", id: original!.id }] } : { cards: [{ op: "remove", id: original!.id }] }, `删除${label}：${original!.name}`);
   };
 
@@ -81,6 +83,7 @@ export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
   /** Lets the AI organize the 设定集 from the premise; true when something was added. */
   onOrganize: (replaceOwnEra: boolean) => Promise<boolean>;
 }) {
+  const { ask } = useApp();
   const [editing, setEditing] = useState<Editing | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [organizing, setOrganizing] = useState(false);
@@ -88,7 +91,7 @@ export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
   const open = (next: Editing) => { if (!busy && !organizing) setEditing(next); };
   const organize = async () => {
     const own = eraCard?.source === "玩家";
-    if (own && !confirm("AI 会按故事设定重新整理，并覆盖你写的时代卡。确定吗？之后可以撤销。")) return;
+    if (own && !await ask({ title: "让 AI 重新整理时代卡？", message: "会按故事设定重写，换掉你写的时代卡。之后可以撤销。", confirm: "重新整理" })) return;
     setOrganizing(true);
     try { await onOrganize(own); } finally { setOrganizing(false); }
   };

@@ -7,7 +7,7 @@ import type { Row } from "../../platform";
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
 
 export default function Settings() {
-  const { game, push, pop, profile, setProfile, reading, setReading, devMode, setDevMode, toast } = useApp();
+  const { game, push, pop, profile, setProfile, reading, setReading, devMode, setDevMode, toast, ask } = useApp();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [usage, setUsage] = useState<{ calls: number; prompt: number; completion: number } | null>(null);
   const [calls, setCalls] = useState<Row[]>([]);
@@ -39,7 +39,7 @@ export default function Settings() {
                 {p.id !== profile?.id && <button onClick={() => { setProfile(p); toast("已切换"); }}>使用</button>}
                 <button onClick={() => push({ name: "setup", profileId: p.id })}>修改</button>
                 <button className="ghost" onClick={async () => {
-                  if (!confirm(`删除“${p.name}”？Key 也会一并删除。`)) return;
+                  if (!await ask({ title: `删除“${p.name}”？`, message: "保存在这台设备上的 Key 也会一起删掉。", confirm: "删除", danger: true })) return;
                   await deleteProfile(game.repo, p);
                   const rest = profiles.filter((x) => x.id !== p.id);
                   setProfiles(rest);

@@ -1,6 +1,10 @@
 import { useRef } from "react";
 
-/** Long press (≈450 ms) without moving; a scroll gesture cancels it. */
+/**
+ * Long press (≈450 ms) without moving; a scroll gesture cancels it. A press
+ * that starts on a button inside belongs to that button (AUDIT 4.4: a long
+ * press on 重说 also opened the passage's menu).
+ */
 export function useLongPress(onLongPress: () => void, onTap?: () => void) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const start = useRef<{ x: number; y: number } | null>(null);
@@ -11,6 +15,8 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
   };
   return {
     onPointerDown(e: React.PointerEvent) {
+      const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");
+      if (inner && inner !== e.currentTarget) return;
       fired.current = false;
       start.current = { x: e.clientX, y: e.clientY };
       timer.current = setTimeout(() => {

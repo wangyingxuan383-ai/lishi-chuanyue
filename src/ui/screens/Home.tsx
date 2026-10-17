@@ -7,6 +7,7 @@ import { useApp } from "../app/context";
 import { MenuSheet } from "../components/Sheet";
 import { useLongPress } from "../components/useLongPress";
 import { fromSetup } from "./openingDraft";
+import { Seal } from "../components/Seal";
 
 interface WorldCard {
   world: World;
@@ -31,20 +32,31 @@ export function lastSentence(text: string): string {
   return last.length > 40 ? `…${last.slice(-40)}` : last;
 }
 
-function WorldItem({ card, onOpen, onMenu }: { card: WorldCard; onOpen: () => void; onMenu: () => void }) {
+/** The first character of the period, for the card's little seal: 唐, 宋, 明… */
+function dynastyMark(clock: string): string {
+  const named = clock.match(/^(秦|汉|唐|宋|元|明|清|晋|隋|周)/)?.[1];
+  return named ?? clock.replace(/\s/g, "").slice(0, 1) ?? "世";
+}
+
+function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen: () => void; onMenu: () => void; featured?: boolean }) {
   const press = useLongPress(onMenu, onOpen);
   return (
-    <button className="card" {...press}>
-      <h3>{card.world.title}</h3>
-      <p>{card.protagonist} · {card.clock}</p>
-      <p style={{ marginTop: 6 }}>{card.lastLine}</p>
-      <p style={{ marginTop: 6, fontSize: 12 }}>{card.turns} 回合 · {relative(card.world.playedAt)}</p>
-    </button>
+    <div className={`card world-card${featured ? " featured" : ""}`}>
+      <button className="world-open" {...press} aria-label={`继续“${card.world.title}”`}>
+        <span className="mark" aria-hidden="true">{dynastyMark(card.clock)}</span>
+        <h3>{card.world.title}</h3>
+        <p>{card.protagonist} · {card.clock}</p>
+        {card.lastLine && <p className="last-line">“{card.lastLine}”</p>}
+        <p className="meta">{card.turns ? `${card.turns} 回合` : "刚开局"} · {relative(card.world.playedAt)}</p>
+        {featured && <span className="primary continue-btn">继续</span>}
+      </button>
+      <button className="icon-btn world-menu" aria-label={`“${card.world.title}”的更多操作`} onClick={onMenu}>⋯</button>
+    </div>
   );
 }
 
 export default function Home() {
-  const { game, push, profile, toast } = useApp();
+  const { game, push, profile, toast, ask } = useApp();
   const [cards, setCards] = useState<WorldCard[] | null>(null);
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
   const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
@@ -111,17 +123,20 @@ export default function Home() {
       <div className="screen-body stack">
         {cards && cards.length === 0 && (
           <div className="hero">
-            <div className="seal" aria-hidden="true">穿越</div>
+            <Seal />
             <h1>历史穿越</h1>
             <p className="muted">醒来时，你已在另一个时代。</p>
           </div>
         )}
-        <button className="primary big-btn" onClick={start}>开始穿越</button>
-        {!profile && <p className="muted" style={{ textAlign: "center" }}>先连接一个 AI 服务才能开始。</p>}
         {cards && cards.length > 0 && (
+          <WorldItem featured card={cards[0]} onOpen={() => push({ name: "play", worldId: cards[0].world.id })} onMenu={() => setMenuFor(cards[0])} />
+        )}
+        <button className={cards && cards.length > 0 ? "big-btn" : "primary big-btn"} onClick={start}>{cards && cards.length > 0 ? "开始新的故事" : "开始穿越"}</button>
+        {!profile && <p className="muted" style={{ textAlign: "center" }}>先连接一个 AI 服务才能开始。</p>}
+        {cards && cards.length > 1 && (
           <div className="list">
-            <p className="muted" style={{ margin: "8px 0 0" }}>继续游玩</p>
-            {cards.map((c) => (
+            <p className="section-title">其他故事</p>
+            {cards.slice(1).map((c) => (
               <WorldItem key={c.world.id} card={c} onOpen={() => push({ name: "play", worldId: c.world.id })} onMenu={() => setMenuFor(c)} />
             ))}
           </div>
@@ -147,7 +162,7 @@ export default function Home() {
             {
               label: "删除这个世界", danger: true,
               onSelect: async () => {
-                if (!confirm(`删除“${menuFor.world.title}”？删除后无法恢复。`)) return;
+                if (!await ask({ title: `删除“${menuFor.world.title}”？`, message: "这个世界的所有路线和存档都会删掉，不能恢复。想留一份可以先导出。", confirm: "删除", danger: true })) return;
                 try {
                   await game.repo.deleteWorld(menuFor.world.id);
                   toast("已删除");

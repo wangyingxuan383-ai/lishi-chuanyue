@@ -23,7 +23,7 @@ function NameSheet({ title, initial, onSave, onClose }: { title: string; initial
 }
 
 export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: string; current: string; onClose: () => void; onChanged: (message: string) => void }) {
-  const { game } = useApp();
+  const { game, ask } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
   const [menu, setMenu] = useState<Row | null>(null);
   const [renaming, setRenaming] = useState<Row | null>(null);
@@ -82,7 +82,7 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
         onClose={() => setMenu(null)}
         items={menu.line.deletedAt ? [
           { label: "恢复", onSelect: () => void act(() => game.repo.setLineDeleted(menu.line.id, false), `已恢复“${menu.line.name}”`) },
-          { label: "彻底删除", danger: true, onSelect: () => { if (confirm(`彻底删除“${menu.line.name}”？只属于它的回合会一起删掉，不能恢复。`)) void act(() => game.repo.purgeLine(menu.line.id), "已彻底删除"); } },
+          { label: "彻底删除", danger: true, onSelect: async () => { if (await ask({ title: `彻底删除“${menu.line.name}”？`, message: "只属于这条路线的回合会一起删掉，不能恢复。", confirm: "彻底删除", danger: true })) void act(() => game.repo.purgeLine(menu.line.id), "已彻底删除"); } },
         ] : [
           { label: "重命名", onSelect: () => setRenaming(menu) },
           { label: "归档", hidden: menu.line.kind !== "line" || menu.line.archived || menu.line.id === current, onSelect: () => void act(() => game.repo.setLineArchived(menu.line.id, true), `已归档“${menu.line.name}”`) },

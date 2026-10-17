@@ -3,6 +3,8 @@ import { getPlatform, type Platform } from "../platform";
 import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
 import { AppProvider, DEFAULT_READING, THEME_KEY, useToast, type AppValue, type Reading, type Route } from "./app/context";
+import { Dialog, type DialogRequest } from "./components/Dialog";
+import { Seal } from "./components/Seal";
 import Home from "./screens/Home";
 import Setup from "./screens/Setup";
 import NewGame from "./screens/NewGame";
@@ -36,7 +38,8 @@ export default function App() {
   const [reading, setReadingState] = useState<Reading>(DEFAULT_READING);
   const [devMode, setDevModeState] = useState(false);
   const [stack, setStack] = useState<Route[]>([{ name: "home" }]);
-  const [toastText, toast] = useToast();
+  const [toastState, toast, clearToast] = useToast();
+  const [dialog, setDialog] = useState<DialogRequest | null>(null);
   const exitArmed = useRef(false);
 
   useEffect(() => {
@@ -62,9 +65,14 @@ export default function App() {
     })().catch((e) => setError(String(e?.message ?? e)));
   }, []);
 
-  const push = useCallback((r: Route) => setStack((s) => [...s, r]), []);
-  const replace = useCallback((r: Route) => setStack((s) => [...s.slice(0, -1), r]), []);
-  const pop = useCallback(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)), []);
+  // A message belongs to the screen it was shown on (AUDIT_V4 1.10): moving on clears it.
+  const push = useCallback((r: Route) => { clearToast(); setStack((s) => [...s, r]); }, [clearToast]);
+  const replace = useCallback((r: Route) => { clearToast(); setStack((s) => [...s.slice(0, -1), r]); }, [clearToast]);
+  const pop = useCallback(() => { clearToast(); setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)); }, [clearToast]);
+  const ask = useCallback((o: { title: string; message?: string; confirm: string; danger?: boolean }) =>
+    new Promise<boolean>((resolve) => setDialog({ kind: "confirm", ...o, resolve })), []);
+  const askName = useCallback((o: { title: string; initial?: string; placeholder?: string; confirm?: string }) =>
+    new Promise<string | null>((resolve) => setDialog({ kind: "name", ...o, initial: o.initial ?? "", resolve })), []);
 
   // Screen-level back, registered once so overlays opened later run first:
   // pop the stack; on the home screen, press twice to exit.
@@ -108,14 +116,14 @@ export default function App() {
       void boot.game.repo.setSetting("devMode", v);
     },
     route: stack[stack.length - 1],
-    push, replace, pop, toast,
-  }, [boot, profile, reading, devMode, stack, push, replace, pop, toast]);
+    push, replace, pop, toast, ask, askName,
+  }, [boot, profile, reading, devMode, stack, push, replace, pop, toast, ask, askName]);
 
   if (error) return <div className="screen-body"><p>启动失败：{error}</p></div>;
   if (!value) {
     return (
       <div className="boot" role="status" aria-label="正在打开">
-        <div className="seal" aria-hidden="true">穿越</div>
+        <Seal />
         <p className="boot-name">历史穿越</p>
         <p className="muted">正在打开…</p>
       </div>
@@ -129,7 +137,13 @@ export default function App() {
       {route.name === "newgame" && <NewGame />}
       {route.name === "play" && <Play key={route.worldId} worldId={route.worldId} />}
       {route.name === "settings" && <Settings />}
-      {toastText && <div className="toast" role="status">{toastText}</div>}
+      {toastState && (
+        <div className="toast" role="status">
+          <span>{toastState.text}</span>
+          {toastState.action && <button className="toast-action" onClick={() => { const run = toastState.action!.run; clearToast(); run(); }}>{toastState.action.label}</button>}
+        </div>
+      )}
+      {dialog && <Dialog key={String(Math.random())} request={dialog} onDone={() => setDialog(null)} />}
     </AppProvider>
   );
 }

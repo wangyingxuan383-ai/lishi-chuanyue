@@ -32,7 +32,7 @@ const TIPS = [
 interface UserTemplate { id: string; name: string; draft: Draft }
 
 export default function NewGame() {
-  const { game, replace, pop, toast } = useApp();
+  const { game, replace, pop, toast, askName } = useApp();
   const [draft, setDraftState] = useState<Draft>(EMPTY);
   const [loaded, setLoaded] = useState(false);
   const [mine, setMine] = useState<UserTemplate[]>([]);
@@ -136,8 +136,8 @@ export default function NewGame() {
   };
 
   const saveTemplate = async () => {
-    const name = prompt("给这个开局起个名字", draft.title || "我的开局");
-    if (!name?.trim()) return;
+    const name = await askName({ title: "存为我的开局", initial: draft.title || "我的开局", placeholder: "给这个开局起个名字" });
+    if (!name) return;
     const id = newId();
     await game.platform.sql.query("INSERT INTO templates (id, kind, name, json, created_at) VALUES (?, 'opening', ?, ?, ?)", [id, name.trim(), JSON.stringify(draft), new Date().toISOString()]);
     setMine((m) => [{ id, name: name.trim(), draft }, ...m]);
@@ -317,7 +317,7 @@ export default function NewGame() {
           </div>
         </details>
 
-        <div className="row" style={{ position: "sticky", bottom: 0, padding: "10px 0", background: "var(--bg)" }}>
+        <div className="row sticky-bar">
           <button onClick={saveTemplate}>存为我的开局</button>
           <button className="primary grow" disabled={!ready} onClick={() => void start(draft)}>开始</button>
         </div>

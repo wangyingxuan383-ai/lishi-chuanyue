@@ -23,8 +23,12 @@ const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
   { mode: "do", label: "做", placeholder: "写下你要做的事…" },
   { mode: "say", label: "说", placeholder: "写下你要说的话…" },
   { mode: "write", label: "写", placeholder: "亲手写一段剧情，AI 会顺着往下写…" },
-  { mode: "direct", label: "导演", placeholder: "给叙事者的幕后要求，如“这段写紧张些”…" },
+  { mode: "direct", label: "幕后", placeholder: "给叙事者的要求，如“这段写紧张些”" },
 ];
+/** What each input mode does, shown in the mode picker (AUDIT 4.9). */
+const MODE_NOTES: Record<string, string> = {
+  do: "写你要做的事，AI 写出结果", say: "写你要说的话，原样说出口", write: "亲手写一段剧情，AI 顺着往下写", direct: "不写行动，只告诉叙事者这段怎么写",
+};
 const HINTS = ["写短一点", "写长一点", "换个结果", "让对方拒绝", "多些对话", "节奏快一些"];
 /** "过些日子" (PLAN §4.6): how long, and how the protagonist spends it. */
 const SPANS: [string, string][] = [
@@ -52,14 +56,14 @@ function ReportCard({ report }: { report?: TurnRecord["report"] }) {
   return <div className="report-card"><b>这段日子</b>{rows.map(([label, text]) => <p key={label}><span>{label}</span>{text}</p>)}</div>;
 }
 
-function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; children?: React.ReactNode }) {
+function TurnView({ node, onMenu, pressed, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; pressed?: boolean; children?: React.ReactNode }) {
   const press = useLongPress(() => onMenu(node));
   const { devMode } = useApp();
   // Developer mode: era words the local check found (R07-T002).
   const taboos = devMode ? ((node.meta.taboos as { term: string; instead: string | null }[] | undefined) ?? []) : [];
   if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" ? node.actionText : `你修改了：${node.actionText}`}</div>;
   return (
-    <div className="turn" data-node-id={node.id} {...press}>
+    <div className={`turn${pressed ? " pressed" : ""}`} data-node-id={node.id} {...press}>
       {node.kind !== "opening" && node.actionMode === "write" && node.actionText && (
         <div className="turn-written"><StoryText text={node.actionText} /></div>
       )}
@@ -85,7 +89,14 @@ export default function Play({ worldId }: { worldId: string }) {
   const [state, setState] = useState<WorldState | null>(null);
   const [variants, setVariants] = useState<tree.Variants | null>(null);
   const [gen, setGen] = useState<Gen | null>(null);
-  const [notice, setNotice] = useState<{ text: string; retry?: () => void } | null>(null);
+  /** One message under the story at a time (AUDIT 5.1): what happened, and what to do now. */
+  const [notice, setNotice] = useState<{ text: string; actions: { label: string; run: () => void }[] } | null>(null);
+  const failures = useRef(0);
+  /** Does the last request again, for “再试一次”. */
+  const retry = useRef<(() => void) | null>(null);
+  /** No new words for a while: say it is still being written (AUDIT 5.5). */
+  const [slow, setSlow] = useState(false);
+  const lastWords = useRef(0);
   const [modeIndex, setModeIndex] = useState(0);
   const [input, setInput] = useState("");
   const [noteOpen, setNoteOpen] = useState(false);
@@ -143,6 +154,21 @@ export default function Play({ worldId }: { worldId: string }) {
   }, [game, worldId, limit, pop]);
 
   useEffect(() => { void refresh(); }, []);
+  // No new words for 8 seconds while writing: say so, rather than a silent cursor (AUDIT 5.5).
+  useEffect(() => {
+    if (!gen) { setSlow(false); return; }
+    const id = setInterval(() => setSlow(Date.now() - lastWords.current > 8000), 1000);
+    return () => clearInterval(id);
+  }, [!!gen]);
+  // After the third turn, once ever: everything a passage can do is behind a long press (AUDIT 4.2).
+  const [pressTip, setPressTip] = useState(false);
+  const countTurn = async () => {
+    if (await game.repo.getSetting("tip:longPress", false)) return;
+    const n = (await game.repo.getSetting<number>("tip:turns", 0)) + 1;
+    await game.repo.setSetting("tip:turns", n);
+    if (n >= 3) { setPressTip(true); await game.repo.setSetting("tip:longPress", true); }
+  };
+  const [modePicker, setModePicker] = useState(false);
   // The AI filed new cards in the background: show its line and the new 设定集.
   useEffect(() => game.subscribe((id) => { if (id === worldId) void refresh(); }), [game, worldId, refresh]);
   useEffect(() => () => { if (readingTimer.current) clearTimeout(readingTimer.current); }, []);
@@ -193,25 +219,36 @@ export default function Play({ worldId }: { worldId: string }) {
 
   const onEvent = (restore: { mode: ActionMode; text: string; note: string } | null) => (e: TurnEvent) => {
     if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
-    else if (e.type === "text") setGen((g) => g && { ...g, phase: "writing", text: e.full });
+    else if (e.type === "text") { lastWords.current = Date.now(); setSlow(false); setGen((g) => g && { ...g, phase: "writing", text: e.full }); }
     else if (e.type === "organizing") setGen((g) => g && { ...g, phase: "organizing" });
     else if (e.type === "done") {
       setGen(null);
       handle.current = null;
+      failures.current = 0;
       void refresh();
+      void countTurn();
     } else if (e.type === "failed") {
       setGen(null);
       handle.current = null;
       if (e.partialSaved) {
+        // The interrupted passage shows its own 续写 / 重说; here only why it stopped.
         void refresh();
-        if (e.reason !== "cancelled") setNotice({ text: `${explainFailure(e.reason, e.status)} 已写出的部分保留了，可以续写或重说。` });
+        if (e.reason !== "cancelled") setNotice({ text: `${explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
       } else {
         if (restore) {
           setInput(restore.text);
           setModeIndex(Math.max(0, MODES.findIndex((m) => m.mode === restore.mode)));
           if (restore.note) { setNote(restore.note); setNoteOpen(true); }
         }
-        if (e.reason !== "cancelled") setNotice({ text: explainFailure(e.reason, e.status), retry: e.reason === "config" ? () => push({ name: "setup" }) : undefined });
+        if (e.reason === "cancelled") return;
+        failures.current++;
+        const actions: { label: string; run: () => void }[] = [];
+        if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup" }) });
+        else {
+          if (retry.current) { const again = retry.current; actions.push({ label: e.reason === "refused" ? "原样再试" : "再试一次", run: again }); }
+          if (failures.current >= 2 || e.reason === "quota" || e.reason === "refused") actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
+        }
+        setNotice({ text: explainFailure(e.reason, e.status), actions });
       }
     }
   };
@@ -228,13 +265,16 @@ export default function Play({ worldId }: { worldId: string }) {
     start?.();
   };
 
-  const send = (override?: { mode: ActionMode; text: string }) => {
+  const send = (override?: { mode: ActionMode; text: string }, overrideNote?: string | null) => {
     if (gen || !cursor) return;
     if (!game.llm) { push({ name: "setup" }); return; }
     void beforeGenerating(() => {
       const mode = override?.mode ?? (input.trim() ? MODES[modeIndex].mode : "continue");
       const text = override?.text ?? (mode === "continue" ? "" : input.trim());
-      const directorNote = !override && noteOpen && note.trim() ? note.trim() : null;
+      const directorNote = overrideNote !== undefined ? overrideNote : !override && noteOpen && note.trim() ? note.trim() : null;
+      lastWords.current = Date.now();
+      setSlow(false);
+      retry.current = () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); };
       setNotice(null);
       follow.current = true;
       setFollowing(true);
@@ -243,7 +283,8 @@ export default function Play({ worldId }: { worldId: string }) {
       setNote("");
       setNoteOpen(false);
       setModeIndex(0);
-      handle.current = game.play(worldId, { mode, text, directorNote }, onEvent(override ? null : { mode, text, note: directorNote ?? "" }));
+      // A failure gives the words back to the box (and 再试一次 sends them again), choices included.
+      handle.current = game.play(worldId, { mode, text, directorNote }, onEvent(mode === "continue" || mode === "skip" ? null : { mode, text, note: directorNote ?? "" }));
     });
   };
 
@@ -253,6 +294,9 @@ export default function Play({ worldId }: { worldId: string }) {
       setNotice(null);
       follow.current = true;
       setFollowing(true);
+      lastWords.current = Date.now();
+      setSlow(false);
+      retry.current = () => regenerate(hint);
       setGen({ phase: "starting", text: "", action: turn.actionMode && turn.actionMode !== "continue" ? { mode: turn.actionMode, text: turn.actionText ?? "" } : null, variant: true });
       handle.current = game.regenerate(worldId, hint, onEvent(null));
     });
@@ -274,6 +318,7 @@ export default function Play({ worldId }: { worldId: string }) {
     const next = variants.index + delta;
     if (next < 0 || next >= variants.count) return;
     await tree.switchVariant(game.repo, { ...cursor, head: turn! }, next);
+    setNotice(null);
     await refresh();
   };
 
@@ -281,8 +326,33 @@ export default function Play({ worldId }: { worldId: string }) {
     if (!cursor) return;
     const before = cursor.line.id;
     const c = await tree.goBackTo(game.repo, cursor, node.id);
+    setNotice(null);
     await refresh();
-    toast(c.line.id !== before ? "已回到这里，原来的路线保留着" : "已回到这里");
+    // Going back never deletes anything (it is a new route, or redo returns); say so, and offer the way back.
+    if (c.line.id !== before) toast("已回到这里，原来的路线保留在“世界线”里", { label: "回原路线", run: () => void tree.switchLine(game.repo, worldId, before).then(() => refresh()) });
+    else toast("已回到这里", { label: "撤回", run: () => void redoAll(c, cursor.head.id) });
+  };
+  /** Steps forward again to `target` after going back on the same line. */
+  const redoAll = async (from: tree.Cursor, target: string) => {
+    let c = from;
+    for (let i = 0; i < 50 && c.head.id !== target && tree.canRedo(c); i++) c = await tree.redo(game.repo, c);
+    await refresh();
+  };
+  const undo = async () => {
+    if (!cursor) return;
+    const undone = cursor.head;
+    const c = await tree.undo(game.repo, cursor);
+    setNotice(null);
+    await refresh();
+    const what = undone.kind === "edit" ? "这次修改" : undone.actionText ? `“${undone.actionText.slice(0, 12)}${undone.actionText.length > 12 ? "…" : ""}”` : "上一段";
+    toast(`已撤销${what}`, { label: "重做", run: () => void tree.redo(game.repo, c).then(() => refresh()) });
+  };
+  const redo = async () => {
+    if (!cursor) return;
+    await tree.redo(game.repo, cursor);
+    setNotice(null);
+    await refresh();
+    toast("已重做");
   };
 
   const editAction = async (node: StoryNode, text: string) => {
@@ -318,7 +388,7 @@ export default function Play({ worldId }: { worldId: string }) {
 
   const head = cursor.head;
   const placeName = state.places.find((p) => p.id === state.placeId)?.name;
-  const place = placeName ?? era.title;
+  const place = placeName ?? world.title;
   const now = nowOf(era.clock, state.time.elapsedMinutes);
   const shown = gen?.variant ? nodes.slice(0, nodes.findIndex((n) => n.id === turn?.id)) : nodes;
   const mode = MODES[modeIndex];
@@ -345,7 +415,7 @@ export default function Play({ worldId }: { worldId: string }) {
       <div className="topbar">
         <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
         <button className="title" aria-label="此时此地" onClick={() => setSheet("time")}>
-          <h1 style={{ fontSize: 15 }}>{place}</h1>
+          <h1>{place}</h1>
           <div className="subtitle">{now.text}</div>
         </button>
         {!wide && <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>}
@@ -359,12 +429,12 @@ export default function Play({ worldId }: { worldId: string }) {
             {shown.map((node) => {
               const isHead = node.id === turn?.id && !gen;
               return (
-                <TurnView key={node.id} node={node} onMenu={setMenuNode}>
+                <TurnView key={node.id} node={node} onMenu={setMenuNode} pressed={menuNode?.id === node.id}>
                   {isHead && node.status === "interrupted" && (
-                    <div className="notice">这段没有写完。<div className="row"><button onClick={resume}>续写</button><button onClick={() => regenerate(null)}>重说</button></div></div>
+                    <div className="notice">这段没有写完。{notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}<div className="row"><button onClick={resume}>续写</button><button onClick={() => regenerate(null)}>重说</button></div></div>
                   )}
                   {isHead && node.status === "no_record" && <p className="muted">这段没能整理出记录，状态可能没有更新。</p>}
-                  {isHead && node.kind !== "opening" && (
+                  {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
                     <div className="turn-tools">
                       {variants && variants.count > 1 && (
                         <>
@@ -374,7 +444,12 @@ export default function Play({ worldId }: { worldId: string }) {
                         </>
                       )}
                       <RegenButton onTap={() => regenerate(null)} onLong={() => setSheet("hints")} />
+                      <button className="ghost" onClick={() => setSheet("hints")}>换个写法</button>
+                      <button className="ghost" aria-label="这一段还能做什么" onClick={() => setMenuNode(node)}>⋯</button>
                     </div>
+                  )}
+                  {isHead && pressTip && (
+                    <div className="tip">长按任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
                   )}
                 </TurnView>
               );
@@ -383,14 +458,15 @@ export default function Play({ worldId }: { worldId: string }) {
               <div className="turn">
                 {gen.action?.mode === "write" && gen.action.text && <div className="turn-written"><StoryText text={gen.action.text} /></div>}
                 {gen.action && gen.action.mode !== "continue" && gen.action.mode !== "write" && gen.action.text && <div className={`turn-action ${gen.action.mode}`}>{gen.action.text}</div>}
-                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line">{statusText || "　"}</p>}
+                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line"><span className="cursor-blink">{statusText || "落笔"}</span></p>}
                 {gen.text && statusText && <p className="status-line">{statusText}</p>}
+                {slow && <p className="status-line">还在写，稍等…（不想等可以点“停止”）</p>}
               </div>
             )}
-            {notice && (
+            {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
               <div className="notice">
                 {notice.text}
-                {notice.retry && <div className="row"><button onClick={notice.retry}>去设置</button></div>}
+                {notice.actions.length > 0 && <div className="row">{notice.actions.map((a) => <button key={a.label} onClick={() => { setNotice(null); a.run(); }}>{a.label}</button>)}</div>}
               </div>
             )}
             {dead && <div className="notice">你已经死了。长按任意一段，可以回到那时重新来过。</div>}
@@ -407,10 +483,13 @@ export default function Play({ worldId }: { worldId: string }) {
           </div>
         )}
         {noteOpen && mode.mode !== "direct" && (
-          <input className="director-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="附加幕后要求（只影响这一段的写法）" />
+          <div className="row director-row">
+            <input className="director-note grow" value={note} onChange={(e) => setNote(e.target.value)} placeholder="幕后要求（只影响这一段）" aria-label="幕后要求" />
+            <button className="icon-btn" aria-label="去掉幕后要求" onClick={() => { setNote(""); setNoteOpen(false); }}>×</button>
+          </div>
         )}
         <div className="inputbar">
-          <button className="mode-btn" onClick={() => setModeIndex((modeIndex + 1) % MODES.length)} disabled={!!gen}>{mode.label}</button>
+          <button className="mode-btn" aria-label={`输入方式：${mode.label}`} onClick={() => setModePicker(true)} disabled={!!gen}>{mode.label}</button>
           <textarea
             ref={inputBox}
             rows={1}
@@ -437,6 +516,7 @@ export default function Play({ worldId }: { worldId: string }) {
 
       {menuNode && (
         <MenuSheet
+          title={`“${menuNode.narrative.replace(/\s+/g, "").slice(0, 16)}…”`}
           onClose={() => setMenuNode(null)}
           items={[
             { label: "改写这段文字", hidden: menuNode.kind === "edit", onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
@@ -497,6 +577,18 @@ export default function Play({ worldId }: { worldId: string }) {
           ))}
         </Sheet>
       )}
+      {modePicker && (
+        <Sheet title="怎么写这一回合" onClose={() => setModePicker(false)}>
+          <div className="sheet-menu">
+            {MODES.map((m, i) => (
+              <button key={m.mode} aria-pressed={i === modeIndex} className="mode-option" onClick={() => { setModeIndex(i); setModePicker(false); inputBox.current?.focus(); }}>
+                <b>{m.label}</b><small>{MODE_NOTES[m.mode]}</small>
+              </button>
+            ))}
+            {!noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b>＋ 幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
+          </div>
+        </Sheet>
+      )}
       {sheet === "ask" && <AskSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
@@ -511,11 +603,11 @@ export default function Play({ worldId }: { worldId: string }) {
         <MenuSheet
           onClose={() => setSheet(null)}
           items={[
-            { label: "撤销", hidden: !head.parentId || !!gen, onSelect: async () => { await tree.undo(game.repo, cursor); await refresh(); } },
-            { label: "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: async () => { await tree.redo(game.repo, cursor); await refresh(); } },
+            { label: "撤销", hidden: !head.parentId || !!gen, onSelect: () => void undo() },
+            { label: "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: () => void redo() },
             { label: "过些日子", hidden: !!gen, onSelect: () => setSheet("skip") },
             { label: "查一查", hidden: !!gen, onSelect: () => setSheet("ask") },
-            { label: "附加幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
+            { label: "幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },

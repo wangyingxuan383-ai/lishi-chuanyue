@@ -100,7 +100,7 @@ await page.getByText("公元 748 年 · 戊子年").waitFor({ state: "detached" 
 await page.getByRole("button", { name: "返回" }).click();
 
 // An AI-written opening via one-tap random start.
-await page.getByRole("button", { name: "开始穿越" }).click();
+await page.getByRole("button", { name: /^(开始穿越|开始新的故事)$/ }).click();
 await page.getByRole("button", { name: "随便穿" }).click();
 await page.locator(".dock .choice").first().waitFor({ timeout: 20000 });
 await shot("03-opening");
@@ -109,7 +109,9 @@ check("record not visible", !(await page.textContent("body")).includes("<record"
 
 // "写" mode: the player writes narrative directly.
 await page.locator(".mode-btn").click();
-await page.locator(".mode-btn").click();
+check("the mode picker shows all four ways with what they do", (await page.locator(".mode-option").count()) >= 4 && (await page.textContent(".sheet")).includes("亲手写一段剧情"));
+await shot("02c-mode-picker");
+await page.locator(".mode-option", { hasText: "亲手写" }).click();
 check("third mode is 写", (await page.locator(".mode-btn").textContent()) === "写");
 await page.locator(".inputbar textarea").fill("一阵风吹开了窗，烛火摇晃。");
 await page.locator(".send-btn").click();
@@ -126,6 +128,7 @@ check("story settings saved", true);
 
 // Free action with streaming.
 await page.locator(".mode-btn").click(); // back to 做
+await page.locator(".mode-option", { hasText: "写你要做的事" }).click();
 await page.locator(".inputbar textarea").fill("推开门出去看看");
 check("send button says 发送", (await page.locator(".send-btn").textContent()) === "发送");
 await page.locator(".send-btn").click();
@@ -136,7 +139,7 @@ check("turn appended with player action", (await page.textContent("body")).inclu
 
 // The scripted fake replies rotate: this turn paid 30 coins.
 check("money chip after paying", (await page.locator(".chip", { hasText: /钱 −30/ }).count()) === 1);
-check("fortune chip shows what the roll was used for", (await page.locator(".chip", { hasText: /^🎲 (大顺|顺|平|不顺|大不顺) · 求掌柜宽限余款 · 成了一半$/ }).count()) === 1);
+check("fortune chip shows what the roll was used for", (await page.locator(".chip", { hasText: /^签·(大顺|顺|平|不顺|大不顺) · 求掌柜宽限余款 · 成了一半$/ }).count()) === 1);
 
 // Choice tap → the next scripted turn introduces a person.
 await page.locator(".choice").first().click();
@@ -226,8 +229,10 @@ check("era card sent with the turn", sent.includes("【时代】测试时代") &
 // AI organizing from the 设定 tab replaces the player's era card after a confirm.
 await page.getByRole("button", { name: "角色" }).click();
 await page.getByRole("tab", { name: "设定" }).click();
-page.once("dialog", (dialog) => void dialog.accept());
 await page.getByRole("button", { name: "AI 重新整理" }).click();
+await page.locator(".dialog").waitFor();
+check("replacing the player's era card asks in the app's own dialog", (await page.textContent(".dialog")).includes("让 AI 重新整理时代卡"));
+await page.locator(".dialog").getByRole("button", { name: "重新整理" }).click();
 // The random opening may already have been organized; wait for the player's era card to be replaced.
 await page.locator(".codex-era", { hasText: "AI 整理的时代" }).waitFor({ timeout: 20000 });
 check("AI organizes the 设定集", (await page.locator(".codex-era").textContent()).includes("AI 整理的时代 · AI 整理") && (await page.locator(".codex-item", { hasText: "漕帮" }).count()) === 1);
@@ -292,6 +297,7 @@ await shot("07-longpress");
 await page.getByRole("button", { name: "回到这里" }).click();
 await page.getByText(/已回到这里/).waitFor();
 check("go back to opening", (await page.locator(".turn").count()) === 1);
+check("going back says the old route is kept and offers the way back", (await page.locator(".toast .toast-action").count()) === 1);
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "故事设定与要点" }).click();
 await page.getByLabel(/^要点/).waitFor();
@@ -438,12 +444,14 @@ await page.keyboard.press("Escape");
 // after the last write, so give it time before reloading.
 await page.waitForTimeout(1500);
 await page.reload();
-await page.getByText("继续游玩").waitFor();
+await page.locator(".world-card").first().waitFor();
 await shot("08-home");
-check("home lists the world after reload", (await page.locator(".card").count()) >= 1);
+check("home lists the world after reload", (await page.locator(".world-card").count()) >= 1);
+check("the latest world is a featured card with 继续, and new stories are secondary", (await page.locator(".world-card.featured .continue-btn").count()) === 1 && (await page.getByRole("button", { name: "开始新的故事" }).count()) === 1);
+check("every world card has a visible ⋯ menu", (await page.locator(".world-menu").count()) === (await page.locator(".world-card").count()));
 
 // "再来一局同样设定" from the home long-press menu.
-const cardBox = await page.locator(".card").first().boundingBox();
+const cardBox = await page.locator(".world-open").first().boundingBox();
 await page.mouse.move(cardBox.x + 30, cardBox.y + 20);
 await page.mouse.down();
 await page.waitForTimeout(650);
@@ -452,10 +460,10 @@ await page.getByRole("button", { name: "用同样设定再开一局" }).click();
 await page.getByRole("button", { name: "随便穿" }).waitFor();
 check("same setup again prefills the new story", (await page.getByLabel(/故事设定/).inputValue()).length > 0 && (await page.getByLabel("名字", { exact: true }).inputValue()).length > 0 && (await page.textContent("body")).includes("（由身份决定）"));
 await page.getByRole("button", { name: "返回" }).click();
-await page.getByText("继续游玩").waitFor();
+await page.locator(".world-card").first().waitFor();
 
 // Edits are a single reversible change after the latest turn.
-await page.locator(".card").first().click();
+await page.locator(".world-open").first().click();
 await page.locator(".dock .choice").first().waitFor();
 await page.locator(".send-btn").click();
 await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
@@ -478,8 +486,9 @@ await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "撤销", exact: true }).click();
 await page.locator(".edit-line", { hasText: "你修改了：钱" }).waitFor({ state: "detached" });
 check("undo removes the edit from the story", true);
+check("undo says what was undone and offers 重做", (await page.locator(".toast", { hasText: "已撤销这次修改" }).count()) === 1 && (await page.locator(".toast .toast-action", { hasText: "重做" }).count()) === 1);
 await page.getByRole("button", { name: "更多" }).click();
-await page.getByRole("button", { name: "重做", exact: true }).click();
+await page.getByRole("dialog").getByRole("button", { name: "重做", exact: true }).click();
 await page.locator(".edit-line", { hasText: "你修改了：钱" }).waitFor();
 check("redo restores the edit", true);
 await page.getByRole("button", { name: "重说", exact: true }).click();
@@ -505,7 +514,7 @@ await page.getByRole("button", { name: "回到底部 ↓" }).waitFor();
 await page.waitForTimeout(500);
 const readTurn = await page.locator(".turn").first().getAttribute("data-node-id");
 await page.getByRole("button", { name: "返回", exact: true }).click();
-await page.locator(".card").first().click();
+await page.locator(".world-open").first().click();
 await page.getByRole("button", { name: "回到底部 ↓" }).waitFor();
 check("reopening restores the earlier reading position", await page.locator(".story").evaluate((el) => el.scrollTop < 30) && await page.locator(".turn").first().getAttribute("data-node-id") === readTurn);
 await shot("11-reading-restored");
@@ -543,7 +552,7 @@ await page.keyboard.press("Escape");
 await page.getByRole("button", { name: "记得更多" }).click();
 check("context size saved on the service", (await page.getByRole("button", { name: "记得更多" }).getAttribute("aria-pressed")) === "true");
 await page.getByRole("button", { name: "返回", exact: true }).click();
-await page.locator(".card").first().click();
+await page.locator(".world-open").first().click();
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "查看上下文（开发者）" }).click();
 await page.getByText("下一回合的上下文").waitFor();
@@ -561,10 +570,10 @@ check("disabling developer mode hides call history", (await page.getByText("调�
 
 // R08-T001: export a world to a file and import it back as a new world.
 await page.getByRole("button", { name: "返回", exact: true }).click();
-await page.getByText("继续游玩").waitFor();
-const worldsBefore = await page.locator(".card").count();
-const exportedTitle = (await page.locator(".card h3").first().textContent()).trim();
-const homeCard = await page.locator(".card").first().boundingBox();
+await page.locator(".world-card").first().waitFor();
+const worldsBefore = await page.locator(".world-card").count();
+const exportedTitle = (await page.locator(".world-card h3").first().textContent()).trim();
+const homeCard = await page.locator(".world-open").first().boundingBox();
 await page.mouse.move(homeCard.x + 30, homeCard.y + 20);
 await page.mouse.down();
 await page.waitForTimeout(650);
@@ -577,21 +586,28 @@ check("a world exports with its turns, lines and states", archive.format === "li
 const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.getByRole("button", { name: "从文件导入世界…" }).click()]);
 await chooser.setFiles(archivePath);
 await page.getByRole("button", { name: "另存为新的世界" }).click();
-await page.locator(".card h3", { hasText: `${exportedTitle}（导入）` }).waitFor();
-check("the same world imports again as a new one", (await page.locator(".card").count()) === worldsBefore + 1);
+await page.locator(".world-card h3", { hasText: `${exportedTitle}（导入）` }).waitFor();
+check("the same world imports again as a new one", (await page.locator(".world-card").count()) === worldsBefore + 1);
 await page.waitForTimeout(400);
 await shot("14-imported");
 // Deleting a world takes everything under it, 要点 included (they point at turns).
-const importedBox = await page.locator(".card", { hasText: `${exportedTitle}（导入）` }).boundingBox();
+const importedBox = await page.locator(".world-card", { hasText: `${exportedTitle}（导入）` }).boundingBox();
 await page.mouse.move(importedBox.x + 30, importedBox.y + 20);
 await page.mouse.down();
 await page.waitForTimeout(650);
 await page.mouse.up();
-page.once("dialog", (dialog) => void dialog.accept());
 await page.getByRole("button", { name: "删除这个世界" }).click();
+await page.locator(".dialog").getByRole("button", { name: "取消" }).click();
+check("cancelling the delete dialog keeps the world", (await page.locator(".dialog").count()) === 0 && (await page.locator(".world-card").count()) === worldsBefore + 1);
+await page.mouse.move(importedBox.x + 30, importedBox.y + 20);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+await page.getByRole("button", { name: "删除这个世界" }).click();
+await page.locator(".dialog").getByRole("button", { name: "删除" }).click();
 await page.getByText("已删除").waitFor();
 await page.waitForTimeout(300);
-check("a world with 要点 can be deleted", (await page.locator(".card").count()) === worldsBefore && (await page.evaluate(async () => (await window.__lishi.game.platform.sql.query("SELECT COUNT(*) AS n FROM pins WHERE world_id NOT IN (SELECT id FROM worlds)"))[0].n)) === 0);
+check("a world with 要点 can be deleted", (await page.locator(".world-card").count()) === worldsBefore && (await page.evaluate(async () => (await window.__lishi.game.platform.sql.query("SELECT COUNT(*) AS n FROM pins WHERE world_id NOT IN (SELECT id FROM worlds)"))[0].n)) === 0);
 
 // D124: while 垂危 the play screen keeps a warning above the input.
 const dyingWorld = await page.evaluate(async () => {
@@ -602,7 +618,7 @@ const dyingWorld = await page.evaluate(async () => {
 });
 await page.waitForTimeout(1200);
 await page.reload();
-await page.locator(".card", { hasText: dyingWorld }).first().click();
+await page.locator(".world-card", { hasText: dyingWorld }).first().click();
 await page.locator(".turn").last().waitFor();
 check("a dying protagonist sees a standing warning", await page.getByText("你伤重垂危").isVisible());
 await shot("15-dying");
