@@ -146,6 +146,25 @@ describe("applyRecord", () => {
     expect(apply(s, { status: [{ op: "remove", name: "脚踝扭伤" }] }).state.protagonist.statuses).toHaveLength(0);
   });
 
+  it("keeps how a goal went, ends it with the time, and reopens it from the goals page", () => {
+    let s = apply(sampleState(), { time: "一个时辰", goals: [{ op: "add", name: "三日内还清三贯钱", kind: "主线", detail: "欠王掌柜三贯" }] }).state;
+    expect(s.goals[0]).toMatchObject({ kind: "主线", startedMinute: 120, steps: [{ minute: 120, text: "欠王掌柜三贯" }] });
+    s = apply(s, { time: "一天", goals: [{ op: "progress", name: "还清三贯钱", detail: "凑到一贯" }, { op: "progress", name: "还清三贯钱", detail: "凑到一贯" }] }).state;
+    const r = apply(s, { time: "一天", goals: [{ op: "done", name: "三日内还清三贯钱", detail: "还清了" }] });
+    expect(r.chips.map((c) => c.text)).toContain("完成：三日内还清三贯钱");
+    expect(r.state.goals[0]).toMatchObject({ status: "完成", progress: "还清了", endedMinute: 120 + 1440 * 2 });
+    expect(r.state.goals[0].steps!.map((x) => x.text)).toEqual(["欠王掌柜三贯", "凑到一贯", "还清了"]);
+    const reopened = applyRecord(r.state, { goals: [{ op: "reopen", id: r.state.goals[0].id, name: "" }] }, ctx(), { advanceTime: false }).state;
+    expect(reopened.goals[0]).toMatchObject({ status: "进行中" });
+    expect(reopened.goals[0].endedMinute).toBeUndefined();
+  });
+
+  it("marks the player's own wishes", () => {
+    const r = applyRecord(sampleState(), { goals: [{ op: "add", name: "攒钱买一处宅子", kind: "心愿" }] }, ctx(), { advanceTime: false });
+    expect(r.chips.map((c) => c.text)).toEqual(["新心愿：攒钱买一处宅子"]);
+    expect(r.state.goals[0].kind).toBe("心愿");
+  });
+
   it("creates goals only on add and ignores progress for unknown goals", () => {
     let s = apply(sampleState(), { goals: [{ op: "add", name: "三日内还清三贯钱" }] }).state;
     s = apply(s, { goals: [{ op: "add", name: "三日内还清三贯钱" }, { op: "progress", name: "三日内还清三贯钱", detail: "凑到一贯" }] }).state;

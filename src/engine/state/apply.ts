@@ -7,7 +7,7 @@ import { parseDurationMinutes } from "../calendar/duration";
 import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
 import type { Fortune } from "../fortune";
-import type { ActionMode, Attitude, Card, CardKind, Difficulty, Person, WorldState } from "../types";
+import type { ActionMode, Attitude, Card, CardKind, Difficulty, Goal, Person, WorldState } from "../types";
 
 export type RiskResult = "成" | "败" | "半成";
 const RISK_TEXT: Record<RiskResult, string> = { 成: "成了", 败: "没成", 半成: "成了一半" };
@@ -24,7 +24,7 @@ export interface TurnRecord {
   /** By name from the model; panel edits pass the id (and may rename, replace aliases or remove). */
   people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; alive?: boolean; aliases?: string[] }[] | null;
   status?: { op: string; name: string; detail?: string }[] | null;
-  goals?: { op: string; name: string; detail?: string; kind?: string }[] | null;
+  goals?: { op: string; name: string; detail?: string; kind?: string; id?: string }[] | null;
   log?: string | null;
   /** The risky part of the action and how it went, when the fortune mattered (R05-T002). */
   risk?: { what: string; result?: RiskResult } | null;
@@ -311,23 +311,40 @@ export function applyRecord(
     }
   }
 
-  // Goals: only "add" may create; other ops must match an existing goal.
+  // Goals: only "add" may create; other ops must match an existing goal (or its id, from the goals page).
+  // Every progress line is kept as a step so the goals page can show how it went (R05-T003).
+  const step = (goal: Goal, text: string | undefined) => {
+    const t = text?.trim();
+    if (!t || goal.steps?.at(-1)?.text === t) return;
+    goal.steps = [...(goal.steps ?? []), { minute: now(), text: t }].slice(-12);
+  };
   for (const raw of record.goals ?? []) {
-    if (!raw?.name) continue;
+    if (!raw?.name && !raw?.id) continue;
     const op = (raw.op ?? "progress").toLowerCase();
-    const goal = matchName(s.goals.filter((g) => g.status === "进行中" || op === "add"), raw.name);
+    const goal = raw.id ? s.goals.find((g) => g.id === raw.id)
+      : matchName(s.goals.filter((g) => g.status === "进行中" || op === "add"), raw.name);
     if (op === "add") {
       if (goal) continue;
       const kind = raw.kind === "主线" || raw.kind === "心愿" ? raw.kind : "支线";
-      s.goals.push({ id: newId(), name: raw.name, kind, progress: raw.detail ?? "", status: "进行中" });
-      chips.push({ text: `新目标：${raw.name}`, tone: "info" });
+      const added: Goal = { id: newId(), name: raw.name, kind, progress: raw.detail ?? "", status: "进行中", startedMinute: now(), steps: [] };
+      step(added, raw.detail);
+      s.goals.push(added);
+      chips.push({ text: `${kind === "心愿" ? "新心愿" : kind === "主线" ? "主线目标" : "新目标"}：${raw.name}`, tone: "info" });
       continue;
     }
     if (!goal) { log.push(`目标“${raw.name}”不存在，${op} 已忽略`); continue; }
-    if (op === "done") { goal.status = "完成"; chips.push({ text: `完成：${goal.name}`, tone: "gain" }); }
-    else if (op === "fail") { goal.status = "失败"; chips.push({ text: `失败：${goal.name}`, tone: "loss" }); }
-    else if (op === "abandon") { goal.status = "放弃"; chips.push({ text: `放弃：${goal.name}`, tone: "info" }); }
-    else if (raw.detail) goal.progress = raw.detail;
+    if (op === "reopen") {
+      if (goal.status !== "进行中") { goal.status = "进行中"; delete goal.endedMinute; step(goal, "重新开始"); }
+      continue;
+    }
+    if (goal.status !== "进行中") continue;
+    step(goal, raw.detail);
+    if (raw.detail) goal.progress = raw.detail;
+    const end = { done: "完成", fail: "失败", abandon: "放弃" }[op] as Goal["status"] | undefined;
+    if (!end) continue;
+    goal.status = end;
+    goal.endedMinute = now();
+    chips.push({ text: `${end === "完成" ? "完成" : end === "失败" ? "失败" : "放弃"}：${goal.name}`, tone: end === "完成" ? "gain" : end === "失败" ? "loss" : "info" });
   }
 
   // Rules: currency units, calendar style and the start date every later date is counted from.

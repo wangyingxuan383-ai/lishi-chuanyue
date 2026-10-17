@@ -10,7 +10,7 @@ import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldS
 import { RECAP_BUDGET, recapBlock } from "./chapter";
 import { FORTUNE_TEXT, type Fortune } from "../fortune";
 
-export const PROMPT_VERSION = "turn-7";
+export const PROMPT_VERSION = "turn-8";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -35,7 +35,7 @@ const RECORD_FIELDS = `{"time":"本回合经过的时长，如：一刻 / 半个
  "items":[{"name":"物品名（已有物品沿用原名）","delta":数量增减}],
  "people":[{"name":"人物名","role":"身份","attitude":"仇视/敌意/冷淡/一般/友善/亲近/生死之交","note":"一句备注","aliases":["此前对他的称呼（如原来只知道是“货栈管事”，现在得知名叫刘三郎，就写 name 刘三郎、aliases 货栈管事）"]}],
  "status":[{"op":"add 或 remove","name":"伤病或状态名","detail":"说明"}],
- "goals":[{"op":"add / progress / done / fail","name":"目标名（已有目标沿用原名）","detail":"进展"}],
+ "goals":[{"op":"add / progress / done / fail","name":"目标名（已有目标沿用原名）","detail":"进展","kind":"新目标才写：主线 / 支线"}],
  "log":"一句话记下本回合发生了什么",
  "risk":{"what":"玩家的行动里有风险或要看运气的那件事（没有就不写 risk）","result":"成 / 败 / 半成"},
  "choices":["建议行动1","建议行动2","建议行动3"]}`;
@@ -52,7 +52,7 @@ const OPENING_EXTRA = `开场的记录块另有要求：
 - "hour"：开场时刻，0～23 的整数；
 - "money"：主角此刻身上的钱（不是增减，是总数，整数，单位为最小货币单位），要符合主角的身份——皇子与乞丐差别很大；
 - "currency"：这个时代的货币单位，从大到小，如 [{"name":"贯","value":1000},{"name":"文","value":1}] 或 [{"name":"两","value":1000},{"name":"钱","value":100},{"name":"文","value":1}] 或 [{"name":"denarius","value":16},{"name":"as","value":1}]；
-- goals 里用 op "add" 写出第一个目标；people 写出开场出现或与主角密切相关的人物；items 写出主角随身真正有的东西；place 写出当前地点。`;
+- goals 里用 op "add"、kind "主线" 写出第一个目标；people 写出开场出现或与主角密切相关的人物；items 写出主角随身真正有的东西；place 写出当前地点。`;
 
 export interface StoryContext {
   era: EraContext;
@@ -76,6 +76,7 @@ function systemParts(ctx: StoryContext): SystemParts {
 - 只写到玩家需要做决定为止。主角只做玩家写下的事：玩家只说了大意，就照大意写，不替主角添新的计划、约定、许诺、威胁或贿赂，不替主角说出或藏起玩家没提的秘密、证据和底牌，不擅自把玩家没说要做完的事做完。玩家说“先试一下”“先问问”，就只写试一下、问一下的结果。拿不准主角会怎么做，就写到那里停下，让玩家决定。
 - 玩家的行动可能失败。行动有难度或风险时，按情理决定成败，失败也要写出后果。
 - 其他人物有自己的目的、脾气和处境，不围着主角转；态度变化要有缘由。
+- 【心愿】是玩家自己想做的事：不要替主角去做，但可以在合适的时候让相关的人和机会自然出现。
 - 涉及钱和物品时，只能使用【当前】中列出的数量，正文写清具体数目；钱不够就买不成、付不起。
 - 主角的性别、身份、年龄以【当前】为准，前后保持一致。正文里的时辰要和【当前】的时辰加上本回合经过的时间对得上；要跳过一段时间（如等到傍晚），就在记录的 time 里写明经过了多久。
 - 避免套话和重复上一回合的开头与句式。不要用：${CLICHES.slice(0, 6).join("、")}。
@@ -123,7 +124,7 @@ export function renderState(state: WorldState, era: EraContext, present?: Set<st
     ...ordered.slice(0, PEOPLE_LINES).map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${p.notes && here(p.id) ? `；${p.notes}` : ""}`),
     ...(rest.length ? [`另有：${rest.map((p) => `${p.name}${p.alive ? "" : "（已死）"}`).join("、")}`] : []),
   ].join("\n") || "无";
-  const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
+  const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `【${g.kind}】${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
   const smallest = era.currency.units[era.currency.units.length - 1].name;
   const when = now.date ? formatDate(now.date, era.clock.rules) : `${era.clock.label ? `${era.clock.label}起 ` : ""}第 ${now.day} 日`;
   return `【当前】${when} ${timeOfDay(now)} · ${place}

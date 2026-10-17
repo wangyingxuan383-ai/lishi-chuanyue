@@ -49,9 +49,15 @@ export interface Place {
 export interface Goal {
   id: string;
   name: string;
+  /** 心愿 are the player's own; the narrator may open chances but never fulfils them alone. */
   kind: "主线" | "支线" | "心愿";
+  /** The latest progress, as the prompt shows it. */
   progress: string;
   status: GoalStatus;
+  /** Game minutes when it began and ended, and how it went in between (R05-T003). */
+  startedMinute?: number;
+  endedMinute?: number;
+  steps?: { minute: number; text: string }[];
 }
 
 export type CardKind = "时代" | "势力" | "物品" | "设定";

@@ -207,6 +207,8 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; backgro
 .codex-text { margin: 0; white-space: pre-wrap; line-height: 1.7; font-size: 14px; }
 .person-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .person-side small { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.timeline { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.timeline small { display: block; color: var(--muted); font-size: 12px; }
 .context-layer { border-bottom: 1px solid var(--line); padding: 8px 0; }
 .context-layer summary { cursor: pointer; line-height: 1.6; }
 .context-layer summary .muted { font-size: 13px; }

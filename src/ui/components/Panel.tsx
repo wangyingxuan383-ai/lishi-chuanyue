@@ -7,12 +7,13 @@ import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
 import { useBack } from "../app/context";
 import { Codex } from "./Codex";
+import { Goals } from "./Goals";
 import { Journal } from "./Journal";
 import { People } from "./People";
 
 const TABS = ["我", "行囊", "人物", "目标", "记事", "设定"] as const;
 /** Tabs with their own editors instead of the panel-wide 修改. */
-const OWN_EDITOR: readonly string[] = ["人物", "记事", "设定"];
+const OWN_EDITOR: readonly string[] = ["人物", "目标", "记事", "设定"];
 type Tab = (typeof TABS)[number];
 
 function level(n: number, words: string[]): string {
@@ -44,8 +45,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
   const me = shown.protagonist;
   const now = nowOf(era.clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name;
-  const active = shown.goals.filter((g) => g.status === "进行中");
-  const finished = shown.goals.filter((g) => g.status !== "进行中");
+  const active = state.goals.filter((g) => g.status === "进行中");
 
   const save = async () => {
     if (!draft) return;
@@ -76,13 +76,6 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
       if (old === quantity) continue;
       (patch.items ??= []).push({ name, delta: quantity - old });
       summary.push(old === 0 ? `添加物品 ${name}` : `${name} ${old} → ${quantity}`);
-    }
-    for (const g of shown.goals.filter((x) => x.name.trim())) {
-      const old = state.goals.find((x) => x.id === g.id);
-      if (old?.status === g.status) continue;
-      const op = !old ? "add" : g.status === "完成" ? "done" : "abandon";
-      (patch.goals ??= []).push({ op, name: g.name.trim(), kind: g.kind });
-      summary.push(!old ? `添加目标 ${g.name.trim()}` : `${g.status}目标 ${g.name}`);
     }
     if (!summary.length) { setDraft(null); return; }
     setSaving(true);
@@ -153,20 +146,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
         {tab === "人物" && <People state={state} era={era} busy={busy} onSave={onSave} />}
         {tab === "记事" && <Journal worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} />}
         {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
-        {tab === "目标" && (
-          <div className="stack">
-            {active.length ? active.map((g) => (
-              <div className="item-row" key={g.id}><div className="grow">{editing && !state.goals.some((x) => x.id === g.id) ? <input aria-label="目标名称" placeholder="名称" value={g.name} onChange={(e) => change((d) => { d.goals.find((x) => x.id === g.id)!.name = e.target.value; })} /> : <b>{g.name}</b>}{g.progress && <small>{g.progress}</small>}</div>
-                {editing && state.goals.some((x) => x.id === g.id) ? <div className="segmented"><button onClick={() => change((d) => { d.goals.find((x) => x.id === g.id)!.status = "完成"; })}>完成</button><button onClick={() => change((d) => { d.goals.find((x) => x.id === g.id)!.status = "放弃"; })}>放弃</button></div> : <span className="tag">{g.kind}</span>}
-              </div>
-            )) : <p className="muted">眼下没有明确的目标。</p>}
-            {editing && <button onClick={() => change((d) => { d.goals.push({ id: `new-${d.goals.length}`, name: "", kind: "心愿", progress: "", status: "进行中" }); })}>＋ 添加目标</button>}
-            {finished.length > 0 && <p className="muted">已结束</p>}
-            {finished.map((g) => (
-              <div className="item-row" key={g.id} style={{ opacity: 0.7 }}><div>{g.name}<small>{g.progress}</small></div><span className="tag">{g.status}</span></div>
-            ))}
-          </div>
-        )}
+        {tab === "目标" && <Goals state={state} era={era} busy={busy} onSave={onSave} />}
       </div>
       {editing && <div className="dock row" style={{ justifyContent: "space-between" }}>
         <button disabled={saving} onClick={() => setDraft(null)}>取消</button>

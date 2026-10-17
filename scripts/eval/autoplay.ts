@@ -174,6 +174,15 @@ async function main() {
   const probeAt = (arg("probe-at", "") ?? "").split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0);
   const [probeFrom, probeTo] = (arg("probe-from", "3-20") ?? "3-20").split("-").map(Number);
   const probes: { questions: { q: string; a: string }[]; rounds: { turn: number; answers: string[]; promptTokens: number | null }[] } = { questions: [], rounds: [] };
+  // Every goal in progress must reach the next turn's context (R05-T003); checked locally, no calls.
+  const goalChecks = { turns: 0, missing: [] as { turn: number; goal: string }[] };
+  async function checkGoals(): Promise<void> {
+    const head = (await cursor(game.repo, worldId!)).head;
+    const active = (await game.repo.getState(head.id)).goals.filter((g) => g.status === "进行中");
+    const stateLayer = (await game.previewContext(worldId!)).layers.find((l) => l.key === "state")?.content ?? "";
+    goalChecks.turns++;
+    for (const g of active) if (!stateLayer.includes(g.name)) goalChecks.missing.push({ turn, goal: g.name });
+  }
 
   /** Six fact questions about turns probeFrom..probeTo, with answers taken from the text. */
   async function writeQuestions(): Promise<void> {
@@ -308,6 +317,7 @@ async function main() {
     consecutiveFailures = entry.failures.length ? consecutiveFailures + 1 : 0;
     if (calls.length >= maxCalls) { stopReason = "max_calls"; break; }
     if (consecutiveFailures >= 3) { stopReason = "three_failures"; break; }
+    if (worldId && entry.status) await checkGoals();
     if (probeAt.length && turn === probeTo) await writeQuestions().catch(() => console.log("记忆探针出题失败"));
     if (probeAt.includes(turn)) {
       await game.settled();
@@ -387,6 +397,7 @@ async function main() {
     timeMismatches, upkeep,
     fortune: { byLevel: fortuneStats, riskyTurns: entries.filter((e) => e.risk).length, luckyFailRate: failRate(["大顺", "顺"]), unluckyFailRate: failRate(["不顺", "大不顺"]) },
     probes: probeAt.length ? { from: `${probeFrom}-${probeTo}`, ...probes } : null,
+    goalsInContext: goalChecks,
     tokenCurve: entries.filter((e) => e.turn % 10 === 0).map((e) => ({ turn: e.turn, promptTokens: e.usage?.promptTokens ?? null })),
     latencyMs: { firstToken: latency(entries.map((e) => e.firstTokenMs)), total: latency(entries.filter((e) => e.calls.some((c) => c.purpose === "turn")).map((e) => e.totalMs)) },
     calls: { total: calls.length, byPurpose: counts(calls.map((c) => c.purpose)), failuresByReason: counts(calls.filter((c) => c.failure).map((c) => c.failure!.status ? `${c.failure!.reason}:${c.failure!.status}` : c.failure!.reason)) },

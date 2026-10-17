@@ -18,7 +18,7 @@ const shot = (name) => page.screenshot({ path: `${out}/game-${name}.png` });
 // A step that throws still reports the checks so far, the page errors and a screenshot.
 process.on("uncaughtException", async (error) => {
   await page.screenshot({ path: `${out}/game-failure.png` }).catch(() => {});
-  const first = String(error.message ?? error).split("\n")[0];
+  const first = String(error.message ?? error).split("\n").slice(0, 4).join(" ¦ ");
   console.log([...results, `FAIL crashed — ${first}`, ...errors.map((e) => `page error: ${e}`)].join("\n"));
   await browser.close().catch(() => {});
   process.exit(1);
@@ -321,6 +321,21 @@ await page.getByRole("button", { name: "保存", exact: true }).click();
 await page.locator(".codex-item", { hasText: "第 1 章 · 初到西市" }).waitFor();
 check("journal writes a chapter and the player can rename it", true);
 check("panel tabs fit the phone width", !(await page.evaluate(() => { const t = document.querySelector(".tabs"); return t.scrollWidth > t.clientWidth; })));
+
+// 目标 (R05-T003): add a wish, then finish the main goal from its sheet.
+await page.getByRole("tab", { name: /目标/ }).click();
+await page.getByRole("button", { name: "添加心愿" }).click();
+await page.getByLabel("心愿", { exact: true }).fill("攒钱在长安买一处宅子");
+await page.getByRole("button", { name: "记下", exact: true }).click();
+await page.locator(".codex-item", { hasText: "攒钱在长安买一处宅子" }).waitFor();
+check("a wish is listed with its kind", (await page.locator(".codex-item", { hasText: "攒钱在长安买一处宅子" }).textContent()).includes("心愿"));
+await page.locator(".codex-item", { hasText: "三日内付清房钱九十文" }).click();
+await page.waitForTimeout(400);
+await shot("06t-goal");
+check("a goal shows how it went", (await page.locator(".timeline li").count()) >= 1);
+await page.getByRole("button", { name: "标为完成" }).click();
+await page.getByText(/已结束 1/).waitFor();
+check("a finished goal moves to the ended list", true);
 await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 
@@ -345,7 +360,7 @@ await page.waitForTimeout(650);
 await page.mouse.up();
 await page.getByRole("button", { name: "用同样设定再开一局" }).click();
 await page.getByRole("button", { name: "随便穿" }).waitFor();
-check("same setup again prefills the new story", (await page.getByLabel(/故事设定/).inputValue()).length > 0 && (await page.getByLabel("名字").inputValue()).length > 0 && (await page.textContent("body")).includes("（由身份决定）"));
+check("same setup again prefills the new story", (await page.getByLabel(/故事设定/).inputValue()).length > 0 && (await page.getByLabel("名字", { exact: true }).inputValue()).length > 0 && (await page.textContent("body")).includes("（由身份决定）"));
 await page.getByRole("button", { name: "返回" }).click();
 await page.getByText("继续游玩").waitFor();
 
@@ -381,11 +396,14 @@ await page.getByRole("button", { name: "重说", exact: true }).click();
 await page.locator(".edit-line", { hasText: "（已沿用）" }).waitFor({ timeout: 20000 });
 await page.getByRole("button", { name: "角色" }).click();
 check("regenerating carries the edit to the new version", (await page.locator(".stat").first().textContent()).includes("500"));
+await page.getByRole("button", { name: "关闭", exact: true }).click();
+const editsBefore = await page.locator(".edit-line").count();
+await page.getByRole("button", { name: "角色" }).click();
 await page.getByRole("button", { name: "修改", exact: true }).click();
 await page.getByRole("button", { name: "保存修改" }).click();
 await page.getByRole("button", { name: "修改", exact: true }).waitFor();
 await page.getByRole("button", { name: "关闭", exact: true }).click();
-check("saving unchanged panel adds no edit", (await page.locator(".edit-line", { hasText: "你修改了" }).count()) === 1);
+check("saving unchanged panel adds no edit", (await page.locator(".edit-line").count()) === editsBefore);
 
 // Reading an earlier turn is restored when reopening the world.
 for (let i = 0; i < 3; i++) {
