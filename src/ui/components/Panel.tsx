@@ -116,7 +116,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
               <Stat label="钱" value={formatMoney(me.stats.money, era.currency)} />
               <Stat label="健康" value={level(me.stats.health, ["康健", "微恙", "带伤", "重伤", "垂危"])} n={me.stats.health} />
               <Stat label="精力" value={level(me.stats.energy, ["充沛", "尚可", "疲惫", "力竭"])} n={me.stats.energy} />
-              <Stat label="名望" value={level(100 - me.stats.fame, ["显赫", "知名", "略有耳闻", "无名小卒"])} n={me.stats.fame} />
+              <Stat label="名望" value={level(me.stats.fame, ["显赫", "知名", "略有耳闻", "无名小卒"])} n={me.stats.fame} />
             </div>}
             {me.stats.debt > 0 && <div className="notice">欠债 {formatMoney(me.stats.debt, era.currency)}</div>}
             <div>

@@ -161,6 +161,7 @@ check("regenerate keeps both versions", true);
 
 // Panel.
 await page.getByRole("button", { name: "角色" }).click();
+check("a new protagonist is a nobody, not famous", (await page.locator(".stat", { hasText: "名望" }).textContent()).includes("无名小卒"));
 await page.getByRole("tab", { name: /人物/ }).click();
 const panelText = await page.textContent(".panel");
 check("panel lists people", panelText.includes("货栈管事"));
