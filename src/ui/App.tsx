@@ -43,6 +43,8 @@ export default function App() {
       const platform = await getPlatform();
       const game = await Game.open(platform);
       void game.autoBackup();
+      // Dev builds only: lets UI scripts build large test worlds (scripts/ui/long-world.mjs).
+      if (import.meta.env.DEV) (window as unknown as { __lishi: unknown }).__lishi = { game };
       const profiles = await listProfiles(game.repo);
       const activeId = await game.repo.getSetting<string | null>("activeProfile", null);
       const active = profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null;

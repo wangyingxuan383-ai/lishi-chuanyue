@@ -83,12 +83,11 @@ export default function Home() {
       const line = world.currentLineId ? await game.repo.getLine(world.currentLineId) : null;
       if (!line) continue;
       const state = await game.repo.getState(line.nodeId);
-      const path = await game.repo.path(line.nodeId);
-      const latest = [...path].reverse().find((n) => n.kind !== "edit");
+      const summary = await game.repo.homeSummary(line.nodeId);
       const era = eraContext(world.eraId, state);
       out.push({
-        world, protagonist: state.protagonist.name, lastLine: lastSentence(latest?.narrative ?? ""),
-        clock: nowOf(era.clock, state.time.elapsedMinutes).text, turns: path.filter((n) => n.kind === "turn" || n.kind === "fastforward").length,
+        world, protagonist: state.protagonist.name, lastLine: lastSentence(summary.last),
+        clock: nowOf(era.clock, state.time.elapsedMinutes).text, turns: summary.turns,
       });
     }
     setCards(out);

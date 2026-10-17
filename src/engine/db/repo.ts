@@ -287,6 +287,21 @@ export class Repo {
     return rows.map(toNode);
   }
 
+  /** Turns on the path to `nodeId` and its latest passage, without loading the path (home and world lines, R08-T003). */
+  async homeSummary(nodeId: string): Promise<{ turns: number; last: string }> {
+    const rows = await this.q(
+      `WITH RECURSIVE up(id, depth) AS (
+         SELECT id, 0 FROM nodes WHERE id = ?
+         UNION ALL
+         SELECT n.parent_id, up.depth + 1 FROM nodes n JOIN up ON n.id = up.id WHERE n.parent_id IS NOT NULL
+       )
+       SELECT (SELECT COUNT(*) FROM up JOIN nodes n ON n.id = up.id WHERE n.kind IN ('turn', 'fastforward')) AS turns,
+              (SELECT n.narrative FROM up JOIN nodes n ON n.id = up.id WHERE n.kind <> 'edit' ORDER BY up.depth LIMIT 1) AS last`,
+      [nodeId],
+    );
+    return { turns: Number(rows[0]?.turns ?? 0), last: (rows[0]?.last as string) ?? "" };
+  }
+
   /** Every node of a world, oldest first, for the turn tree. */
   async allNodes(worldId: string): Promise<StoryNode[]> {
     return (await this.q(`SELECT ${NODE_COLUMNS} FROM nodes WHERE world_id = ? ORDER BY seq`, [worldId])).map(toNode);

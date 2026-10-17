@@ -33,9 +33,9 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
     await game.repo.purgeTrash(worldId);
     const out: Row[] = [];
     for (const line of await game.repo.lines(worldId)) {
-      const path = await game.repo.path(line.nodeId);
-      const last = [...path].reverse().find((n) => n.kind !== "edit")?.narrative.replace(/\s+/g, "") ?? "";
-      out.push({ line, turns: path.filter((n) => n.kind === "turn" || n.kind === "fastforward").length, last: last.length > 28 ? `…${last.slice(-28)}` : last });
+      const summary = await game.repo.homeSummary(line.nodeId);
+      const last = summary.last.replace(/\s+/g, "");
+      out.push({ line, turns: summary.turns, last: last.length > 28 ? `…${last.slice(-28)}` : last });
     }
     setRows(out);
   };
