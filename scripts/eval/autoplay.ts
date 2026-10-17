@@ -11,7 +11,7 @@ import { CLICHES, PROMPT_VERSION } from "../../src/engine/prompt/turn.ts";
 import { eraContext, eraPack } from "../../src/engine/era/index.ts";
 import { nowOf, timeOfDay } from "../../src/engine/calendar/clock.ts";
 import { formatDate } from "../../src/engine/calendar/date.ts";
-import { cursor } from "../../src/engine/tree.ts";
+import { cursor, goBackTo } from "../../src/engine/tree.ts";
 import type { ActionMode, StoryNode } from "../../src/engine/types.ts";
 import { TEMPLATES, templateName } from "../../src/content/templates.ts";
 import { createMemoryPlatform } from "../../src/platform/memory.ts";
@@ -180,6 +180,7 @@ async function main() {
   const probes: { questions: { q: string; a: string }[]; rounds: { turn: number; answers: string[]; promptTokens: number | null }[] } = { questions: [], rounds: [] };
   // Every goal in progress must reach the next turn's context (R05-T003); checked locally, no calls.
   const goalChecks = { turns: 0, missing: [] as { turn: number; goal: string }[] };
+  const deaths: number[] = [];
   async function checkGoals(): Promise<void> {
     const head = (await cursor(game.repo, worldId!)).head;
     const active = (await game.repo.getState(head.id)).goals.filter((g) => g.status === "进行中");
@@ -326,6 +327,17 @@ async function main() {
     consecutiveFailures = entry.failures.length ? consecutiveFailures + 1 : 0;
     if (calls.length >= maxCalls) { stopReason = "max_calls"; break; }
     if (consecutiveFailures >= 3) { stopReason = "three_failures"; break; }
+    // Like the app: a dead protagonist cannot go on, so the player goes back two turns (D123).
+    if (worldId && entry.status) {
+      const c = await cursor(game.repo, worldId);
+      if ((await game.repo.getState(c.head.id)).protagonist.stats.health <= 0) {
+        const path = await game.repo.path(c.head.id);
+        const back = path.filter((n) => n.kind !== "edit").at(-3);
+        if (back) await goBackTo(game.repo, c, back.id);
+        deaths.push(turn);
+        console.log(`第 ${turn} 回合主角死亡，回到两回合前`);
+      }
+    }
     if (worldId && entry.status) await checkGoals();
     if (probeAt.length && turn === probeTo) await writeQuestions().catch(() => console.log("记忆探针出题失败"));
     if (probeAt.includes(turn)) {
@@ -408,7 +420,7 @@ async function main() {
     timeMismatches, upkeep, chapters: chapterList,
     fortune: { byLevel: fortuneStats, riskyTurns: entries.filter((e) => e.risk).length, luckyFailRate: failRate(["大顺", "顺"]), unluckyFailRate: failRate(["不顺", "大不顺"]) },
     probes: probeAt.length ? { from: `${probeFrom}-${probeTo}`, ...probes } : null,
-    goalsInContext: goalChecks,
+    goalsInContext: goalChecks, deaths,
     tokenCurve: entries.filter((e) => e.turn % 10 === 0).map((e) => ({ turn: e.turn, promptTokens: e.usage?.promptTokens ?? null })),
     latencyMs: { firstToken: latency(entries.map((e) => e.firstTokenMs)), total: latency(entries.filter((e) => e.calls.some((c) => c.purpose === "turn")).map((e) => e.totalMs)) },
     calls: { total: calls.length, byPurpose: counts(calls.map((c) => c.purpose)), failuresByReason: counts(calls.filter((c) => c.failure).map((c) => c.failure!.status ? `${c.failure!.reason}:${c.failure!.status}` : c.failure!.reason)) },

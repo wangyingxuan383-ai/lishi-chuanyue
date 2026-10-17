@@ -673,7 +673,7 @@ export class Game {
     const state = await this.repo.getState(head.id);
     const messages = askMessages({
       question, state, era: eraContext(world.eraId, state), settings: world.settings,
-      chapters: await this.repo.chaptersOnPath(worldId, head.id), history: await this.repo.path(head.id, 12),
+      chapters: await this.repo.chaptersOnPath(worldId, head.id), history: await this.repo.path(head.id),
       pins: (await this.repo.pinsOnPath(worldId, head.id)).map((p) => p.text),
     });
     let result: ChatResult | null = null;

@@ -230,14 +230,25 @@ export function applyRecord(
       if (value !== undefined) me.stats[key] = clamp(value, 0, key === "money" ? Infinity : 100);
     }
   }
+  // Death follows the story (D123): on 标准 the first time health runs out the protagonist is 垂危,
+  // the narrator is told, and only another blow kills; 残酷 kills at once; 宽松 never kills.
+  const dying = me.statuses.some((x) => x.name === "垂危");
   if (me.stats.health <= 0 && opts?.advanceTime !== false) {
     if (ctx.difficulty === "宽松") {
       me.stats.health = 1;
       if (!me.statuses.some((x) => x.name === "昏迷")) me.statuses.push({ name: "昏迷", detail: "伤重昏迷", sinceMinute: now() });
       chips.push({ text: "昏迷", tone: "warn" });
+    } else if (ctx.difficulty !== "残酷" && !dying) {
+      me.stats.health = 1;
+      me.statuses.push({ name: "垂危", detail: "伤重濒死，再受重伤就会死", sinceMinute: now() });
+      chips.push({ text: "垂危", tone: "warn" });
+      notes.push("主角伤重濒死、命悬一线：叙述里要写出来；在伤势好转之前再受重伤，就会死去。");
     } else {
       chips.push({ text: "你死了", tone: "warn" });
     }
+  } else if (dying && me.stats.health > 30) {
+    me.statuses = me.statuses.filter((x) => x.name !== "垂危");
+    chips.push({ text: "垂危 好了", tone: "gain" });
   }
 
   // Items

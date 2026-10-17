@@ -193,6 +193,20 @@ describe("applyRecord", () => {
     expect(r.log).toContain("“开元通宝”是钱，按钱记，不放进行囊");
   });
 
+  it("on 标准, running out of health first leaves the protagonist dying; another blow kills", () => {
+    const s = sampleState();
+    s.protagonist.stats.health = 10;
+    const first = apply(s, { stats: { health: -20 } });
+    expect(first.state.protagonist.stats.health).toBe(1);
+    expect(first.state.protagonist.statuses.map((x) => x.name)).toContain("垂危");
+    expect(first.chips.map((c) => c.text)).toContain("垂危");
+    expect(first.notes.join()).toContain("命悬一线");
+    expect(apply(first.state, { stats: { health: -5 } }).chips.map((c) => c.text)).toContain("你死了");
+    const healed = apply(first.state, { stats: { health: 35 } });
+    expect(healed.state.protagonist.statuses.map((x) => x.name)).not.toContain("垂危");
+    expect(apply(s, { stats: { health: -20 } }, "残酷").chips.map((c) => c.text)).toContain("你死了");
+  });
+
   it("says long spans in months and years", () => {
     const chip = (time: string) => apply(sampleState(), { time }).chips[0].text;
     expect(chip("一个月")).toBe("过了 1 个月");
