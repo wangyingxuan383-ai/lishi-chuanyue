@@ -74,15 +74,24 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
   );
 }
 
-export function Codex({ state, era, busy, onSave, onOpenStory }: {
+export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
   state: WorldState; era: EraContext; busy: boolean;
   onSave: (patch: TurnRecord, summary: string) => Promise<void>;
   onOpenStory: () => void;
+  /** Lets the AI organize the 设定集 from the premise; true when something was added. */
+  onOrganize: (replaceOwnEra: boolean) => Promise<boolean>;
 }) {
   const [editing, setEditing] = useState<Editing | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [organizing, setOrganizing] = useState(false);
   const eraCard = era.eraCard;
-  const open = (next: Editing) => { if (!busy) setEditing(next); };
+  const open = (next: Editing) => { if (!busy && !organizing) setEditing(next); };
+  const organize = async () => {
+    const own = eraCard?.source === "玩家";
+    if (own && !confirm("AI 会按故事设定重新整理，并覆盖你写的时代卡。确定吗？之后可以撤销。")) return;
+    setOrganizing(true);
+    try { await onOrganize(own); } finally { setOrganizing(false); }
+  };
   const items = (kind: "地点" | CardKind): { id: string; name: string; text: string; tag?: string; edit: Editing }[] =>
     kind === "地点"
       ? [...state.places].sort((a, b) => Number(b.id === state.placeId) - Number(a.id === state.placeId))
@@ -93,8 +102,9 @@ export function Codex({ state, era, busy, onSave, onOpenStory }: {
     <div className="stack">
       <section className="codex-era">
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <b>时代卡</b>
-          <button className="ghost" disabled={busy} onClick={() => open({ type: "card", kind: "时代", card: eraCard })}>{eraCard ? "编辑" : "写一张"}</button>
+          <b className="grow">时代卡</b>
+          <button className="ghost" disabled={busy || organizing} onClick={() => void organize()}>{organizing ? "整理中…" : eraCard ? "AI 重新整理" : "AI 整理"}</button>
+          <button className="ghost" disabled={busy || organizing} onClick={() => open({ type: "card", kind: "时代", card: eraCard })}>{eraCard ? "编辑" : "写一张"}</button>
         </div>
         {eraCard ? <>
           <p className="muted" style={{ margin: "2px 0 6px" }}>{eraCard.name}{eraCard.source ? ` · ${SOURCE[eraCard.source]}` : ""} · 每回合都交给 AI</p>

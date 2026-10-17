@@ -169,7 +169,7 @@ await page.getByLabel("内容").fill("一伙行走江湖的人，暗中贩私盐
 await page.getByRole("button", { name: "保存", exact: true }).click();
 await page.locator(".codex-item", { hasText: "天地会" }).waitFor();
 check("new card listed in the 设定集", true);
-await page.locator(".codex-era button").first().click();
+await page.locator(".codex-era").getByRole("button", { name: /^(编辑|写一张)$/ }).click();
 await page.getByLabel("名称").fill("测试时代");
 await page.getByLabel("内容").fill("时局：天下太平。\n不要出现：手机");
 await page.getByRole("button", { name: "保存", exact: true }).click();
@@ -186,6 +186,18 @@ await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
 const sent = JSON.stringify(await (await fetch("http://127.0.0.1:18800/debug/last-request")).json());
 check("mentioned card sent to the AI", sent.includes("【势力】天地会（又称会党）：一伙行走江湖的人"));
 check("era card sent with the turn", sent.includes("【时代】测试时代") && sent.includes("时局：天下太平"));
+
+// AI organizing from the 设定 tab replaces the player's era card after a confirm.
+await page.getByRole("button", { name: "角色" }).click();
+await page.getByRole("tab", { name: "设定" }).click();
+page.once("dialog", (dialog) => void dialog.accept());
+await page.getByRole("button", { name: "AI 重新整理" }).click();
+// The random opening may already have been organized; wait for the player's era card to be replaced.
+await page.locator(".codex-era", { hasText: "AI 整理的时代" }).waitFor({ timeout: 20000 });
+check("AI organizes the 设定集", (await page.locator(".codex-era").textContent()).includes("AI 整理的时代 · AI 整理") && (await page.locator(".codex-item", { hasText: "漕帮" }).count()) === 1);
+await page.keyboard.press("Escape");
+await page.locator(".panel").waitFor({ state: "detached" });
+await page.locator(".edit-line", { hasText: "AI 整理了设定集" }).waitFor();
 
 // Long-press menu → go back to opening.
 const firstTurn = page.locator(".turn").first();

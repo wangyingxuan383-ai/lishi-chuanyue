@@ -21,12 +21,14 @@ export interface Draft {
   openingMode: "ai" | "player";
   hint: string;
   openingText: string;
+  /** Without a built-in pack: let the AI organize the 设定集 from the premise. */
+  organize: boolean;
   settings: Pick<WorldSettings, "perspective" | "style" | "length" | "choiceCount" | "intensity" | "essentials" | "rules">;
 }
 
 export const EMPTY: Draft = {
   templateId: null, lockedGender: null, title: "", eraId: null, premise: "", name: "", gender: "男", age: "",
-  identity: "", arrival: "魂穿", origin: "历史系研究生", openingMode: "ai", hint: "", openingText: "",
+  identity: "", arrival: "魂穿", origin: "历史系研究生", openingMode: "ai", hint: "", openingText: "", organize: true,
   settings: {
     perspective: DEFAULT_SETTINGS.perspective, style: DEFAULT_SETTINGS.style, length: DEFAULT_SETTINGS.length,
     choiceCount: DEFAULT_SETTINGS.choiceCount, intensity: DEFAULT_SETTINGS.intensity, essentials: "", rules: "",
@@ -65,6 +67,7 @@ export function toNewWorld(d: Draft): NewWorld {
     arrival: d.arrival,
     origin: d.arrival === "不穿越" ? "" : d.origin,
     opening: d.openingMode === "player" ? { mode: "player", text: d.openingText } : { mode: "ai", hint: d.hint },
+    organize: !d.eraId && d.organize,
   };
 }
 
@@ -79,6 +82,7 @@ export function fromSetup(setup: NewWorld): Draft {
     identity: setup.protagonist.identity, arrival: setup.arrival, origin: setup.origin || EMPTY.origin,
     openingMode: setup.opening.mode, hint: setup.opening.mode === "ai" ? setup.opening.hint : "",
     openingText: setup.opening.mode === "player" ? setup.opening.text : "",
+    organize: setup.organize !== false,
     settings: { ...EMPTY.settings, ...s, essentials: s.essentials ?? "", rules: s.rules ?? "" },
   });
 }
@@ -129,6 +133,7 @@ function clean(raw: Record<string, unknown>): Draft {
     openingMode: oneOf(raw.openingMode, ["ai", "player"] as const, "ai"),
     hint: str(raw.hint, 200),
     openingText: str(raw.openingText, 8000),
+    organize: raw.organize !== false,
     settings: {
       perspective: oneOf(s.perspective, ["你", "我", "他"] as Perspective[], EMPTY.settings.perspective),
       style: oneOf(s.style, ["白话", "半文半白"] as const, EMPTY.settings.style),

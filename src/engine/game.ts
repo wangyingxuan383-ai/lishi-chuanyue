@@ -13,6 +13,7 @@ import {
   assistMessages, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION, turnMessages,
   type Arrival, type SetupDraft,
 } from "./prompt/turn";
+import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
 import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
@@ -49,6 +50,8 @@ export interface NewWorld {
   arrival: Arrival;
   origin: string;
   opening: { mode: "ai"; hint: string } | { mode: "player"; text: string };
+  /** Without a built-in pack: let the AI organize the 设定集 from the premise (R03-T008). */
+  organize?: boolean;
 }
 
 export interface PlayerAction {
@@ -75,6 +78,7 @@ interface Pending {
 }
 
 const EXTRACT_TIMEOUT = { firstByteMs: 20_000, idleMs: 20_000, totalMs: 40_000 };
+const CODEX_TIMEOUT = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 75_000 };
 
 function failReason(error: unknown): { reason: FailReason; status?: number; detail?: string } {
   if (!(error instanceof ChatError)) return { reason: "network", detail: String(error) };
@@ -173,6 +177,31 @@ export class Game {
     }
   }
 
+  /** One organizing call (R03-T008); null when it fails, which never blocks play. */
+  private async codex(input: CodexInput): Promise<ChatResult | null> {
+    try {
+      return await this.call(codexMessages(input), { aux: true, timeouts: CODEX_TIMEOUT });
+    } catch {
+      return null;
+    }
+  }
+
+  /** Organizes the 设定集 again from the current premise; an undoable edit node, or null if nothing came back. */
+  async organize(worldId: string, opts: { replaceOwnEra?: boolean } = {}): Promise<tree.Cursor | null> {
+    const world = await this.repo.getWorld(worldId);
+    if (!world) return null;
+    const state = await this.repo.getState((await tree.cursor(this.repo, worldId)).head.id);
+    const me = state.protagonist;
+    const result = await this.codex({
+      premise: world.settings.premise, protagonist: { name: me.name, gender: me.gender, age: me.age, identity: me.identity },
+      arrival: (await this.setupOf(worldId))?.arrival ?? "魂穿",
+      known: [...state.cards.filter((c) => c.kind !== "时代").map((c) => c.name), ...state.places.map((p) => p.name)],
+    });
+    const patch = result ? codexPatch(result.text, state, opts) : null;
+    await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.llm!.auxModel || this.llm!.model)]);
+    return patch ? this.editState(worldId, patch, codexSummary(patch)) : null;
+  }
+
   async createWorld(input: NewWorld, onEvent: (e: TurnEvent) => void): Promise<string | null> {
     const pack = eraPack(input.eraId);
     const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
@@ -193,6 +222,13 @@ export class Game {
     };
     const era = eraContext(pack?.id ?? null, initial);
     const opening = { era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "" };
+    // Organizing starts once the opening is under way, so it never delays the first words.
+    const organize = !pack && input.organize === true;
+    let codex: Promise<ChatResult | null> | null = null;
+    const startCodex = (): Promise<ChatResult | null> | null => {
+      if (organize && !codex) codex = this.codex({ premise: settings.premise, protagonist: p, arrival: input.arrival });
+      return codex;
+    };
 
     let narrative: string;
     let record: TurnRecord | null;
@@ -215,6 +251,7 @@ export class Game {
         result = await this.call(openingMessages(opening), {
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
+            startCodex();
             const visible = splitter.push(delta);
             if (visible) { shown += visible; onEvent({ type: "text", delta: visible, full: shown }); }
           },
@@ -234,6 +271,15 @@ export class Game {
     if (!record) {
       onEvent({ type: "failed", reason: "no_record", partialSaved: false });
       return null;
+    }
+
+    // The organized 设定集 goes into the opening state before the opening's own record.
+    let codexResult: ChatResult | null = null;
+    if (organize) {
+      onEvent({ type: "organizing" });
+      codexResult = await startCodex();
+      const patch = codexResult ? codexPatch(codexResult.text, initial) : null;
+      if (patch) Object.assign(initial, applyRecord(initial, patch, { mode: "do", difficulty: settings.difficulty, currency: era.currency }, { advanceTime: false }).state);
     }
 
     // Opening-only fields: date, hour, currency and the starting purse (an absolute amount).
@@ -263,12 +309,15 @@ export class Game {
         parentId: null, kind: "opening", narrative, record, choices: record.choices ?? [], state: applied.state,
         meta: {
           promptVersion: PROMPT_VERSION, model, playerWritten: input.opening.mode === "player",
-          setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "" },
+          setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "", organize },
+          ...(organize ? { codexPromptVersion: CODEX_PROMPT_VERSION, codexOk: !!codexResult } : {}),
           firstTokenMs: result?.firstTokenMs, totalMs: result?.totalMs, usage: result?.usage, raw: result?.text,
         },
       },
     });
-    if (result) await this.platform.sql.batch([this.usage(world.id, node.id, "opening", result, "ok", model)]);
+    const usage = result ? [this.usage(world.id, node.id, "opening", result, "ok", model)] : [];
+    if (organize) usage.push(this.usage(world.id, node.id, "codex", codexResult, initial.cards.length ? "ok" : "no_record", this.llm!.auxModel || model));
+    if (usage.length) await this.platform.sql.batch(usage);
     onEvent({ type: "done", cursor: await tree.cursor(this.repo, world.id), node, chips: [] });
     return world.id;
   }
@@ -279,12 +328,13 @@ export class Game {
     const opening = world ? await this.repo.opening(worldId) : null;
     if (!world || !opening) return null;
     const me = (await this.repo.getState(opening.id)).protagonist;
-    const setup = (opening.meta.setup ?? {}) as { arrival?: Arrival; hint?: string };
+    const setup = (opening.meta.setup ?? {}) as { arrival?: Arrival; hint?: string; organize?: boolean };
     return {
       title: world.title, eraId: eraPack(world.eraId)?.id ?? null, settings: world.settings,
       protagonist: { name: me.name, gender: me.gender, age: me.age, identity: me.identity },
       arrival: setup.arrival ?? (me.origin ? "魂穿" : "不穿越"), origin: me.origin,
       opening: opening.meta.playerWritten ? { mode: "player", text: opening.narrative } : { mode: "ai", hint: setup.hint ?? "" },
+      organize: setup.organize ?? !eraPack(world.eraId),
     };
   }
 

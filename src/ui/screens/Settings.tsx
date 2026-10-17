@@ -3,7 +3,7 @@ import { deleteProfile, listProfiles, type Profile } from "../../engine/llm/prov
 import { useApp, type Reading } from "../app/context";
 import type { Row } from "../../platform";
 
-const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", test: "测试" };
+const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", test: "测试" };
 
 export default function Settings() {
   const { game, push, pop, profile, setProfile, reading, setReading, devMode, setDevMode, toast } = useApp();

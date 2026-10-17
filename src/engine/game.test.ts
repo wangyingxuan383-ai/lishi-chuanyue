@@ -161,6 +161,50 @@ describe("Game", () => {
     expect((await game.repo.getState(back.head.id)).cards.map((c) => c.name)).toEqual(["唐 · 天宝七载 · 长安"]);
   });
 
+  it("organizes the 设定集 alongside an opening without a pack", async () => {
+    const codex = JSON.stringify({
+      era: { name: "大胤 · 景和三年", content: "时局：太后垂帘。\n不要出现：火枪" },
+      cards: [{ kind: "势力", name: "青衣卫", content: "太后的密探" }, { kind: "地点", name: "云京", content: "京城" }],
+    });
+    const llm = fakeLlm([{ text: "你醒在云京。" + RECORD({ place: "云京", goals: [{ op: "add", name: "活下去" }] }) }, { text: codex }]);
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "", eraId: null, settings: { premise: "架空王朝大胤，太后垂帘。" }, organize: true,
+      protagonist: { name: "沈砚", gender: "男", age: 20, identity: "你是青衣卫的小旗。" },
+      arrival: "魂穿", origin: "程序员", opening: { mode: "ai", hint: "" },
+    }, () => {}))!;
+    const head = (await tree.cursor(game.repo, worldId)).head;
+    const state = await game.repo.getState(head.id);
+    expect(llm.calls[0].body.messages[1].content).toContain("请写这部小说的开场");
+    expect(llm.calls[1].body.messages[0].content).toContain("设定集");
+    expect(state.cards.map((c) => [c.kind, c.name, c.source])).toEqual([["时代", "大胤 · 景和三年", "AI"], ["势力", "青衣卫", "AI"]]);
+    expect(state.places.map((p) => [p.name, p.description])).toEqual([["云京", "京城"]]);
+    expect(state.placeId).toBe(state.places[0].id);
+    expect(head.meta).toMatchObject({ codexOk: true, setup: { organize: true } });
+    const usage = await game.platform.sql.query("SELECT purpose, outcome FROM usage ORDER BY purpose");
+    expect(usage).toEqual([{ purpose: "codex", outcome: "ok" }, { purpose: "opening", outcome: "ok" }]);
+    expect((await game.setupOf(worldId))?.organize).toBe(true);
+  });
+
+  it("starts the world even when organizing fails, and can organize again later", async () => {
+    const llm = fakeLlm([
+      { text: "你醒来。" + RECORD({ goals: [{ op: "add", name: "活下去" }] }) },
+      { text: "抱歉，无法整理。" },
+      { text: JSON.stringify({ era: { name: "大胤", content: "时局：太后垂帘。" }, cards: [{ kind: "势力", name: "青衣卫", content: "AI 写的" }] }) },
+    ]);
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "", eraId: null, settings: { premise: "架空王朝大胤。" }, organize: true,
+      protagonist: { name: "沈砚", gender: "男", age: 20, identity: "你是小旗。" }, arrival: "魂穿", origin: "", opening: { mode: "ai", hint: "" },
+    }, () => {}))!;
+    expect((await game.repo.getState((await tree.cursor(game.repo, worldId)).head.id)).cards).toEqual([]);
+    await game.editState(worldId, { cards: [{ op: "add", kind: "势力", name: "青衣卫", content: "我写的" }] }, "新建势力卡：青衣卫");
+    const c = (await game.organize(worldId))!;
+    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：时代卡" });
+    const state = await game.repo.getState(c.head.id);
+    expect(state.cards.map((x) => [x.name, x.content])).toEqual([["青衣卫", "我写的"], ["大胤", "时局：太后垂帘。"]]);
+  });
+
   it("uses the opening's purse, date and hour", async () => {
     const llm = fakeLlm([{ text: "你醒在汴京。" + RECORD({ money: "二百两", date: "宣和四年春二月", hour: 9, currency: [{ name: "文", value: 1 }, { name: "两", value: 1000 }], goals: [{ op: "add", name: "活下去" }] }) }]);
     const game = await Game.open(await createMemoryPlatform(llm), LLM);

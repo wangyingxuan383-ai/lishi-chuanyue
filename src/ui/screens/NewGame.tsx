@@ -170,7 +170,7 @@ export default function NewGame() {
           {!text ? (
             <div className="hero"><p style={{ fontSize: 20, letterSpacing: 4 }}>{phase === "organizing" ? "整理中…" : "落笔中…"}</p><p className="muted">{tip}</p></div>
           ) : <StoryText text={text} streaming={phase === "writing"} />}
-          {text && phase === "organizing" && <p className="status-line">整理人物与处境…</p>}
+          {text && phase === "organizing" && <p className="status-line">整理人物与设定…</p>}
         </div>
       </div>
     );
@@ -283,12 +283,15 @@ export default function NewGame() {
           <summary className="muted">更多设置</summary>
           <div className="stack" style={{ marginTop: 12 }}>
             <label>故事名<input value={draft.title} onChange={(e) => set("title", e.target.value)} placeholder="不填则用主角名字" /></label>
-            <span className="muted">时代资料</span>
-            <div className="segmented">
-              <button aria-pressed={!draft.eraId} onClick={() => set("eraId", null)}>按故事设定</button>
+            <span className="muted">时代设定（放进设定集，开局后可在“我 → 设定”里修改）</span>
+            <div className="segmented" role="group" aria-label="时代设定">
+              <button aria-pressed={!draft.eraId && draft.organize} onClick={() => setDraft((d) => ({ ...d, eraId: null, organize: true }))}>AI 按故事设定整理</button>
               {ERAS.map((e) => <button key={e.id} aria-pressed={draft.eraId === e.id} onClick={() => set("eraId", e.id)}>{e.title}</button>)}
+              <button aria-pressed={!draft.eraId && !draft.organize} onClick={() => setDraft((d) => ({ ...d, eraId: null, organize: false }))}>不要</button>
             </div>
-            <p className="muted" style={{ margin: 0 }}>选了时代资料，AI 会参考当时的货币、物价、称谓，并避开常见的时代错误。</p>
+            <p className="muted" style={{ margin: 0 }}>{draft.eraId ? "使用整理好的内置资料：时代卡、主要地点、年号与货币。"
+              : draft.organize ? "开场时 AI 按你的故事设定整理一张时代卡和几张关键卡片，只补你没写的部分。"
+              : "不准备时代卡，AI 只按故事设定来写。"}</p>
             <span className="muted">叙述视角</span>
             <div className="segmented">
               {([["你", "你（第二人称）"], ["我", "我（第一人称）"], ["他", "他 / 她（小说式）"]] as [Perspective, string][]).map(([v, l]) => <button key={v} aria-pressed={draft.settings.perspective === v} onClick={() => setS("perspective", v)}>{l}</button>)}

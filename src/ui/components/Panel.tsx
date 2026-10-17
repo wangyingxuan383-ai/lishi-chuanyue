@@ -25,8 +25,9 @@ function Stat({ label, value, n }: { label: string; value: string; n?: number })
   );
 }
 
-export function Panel({ state, era, onClose, onSave, onOpenStory, busy }: {
-  state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>; onOpenStory: () => void; busy: boolean;
+export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, busy }: {
+  state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
+  onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean) => Promise<boolean>; busy: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("我");
   const [draft, setDraft] = useState<WorldState | null>(null);
@@ -167,7 +168,7 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, busy }: {
             {!editing && <span className="tag">{p.attitude}</span>}
           </div>
         )) : <p className="muted">还没有结识什么人。</p>)}
-        {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} />}
+        {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && (
           <div className="stack">
             {active.length ? active.map((g) => (
