@@ -23,7 +23,7 @@ const THEMES: [Reading["theme"], string][] = [["auto", "跟随系统"], ["paper"
 const SIZES: [number, string][] = [[16, "小"], [18, "中"], [20, "大"], [22, "特大"]];
 
 export default function Settings() {
-  const { game, pop, profile, reading, devMode } = useApp();
+  const { game, pop, push, profile, reading, devMode } = useApp();
   const [page, setPage] = useState<Page>("home");
   const [defaults, setDefaults] = useState<PlayDefaults>(BUILTIN_DEFAULTS);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -49,6 +49,7 @@ export default function Settings() {
     { group: "游戏", items: [
       { page: "play", label: "游玩默认", state: `难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
       { page: "reading", label: "阅读与外观", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
+      { page: "guide" as Page, label: "游玩指南", state: "怎么玩、各个功能在哪、常见问题" },
       { page: "notify", label: "通知与提醒", state: !android ? "电脑上不需要" : notify?.enabled ? "已打开" : "没打开", hidden: !android && !devMode },
     ] },
     { group: "应用", items: [
@@ -71,7 +72,7 @@ export default function Settings() {
             <h2>{g.group}</h2>
             <div className="settings-list">
               {g.items.filter((i) => !i.hidden).map((i) => (
-                <button key={i.page} className="settings-entry" onClick={() => setPage(i.page)}>
+                <button key={i.page} className="settings-entry" onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : setPage(i.page))}>
                   <span><b>{i.label}</b><small>{i.state}</small></span><span aria-hidden="true">›</span>
                 </button>
               ))}

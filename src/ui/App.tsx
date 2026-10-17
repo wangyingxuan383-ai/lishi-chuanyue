@@ -10,6 +10,7 @@ import Setup from "./screens/Setup";
 import NewGame from "./screens/NewGame";
 import Play from "./screens/Play";
 import Settings from "./screens/Settings";
+import Guide from "./screens/Guide";
 
 export function llmFor(profile: Profile | null): LlmConfig | null {
   if (!profile) return null;
@@ -169,6 +170,7 @@ export default function App() {
       {route.name === "newgame" && <NewGame />}
       {route.name === "play" && <Play key={route.worldId} worldId={route.worldId} />}
       {route.name === "settings" && <Settings />}
+      {route.name === "guide" && <Guide />}
       {toastState && (
         <div className="toast" role="status">
           <span>{toastState.text}</span>

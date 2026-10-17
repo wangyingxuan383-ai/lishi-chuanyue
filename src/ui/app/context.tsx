@@ -9,7 +9,8 @@ export type Route =
   | { name: "setup"; first?: boolean; profileId?: string }
   | { name: "newgame" }
   | { name: "play"; worldId: string }
-  | { name: "settings" };
+  | { name: "settings" }
+  | { name: "guide" };
 
 export interface Reading {
   size: number;

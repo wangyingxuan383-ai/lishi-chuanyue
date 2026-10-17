@@ -186,7 +186,10 @@ export default function Home() {
             ))}
           </div>
         </details>}
-        <button className="ghost" onClick={() => void importOne()}>从文件导入世界…</button>
+        <div className="row home-links">
+          <button className="ghost" onClick={() => push({ name: "guide" })}>游玩指南</button>
+          <button className="ghost" onClick={() => void importOne()}>从文件导入世界…</button>
+        </div>
         {incoming && <MenuSheet
           title={`已经有“${incoming.title}”了`}
           onClose={() => setIncoming(null)}

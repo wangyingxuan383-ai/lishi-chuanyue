@@ -408,6 +408,14 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 .service-main p { margin: 0; font-size: 14px; color: var(--muted); word-break: break-all; }
 .service-actions { padding: 0 6px 4px; gap: 0; }
 
+.welcome { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 3px; background: var(--surface); }
+.welcome p { margin: 0; line-height: 1.7; }
+.welcome b { font-family: var(--serif); }
+.welcome .link { justify-self: start; }
+.guide-body p { margin: 0 0 10px; line-height: 1.8; font-size: 15px; }
+.guide-body b { font-family: var(--serif); color: var(--accent); }
+.home-links { justify-content: center; flex-wrap: wrap; gap: 4px; }
+
 /* ---------- new game ---------- */
 .sticky-bar { position: sticky; bottom: 0; z-index: 2; padding: 10px 0 calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 3px double var(--line); box-shadow: 0 -12px 12px -6px color-mix(in srgb, var(--bg) 90%, transparent); }
 .template-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }

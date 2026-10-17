@@ -29,6 +29,7 @@ await page.goto("http://127.0.0.1:1420/");
 
 // First launch → AI service setup.
 await page.getByText("连接 AI 服务").waitFor();
+check("first launch says what the game is and how to get a key", (await page.locator(".welcome").textContent()).includes("另一个时代") && (await page.getByRole("button", { name: "我还没有 Key，怎么办？" }).count()) === 1);
 await shot("01-setup");
 await connectFake(page, { check });
 
@@ -529,6 +530,18 @@ await shot("11-reading-restored");
 await page.locator(".send-btn").click();
 await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
 check("new generation follows the bottom again", (await page.getByRole("button", { name: "回到底部 ↓" }).count()) === 0);
+
+// The play guide: every feature and where it lives, from the home screen.
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.getByRole("button", { name: "游玩指南" }).click();
+await page.locator(".guide .fold").first().waitFor();
+check("the play guide lists how to play, the features and common problems", (await page.locator(".guide .fold").count()) >= 7 && (await page.textContent(".guide")).includes("醒来") === false && (await page.textContent(".guide")).includes("这是什么游戏"));
+await page.locator(".guide .fold-head", { hasText: "常见问题" }).click();
+check("guide sections open to their answers", (await page.textContent(".guide")).includes("连不上服务"));
+await shot("11c-guide");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".world-open").first().click();
+await page.locator(".turn").last().waitFor();
 
 // Developer call history is only shown after enabling developer mode.
 await page.getByRole("button", { name: "返回", exact: true }).click();

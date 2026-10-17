@@ -625,6 +625,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
+            { label: "游玩指南", onSelect: () => push({ name: "guide" }) },
             { label: "查看上下文（开发者）", hidden: !devMode || !!gen, onSelect: async () => setContext(await game.previewContext(worldId)) },
             { label: "用同样设定再开一局", hidden: !!gen, onSelect: async () => {
               const setup = await game.setupOf(worldId);

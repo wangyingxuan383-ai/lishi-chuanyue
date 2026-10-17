@@ -34,6 +34,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   const [modelsNote, setModelsNote] = useState<string | null>(null);
   const [picking, setPicking] = useState<"main" | "aux" | null>(null);
   const [presetsOpen, setPresetsOpen] = useState(false);
+  const [noKeyHelp, setNoKeyHelp] = useState(false);
   /** The key is kept in a draft slot until 保存 (J-09): nothing lands in the service list before that. */
   const draftSlot = useRef(`draft-${newId().slice(0, 12)}`);
   const draftKeyBase = useRef<string | null>(null);
@@ -199,7 +200,19 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
         <div className="title"><h1>{first ? "连接 AI 服务" : existing ? "修改 AI 服务" : "添加 AI 服务"}</h1></div>
       </div>
       <div className="screen-body stack">
-        {first && <p className="muted" style={{ margin: 0 }}>故事由你自己的 AI 服务来写。Key 只加密保存在这台设备上。</p>}
+        {first && (
+          <div className="welcome">
+            <p><b>醒来时，你已在另一个时代。</b>你写下想做的事，AI 把结果写成故事；钱、伤病、人物、时间由程序替你记着。</p>
+            <p className="muted">故事由你自己的 AI 服务来写（按用量付费，一回合通常不到一分钱）。Key 只加密保存在这台设备上。</p>
+            {!noKeyHelp ? <button className="link" onClick={() => setNoKeyHelp(true)}>我还没有 Key，怎么办？</button> : (
+              <ol className="steps">
+                <li>推荐 DeepSeek（便宜、中文好）或智谱（有免费模型）。在上面选好服务商，点“申请 Key”。</li>
+                <li>在打开的网页里注册，新建一个 Key，复制下来（有的只显示一次）。</li>
+                <li>回到这里粘贴，模型会自己出来，点“连接并开始”。</li>
+              </ol>
+            )}
+          </div>
+        )}
 
         <section className="stack" style={{ gap: 8 }}>
           <span className="field-label">服务商</span>
