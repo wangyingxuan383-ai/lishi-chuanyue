@@ -464,3 +464,22 @@ button.danger-text { color: var(--loss); }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
 :root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+
+/* ---------- 完整感 (direction G): 目录, search, 前情提要 ---------- */
+.toc .section-title { margin: 6px 0 2px; color: var(--accent); }
+.toc button.codex-item { min-height: var(--tap); }
+.toc .item-row b { font-weight: 600; letter-spacing: 0.04em; }
+.toc-pin { font-family: var(--serif); line-height: 1.6; }
+.toc .item-row small.toc-snippet { line-height: 1.6; color: var(--fg); font-family: var(--serif); font-size: 14px; }
+.toc-snippet mark { background: var(--accent-soft); color: var(--accent); padding: 0 1px; border-radius: 2px; }
+.turn.toc-flash { animation: toc-flash 1.6s ease-out; }
+@keyframes toc-flash { 0%, 30% { background: var(--accent-soft); } 100% { background: transparent; } }
+.recap-card {
+  margin: 14px 0 6px; padding: 8px 14px 12px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 3px;
+  background: var(--surface); font-family: var(--serif); font-size: 15px; line-height: 1.75; animation: fade-up 0.24s ease-out both;
+}
+.recap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recap-head b { letter-spacing: 0.12em; color: var(--accent); }
+.recap-head button { min-height: var(--tap); padding: 0 8px; font-size: 14px; color: var(--muted); font-family: var(--sans); }
+.recap-card p { margin: 4px 0 0; }
+.recap-label { display: inline-block; margin-right: 8px; font-size: 13px; color: var(--muted); font-family: var(--sans); }

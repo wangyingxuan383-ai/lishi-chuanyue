@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { archiveProblems, exportWorld, importWorld } from "../../engine/archive";
+import { exportStory } from "../../engine/book";
 import { eraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
 import type { World } from "../../engine/types";
@@ -214,6 +215,12 @@ export default function Home() {
             } },
             { label: "用同样设定再开一局", onSelect: () => void again(menuFor.world.id) },
             { label: "导出成文件", onSelect: () => void exportOne(menuFor) },
+            // The current route as a readable novel (direction G): 回目 headings, the player's actions as short lines.
+            { label: "导出成小说（文本）", onSelect: async () => {
+              const story = await exportStory(game.repo, menuFor.world.id).catch(() => null);
+              if (!story) { toast("没导出来，请再试一次"); return; }
+              if (await game.platform.files.exportText(story.fileName, story.text).catch(() => false)) toast("已导出成小说");
+            } },
             {
               label: "删除这个世界", danger: true,
               // Into the recycle bin, with a way back right away (AUDIT_V4_FUNCTION C2).

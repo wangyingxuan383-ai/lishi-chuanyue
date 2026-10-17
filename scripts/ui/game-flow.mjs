@@ -692,6 +692,70 @@ await page.locator(".ending-card").waitFor({ state: "detached" });
 check("going back from the ending brings the story back", (await page.locator(".ending-card").count()) === 0);
 await page.getByRole("button", { name: "返回", exact: true }).click();
 
+// 完整感 (direction G): 目录 with 回目, bookmarks and 要点; search jumps to the passage.
+await page.locator(".world-card", { hasText: dyingWorld }).first().click();
+await page.locator(".turn").last().waitFor();
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "目录与搜索" }).click();
+await page.locator(".toc .section-title", { hasText: "章回" }).waitFor();
+await page.waitForTimeout(400);
+await shot("17-toc");
+const tocText = await page.textContent(".sheet");
+check("目录 lists chapters as 回目 with their time, bookmarks and 要点", tocText.includes("第一回　初到西市") && tocText.includes("楔子") && tocText.includes("刚穿越来时") && tocText.includes("我记下的要点") && /天宝/.test(tocText));
+check("目录 fits the phone width", !(await page.evaluate(() => document.querySelector(".sheet").scrollWidth > innerWidth)));
+await page.getByLabel("搜索").fill("货栈");
+await page.locator(".toc-snippet mark").first().waitFor();
+await page.waitForTimeout(300);
+await shot("18-search");
+check("search shows snippets with the hit marked", (await page.locator(".toc-snippet mark").first().textContent()) === "货栈" && (await page.locator(".sheet .tag", { hasText: "正文" }).count()) >= 1);
+const firstPassage = page.locator(".sheet button.codex-item", { has: page.locator(".tag", { hasText: "正文" }) }).last();
+await page.locator(".story").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+await firstPassage.click();
+await page.locator(".sheet").waitFor({ state: "detached" });
+await page.waitForTimeout(300);
+const jumped = await page.evaluate(() => {
+  const story = document.querySelector(".story").getBoundingClientRect();
+  const hit = [...document.querySelectorAll(".turn")].find((t) => t.textContent.includes("货栈"));
+  const box = hit?.getBoundingClientRect();
+  return !!box && box.top < story.bottom && box.bottom > story.top;
+});
+check("tapping a search result scrolls the story to that passage", jumped);
+await page.getByRole("button", { name: "返回", exact: true }).click();
+
+// 前情提要: away more than six hours, the story opens with a recap card.
+await page.evaluate(async (title) => {
+  const { game } = window.__lishi;
+  const world = (await game.repo.listWorlds()).find((w) => w.title === title);
+  const old = new Date(Date.now() - 8 * 3600_000).toISOString();
+  await game.platform.sql.query("UPDATE worlds SET played_at = ? WHERE id = ?", [old, world.id]);
+  await game.repo.setSetting("opened:" + world.id, Date.now() - 8 * 3600_000);
+}, dyingWorld);
+await page.waitForTimeout(1200);
+await page.reload();
+await page.locator(".world-card", { hasText: dyingWorld }).first().click();
+await page.locator(".recap-card").waitFor();
+await page.waitForTimeout(400);
+await shot("19-recap");
+const recapText = await page.textContent(".recap-card");
+check("a recap card greets a player back after hours away", recapText.includes("前回说到") && recapText.includes("第一回") && recapText.includes("上回停在"));
+check("the recap card is in view", await page.locator(".recap-card").evaluate((el) => { const s = document.querySelector(".story").getBoundingClientRect(); const b = el.getBoundingClientRect(); return b.top < s.bottom && b.bottom > s.top; }));
+await page.locator(".recap-card").getByRole("button", { name: "收起" }).click();
+check("the recap card can be dismissed", (await page.locator(".recap-card").count()) === 0);
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".world-card", { hasText: dyingWorld }).first().click();
+await page.locator(".turn").last().waitFor();
+await page.waitForTimeout(300);
+check("the recap shows once per return", (await page.locator(".recap-card").count()) === 0);
+await page.getByRole("button", { name: "返回", exact: true }).click();
+
+// Export as a readable novel.
+await page.locator(".world-card", { hasText: dyingWorld }).first().locator(".world-menu").click();
+const [novel] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "导出成小说（文本）" }).click()]);
+const novelPath = `${out}/world-novel.txt`;
+await novel.saveAs(novelPath);
+const novelText = fs.readFileSync(novelPath, "utf8");
+check("a world exports as a novel with 回目 and marked actions", novel.suggestedFilename().endsWith(".txt") && novelText.startsWith(`《${dyingWorld}》`) && novelText.includes("第一回　初到西市") && /^◇ (你|你说|过些日子)：/m.test(novelText) && novelText.includes("　　"));
+
 // No horizontal overflow, no page errors.
 check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
 check("no page errors", errors.length === 0, errors.join(" | "));

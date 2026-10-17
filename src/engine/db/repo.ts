@@ -318,6 +318,21 @@ export class Repo {
     return rows.map(toNode);
   }
 
+  /** Game minutes at each node on the path to `nodeId`, read from the states without parsing them (目录 and search). */
+  async minutesOnPath(nodeId: string): Promise<Map<string, number>> {
+    const rows = await this.q(
+      `WITH RECURSIVE up(id) AS (
+         SELECT id FROM nodes WHERE id = ?
+         UNION ALL
+         SELECT n.parent_id FROM nodes n JOIN up ON n.id = up.id WHERE n.parent_id IS NOT NULL
+       )
+       SELECT s.node_id AS id, json_extract(s.state_json, '$.time.elapsedMinutes') AS minute
+       FROM up JOIN states s ON s.node_id = up.id`,
+      [nodeId],
+    );
+    return new Map(rows.filter((r) => r.minute != null).map((r) => [r.id as string, Number(r.minute)]));
+  }
+
   /** Turns on the path to `nodeId` and its latest passage, without loading the path (home and world lines, R08-T003). */
   async homeSummary(nodeId: string): Promise<{ turns: number; last: string }> {
     const rows = await this.q(
