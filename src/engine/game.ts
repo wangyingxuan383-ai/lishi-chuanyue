@@ -10,8 +10,8 @@ import { Repo } from "./db/repo";
 import { ChatError, parseChunk, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "./llm/chat";
 import { isRefusal } from "./llm/refusal";
 import {
-  assistMessages, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION, turnMessages,
-  type Arrival, type SetupDraft,
+  assistMessages, buildTurnContext, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
+  turnMessages, type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
 } from "./prompt/turn";
 import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
 import { UPKEEP_EVERY, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
@@ -32,6 +32,18 @@ export interface LlmConfig {
   includeUsage: boolean;
   maxTokens?: number;
   extra?: Record<string, unknown>;
+  /** Target input tokens per turn (PLAN §5.3: 12k, hard cap 7/6 of it). */
+  contextTokens?: number;
+}
+
+/** The next turn's request as the context viewer shows it (R04-T004). */
+export interface ContextPreview {
+  layers: ContextLayer[];
+  chars: number;
+  budgetChars: number;
+  /** Tokens per character, learned from what the service reported. */
+  ratio: number;
+  calibrated: boolean;
 }
 
 export type FailReason = "network" | "timeout" | "http" | "auth" | "quota" | "empty" | "refused" | "cancelled" | "config" | "no_record";
@@ -80,6 +92,7 @@ interface Pending {
 }
 
 const EXTRACT_TIMEOUT = { firstByteMs: 20_000, idleMs: 20_000, totalMs: 40_000 };
+const DEFAULT_CONTEXT_TOKENS = 12_000;
 const CODEX_TIMEOUT = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 75_000 };
 
 function failReason(error: unknown): { reason: FailReason; status?: number; detail?: string } {
@@ -425,13 +438,9 @@ export class Game {
       const action: PlayerAction = actionIn ?? { mode: c.head.actionMode ?? "continue", text: c.head.actionText ?? "", directorNote: c.head.directorNote };
       const state = await this.repo.getState(base.id);
       const era = eraContext(world.eraId, state);
-      const history = await this.repo.path(base.id, 40);
-      const pins = (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text);
-      const chapters = await this.repo.chaptersOnPath(worldId, base.id);
-      const messages = turnMessages({
-        era, settings: world.settings, protagonistName: state.protagonist.name, state, history, mode: action.mode, text: action.text,
-        directorNote: action.directorNote, notes: (base.meta.notes as string[] | undefined) ?? [], rewriteHint: hint, pins, chapters,
-      });
+      const { messages, chars } = buildTurnContext(await this.turnInput(worldId, base, {
+        mode: action.mode, text: action.text, directorNote: action.directorNote, rewriteHint: hint,
+      }));
 
       const splitter = new RecordSplitter();
       let shown = "";
@@ -472,6 +481,7 @@ export class Game {
         onEvent({ type: "failed", reason: "refused", partialSaved: false });
         return;
       }
+      if (result.usage?.promptTokens) await this.learnRatio(result.usage.promptTokens / chars);
       const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent);
       if (edit) cursor.cursor = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
       await this.repo.setSetting("pending", null);
@@ -543,11 +553,9 @@ export class Game {
       const world = (await this.repo.getWorld(worldId))!;
       const state = await this.repo.getState(node.parentId);
       const era = eraContext(world.eraId, state);
-      const base = (node.meta.messages as ChatMessage[] | undefined) ?? turnMessages({
-        era, settings: world.settings, protagonistName: state.protagonist.name, state, history: await this.repo.path(node.parentId, 40),
-        mode: node.actionMode ?? "continue", text: node.actionText ?? "", pins: (await this.repo.pinsOnPath(worldId, node.parentId)).map((p) => p.text),
-        chapters: await this.repo.chaptersOnPath(worldId, node.parentId),
-      });
+      const base = (node.meta.messages as ChatMessage[] | undefined) ?? turnMessages(await this.turnInput(worldId, (await this.repo.getNode(node.parentId))!, {
+        mode: node.actionMode ?? "continue", text: node.actionText ?? "",
+      }));
       const splitter = new RecordSplitter();
       let shown = node.narrative;
       let result: ChatResult & { attempts: number };
@@ -580,6 +588,43 @@ export class Game {
       onEvent({ type: "done", cursor: { ...c, head: updated }, node: updated, chips: applied.chips });
     });
     return { stop: () => handle?.cancel(), catchUp: async () => { await handle?.catchUp(); }, done };
+  }
+
+  /** Everything a turn prompt needs, read for the turn that follows `base`. */
+  private async turnInput(worldId: string, base: StoryNode, action: Pick<TurnPromptInput, "mode" | "text" | "directorNote" | "rewriteHint">): Promise<TurnPromptInput> {
+    const world = (await this.repo.getWorld(worldId))!;
+    const state = await this.repo.getState(base.id);
+    const ratio = await this.tokenRatio();
+    return {
+      era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name, state,
+      history: await this.repo.path(base.id, 40), notes: (base.meta.notes as string[] | undefined) ?? [],
+      pins: (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text),
+      chapters: await this.repo.chaptersOnPath(worldId, base.id),
+      budgetChars: Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value),
+      ...action,
+    };
+  }
+
+  /** Tokens per character for the main model: 1 until the service has reported real usage. */
+  private async tokenRatio(): Promise<{ value: number; calibrated: boolean }> {
+    const learned = this.llm ? await this.repo.getSetting<number | null>(`tokenRatio:${this.llm.model}`, null) : null;
+    return learned ? { value: learned, calibrated: true } : { value: 1, calibrated: false };
+  }
+
+  /** Moves the ratio toward what one request actually cost (R04-T004). */
+  private async learnRatio(observed: number): Promise<void> {
+    if (!this.llm || !Number.isFinite(observed) || observed <= 0) return;
+    const current = await this.repo.getSetting<number | null>(`tokenRatio:${this.llm.model}`, null);
+    const next = Math.min(2, Math.max(0.3, current ? current * 0.7 + observed * 0.3 : observed));
+    await this.repo.setSetting(`tokenRatio:${this.llm.model}`, Math.round(next * 1000) / 1000);
+  }
+
+  /** The next turn's request, layer by layer, for the developer context viewer (R04-T004). */
+  async previewContext(worldId: string): Promise<ContextPreview> {
+    const head = (await tree.cursor(this.repo, worldId)).head;
+    const ratio = await this.tokenRatio();
+    const { layers, chars, budgetChars } = buildTurnContext(await this.turnInput(worldId, head, { mode: "do", text: "（下一回合的行动）" }));
+    return { layers, chars, budgetChars, ratio: ratio.value, calibrated: ratio.calibrated };
   }
 
   /**

@@ -416,6 +416,24 @@ check("developer mode shows recent call details", /\d{2}-\d{2}.*\d{2}:\d{2}/.tes
 check("call history has at most 30 rows", (await page.locator(".item-row").count()) <= 30);
 await page.getByText("调用记录", { exact: true }).scrollIntoViewIfNeeded();
 await shot("12-call-history");
+
+// Context size per service and the developer context viewer (R04-T004).
+await page.getByRole("button", { name: "记得更多" }).click();
+check("context size saved on the service", (await page.getByRole("button", { name: "记得更多" }).getAttribute("aria-pressed")) === "true");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".card").first().click();
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "查看上下文（开发者）" }).click();
+await page.getByText("下一回合的上下文").waitFor();
+await page.locator(".context-layer summary", { hasText: "最近原文" }).click();
+await page.waitForTimeout(400);
+await shot("13-context");
+const contextText = await page.textContent(".sheet");
+check("context viewer lists every layer with sizes", ["叙事规则", "时代卡", "前情提要", "最近原文", "当前状态与人物", "要点", "相关设定", "玩家行动"].every((t) => contextText.includes(t)) && /约 [\d,]+ token/.test(contextText));
+check("context viewer fits the phone width", !(await page.evaluate(() => document.querySelector(".sheet").scrollWidth > innerWidth)));
+await page.keyboard.press("Escape");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.getByRole("button", { name: "设置", exact: true }).click();
 await page.getByLabel(/开发者模式/).uncheck();
 check("disabling developer mode hides call history", (await page.getByText("调用记录", { exact: true }).count()) === 0);
 

@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { eraContext } from "../../engine/era";
 import { nowOf, timeRows } from "../../engine/calendar/clock";
-import type { TurnEvent, TurnHandle } from "../../engine/game";
+import type { ContextPreview, TurnEvent, TurnHandle } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
 import type { Chip } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
@@ -74,6 +74,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
+  const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | null>(null);
   const [panel, setPanel] = useState(false);
@@ -436,6 +437,20 @@ export default function Play({ worldId }: { worldId: string }) {
           <pre className="raw">{String(rawNode.meta.raw ?? "（无）")}</pre>
         </Sheet>
       )}
+      {context && (
+        <Sheet title="下一回合的上下文" onClose={() => setContext(null)}>
+          <p className="muted" style={{ marginTop: 0 }}>
+            共 {context.chars} 字，约 {Math.round(context.chars * context.ratio).toLocaleString()} token
+            （{context.calibrated ? `按实际用量校准，每字约 ${context.ratio} token` : "还没有实际用量，按每字 1 token 估算"}）；预算 {context.budgetChars} 字。
+          </p>
+          {context.layers.map((l) => (
+            <details key={l.key} className="context-layer">
+              <summary><b>{l.label}</b> <span className="muted">{l.chars} 字 · {l.note}</span></summary>
+              <pre className="raw">{l.content.trim() || "（空）"}</pre>
+            </details>
+          ))}
+        </Sheet>
+      )}
       {sheet === "hints" && (
         <Sheet title="重说时希望…" onClose={() => setSheet(null)}>
           <div className="segmented">
@@ -454,6 +469,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
+            { label: "查看上下文（开发者）", hidden: !devMode || !!gen, onSelect: async () => setContext(await game.previewContext(worldId)) },
             { label: "用同样设定再开一局", hidden: !!gen, onSelect: async () => {
               const setup = await game.setupOf(worldId);
               if (!setup) return;

@@ -58,8 +58,9 @@ export interface StoryContext {
   protagonistName: string;
 }
 
-/** `recap` is the 【前情提要】 of chapters that left the raw-text window (R04-T003). */
-function systemPrompt(ctx: StoryContext, recap = ""): string {
+interface SystemParts { rules: string; premise: string; era: string; spec: string }
+
+function systemParts(ctx: StoryContext): SystemParts {
   const { era, settings } = ctx;
   const i = settings.intensity;
   const premise = settings.premise.trim();
@@ -67,7 +68,7 @@ function systemPrompt(ctx: StoryContext, recap = ""): string {
   const eraBlock = era.eraCard
     ? `【时代】${era.eraCard.name}（与【故事设定】冲突时以故事设定为准；拿不准的细节写得模糊些）\n${era.eraCard.content.slice(0, ERA_CARD_LIMIT)}`
     : "【时代】以【故事设定】为准。称谓、货币、器物、制度要符合那个时代；拿不准的细节写得模糊些，不编造确切数字、人名和官职。";
-  return `你是一部历史互动小说的作者兼叙事者。玩家扮演主角，你负责写出世界、其他人物和剧情。
+  const rulesText = `你是一部历史互动小说的作者兼叙事者。玩家扮演主角，你负责写出世界、其他人物和剧情。
 【写作要求】
 - ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}。先写画面、声音、气味和动作，少用总结句；对话简短、口吻符合人物身份。叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，人物对白带时代口吻。每回合${LENGTH[settings.length]}。
 - 只写到玩家需要做决定为止。主角只做玩家写下的事：玩家只说了大意，就照大意写，不替主角添新的计划、约定、许诺、威胁或贿赂，不替主角说出或藏起玩家没提的秘密、证据和底牌，不擅自把玩家没说要做完的事做完。玩家说“先试一下”“先问问”，就只写试一下、问一下的结果。拿不准主角会怎么做，就写到那里停下，让玩家决定。
@@ -77,11 +78,22 @@ function systemPrompt(ctx: StoryContext, recap = ""): string {
 - 主角的性别、身份、年龄以【当前】为准，前后保持一致。正文里的时辰要和【当前】的时辰加上本回合经过的时间对得上；要跳过一段时间（如等到傍晚），就在记录的 time 里写明经过了多久。
 - 避免套话和重复上一回合的开头与句式。不要用：${CLICHES.slice(0, 6).join("、")}。
 - 内容尺度：${INTENSITY_TEXT.violence[i.violence]}；${INTENSITY_TEXT.romance[i.romance]}；${INTENSITY_TEXT.darkness[i.darkness]}。
-- 每回合结尾留一个自然的行动点。${settings.choiceCount > 0 ? `在记录里给出 ${settings.choiceCount} 个简短、彼此不同的建议行动（各不超过二十字）` : "记录里的 choices 写空数组 []"}。
-${premise ? `\n【故事设定】（玩家写的，始终遵守）\n${premise}\n` : ""}${rules ? `\n【玩家给你的额外规则】（始终遵守）\n${rules}\n` : ""}
-${eraBlock}
-${recap ? `\n${recap}\n` : ""}
-${RECORD_SPEC}`;
+- 每回合结尾留一个自然的行动点。${settings.choiceCount > 0 ? `在记录里给出 ${settings.choiceCount} 个简短、彼此不同的建议行动（各不超过二十字）` : "记录里的 choices 写空数组 []"}。`;
+  return {
+    rules: rulesText,
+    premise: `${premise ? `\n【故事设定】（玩家写的，始终遵守）\n${premise}\n` : ""}${rules ? `\n【玩家给你的额外规则】（始终遵守）\n${rules}\n` : ""}`,
+    era: eraBlock,
+    spec: RECORD_SPEC,
+  };
+}
+
+/** `recap` is the 【前情提要】 of chapters that left the raw-text window (R04-T003). */
+function joinSystem(p: SystemParts, recap = ""): string {
+  return `${p.rules}\n${p.premise}\n${p.era}\n${recap ? `\n${recap}\n` : ""}\n${p.spec}`;
+}
+
+function systemPrompt(ctx: StoryContext): string {
+  return joinSystem(systemParts(ctx));
 }
 
 const level = (n: number, words: string[]) => words[Math.min(words.length - 1, Math.floor((100 - n) / (100 / words.length)))];
@@ -179,8 +191,7 @@ function recentText(input: TurnPromptInput): string {
 }
 
 /** Places and cards mentioned in the last three turns or this action (D121). */
-function cardsBlock(input: TurnPromptInput, recent: string): string {
-  const lines = activeCardLines(input.state, recent);
+function cardsBlock(lines: string[]): string {
   return lines.length ? `\n【相关设定】\n${lines.join("\n")}` : "";
 }
 
@@ -189,26 +200,103 @@ function presentPeople(state: WorldState, recent: string): Set<string> {
   return new Set(state.people.filter((p) => [p.name, ...p.aliases].some((n) => n && recent.includes(n))).map((p) => p.id));
 }
 
-export function turnMessages(input: TurnPromptInput): ChatMessage[] {
-  const base = systemPrompt(input);
+/** One layer of a turn's context, for the developer context viewer (PLAN §5.3). */
+export interface ContextLayer {
+  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "cards" | "directive" | "notes" | "action" | "spec";
+  label: string;
+  chars: number;
+  /** Why it is in, and what was left out. */
+  note: string;
+  content: string;
+}
+
+export interface TurnContext {
+  messages: ChatMessage[];
+  layers: ContextLayer[];
+  /** Characters sent, and the target they were fitted to. */
+  chars: number;
+  budgetChars: number;
+}
+
+const DEFAULT_BUDGET_CHARS = 12000;
+
+/**
+ * The turn request, layer by layer (PLAN §5.3, R04-T004). Rules, premise, the
+ * current state with people, 要点, the 方针 and the action are never trimmed;
+ * the era card, cards and recap have their own limits; the raw-text window
+ * takes what is left (at least three turns). Over the hard cap (7/6 of the
+ * target) the recap shrinks to gists, then cards go, least recently mentioned first.
+ */
+export function buildTurnContext(input: TurnPromptInput): TurnContext {
+  const parts = systemParts(input);
+  const recent = recentText(input);
+  const present = presentPeople(input.state, recent);
+  const state = renderState(input.state, input.era, present);
+  const essentials = essentialsBlock(input.settings, input.pins);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
   const notes = input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : "";
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
-  // Chapters take their share of the budget first; the raw-text window gets the rest.
+  const action = `\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
+  const target = input.budgetChars ?? DEFAULT_BUDGET_CHARS;
+  const hardCap = Math.round((target * 7) / 6);
   const chapters = input.chapters ?? [];
-  const budget = (input.budgetChars ?? 12000) - base.length - 1500 - (chapters.length ? RECAP_BUDGET : 0);
-  const window = historyWindow(input.history, budget);
-  const recap = recapBlock(chapters, (id) => window.ids.has(id));
-  const recent = recentText(input);
-  return [
-    { role: "system", content: recap ? systemPrompt(input, recap) : base },
-    ...window.messages,
+  const allCards = activeCardLines(input.state, recent);
+  let cardLines = allCards;
+  const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + directive.length + notes.length + action.length;
+  // First pass reserves room for the recap; the second gives the window whatever the recap left.
+  let window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - (chapters.length ? RECAP_BUDGET : 0));
+  let recap = recapBlock(chapters, (id) => window.ids.has(id));
+  if (chapters.length) {
+    window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - recap.length);
+    recap = recapBlock(chapters, (id) => window.ids.has(id));
+  }
+  const historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
+  const total = () => fixed + cardsBlock(cardLines).length + recap.length + historyChars;
+  let gistsOnly = false;
+  if (total() > hardCap && recap) {
+    recap = recapBlock(chapters, (id) => window.ids.has(id), RECAP_BUDGET, 0);
+    gistsOnly = true;
+  }
+  while (total() > hardCap && cardLines.length) cardLines = cardLines.slice(0, -1);
+
+  const cards = cardsBlock(cardLines);
+  const system = joinSystem(parts, recap);
+  const user = `${state}${essentials}${cards}${directive}${notes}${action}`;
+  const messages: ChatMessage[] = [{ role: "system", content: system }, ...window.messages, { role: "user", content: user }];
+
+  const turnsIn = input.history.filter((n) => n.kind !== "edit" && window.ids.has(n.id)).length;
+  const turnsOut = input.history.filter((n) => n.kind !== "edit").length - turnsIn;
+  const recapped = chapters.map((c, i) => ({ c, n: i + 1 })).filter(({ c }) => !window.ids.has(c.firstNodeId));
+  const globalLines = input.settings.essentials.split(/\n+/).filter((l) => l.trim()).length;
+  const layers: ContextLayer[] = ([
+    { key: "rules", label: "叙事规则", content: parts.rules, note: "每回合都有，不裁剪" },
+    { key: "premise", label: "故事设定与额外规则", content: parts.premise, note: parts.premise ? "玩家写的，每回合都有" : "没写" },
+    { key: "era", label: "时代卡", content: parts.era, note: input.era.eraCard ? `${input.era.eraCard.name}，正文 ${Math.min(input.era.eraCard.content.length, ERA_CARD_LIMIT)}/${ERA_CARD_LIMIT} 字` : "没有时代卡，只提醒以故事设定为准" },
     {
-      role: "user",
-      content: `${renderState(input.state, input.era, presentPeople(input.state, recent))}${essentialsBlock(input.settings, input.pins)}${cardsBlock(input, recent)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
+      key: "recap", label: "前情提要", content: recap,
+      note: recapped.length ? `第 ${recapped[0].n}～${recapped[recapped.length - 1].n} 章已移出原文范围${gistsOnly ? "；超出上限，只留梗概" : "；最近三章给全文"}` : chapters.length ? "章节都还在原文范围内" : "还没有章节",
     },
-  ];
+    {
+      key: "history", label: "最近原文", content: window.messages.map((m) => `${m.role === "user" ? "▶" : ""}${m.content}`).join("\n\n"),
+      note: `最近 ${turnsIn} 段（预算剩下的部分，至少 3 段）${turnsOut ? `；更早的 ${turnsOut}${input.history.length >= 40 ? " 段以上" : " 段"}不在原文里` : ""}`,
+    },
+    { key: "state", label: "当前状态与人物", content: state, note: `每回合都有，不裁剪；人物 ${input.state.people.length} 人，最近提到的 ${present.size} 人带备注` },
+    { key: "essentials", label: "要点", content: essentials, note: essentials ? `全局 ${globalLines} 条，剧情里记下 ${input.pins?.length ?? 0} 条；不裁剪` : "没有要点" },
+    {
+      key: "cards", label: "相关设定", content: cards,
+      note: allCards.length ? `最近三回合或本次行动提到的，所在地优先${cardLines.length < allCards.length ? `；超出上限，去掉了 ${allCards.length - cardLines.length} 张` : ""}` : "最近没有提到设定集里的东西",
+    },
+    { key: "directive", label: "叙事方针", content: directive, note: directive ? "玩家写的，每回合都有" : "没写" },
+    { key: "notes", label: "上回合的实际结果", content: notes, note: notes ? "程序修正过的变化" : "没有" },
+    { key: "action", label: "玩家行动", content: action, note: "本回合的行动与幕后要求" },
+    { key: "spec", label: "输出格式", content: parts.spec, note: "每回合都有，不裁剪" },
+  ] as Omit<ContextLayer, "chars">[]).map((l) => ({ ...l, chars: l.content.length }));
+  return { messages, layers, chars: messages.reduce((n, m) => n + m.content.length, 0), budgetChars: target };
+}
+
+export function turnMessages(input: TurnPromptInput): ChatMessage[] {
+  return buildTurnContext(input).messages;
 }
 
 // ---------- opening ----------

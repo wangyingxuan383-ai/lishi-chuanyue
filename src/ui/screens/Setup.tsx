@@ -55,6 +55,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
     const saved = await saveProfile(game.repo, {
       id: existing?.id, keySlot: existing?.keySlot, name: preset.name, provider: presetId, baseUrl: baseUrl.trim(),
       mainModel: model, auxModel: auxModel || null, includeUsage: existing?.includeUsage ?? true, allowHttp,
+      contextTokens: existing?.contextTokens,
     }, key.trim() || null);
     setKey("");
     setExisting(saved);

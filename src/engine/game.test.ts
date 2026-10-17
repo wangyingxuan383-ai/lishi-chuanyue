@@ -575,7 +575,8 @@ describe("chapter summaries", () => {
     const story = fakeLlm([{ text: OPENING }, ...turnScripts]);
     const aux = fakeLlm(chapterScripts);
     const llm = { ...story, stream: (request: any, onEvent: any) => (isChapter(request.body) ? aux : story).stream(request, onEvent) };
-    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    // The fake reports 100 prompt tokens a call, so the learned ratio sits at its 0.3 floor: 3600 tokens ≈ 12000 characters.
+    const game = await Game.open(await createMemoryPlatform(llm), { ...LLM, contextTokens: 3600 });
     const worldId = (await game.createWorld({
       title: "长安", eraId: "tang-748", settings: { premise: "天宝七载，长安。", autoUpkeep: false, ...settings },
       protagonist: { name: "李安", gender: "男", age: 22, identity: "你是落第举子，欠房钱。" },
@@ -643,5 +644,18 @@ describe("chapter summaries", () => {
     await game.repo.updateChapter(chapter.id, { title: "我改的", gist: "我改的", summary: "我改的", edited: true });
     expect(await game.rewriteChapter(worldId, chapter.id)).toMatchObject({ title: "重写的章", edited: false });
     expect(JSON.stringify(aux.calls[1].body)).toContain("第 1～2 回合");
+  });
+});
+
+describe("context budget", () => {
+  it("learns tokens per character from reported usage and previews the next request", async () => {
+    const { game, worldId } = await setup([{ text: "掌柜松了口。" + RECORD({}) }]);
+    expect((await game.previewContext(worldId)).calibrated).toBe(false);
+    await play(game, worldId, "求掌柜宽限");
+    const preview = await game.previewContext(worldId);
+    // 100 reported tokens for a few thousand characters: far below the floor, so it is clamped.
+    expect(preview).toMatchObject({ calibrated: true, ratio: 0.3, budgetChars: 40000 });
+    expect(preview.layers.map((l) => l.key)).toEqual(["rules", "premise", "era", "recap", "history", "state", "essentials", "cards", "directive", "notes", "action", "spec"]);
+    expect(preview.layers.find((l) => l.key === "action")!.content).toContain("（下一回合的行动）");
   });
 });

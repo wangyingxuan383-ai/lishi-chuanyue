@@ -17,6 +17,7 @@ export function llmFor(profile: Profile | null): LlmConfig | null {
     model: profile.mainModel,
     auxModel: profile.auxModel ?? undefined,
     includeUsage: profile.includeUsage,
+    contextTokens: profile.contextTokens,
   };
 }
 

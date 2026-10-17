@@ -50,6 +50,8 @@ export interface Profile {
   /** Learned once at connection test: does the service accept stream_options.include_usage? */
   includeUsage: boolean;
   allowHttp: boolean;
+  /** Target input tokens per turn; the game's default (12k) when absent (R04-T004). */
+  contextTokens?: number;
 }
 
 export async function listProfiles(repo: Repo): Promise<Profile[]> {
@@ -61,6 +63,7 @@ export async function listProfiles(repo: Repo): Promise<Profile[]> {
       id: r.id as string, name: r.name as string, provider: r.provider as string, baseUrl: r.base_url as string,
       mainModel: r.main_model as string, auxModel: (r.aux_model as string) ?? null, keySlot: r.key_slot as string,
       includeUsage: caps.includeUsage !== false, allowHttp: !!params.allowHttp,
+      ...(typeof params.contextTokens === "number" ? { contextTokens: params.contextTokens } : {}),
     };
   });
 }
@@ -75,7 +78,7 @@ export async function saveProfile(repo: Repo, p: Omit<Profile, "id" | "keySlot">
      ON CONFLICT(id) DO UPDATE SET name = excluded.name, provider = excluded.provider, base_url = excluded.base_url,
        main_model = excluded.main_model, aux_model = excluded.aux_model, params_json = excluded.params_json,
        capabilities_json = excluded.capabilities_json`,
-    [id, p.name, p.provider, p.baseUrl, p.mainModel, p.auxModel, JSON.stringify({ allowHttp: p.allowHttp }), keySlot,
+    [id, p.name, p.provider, p.baseUrl, p.mainModel, p.auxModel, JSON.stringify({ allowHttp: p.allowHttp, ...(p.contextTokens ? { contextTokens: p.contextTokens } : {}) }), keySlot,
       JSON.stringify({ includeUsage: p.includeUsage }), new Date().toISOString()],
   );
   return { ...p, id, keySlot };

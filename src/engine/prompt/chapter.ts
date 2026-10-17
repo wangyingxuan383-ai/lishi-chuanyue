@@ -61,13 +61,13 @@ export function parseChapter(raw: string): Pick<Chapter, "title" | "gist" | "sum
 
 /**
  * 【前情提要】 for a turn: chapters (oldest first, numbered from 1) whose
- * first turn is no longer in the raw-text window. The newest few come in full,
- * older ones by their gist; the oldest are dropped first to fit the budget.
+ * first turn is no longer in the raw-text window. The newest `full` come in
+ * full, older ones by their gist; the oldest are dropped first to fit the budget.
  */
-export function recapBlock(chapters: Chapter[], inWindow: (nodeId: string) => boolean, budget = RECAP_BUDGET): string {
+export function recapBlock(chapters: Chapter[], inWindow: (nodeId: string) => boolean, budget = RECAP_BUDGET, full = FULL_CHAPTERS): string {
   const needed = chapters.map((c, i) => ({ c, n: i + 1 })).filter(({ c }) => !inWindow(c.firstNodeId));
   if (!needed.length) return "";
-  const lines = needed.map(({ c, n }, i) => `第 ${n} 章 · ${c.title}：${i >= needed.length - FULL_CHAPTERS ? c.summary : c.gist}`);
+  const lines = needed.map(({ c, n }, i) => `第 ${n} 章 · ${c.title}：${i >= needed.length - full ? c.summary : c.gist}`);
   while (lines.length > 1 && lines.join("\n").length > budget) lines.shift();
   return `【前情提要】（更早的剧情，按先后排列）\n${lines.join("\n").slice(0, budget)}`;
 }

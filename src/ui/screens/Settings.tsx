@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { deleteProfile, listProfiles, type Profile } from "../../engine/llm/providers";
+import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../engine/llm/providers";
 import { useApp, type Reading } from "../app/context";
 import type { Row } from "../../platform";
 
@@ -49,6 +49,19 @@ export default function Settings() {
           ))}
           <button onClick={() => push({ name: "setup", profileId: "new" })}>＋ 添加服务</button>
         </div>
+        {profile && <>
+          <span className="muted">每回合发给 AI 的内容</span>
+          <div className="segmented">
+            {([[8000, "省一些"], [12000, "标准"], [16000, "记得更多"]] as const).map(([n, label]) => (
+              <button key={n} aria-pressed={(profile.contextTokens ?? 12000) === n} onClick={async () => {
+                const saved = await saveProfile(game.repo, { ...profile, contextTokens: n }, null);
+                setProfiles((list) => list.map((x) => (x.id === saved.id ? saved : x)));
+                setProfile(saved);
+              }}>{label}</button>
+            ))}
+          </div>
+          <p className="muted" style={{ margin: 0 }}>约 {((profile.contextTokens ?? 12000) / 1000).toFixed(0)}k token。越多，AI 能直接看到的前文越长，但每回合更贵、更慢；更早的剧情靠章节摘要和设定集记住。</p>
+        </>}
 
         <p className="muted" style={{ margin: "12px 0 0" }}>阅读</p>
         <span className="muted">字号</span>
