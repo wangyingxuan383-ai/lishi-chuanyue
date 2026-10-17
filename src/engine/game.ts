@@ -17,6 +17,7 @@ import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type Cod
 import { UPKEEP_EVERY, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
 import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
 import { askMessages } from "./prompt/ask";
+import { findTaboos, tabooTerms, type TabooHit } from "./era/taboo";
 import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
@@ -535,11 +536,13 @@ export class Game {
     }
     const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune });
     const model = this.llm!.model;
+    // Words the era card says must not appear (R07-T002): shown in developer mode, reminded next turn.
+    const taboos = findTaboos(narrative, tabooTerms(era.eraCard, eraPack(era.packId)));
     const node = {
       kind: "turn" as const, actionMode: action.mode, actionText: action.text, directorNote: action.directorNote ?? null,
       narrative, record, choices: record?.choices ?? [], status: record ? ("ok" as const) : ("no_record" as const), state: applied.state,
       meta: {
-        chips: applied.chips, notes: applied.notes, log: [...issues, ...applied.log], promptVersion: PROMPT_VERSION, model,
+        chips: applied.chips, notes: applied.notes, log: [...issues, ...applied.log], promptVersion: PROMPT_VERSION, model, ...(taboos.length ? { taboos } : {}),
         firstTokenMs: result.firstTokenMs, totalMs: result.totalMs, usage: result.usage, attempts: result.attempts,
         extracted: !!extractResult, raw: result.text,
       },
@@ -627,6 +630,7 @@ export class Game {
     return {
       era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name, state,
       history: await this.repo.path(base.id, 40), notes: (base.meta.notes as string[] | undefined) ?? [],
+      taboos: (base.meta.taboos as TabooHit[] | undefined) ?? [],
       pins: (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text),
       chapters: await this.repo.chaptersOnPath(worldId, base.id),
       budgetChars: Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value),

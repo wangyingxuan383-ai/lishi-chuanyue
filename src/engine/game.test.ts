@@ -714,3 +714,17 @@ describe("the world's timeline", () => {
     expect((await game.repo.getState(done.node.id)).deviations[0]).toMatch(/^天宝八载 \S+：王忠嗣没有被贬$/);
   });
 });
+
+describe("era words", () => {
+  it("notes taboo words in a passage and reminds the next turn", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "你掏出一锭银两拍在柜上。" + RECORD({}) },
+      { text: "掌柜收了铜钱。" + RECORD({}) },
+    ]);
+    const events = await play(game, worldId, "付房钱");
+    const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
+    expect(done.node.meta.taboos).toEqual([{ term: "银两", instead: "铜钱、绢帛" }]);
+    await play(game, worldId, "出门");
+    expect(JSON.stringify(llm.calls[2].body)).toContain("【用词提醒】上一段用了这个时代不该有的说法：“银两”（该用：铜钱、绢帛）");
+  });
+});

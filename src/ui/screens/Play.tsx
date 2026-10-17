@@ -53,6 +53,9 @@ function ReportCard({ report }: { report?: TurnRecord["report"] }) {
 
 function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; children?: React.ReactNode }) {
   const press = useLongPress(() => onMenu(node));
+  const { devMode } = useApp();
+  // Developer mode: era words the local check found (R07-T002).
+  const taboos = devMode ? ((node.meta.taboos as { term: string; instead: string | null }[] | undefined) ?? []) : [];
   if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" ? node.actionText : `你修改了：${node.actionText}`}</div>;
   return (
     <div className="turn" data-node-id={node.id} {...press}>
@@ -65,7 +68,7 @@ function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: Sto
       {node.kind !== "opening" && node.actionMode === "continue" && <div className="turn-action continue">（继续）</div>}
       <StoryText text={node.narrative} />
       {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
-      <ChipRow chips={(node.meta.chips as Chip[]) ?? []} />
+      <ChipRow chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
       {children}
     </div>
   );

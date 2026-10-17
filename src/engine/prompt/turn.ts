@@ -11,8 +11,9 @@ import { RECAP_BUDGET, recapBlock } from "./chapter";
 import { FORTUNE_TEXT, type Fortune } from "../fortune";
 import { parseDurationMinutes } from "../calendar/duration";
 import { worldBlock } from "../timeline";
+import { tabooReminder, type TabooHit } from "../era/taboo";
 
-export const PROMPT_VERSION = "turn-10";
+export const PROMPT_VERSION = "turn-11";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -169,6 +170,8 @@ export interface TurnPromptInput extends StoryContext {
   chapters?: Chapter[];
   /** This turn's hidden fortune (R05-T002). */
   fortune?: Fortune;
+  /** Era words the last passage should not have used (R07-T002). */
+  taboos?: TabooHit[];
   /** Rough input budget in characters (≈ tokens for Chinese). */
   budgetChars?: number;
 }
@@ -247,7 +250,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   // Great events of the world's timeline: lately, and coming soon (over the whole span for 过些日子).
   const world = worldBlock(input.state, input.mode === "skip" ? parseDurationMinutes(input.text) ?? 90 * 1440 : undefined);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
-  const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${input.fortune ? `\n【本回合运势（玩家看不到）】${FORTUNE_TEXT[input.fortune]}没有风险的日常行动不受运势影响，也不要在正文里提运势。` : ""}`;
+  const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${tabooReminder(input.taboos ?? [])}${input.fortune ? `\n【本回合运势（玩家看不到）】${FORTUNE_TEXT[input.fortune]}没有风险的日常行动不受运势影响，也不要在正文里提运势。` : ""}`;
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
   const action = `\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
