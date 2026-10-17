@@ -517,6 +517,19 @@ check("call history has at most 30 rows", (await page.locator(".item-row").count
 await page.getByText("调用记录", { exact: true }).scrollIntoViewIfNeeded();
 await shot("12-call-history");
 
+// R08-T004: usage by world, day and purpose, with the player's prices.
+await page.getByRole("button", { name: "用量明细与费用估算 ›" }).click();
+await page.getByRole("heading", { name: "用量明细" }).waitFor();
+await page.getByRole("button", { name: "按用途" }).click();
+await page.locator(".sheet .item-row", { hasText: "回合" }).first().waitFor();
+await page.getByLabel("输入价格").fill("1");
+await page.getByLabel("输出价格").fill("4");
+await page.locator(".sheet .tag", { hasText: "元" }).first().waitFor();
+await page.waitForTimeout(400);
+await shot("12b-usage");
+check("usage shows calls by purpose with an estimated cost", (await page.textContent(".sheet")).includes("估计约") && (await page.locator(".sheet .item-row").count()) >= 2);
+await page.keyboard.press("Escape");
+
 // Context size per service and the developer context viewer (R04-T004).
 await page.getByRole("button", { name: "记得更多" }).click();
 check("context size saved on the service", (await page.getByRole("button", { name: "记得更多" }).getAttribute("aria-pressed")) === "true");

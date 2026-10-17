@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../engine/llm/providers";
 import { useApp, type Reading } from "../app/context";
+import { PURPOSES, UsageSheet } from "../components/Usage";
 import type { Row } from "../../platform";
 
-const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", ask: "查一查", test: "测试" };
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
 
 export default function Settings() {
@@ -11,6 +11,7 @@ export default function Settings() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [usage, setUsage] = useState<{ calls: number; prompt: number; completion: number } | null>(null);
   const [calls, setCalls] = useState<Row[]>([]);
+  const [usageOpen, setUsageOpen] = useState(false);
   useEffect(() => {
     if (devMode) void game.platform.sql.query("SELECT * FROM usage ORDER BY at DESC LIMIT 30").then(setCalls);
   }, [devMode, game]);
@@ -81,6 +82,8 @@ export default function Settings() {
 
         <p className="muted" style={{ margin: "12px 0 0" }}>用量</p>
         {usage && <p className="muted" style={{ margin: 0 }}>共 {usage.calls} 次调用，输入 {usage.prompt.toLocaleString()} token，输出 {usage.completion.toLocaleString()} token（部分服务不返回用量，实际可能更多）。</p>}
+        <button className="ghost" style={{ alignSelf: "flex-start" }} onClick={() => setUsageOpen(true)}>用量明细与费用估算 ›</button>
+        {usageOpen && <UsageSheet onClose={() => setUsageOpen(false)} />}
 
         <label className="row" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={devMode} onChange={(e) => setDevMode(e.target.checked)} style={{ width: 20, minHeight: 20 }} />
