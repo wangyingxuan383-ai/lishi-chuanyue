@@ -852,7 +852,7 @@ check("the 人物小传 saves name, age and 金手指", (await page.locator(".bi
 await page.getByRole("button", { name: "修改", exact: true }).click();
 check("health is edited by level words, not 0–100", (await page.getByRole("group", { name: "健康" }).getByRole("button").allTextContents()).join() === "康健,微恙,带伤,重伤,垂危");
 await page.getByLabel("钱", { exact: true }).fill("12.7");
-check("money takes whole numbers only, the hint stays inside the field", (await page.getByLabel("钱", { exact: true }).inputValue()) === "127" && (await page.locator(".field-line .field-suffix").count()) === 1);
+check("money takes whole numbers only, the hint stays inside the field", (await page.getByLabel("钱", { exact: true }).inputValue()) === "127" && (await page.locator(".field-line .field-suffix").count()) <= 1 && (await page.locator(".bio-fields + * small, label > small").count()) === 0);
 await page.getByRole("group", { name: "精力" }).getByRole("button", { name: "疲惫" }).click();
 await page.waitForTimeout(300);
 await shot("17c-me-edit");
@@ -861,7 +861,7 @@ await page.getByRole("button", { name: "修改", exact: true }).waitFor();
 check("a level saves as that word", (await page.locator(".stat", { hasText: "精力" }).textContent()).includes("疲惫"));
 // 行囊: one editor per item; a name already there asks to merge.
 await page.getByRole("tab", { name: /行囊/ }).click();
-await page.getByRole("button", { name: "＋ 添加物品" }).click();
+await page.getByRole("button", { name: "添加物品" }).click();
 await page.locator(".sheet").getByLabel("名称").fill("紫毫笔");
 await page.locator(".sheet").getByLabel("数量").fill("2");
 await page.locator(".sheet").getByLabel("单位").fill("支");
@@ -869,7 +869,7 @@ await page.locator(".sheet").getByLabel("放在哪").fill("书箱");
 await page.locator(".sheet").getByRole("button", { name: "保存" }).click();
 await page.locator(".codex-item", { hasText: "紫毫笔" }).waitFor();
 check("a new item has its unit and place", (await page.locator(".codex-item", { hasText: "紫毫笔" }).textContent()).includes("2 支") && (await page.locator(".codex-item", { hasText: "紫毫笔" }).textContent()).includes("放在书箱"));
-await page.getByRole("button", { name: "＋ 添加物品" }).click();
+await page.getByRole("button", { name: "添加物品" }).click();
 await page.locator(".sheet").getByLabel("名称").fill("紫毫笔");
 await page.locator(".sheet").getByRole("button", { name: "保存" }).click();
 await page.locator(".dialog").waitFor();

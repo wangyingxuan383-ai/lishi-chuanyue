@@ -84,7 +84,7 @@ const headState = () => page.evaluate(async () => {
 const moneyBefore = (await headState()).money;
 await side.getByRole("tab", { name: "我" }).click();
 await side.getByRole("button", { name: "修改" }).click();
-await side.getByLabel("精力").fill("50");
+await side.getByRole("group", { name: "精力" }).getByRole("button", { name: "疲惫" }).click();
 const turnsBeforeEdit = await page.locator(".turn").count();
 await box.click();
 await box.pressSequentially("先付三十文");
@@ -95,7 +95,7 @@ const paid = (await headState()).money;
 await side.getByRole("button", { name: "保存修改" }).click();
 await side.getByRole("button", { name: "修改" }).waitFor({ timeout: 5000 }).catch(() => {});
 const after = await headState();
-check("a turn played while editing pays, and saving the edit keeps it", paid === moneyBefore - 30 && after.money === paid && after.energy === 50);
+check("a turn played while editing pays, and saving the edit keeps it", paid === moneyBefore - 30 && after.money === paid && after.energy >= 25 && after.energy < 50);
 await page.getByRole("button", { name: "更多" }).click();
 const sheet = await page.locator(".sheet").boundingBox();
 check("sheets keep a readable width and stay centred", !!sheet && sheet.width <= 600 && Math.abs(sheet.x + sheet.width / 2 - 640) < 2);
