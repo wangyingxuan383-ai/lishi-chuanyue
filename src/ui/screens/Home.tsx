@@ -10,6 +10,7 @@ import { useLongPress } from "../components/useLongPress";
 import { fromSetup } from "./openingDraft";
 import { Seal } from "../components/Seal";
 import { latestRelease, newer, type ReleaseInfo } from "../app/update";
+import { Icon } from "../components/Icon";
 
 interface WorldCard {
   world: World;
@@ -52,7 +53,7 @@ function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen
         <p className="meta">{card.turns ? `${card.turns} 回合` : "刚开局"} · {relative(card.world.playedAt)}</p>
         {featured && <span className="primary continue-btn">继续</span>}
       </button>
-      <button className="icon-btn world-menu" aria-label={`“${card.world.title}”的更多操作`} onClick={onMenu}>⋯</button>
+      <button className="icon-btn world-menu" aria-label={`“${card.world.title}”的更多操作`} onClick={onMenu}><Icon name="more" /></button>
     </div>
   );
 }
@@ -139,7 +140,7 @@ export default function Home() {
     <div className="screen">
       <div className="topbar">
         <div className="title"><h1>历史穿越</h1></div>
-        <button className="icon-btn" aria-label="设置" onClick={() => push({ name: "settings" })}>⚙</button>
+        <button className="icon-btn" aria-label="设置" onClick={() => push({ name: "settings" })}><Icon name="settings" /></button>
       </div>
       <div className="screen-body stack">
         {update && (

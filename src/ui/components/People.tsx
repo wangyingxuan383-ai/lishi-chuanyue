@@ -9,6 +9,7 @@ import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
 import type { Attitude, Person, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { Icon } from "./Icon";
 
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
 const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.trim()).filter(Boolean);
@@ -84,7 +85,7 @@ export function People({ state, era, busy, onSave }: {
     <div className="stack">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <b>人物{people.length ? ` ${people.length}` : ""}</b>
-        <button className="ghost" aria-label="添加人物" disabled={busy} onClick={() => setEditing({ person: null })}>＋ 添加</button>
+        <button className="ghost" aria-label="添加人物" disabled={busy} onClick={() => setEditing({ person: null })}><Icon name="plus" size={18} />添加</button>
       </div>
       {people.length ? people.map((p) => (
         <button key={p.id} className="item-row codex-item" disabled={busy} onClick={() => setEditing({ person: p })}>

@@ -10,6 +10,7 @@ import { Codex } from "./Codex";
 import { Goals } from "./Goals";
 import { Journal } from "./Journal";
 import { People } from "./People";
+import { Icon } from "./Icon";
 
 const TABS = ["我", "行囊", "人物", "目标", "记事", "设定"] as const;
 /** Tabs with their own editors instead of the panel-wide 修改. */
@@ -101,7 +102,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
   return (
     <div className={`panel${docked ? " docked" : ""}`} role={docked ? "complementary" : "dialog"} aria-label="角色">
       <div className="topbar">
-        {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>}
+        {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}><Icon name="back" /></button>}
         <div className="title"><h1>{me.name}</h1><div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div></div>
         {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => { setBase(state); setDraft(structuredClone(state)); }}>修改</button>}
       </div>
@@ -135,7 +136,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
                   {editing && <button onClick={() => change((d) => { d.protagonist.statuses.splice(i, 1); })}>去掉</button>}
                 </div>
               )) : <p className="muted">无</p>}
-              {editing && <button onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}>＋ 添加状况</button>}
+              {editing && <button onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}><Icon name="plus" size={18} />添加状况</button>}
             </div>
             <div className="stack" style={{ gap: 4 }}>
               <p className="muted" style={{ margin: 0 }}>{now.text}{place ? ` · ${place}` : ""}</p>
@@ -148,13 +149,13 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
           <div className="item-row" key={index}>
             <div className="grow">{editing && !state.protagonist.items.some((x) => x.name === i.name) ? <input aria-label="物品名称" placeholder="名称" value={i.name} onChange={(e) => change((d) => { d.protagonist.items[index].name = e.target.value; })} /> : i.name}{i.note && <small>{i.note}</small>}{i.place && <small>放在{i.place}</small>}</div>
             <div className="row">
-              {editing && <button aria-label={`减少${i.name}`} disabled={i.quantity === 0} onClick={() => change((d) => { d.protagonist.items[index].quantity--; })}>−</button>}
+              {editing && <button aria-label={`减少${i.name}`} disabled={i.quantity === 0} onClick={() => change((d) => { d.protagonist.items[index].quantity--; })}><Icon name="minus" size={20} /></button>}
               {editing && !state.protagonist.items.some((x) => x.name === i.name) ? <input aria-label="物品数量" type="number" min={0} style={{ width: 72 }} value={i.quantity} onChange={(e) => change((d) => { d.protagonist.items[index].quantity = Math.max(0, Number(e.target.value)); })} /> : <span>×{i.quantity}{i.unit}</span>}
-              {editing && <button aria-label={`增加${i.name}`} onClick={() => change((d) => { d.protagonist.items[index].quantity++; })}>＋</button>}
+              {editing && <button aria-label={`增加${i.name}`} onClick={() => change((d) => { d.protagonist.items[index].quantity++; })}><Icon name="plus" size={20} /></button>}
             </div>
           </div>
         )) : <p className="muted">行囊空空。</p>)}
-          {editing && <button onClick={() => change((d) => { d.protagonist.items.push({ name: "", quantity: 1, unit: "", place: null, note: "" }); })}>＋ 添加物品</button>}
+          {editing && <button onClick={() => change((d) => { d.protagonist.items.push({ name: "", quantity: 1, unit: "", place: null, note: "" }); })}><Icon name="plus" size={18} />添加物品</button>}
         </div>}
         {tab === "人物" && <People state={state} era={era} busy={busy} onSave={onSave} />}
         {tab === "记事" && <Journal worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} onSave={onSave} />}

@@ -4,6 +4,7 @@
 // page reads as a table of contents first.
 import { useState } from "react";
 import { useApp } from "../app/context";
+import { Icon } from "../components/Icon";
 
 const SECTIONS: { id: string; title: string; body: [string, string][] }[] = [
   {
@@ -91,7 +92,7 @@ export default function Guide() {
   return (
     <div className="screen">
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={pop}>‹</button>
+        <button className="icon-btn" aria-label="返回" onClick={pop}><Icon name="back" /></button>
         <div className="title"><h1>游玩指南</h1></div>
       </div>
       <div className="screen-body stack guide">

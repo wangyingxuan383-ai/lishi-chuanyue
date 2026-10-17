@@ -7,13 +7,14 @@ import type { Line } from "../../engine/types";
 import { useApp } from "../app/context";
 import { MenuSheet, Sheet } from "./Sheet";
 import { TreeView } from "./TreeView";
+import { Icon } from "./Icon";
 
 interface Row { line: Line; turns: number; last: string }
 
 function NameSheet({ title, initial, onSave, onClose }: { title: string; initial: string; onSave: (name: string) => void; onClose: () => void }) {
   const [name, setName] = useState(initial);
   return (
-    <Sheet title={title} onClose={onClose}>
+    <Sheet title={title} onClose={onClose} dirty={name.trim() !== initial.trim()}>
       <div className="stack">
         <input aria-label="名称" value={name} onChange={(e) => setName(e.target.value)} />
         <button className="primary" disabled={!name.trim()} onClick={() => onSave(name.trim())}>保存</button>
@@ -53,9 +54,13 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
         <h3>{r.line.name}{r.line.id === current ? "（当前）" : ""}</h3>
         <p>{r.turns} 回合 · {r.last}</p>
       </button>
-      <button className="ghost" aria-label={`${r.line.name}的更多操作`} onClick={() => setMenu(r)}>⋯</button>
+      <button className="ghost" aria-label={`${r.line.name}的更多操作`} onClick={() => setMenu(r)}><Icon name="more" /></button>
     </div>
   );
+
+  // The turn tree takes the sheet's place instead of rising as a second
+  // sheet on top (AUDIT_V4 6.3); closing it comes back to the list.
+  if (showTree) return <TreeView worldId={worldId} onClose={() => setShowTree(false)} onJumped={(message) => { setShowTree(false); onClose(); onChanged(message); }} />;
 
   return (
     <Sheet title="世界线" onClose={onClose}>
@@ -76,7 +81,6 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
       </details>}
       <button className="ghost" style={{ alignSelf: "flex-start" }} onClick={() => setShowTree(true)}>看回合树 ›</button>
       <p className="muted">长按任意一段，可以“回到这里”开出新路线，或者“加书签”。</p>
-      {showTree && <TreeView worldId={worldId} onClose={() => setShowTree(false)} onJumped={(message) => { setShowTree(false); onClose(); onChanged(message); }} />}
       {menu && <MenuSheet
         title={menu.line.name}
         onClose={() => setMenu(null)}

@@ -13,6 +13,7 @@ import { exportWorld } from "../../engine/archive";
 import { PURPOSES, UsageSheet } from "../components/Usage";
 import { Seal } from "../components/Seal";
 import { BackupRestore } from "../components/BackupRestore";
+import { Icon } from "../components/Icon";
 
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
 type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev";
@@ -64,7 +65,7 @@ export default function Settings() {
   return (
     <div className="screen">
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={() => (page === "home" ? pop() : setPage("home"))}>‹</button>
+        <button className="icon-btn" aria-label="返回" onClick={() => (page === "home" ? pop() : setPage("home"))}><Icon name="back" /></button>
         <div className="title"><h1>{TITLES[page]}</h1></div>
       </div>
       <div className="screen-body stack settings">
@@ -145,7 +146,7 @@ function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged:
             </div>
           </div>
         ))}
-        <button onClick={() => push({ name: "setup", profileId: "new" })}>＋ 添加服务</button>
+        <button onClick={() => push({ name: "setup", profileId: "new" })}><Icon name="plus" size={18} />添加服务</button>
       </div>
     </>
   );

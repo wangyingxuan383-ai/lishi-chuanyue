@@ -8,6 +8,7 @@ import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { Card, CardKind, Place, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { Icon } from "./Icon";
 
 type Editing =
   | { type: "card"; kind: CardKind; card: Card | null }
@@ -126,7 +127,7 @@ export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
           <section key={kind}>
             <div className="row" style={{ justifyContent: "space-between" }}>
               <b>{kind}{list.length ? ` ${list.length}` : ""}</b>
-              <button className="ghost" aria-label={`新建${kind}`} disabled={busy} onClick={() => open(kind === "地点" ? { type: "place", place: null } : { type: "card", kind, card: null })}>＋ 新建</button>
+              <button className="ghost" aria-label={`新建${kind}`} disabled={busy} onClick={() => open(kind === "地点" ? { type: "place", place: null } : { type: "card", kind, card: null })}><Icon name="plus" size={18} />新建</button>
             </div>
             {list.length ? list.map((item) => (
               <button key={item.id} className="item-row codex-item" onClick={() => open(item.edit)}>

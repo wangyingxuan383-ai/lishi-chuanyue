@@ -8,6 +8,7 @@ import type { EraContext } from "../../engine/era";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { Goal, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { Icon } from "./Icon";
 
 const ORDER: Goal["kind"][] = ["主线", "支线", "心愿"];
 type Save = (patch: TurnRecord, summary: string) => Promise<void>;
@@ -81,7 +82,7 @@ export function Goals({ state, era, busy, onSave }: { state: WorldState; era: Er
     <div className="stack">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <b>进行中{active.length ? ` ${active.length}` : ""}</b>
-        <button className="ghost" aria-label="添加心愿" disabled={busy} onClick={() => setWish(true)}>＋ 我的心愿</button>
+        <button className="ghost" aria-label="添加心愿" disabled={busy} onClick={() => setWish(true)}><Icon name="plus" size={18} />我的心愿</button>
       </div>
       {active.length ? active.map((g) => (
         <button key={g.id} className="item-row codex-item" disabled={busy} onClick={() => setOpen(g)}>
