@@ -301,6 +301,7 @@ for (let i = 0; i < 6; i++) {
   await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
 }
 await page.locator(".edit-line", { hasText: "AI 整理了设定集：铜鹰符" }).waitFor({ timeout: 20000 });
+const yearNow = (await page.locator(".topbar .subtitle").textContent()).split(" ")[0];
 await page.getByRole("button", { name: "角色" }).click();
 await page.getByRole("tab", { name: "设定" }).click();
 check("AI files new cards every six turns", (await page.locator(".codex-item", { hasText: "铜鹰符" }).textContent()).includes("AI 整理"));
@@ -336,6 +337,18 @@ check("a goal shows how it went", (await page.locator(".timeline li").count()) >
 await page.getByRole("button", { name: "标为完成" }).click();
 await page.getByText(/已结束 1/).waitFor();
 check("a finished goal moves to the ended list", true);
+
+// 天下大事 (R05-T004): an event next month; 过些日子 below crosses it.
+await page.getByRole("tab", { name: "记事" }).click();
+await page.getByRole("button", { name: "添加大事" }).click();
+await page.getByLabel(/^日期/).fill(`${yearNow}腊月`);
+await page.getByLabel("发生什么").fill("大雪封了城门");
+await page.getByRole("button", { name: "固定（一定发生）" }).click();
+await page.getByRole("button", { name: "添加", exact: true }).click();
+await page.locator(".codex-item", { hasText: "大雪封了城门" }).waitFor();
+await page.waitForTimeout(400);
+await shot("06u-timeline");
+check("a great event is added to the timeline", (await page.locator(".codex-item", { hasText: "大雪封了城门" }).textContent()).includes("腊月"));
 await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 
@@ -350,6 +363,7 @@ await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
 await page.waitForTimeout(400);
 await shot("07c-skip");
 check("a month passes with a report and the time chip", (await page.locator(".turn").last().textContent()).includes("过一个月；这段时间读书") && (await page.locator(".chip", { hasText: "过了 1 个月" }).count()) === 1 && (await page.locator(".report-card").textContent()).includes("米价"));
+check("the month crosses the great event", (await page.locator(".chip", { hasText: "📜 大雪封了城门" }).count()) === 1);
 
 // Stop mid-generation keeps partial text as interrupted.
 await page.getByRole("button", { name: "更多" }).click();

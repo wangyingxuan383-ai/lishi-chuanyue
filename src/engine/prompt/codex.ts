@@ -7,7 +7,7 @@ import type { CardPatch, PlacePatch, TurnRecord } from "../state/apply";
 import { matchName } from "../state/names";
 import type { CardKind, WorldState } from "../types";
 
-export const CODEX_PROMPT_VERSION = "codex-1";
+export const CODEX_PROMPT_VERSION = "codex-2";
 
 export interface CodexInput {
   premise: string;
@@ -37,9 +37,11 @@ export function codexMessages(input: CodexInput): ChatMessage[] {
 文风：叙述和对白应是什么味道
 不要出现：这个时代容易写错的东西，如“算盘（用算筹）”，十条以上，用“；”分开
 - 卡片只写故事设定里出现或明显会出现的势力、地点、规矩（kind 写“势力”“地点”“设定”或“物品”），每张不超过 80 字。
+- 故事设定是真实朝代时，再列出故事开始之后几年里史书记载的大事，至多 8 件，日期写到月份（如“崇祯二年十月”），kind 写“固定”（主角改变不了，如天灾、远方的战事）或“可变”（主角的行动可能改变，如朝中人事、近处的案子）；架空或改编的世界不写。
 只输出一个 JSON 对象：
 {"era":{"name":"时代卡名称，如“北宋 · 宣和年间 · 汴京”","content":"时局：……\\n货币：……\\n……\\n不要出现：……"},
- "cards":[{"kind":"势力","name":"名称","keys":["别名"],"content":"一两句话"}]}`,
+ "cards":[{"kind":"势力","name":"名称","keys":["别名"],"content":"一两句话"}],
+ "timeline":[{"date":"崇祯二年十月","title":"一句话写清这件大事","kind":"固定"}]}`,
     },
     {
       role: "user",
@@ -83,8 +85,14 @@ export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "place
       if (!mine(kind, name)) cards.push({ op: "add", kind, name, keys, content, source: "AI" });
     }
   }
-  if (!cards.length && !places.length) return null;
-  return { ...(cards.length ? { cards } : {}), ...(places.length ? { places } : {}) };
+  const timeline = (Array.isArray((value as { timeline?: unknown }).timeline) ? (value as { timeline: unknown[] }).timeline : []).slice(0, 8).flatMap((raw) => {
+    const e = raw as Record<string, unknown> | null;
+    const date = text(e?.date, 20);
+    const title = text(e?.title, 60);
+    return date && title ? [{ op: "add" as const, date, title, kind: e?.kind === "固定" ? "固定" : "可变", source: "AI" as const }] : [];
+  });
+  if (!cards.length && !places.length && !timeline.length) return null;
+  return { ...(cards.length ? { cards } : {}), ...(places.length ? { places } : {}), ...(timeline.length ? { timeline } : {}) };
 }
 
 /** "时代卡、天地会、西市等" for the edit line. */

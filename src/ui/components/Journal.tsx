@@ -1,7 +1,9 @@
 // The 记事 tab of the character panel (PLAN §4.5): chapter summaries on the
-// current path, the turns not yet in a chapter, and what happened in each turn.
+// current path, the turns not yet in a chapter, what happened in each turn,
+// the world's great events and how this world's history has changed (R05-T004).
 import { useEffect, useState } from "react";
-import type { Chapter, StoryNode } from "../../engine/types";
+import type { TurnRecord } from "../../engine/state/apply";
+import type { Chapter, StoryNode, TimelineEvent, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 
@@ -74,12 +76,51 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
   );
 }
 
-export function Journal({ worldId, headId, chapterEvery, busy }: { worldId: string; headId: string; chapterEvery: number; busy: boolean }) {
+type Save = (patch: TurnRecord, summary: string) => Promise<void>;
+
+function EventSheet({ event, onClose, onSave }: { event: TimelineEvent | null; onClose: () => void; onSave: Save }) {
+  const [date, setDate] = useState("");
+  const [title, setTitle] = useState("");
+  const [kind, setKind] = useState<TimelineEvent["kind"]>("可变");
+  const [saving, setSaving] = useState(false);
+  const run = async (patch: TurnRecord, summary: string) => {
+    setSaving(true);
+    try { await onSave(patch, summary); onClose(); } finally { setSaving(false); }
+  };
+  if (event) return (
+    <Sheet title={event.title} onClose={onClose}>
+      <div className="stack" style={{ gap: 10 }}>
+        <p className="muted" style={{ margin: 0 }}>{event.date} · {event.kind === "固定" ? "固定：不管你做什么都会发生" : "可变：你的行动可能改变它"}{event.source === "卡组" ? " · 来自内置卡组" : event.source === "AI" ? " · AI 整理" : ""}</p>
+        <button className="danger-text" disabled={saving} onClick={() => void run({ timeline: [{ op: "remove", id: event.id }] }, `删除大事：${event.title}`)}>从年表删除</button>
+      </div>
+    </Sheet>
+  );
+  return (
+    <Sheet title="添加大事" onClose={onClose}>
+      <div className="stack" style={{ gap: 10 }}>
+        <p className="muted" style={{ margin: 0 }}>史书上记载、或你想让它发生的大事。游戏时间到了，回合下会提醒，AI 也会知道。</p>
+        <label>日期（写到月份）<input value={date} onChange={(e) => setDate(e.target.value)} placeholder="如：天宝九载十月" /></label>
+        <label>发生什么<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="如：杨钊请改名，玄宗赐名国忠" /></label>
+        <div className="segmented">
+          {(["固定", "可变"] as const).map((k) => <button key={k} aria-pressed={kind === k} onClick={() => setKind(k)}>{k === "固定" ? "固定（一定发生）" : "可变（能被改变）"}</button>)}
+        </div>
+        <button className="primary" disabled={saving || !date.trim() || !title.trim()} onClick={() => void run({ timeline: [{ op: "add", date: date.trim(), title: title.trim(), kind }] }, `添加大事：${title.trim()}`)}>添加</button>
+      </div>
+    </Sheet>
+  );
+}
+
+export function Journal({ worldId, headId, chapterEvery, busy, state, onSave }: {
+  worldId: string; headId: string; chapterEvery: number; busy: boolean; state: WorldState; onSave: Save;
+}) {
   const { game, toast } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
   const [pending, setPending] = useState<{ from: number; turns: StoryNode[] }>({ from: 1, turns: [] });
   const [open, setOpen] = useState<Row | null>(null);
   const [writing, setWriting] = useState(false);
+  const [event, setEvent] = useState<{ event: TimelineEvent | null } | null>(null);
+  const now = state.time.elapsedMinutes;
+  const timeline = state.timeline ?? [];
 
   const load = async () => {
     const [chapters, path] = await Promise.all([game.repo.chaptersOnPath(worldId, headId), game.repo.path(headId)]);
@@ -125,7 +166,24 @@ export function Journal({ worldId, headId, chapterEvery, busy }: { worldId: stri
         {pending.turns.map((t, i) => <small key={t.id} className="muted">{logLine(t, pending.from + i)}</small>)}
         <button className="ghost" style={{ alignSelf: "flex-start" }} disabled={busy || writing} onClick={() => void writeNow()}>{writing ? "正在写…" : `把第 ${pending.from}～${to} 回合写成一章`}</button>
       </section>}
+      <section className="stack" style={{ gap: 4 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>天下大事</b>
+          <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => setEvent({ event: null })}>＋ 添加</button>
+        </div>
+        {timeline.length ? timeline.map((e) => (
+          <button key={e.id} className="item-row codex-item" disabled={busy} style={e.atMinute !== null && e.atMinute <= now ? { opacity: 0.7 } : undefined} onClick={() => setEvent({ event: e })}>
+            <div className="grow"><b>{e.title}</b><small>{e.date}{e.atMinute === null ? "（日期换算不了，不会提醒）" : e.atMinute < 0 ? " · 开局之前" : e.atMinute <= now ? " · 已到" : ""}</small></div>
+            <span className="tag">{e.kind}</span>
+          </button>
+        )) : <p className="muted" style={{ margin: 0 }}>这个世界还没有年表。可以把史书上的大事加进来，时间到了会提醒。</p>}
+      </section>
+      {state.deviations.length > 0 && <section className="stack" style={{ gap: 4 }}>
+        <b>历史偏离</b>
+        {state.deviations.map((d, i) => <small key={i} className="muted">{d}</small>)}
+      </section>}
       {open && <ChapterSheet row={open} worldId={worldId} onClose={() => setOpen(null)} onChanged={() => void load()} />}
+      {event && <EventSheet event={event.event} onClose={() => setEvent(null)} onSave={onSave} />}
     </div>
   );
 }

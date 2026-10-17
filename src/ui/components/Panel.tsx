@@ -144,7 +144,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
           {editing && <button onClick={() => change((d) => { d.protagonist.items.push({ name: "", quantity: 1, unit: "", place: null, note: "" }); })}>＋ 添加物品</button>}
         </div>}
         {tab === "人物" && <People state={state} era={era} busy={busy} onSave={onSave} />}
-        {tab === "记事" && <Journal worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} />}
+        {tab === "记事" && <Journal worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} onSave={onSave} />}
         {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && <Goals state={state} era={era} busy={busy} onSave={onSave} />}
       </div>

@@ -4,6 +4,10 @@ import { TANG_CURRENCY, formatMoney, parseMoney } from "../money";
 import { sampleState } from "../testing/fixtures";
 import type { Difficulty, WorldState } from "../types";
 import { applyRecord, type TurnRecord } from "./apply";
+import { nowOf, type GameClock } from "../calendar/clock";
+import { formatDate } from "../calendar/date";
+
+const formatDateOf = (s: WorldState, clock: GameClock) => formatDate(nowOf(clock, s.time.elapsedMinutes).date!, clock.rules);
 import { matchName } from "./names";
 
 const ctx = (difficulty: Difficulty = "标准") => ({ mode: "do" as const, difficulty, currency: TANG_CURRENCY });
@@ -188,6 +192,19 @@ describe("applyRecord", () => {
     expect(chip("一季")).toBe("过了 3 个月");
     expect(chip("一年")).toBe("过了 1 年");
     expect(chip("十天")).toBe("过了 10 天");
+  });
+
+  it("notes great events whose time came, keeps dated deviations, and edits the timeline", () => {
+    const clock = { date: TANG_748.start.date, hour: 7, label: "", rules: TANG_748.calendar };
+    let s = sampleState();
+    s.time.date = TANG_748.start.date;
+    s = applyRecord(s, { timeline: [{ op: "add", date: "天宝八载正月", title: "大雪", kind: "固定" }, { op: "add", date: "天宝八载二月", title: "宰相病重" }] }, { ...ctx(), clock }, { advanceTime: false }).state;
+    expect(s.timeline!.map((e) => [e.date, e.title, e.kind, e.source])).toEqual([["天宝八载 正月", "大雪", "固定", "玩家"], ["天宝八载 二月", "宰相病重", "可变", "玩家"]]);
+    const r = applyRecord(s, { time: "三个月", deviation: "主角救下了王忠嗣" }, { ...ctx(), clock });
+    expect(r.chips.map((c) => c.text)).toEqual(expect.arrayContaining(["📜 大雪", "📜 按史书，此时应有：宰相病重", "⚠ 历史偏离：主角救下了王忠嗣"]));
+    expect(r.state.deviations).toEqual([`${formatDateOf(r.state, clock)}：主角救下了王忠嗣`]);
+    const removed = applyRecord(r.state, { timeline: [{ op: "remove", id: r.state.timeline![0].id }] }, { ...ctx(), clock }, { advanceTime: false }).state;
+    expect(removed.timeline!.map((e) => e.title)).toEqual(["宰相病重"]);
   });
 
   it("shows the fortune behind a risky action", () => {

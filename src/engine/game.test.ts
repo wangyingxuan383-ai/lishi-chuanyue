@@ -655,7 +655,7 @@ describe("context budget", () => {
     const preview = await game.previewContext(worldId);
     // 100 reported tokens for a few thousand characters: far below the floor, so it is clamped.
     expect(preview).toMatchObject({ calibrated: true, ratio: 0.3, budgetChars: 40000 });
-    expect(preview.layers.map((l) => l.key)).toEqual(["rules", "premise", "era", "recap", "history", "state", "essentials", "cards", "directive", "notes", "action", "spec"]);
+    expect(preview.layers.map((l) => l.key)).toEqual(["rules", "premise", "era", "recap", "history", "state", "world", "essentials", "cards", "directive", "notes", "action", "spec"]);
     expect(preview.layers.find((l) => l.key === "action")!.content).toContain("（下一回合的行动）");
   });
 });
@@ -694,5 +694,23 @@ describe("过些日子", () => {
     expect(after.protagonist.age).toBe((before.protagonist.age ?? 0) + 1);
     expect(done.chips.map((c) => c.text)).toEqual(expect.arrayContaining(["过了 1 年", `过年了，${after.protagonist.age} 岁`]));
     expect((done.node.record as { report?: unknown }).report).toEqual({ world: "边镇又有战事", local: "米价稍涨" });
+  });
+});
+
+describe("the world's timeline", () => {
+  it("copies a pack's events at the start and marks those a year of 过些日子 crosses", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "一年过去了。" + RECORD({ time: "一年", deviation: "王忠嗣没有被贬" }) },
+    ]);
+    const start = await game.repo.getState((await tree.cursor(game.repo, worldId)).head.id);
+    expect(start.timeline!.length).toBe(13);
+    expect(start.timeline!.filter((e) => e.atMinute! < 0).map((e) => e.title)).toContain("杨贵妃的三位姐姐分封韩国、虢国、秦国夫人");
+    const events = await play(game, worldId, "过一年；这段时间读书", "skip");
+    const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
+    // The year ahead was in the request, and the turn marks what it crossed.
+    expect(JSON.stringify(llm.calls[1].body)).toContain("天宝八载 六月将会：哥舒翰攻克石堡城，唐军死伤数万（一定发生）");
+    expect(done.chips.map((c) => c.text)).toContain("📜 哥舒翰攻克石堡城，唐军死伤数万");
+    expect(done.chips.map((c) => c.text)).toContain("⚠ 历史偏离：王忠嗣没有被贬");
+    expect((await game.repo.getState(done.node.id)).deviations[0]).toMatch(/^天宝八载 \S+：王忠嗣没有被贬$/);
   });
 });

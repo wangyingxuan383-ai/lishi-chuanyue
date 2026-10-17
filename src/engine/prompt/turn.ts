@@ -9,8 +9,10 @@ import { formatMoney } from "../money";
 import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 import { RECAP_BUDGET, recapBlock } from "./chapter";
 import { FORTUNE_TEXT, type Fortune } from "../fortune";
+import { parseDurationMinutes } from "../calendar/duration";
+import { worldBlock } from "../timeline";
 
-export const PROMPT_VERSION = "turn-9";
+export const PROMPT_VERSION = "turn-10";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -37,6 +39,7 @@ const RECORD_FIELDS = `{"time":"本回合经过的时长，如：一刻 / 半个
  "status":[{"op":"add 或 remove","name":"伤病或状态名","detail":"说明"}],
  "goals":[{"op":"add / progress / done / fail","name":"目标名（已有目标沿用原名）","detail":"进展","kind":"新目标才写：主线 / 支线"}],
  "log":"一句话记下本回合发生了什么",
+ "deviation":"本回合的剧情若改变了史书记载的事（如救下了本该死去的人、阻止了本该发生的事），写一句；没有就不写",
  "risk":{"what":"玩家的行动里有风险或要看运气的那件事（没有就不写 risk）","result":"成 / 败 / 半成"},
  "choices":["建议行动1","建议行动2","建议行动3"]}`;
 
@@ -210,7 +213,7 @@ function presentPeople(state: WorldState, recent: string): Set<string> {
 
 /** One layer of a turn's context, for the developer context viewer (PLAN §5.3). */
 export interface ContextLayer {
-  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "cards" | "directive" | "notes" | "action" | "spec";
+  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "directive" | "notes" | "action" | "spec";
   label: string;
   chars: number;
   /** Why it is in, and what was left out. */
@@ -241,6 +244,8 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const present = presentPeople(input.state, recent);
   const state = renderState(input.state, input.era, present);
   const essentials = essentialsBlock(input.settings, input.pins);
+  // Great events of the world's timeline: lately, and coming soon (over the whole span for 过些日子).
+  const world = worldBlock(input.state, input.mode === "skip" ? parseDurationMinutes(input.text) ?? 90 * 1440 : undefined);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
   const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${input.fortune ? `\n【本回合运势（玩家看不到）】${FORTUNE_TEXT[input.fortune]}没有风险的日常行动不受运势影响，也不要在正文里提运势。` : ""}`;
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
@@ -251,7 +256,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const chapters = input.chapters ?? [];
   const allCards = activeCardLines(input.state, recent);
   let cardLines = allCards;
-  const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + directive.length + notes.length + action.length;
+  const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + notes.length + action.length;
   // First pass reserves room for the recap; the second gives the window whatever the recap left.
   let window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - (chapters.length ? RECAP_BUDGET : 0));
   let recap = recapBlock(chapters, (id) => window.ids.has(id));
@@ -270,7 +275,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
 
   const cards = cardsBlock(cardLines);
   const system = joinSystem(parts, recap);
-  const user = `${state}${essentials}${cards}${directive}${notes}${action}`;
+  const user = `${state}${essentials}${world}${cards}${directive}${notes}${action}`;
   const messages: ChatMessage[] = [{ role: "system", content: system }, ...window.messages, { role: "user", content: user }];
 
   const turnsIn = input.history.filter((n) => n.kind !== "edit" && window.ids.has(n.id)).length;
@@ -290,6 +295,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
       note: `最近 ${turnsIn} 段（预算剩下的部分，至少 3 段）${turnsOut ? `；更早的 ${turnsOut}${input.history.length >= 40 ? " 段以上" : " 段"}不在原文里` : ""}`,
     },
     { key: "state", label: "当前状态与人物", content: state, note: `每回合都有，不裁剪；人物 ${input.state.people.length} 人，最近提到的 ${present.size} 人带备注` },
+    { key: "world", label: "天下大事与历史偏离", content: world, note: world ? "年表里近来发生的和不久将到的大事，以及这一世已经改变的历史；不裁剪" : "这个世界没有年表，或近来没有大事" },
     { key: "essentials", label: "要点", content: essentials, note: essentials ? `全局 ${globalLines} 条，剧情里记下 ${input.pins?.length ?? 0} 条；不裁剪` : "没有要点" },
     {
       key: "cards", label: "相关设定", content: cards,

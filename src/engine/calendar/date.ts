@@ -150,6 +150,29 @@ export function monthDayLabel(date: GameDate): string {
   return date.lunar ? `${LUNAR_MONTHS[date.month - 1]}${cnDay(date.day)}` : `${date.month}月${date.day}日`;
 }
 
+/** "天宝九载 十月" / "公元1665年 4月": month precision, for timeline events. */
+export function monthLabel(date: GameDate, rules?: CalendarRules): string {
+  return `${yearLabel(date, rules)} ${date.lunar ? LUNAR_MONTHS[date.month - 1] : `${date.month}月`}`;
+}
+
+/** Days in the months before `month` of one year (the simplified calendar has no leap months or days). */
+function daysBeforeMonth(month: number, lunar: boolean): number {
+  let days = 0;
+  for (let m = 1; m < month; m++) days += monthDays({ lunar, month: m });
+  return days;
+}
+
+/**
+ * Days from `a` to `b` (negative when `b` is earlier). Needs CE years, or the
+ * same era name when the world has no CE years; null otherwise.
+ */
+export function daysBetween(a: GameDate, b: GameDate): number | null {
+  const years = a.ceYear != null && b.ceYear != null ? yearsBetween(a.ceYear, b.ceYear) : a.era === b.era ? b.year - a.year : null;
+  if (years === null) return null;
+  const yearDays = daysBeforeMonth(13, a.lunar);
+  return years * yearDays + daysBeforeMonth(b.month, a.lunar) + b.day - (daysBeforeMonth(a.month, a.lunar) + a.day);
+}
+
 /** "天宝七载 冬月十七" / "公元前44年 3月14日" */
 export function formatDate(date: GameDate, rules?: CalendarRules): string {
   return `${yearLabel(date, rules)} ${monthDayLabel(date)}`;

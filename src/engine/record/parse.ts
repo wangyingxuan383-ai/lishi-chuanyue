@@ -163,6 +163,7 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
   if (units.length) r.currency = units.sort((a, b) => b.value - a.value);
 
   if (str(v.log)) r.log = str(v.log);
+  if (str(v.deviation)) r.deviation = str(v.deviation);
   if (v.report && typeof v.report === "object" && !Array.isArray(v.report)) {
     const o = v.report as Record<string, unknown>;
     const report = { world: str(o.world), local: str(o.local), people: str(o.people) };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  addDays, ceYearOf, cnDay, cnNumber, coerceDate, eraAt, formatDate, ganzhi, monthIndex, parseDateLabel, season, seasonDetail,
+  addDays, ceYearOf, cnDay, cnNumber, coerceDate, daysBetween, eraAt, formatDate, ganzhi, monthIndex, monthLabel, parseDateLabel, season, seasonDetail,
   type CalendarRules, type GameDate,
 } from "./date";
 
@@ -141,5 +141,27 @@ describe("monthIndex", () => {
   it("orders BC and AD months", () => {
     expect(monthIndex(-1, 12)).toBeLessThan(monthIndex(1, 1));
     expect(monthIndex(748, 11)).toBeLessThan(monthIndex(749, 1));
+  });
+});
+
+describe("daysBetween", () => {
+  it("counts lunar days within a year and across New Year, both ways", () => {
+    expect(daysBetween(tianbao7, { ...tianbao7, day: 27 })).toBe(10);
+    // 冬月十七 → 正月初一 of the next year: 13 days of 冬月 (30 days) + 29 of 腊月 + 1.
+    expect(daysBetween(tianbao7, { era: "天宝", year: 8, month: 1, day: 1, ceYear: 749, lunar: true })).toBe(13 + 29 + 1);
+    const later = addDays(tianbao7, 400, TANG).date;
+    expect(daysBetween(tianbao7, later)).toBe(400);
+    expect(daysBetween(later, tianbao7)).toBe(-400);
+  });
+
+  it("uses the era name when a made-up world has no CE years, and gives up across eras", () => {
+    const jinghe = (year: number, month: number, day: number): GameDate => ({ era: "景和", year, month, day, ceYear: null, lunar: true });
+    expect(daysBetween(jinghe(3, 2, 12), jinghe(3, 3, 12))).toBe(29);
+    expect(daysBetween(jinghe(3, 2, 12), { ...jinghe(1, 1, 1), era: "永宁" })).toBeNull();
+  });
+
+  it("labels a month", () => {
+    expect(monthLabel({ era: "天宝", year: 9, month: 10, day: 1, ceYear: 750, lunar: true }, TANG)).toBe("天宝九载 十月");
+    expect(monthLabel({ era: "公元", year: 1665, month: 4, day: 1, ceYear: 1665, lunar: false })).toBe("公元1665年 4月");
   });
 });

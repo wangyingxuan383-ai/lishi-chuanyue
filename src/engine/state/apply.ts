@@ -1,13 +1,14 @@
 // Applies a model's turn record to the world state, change by change
 // (D104, D113). Invalid changes are corrected or dropped, never fatal; the
 // player sees what actually happened as chips, and the next prompt gets notes.
-import { newYearsBetween, type GameClock } from "../calendar/clock";
+import { newYearsBetween, nowOf, type GameClock } from "../calendar/clock";
 import { coerceDate, formatDate } from "../calendar/date";
 import { parseDurationMinutes } from "../calendar/duration";
 import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
 import type { Fortune } from "../fortune";
-import type { ActionMode, Attitude, Card, CardKind, Difficulty, Goal, Person, WorldState } from "../types";
+import type { ActionMode, Attitude, Card, CardKind, Difficulty, Goal, Person, TimelineEvent, WorldState } from "../types";
+import { eventsBetween, placeEvent } from "../timeline";
 
 export type RiskResult = "成" | "败" | "半成";
 const RISK_TEXT: Record<RiskResult, string> = { 成: "成了", 败: "没成", 半成: "成了一半" };
@@ -26,6 +27,10 @@ export interface TurnRecord {
   status?: { op: string; name: string; detail?: string }[] | null;
   goals?: { op: string; name: string; detail?: string; kind?: string; id?: string }[] | null;
   log?: string | null;
+  /** The story changed what the history books say (R05-T004). */
+  deviation?: string | null;
+  /** Timeline edits from the 记事 page or the organizer: add by written date, remove by id. */
+  timeline?: { op: "add" | "remove"; id?: string; date?: string; title?: string; kind?: string; source?: TimelineEvent["source"] }[] | null;
   /** "过些日子" only: what the protagonist heard while time passed (R05-T001). */
   report?: { world?: string; local?: string; people?: string } | null;
   /** The risky part of the action and how it went, when the fortune mattered (R05-T002). */
@@ -126,11 +131,36 @@ export function applyRecord(
   if (minutes >= 15) chips.push({ text: describeMinutes(minutes), tone: "info" });
   // Ages count the Chinese way (虚岁): everyone grows a year at New Year.
   const newYears = ctx.clock ? newYearsBetween(ctx.clock, before.time.elapsedMinutes, s.time.elapsedMinutes) : 0;
+  // Great events whose time has come (R05-T004): fixed ones happen; changeable ones are what the books say.
+  for (const e of eventsBetween(s.timeline, before.time.elapsedMinutes, s.time.elapsedMinutes)) {
+    chips.push({ text: e.kind === "固定" ? `📜 ${e.title}` : `📜 按史书，此时应有：${e.title}`, tone: "info" });
+  }
   if (newYears > 0) {
     if (me.age != null) me.age += newYears;
     chips.push({ text: `${newYears === 1 ? "过年了" : `过了 ${newYears} 个年`}${me.age != null ? `，${me.age} 岁` : ""}`, tone: "info" });
   }
   if (!record) return { state: s, chips, notes, log: [...log, "本回合没有记录"], minutes };
+
+  // History changed by the story is kept, dated, for every later turn (R05-T004).
+  if (record.deviation?.trim()) {
+    const when = ctx.clock?.date ? nowOf(ctx.clock, s.time.elapsedMinutes) : null;
+    const text = record.deviation.trim();
+    s.deviations = [...(s.deviations ?? []), `${when?.date ? `${formatDate(when.date, ctx.clock!.rules)}：` : ""}${text}`];
+    chips.push({ text: `⚠ 历史偏离：${text}`, tone: "warn" });
+  }
+  for (const raw of record.timeline ?? []) {
+    if (raw.op === "remove") {
+      const i = (s.timeline ?? []).findIndex((e) => e.id === raw.id);
+      if (i >= 0) s.timeline!.splice(i, 1);
+      continue;
+    }
+    if (!raw.date?.trim() || !raw.title?.trim()) { log.push(`大事缺少日期或内容：${JSON.stringify(raw)}`); continue; }
+    if (!ctx.clock) { log.push("没有游戏日期，大事无法放进年表"); continue; }
+    const placed = placeEvent(ctx.clock, { date: raw.date, title: raw.title, kind: raw.kind });
+    if (placed.atMinute === null) log.push(`大事“${placed.title}”的日期无法换算，只记录不提醒`);
+    if ((s.timeline ?? []).some((e) => e.title === placed.title)) continue;
+    s.timeline = [...(s.timeline ?? []), { id: newId(), ...placed, source: raw.source ?? "玩家" }].sort((a, b) => (a.atMinute ?? Infinity) - (b.atMinute ?? Infinity));
+  }
 
   // The fortune behind a risky action, shown so the outcome is not a black box (PLAN §5.5).
   if (record.risk?.what && ctx.fortune) {

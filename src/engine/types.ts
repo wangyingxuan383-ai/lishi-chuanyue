@@ -81,6 +81,19 @@ export interface Card {
   source?: "卡组" | "AI" | "玩家";
 }
 
+/** One great event of the world's timeline (R05-T004). */
+export interface TimelineEvent {
+  id: string;
+  /** As written, month precision: "天宝九载 十月". */
+  date: string;
+  /** Game minutes after the start when it happens; negative for history before the start, null when it could not be placed. */
+  atMinute: number | null;
+  title: string;
+  /** 固定 happens whatever the player does; 可变 is what the books say, and the story may change it. */
+  kind: "固定" | "可变";
+  source?: "卡组" | "AI" | "玩家";
+}
+
 /** A chapter summary (R04-T003); used only while its last node is on the current path. */
 export interface Chapter {
   id: string;
@@ -137,6 +150,8 @@ export interface WorldState {
   deviations: string[];
   /** Names of cards and places the player deleted; the AI does not propose them again (D122). */
   dismissed?: string[];
+  /** The world's great events (R05-T004); absent in old saves. */
+  timeline?: TimelineEvent[];
 }
 
 export type Perspective = "你" | "我" | "他";

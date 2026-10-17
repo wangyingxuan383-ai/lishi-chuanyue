@@ -21,6 +21,8 @@ import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
 import { isFortune, rollFortune, type Fortune } from "./fortune";
+import { packTimeline } from "./timeline";
+import { newId } from "./db/repo";
 import { parseMoney } from "./money";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS, type ActionMode, type Chapter, type StoryNode, type WorldSettings, type WorldState } from "./types";
@@ -324,11 +326,17 @@ export class Game {
 
     // The organized 设定集 goes into the opening state before the opening's own record.
     let codexResult: ChatResult | null = null;
+    // Organized great events wait until the opening has fixed the start date they are counted from.
+    let codexTimeline: TurnRecord["timeline"] = null;
     if (organize) {
       onEvent({ type: "organizing" });
       codexResult = await startCodex();
       const patch = codexResult ? codexPatch(codexResult.text, initial) : null;
-      if (patch) Object.assign(initial, applyRecord(initial, patch, { mode: "do", difficulty: settings.difficulty, currency: era.currency }, { advanceTime: false }).state);
+      if (patch) {
+        const { timeline, ...rest } = patch;
+        codexTimeline = timeline ?? null;
+        Object.assign(initial, applyRecord(initial, rest, { mode: "do", difficulty: settings.difficulty, currency: era.currency }, { advanceTime: false }).state);
+      }
     }
 
     // Opening-only fields: date, hour, currency and the starting purse (an absolute amount).
@@ -346,6 +354,9 @@ export class Game {
     if (record.hour != null) initial.time.startHour = record.hour;
     if (!pack && record.currency?.length) initial.era.currency = { units: record.currency };
     const startEra = eraContext(pack?.id ?? null, initial);
+    // The world's timeline (R05-T004): a pack's events, then the organizer's, placed against the start.
+    if (pack) initial.timeline = packTimeline(pack.timeline, startEra.clock).map((e) => ({ id: newId(), ...e }));
+    if (codexTimeline?.length) Object.assign(initial, applyRecord(initial, { timeline: codexTimeline }, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency, clock: startEra.clock }, { advanceTime: false }).state);
     const purse = record.money != null ? parseMoney(record.money, startEra.currency) : null;
     initial.protagonist.stats.money = Math.max(0, purse ?? pack?.startMoney ?? 0);
     const { money: _m, time: _t, date: _d, hour: _h, currency: _c, ...rest } = record;
