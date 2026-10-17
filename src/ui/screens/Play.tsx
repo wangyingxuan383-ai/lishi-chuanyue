@@ -92,7 +92,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
@@ -468,6 +468,7 @@ export default function Play({ worldId }: { worldId: string }) {
           ))}
         </Sheet>
       )}
+      {sheet === "ask" && <AskSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
         <Sheet title="重说时希望…" onClose={() => setSheet(null)}>
@@ -484,6 +485,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "撤销", hidden: !head.parentId || !!gen, onSelect: async () => { await tree.undo(game.repo, cursor); await refresh(); } },
             { label: "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: async () => { await tree.redo(game.repo, cursor); await refresh(); } },
             { label: "过些日子", hidden: !!gen, onSelect: () => setSheet("skip") },
+            { label: "查一查", hidden: !!gen, onSelect: () => setSheet("ask") },
             { label: "附加幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
@@ -532,6 +534,45 @@ export default function Play({ worldId }: { worldId: string }) {
         <div className="row"><button className="primary" onClick={() => void answerNotifications(true)}>允许</button><button onClick={() => void answerNotifications(false)}>不用了</button></div>
       </Sheet>}
     </div>
+  );
+}
+
+/** 查一查 (R07-T001): questions about this world or the era; the story does not move. */
+function AskSheet({ worldId, onClose }: { worldId: string; onClose: () => void }) {
+  const { game } = useApp();
+  const [question, setQuestion] = useState("");
+  const [asked, setAsked] = useState<{ q: string; a: string; pending: boolean }[]>([]);
+  const pending = asked.some((x) => x.pending);
+  const update = (patch: { a: string; pending: boolean }) => setAsked((list) => list.map((x, i) => (i === list.length - 1 ? { ...x, ...patch } : x)));
+  const ask = async () => {
+    const q = question.trim();
+    if (!q || pending) return;
+    setQuestion("");
+    setAsked((list) => [...list, { q, a: "", pending: true }]);
+    try {
+      const answer = await game.ask(worldId, q, (full) => update({ a: full, pending: true }));
+      update({ a: answer || "没有查到。", pending: false });
+    } catch {
+      update({ a: "这次没查到，稍后再试。", pending: false });
+    }
+  };
+  return (
+    <Sheet title="查一查" onClose={onClose}>
+      <div className="stack">
+        <p className="muted" style={{ margin: 0 }}>问这个世界里的人和事，或者这个时代的常识。只是查资料，故事不会往下走。</p>
+        {asked.map((x, i) => (
+          <div key={i} className="ask-item">
+            <b>{x.q}</b>
+            {x.a ? <StoryText text={x.a} /> : <p className="muted">查找中…</p>}
+          </div>
+        ))}
+        <div className="row">
+          <input className="grow" aria-label="想问什么" value={question} onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void ask(); }} placeholder="如：王掌柜是什么来头？一斗米多少钱？" />
+          <button className="primary" disabled={!question.trim() || pending} onClick={() => void ask()}>问</button>
+        </div>
+      </div>
+    </Sheet>
   );
 }
 

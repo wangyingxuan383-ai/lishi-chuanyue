@@ -394,6 +394,19 @@ check("a great event is added to the timeline", (await page.locator(".codex-item
 await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 
+// 查一查 (R07-T001): answers from this world first; the story does not move.
+const turnsBeforeAsk = await page.locator(".turn").count();
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "查一查" }).click();
+await page.getByLabel("想问什么").fill("王掌柜是什么来头？");
+await page.getByRole("button", { name: "问", exact: true }).click();
+await page.locator(".ask-item", { hasText: "仅供参考" }).waitFor({ timeout: 20000 });
+await page.waitForTimeout(400);
+await shot("07e-ask");
+check("查一查 answers from this world and marks general knowledge", (await page.locator(".ask-item").textContent()).includes("【本局】王掌柜"));
+await page.keyboard.press("Escape");
+check("查一查 does not move the story", (await page.locator(".turn").count()) === turnsBeforeAsk);
+
 // 过些日子 (R05-T001): a month passes, with the report card and a month chip.
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "过些日子" }).click();

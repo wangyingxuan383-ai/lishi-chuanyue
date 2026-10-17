@@ -16,6 +16,7 @@ import {
 import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
 import { UPKEEP_EVERY, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
 import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
+import { askMessages } from "./prompt/ask";
 import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
@@ -645,6 +646,28 @@ export class Game {
     const current = await this.repo.getSetting<number | null>(`tokenRatio:${this.llm.model}`, null);
     const next = Math.min(2, Math.max(0.3, current ? current * 0.7 + observed * 0.3 : observed));
     await this.repo.setSetting(`tokenRatio:${this.llm.model}`, Math.round(next * 1000) / 1000);
+  }
+
+  /**
+   * 查一查 (R07-T001): answers a question from this world's records, marking
+   * general knowledge as 【仅供参考】. Nothing advances or changes; one auxiliary call.
+   */
+  async ask(worldId: string, question: string, onText: (full: string) => void): Promise<string> {
+    const world = (await this.repo.getWorld(worldId))!;
+    const head = (await tree.cursor(this.repo, worldId)).head;
+    const state = await this.repo.getState(head.id);
+    const messages = askMessages({
+      question, state, era: eraContext(world.eraId, state), settings: world.settings,
+      chapters: await this.repo.chaptersOnPath(worldId, head.id), history: await this.repo.path(head.id, 12),
+      pins: (await this.repo.pinsOnPath(worldId, head.id)).map((p) => p.text),
+    });
+    let result: ChatResult | null = null;
+    try {
+      result = await this.call(messages, { aux: true, timeouts: CODEX_TIMEOUT, onText: (_d, full) => onText(full) });
+      return result.text.trim();
+    } finally {
+      await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, result ? "ok" : "failed", this.llm!.auxModel || this.llm!.model)]);
+    }
   }
 
   /** The next turn's request, layer by layer, for the developer context viewer (R04-T004). */

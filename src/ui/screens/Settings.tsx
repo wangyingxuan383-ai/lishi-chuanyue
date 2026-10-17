@@ -3,7 +3,7 @@ import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../en
 import { useApp, type Reading } from "../app/context";
 import type { Row } from "../../platform";
 
-const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", test: "测试" };
+const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", ask: "查一查", test: "测试" };
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
 
 export default function Settings() {

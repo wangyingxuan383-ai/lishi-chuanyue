@@ -112,6 +112,8 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .tree-turns .ghost { min-height: 32px; padding: 2px 8px; font-size: 13px; }
 .line-row { align-items: stretch; gap: 4px; }
 .line-row > .ghost { min-width: 40px; padding: 0 6px; }
+.ask-item { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.ask-item .story-text, .ask-item p { font-size: 15px; }
 .report-card { margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 14px; }
 .report-card b { display: block; margin-bottom: 4px; }
 .report-card p { margin: 2px 0; line-height: 1.6; }

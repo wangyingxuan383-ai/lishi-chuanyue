@@ -41,6 +41,7 @@ ${JSON.stringify(r)}
   if (prompt.includes("你帮玩家构思")) return JSON.stringify({ title: "汴京小吏", premise: "北宋宣和七年，汴京。金兵南下在即，朝野却仍歌舞升平。", name: "沈默", gender: "男", age: 26, identity: "你是开封府的一名小吏，掌管户籍文书。", arrival: "魂穿", origin: "历史系研究生", hint: "府衙里，上官让你连夜誊抄一份名册。", essentials: "主角知道靖康之变将至" });
   if (prompt.includes("整理出一张时代卡")) return JSON.stringify({ era: { name: "AI 整理的时代", content: "时局：天下初定。\n不要出现：手机" }, cards: [{ kind: "势力", name: "漕帮", keys: ["帮里"], content: "运河上的帮会" }] });
   if (prompt.includes("【玩家选择过些日子】") && prompt.lastIndexOf("【玩家选择过些日子】") > prompt.lastIndexOf("【玩家行动】")) return "一个月过得很快。你白天在西市货栈扛活，夜里替人抄书，攒下了一些钱；王掌柜的脸色也好看了些。月末，一个陌生人找上门来。" + record({ time: "一个月", money: 400, report: { world: "听说陇右又打了胜仗", local: "米价涨到一斗二十二文", people: "货栈管事请你喝了一回酒" }, log: "过了一个月", choices: ["开门见客", "装作不在"] });
+  if (prompt.includes("替玩家查资料")) return "【本局】王掌柜是西市旁邸店的掌柜，正催你付九十文房钱。\n\n【仅供参考】唐代天宝年间，一斗米大约二十文上下。";
   if (prompt.includes("出记忆测试题")) return JSON.stringify([{ q: "主角欠谁房钱？", a: "王掌柜" }, { q: "欠了多少？", a: "九十文" }]);
   if (prompt.includes("这不是剧情，是一次记忆测试")) return "1. 王掌柜\n2. 九十文";
   if (prompt.includes("写成章节摘要")) return JSON.stringify({ title: "西市谋生", gist: "主角在西市货栈找活，欠下房钱", summary: "主角在西市邸店醒来，被王掌柜催讨九十文房钱；付了三十文后约定后日补齐，又去西市货栈应短工。" });
