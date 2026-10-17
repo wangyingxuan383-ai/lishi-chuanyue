@@ -2,6 +2,7 @@
 // node_modules/.bin/tsx scripts/eval/autoplay.ts --model fake-normal --slot fake --turns 8
 // Memory probes (R04-T005): --probe-at 60,100,150 asks, out of band and with the
 // next turn's own context, questions written from turns --probe-from 3-20.
+// --save-db <file> keeps the finished game for scripts/eval/probe.ts.
 import fs from "node:fs";
 import path from "node:path";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
@@ -171,6 +172,7 @@ async function main() {
   };
   const platform = await createMemoryPlatform(llm);
   const game = await Game.open(platform, { slot, url, model, includeUsage: true });
+  const saveDb = arg("save-db");
   const entries: Entry[] = [];
   let stopReason = "turns";
   const probeAt = (arg("probe-at", "") ?? "").split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0);
@@ -194,7 +196,7 @@ async function main() {
     const result = await streamChat(platform, {
       slot, url, model, includeUsage: true, maxTokens: 1500,
       messages: [
-        { role: "system", content: "你替一部互动小说出记忆测试题。出 6 道事实题，检查读者以后是否还记得这些事：每题只问一件具体、之后不会被剧情改写的事实（人物的名字或身份、钱数、地点、约定或承诺、受的伤、得到或交出的东西），答案能在原文里找到、一两句话说清，不要问感受或推测。只输出 JSON 数组：[{\"q\":\"问题\",\"a\":\"答案\"}]" },
+        { role: "system", content: "你替一部互动小说出记忆测试题。出 6 道事实题，检查作者写到后面时是否还记得前面的关键事实：只问以后的剧情很可能还用得上的事——重要人物是谁、和主角是什么关系；主角欠了谁什么、答应过谁什么；主角受过的伤；主角得到或交出的关键物件；关键线索指向谁。不要问一次性的细节（某个小角色的名字、付了什么报酬、器物上的花纹）。每题只问一件事，答案能在原文里找到、一两句话说清。只输出 JSON 数组：[{\"q\":\"问题\",\"a\":\"答案\"}]" },
         { role: "user", content: text },
       ],
     }).result;
@@ -202,10 +204,13 @@ async function main() {
     probes.questions = list.filter((x) => typeof x.q === "string" && typeof x.a === "string").slice(0, 6).map((x) => ({ q: x.q as string, a: x.a as string }));
   }
 
-  /** Asks the questions with exactly the context the next turn would get; nothing is saved to the story. */
+  /**
+   * Asks the questions with the context the next turn would get if the player
+   * asked them (so cards, people's notes and 【相关旧事】 they mention come in); nothing is saved.
+   */
   async function askQuestions(): Promise<void> {
     if (!probes.questions.length) return;
-    const { messages } = await game.previewContext(worldId!);
+    const { messages } = await game.previewContext(worldId!, { mode: "do", text: probes.questions.map((x) => x.q).join(" ") });
     const last = messages[messages.length - 1];
     const ask = `\n\n【这不是剧情，是一次记忆测试】请只根据上面的前文、前情提要和设定回答下列问题，每题一行，格式“编号. 答案”；不记得就写“不知道”，不要编。\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}`).join("\n")}`;
     const content = last.content.slice(0, last.content.indexOf("\n\n【玩家行动】")) + ask;
@@ -423,6 +428,8 @@ async function main() {
   const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}；运势：${e.fortune ?? "（无）"}${e.risk ? `；风险：${e.risk.what}${e.risk.result ? ` · ${e.risk.result}` : ""}` : ""}${e.goals?.length ? `\n\n目标变化：${e.goals.map((g) => `${g.op} ${g.name}${g.detail ? `（${g.detail}）` : ""}`).join("；")}` : ""}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
+  // The game itself, for probes re-run later against newer memory code (scripts/eval/probe.ts).
+  if (saveDb) fs.writeFileSync(path.resolve(ROOT, saveDb), platform.exportDb());
   fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n${chapterList.length ? `\n## 章节摘要\n\n${chapterList.map((c, i) => `### 第 ${i + 1} 章 · ${c.title}\n\n梗概：${c.gist}\n\n${c.summary}`).join("\n\n")}\n` : ""}${probes.questions.length ? `\n## 记忆探针（第 ${probeFrom}～${probeTo} 回合出题）\n\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}\n   标准答案：${x.a}${probes.rounds.map((r) => `\n   第 ${r.turn} 回合：${r.answers[i]}`).join("")}`).join("\n")}\n` : ""}`, "utf8");
   const { opening: _opening, entries: _entries, ...totals } = summary;
   console.log(JSON.stringify(totals, null, 2));

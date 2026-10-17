@@ -186,6 +186,13 @@ describe("applyRecord", () => {
     expect(before.protagonist.stats.health).toBe(80);
   });
 
+  it("counts money as money, not as items", () => {
+    const r = apply(sampleState(), { money: 180, items: [{ name: "开元通宝", delta: 180 }, { name: "三百文", delta: 1 }, { name: "钱袋", delta: 1 }] });
+    expect(r.state.protagonist.items.map((i) => i.name)).toEqual(["钱袋"]);
+    expect(r.state.protagonist.stats.money).toBe(480);
+    expect(r.log).toContain("“开元通宝”是钱，按钱记，不放进行囊");
+  });
+
   it("says long spans in months and years", () => {
     const chip = (time: string) => apply(sampleState(), { time }).chips[0].text;
     expect(chip("一个月")).toBe("过了 1 个月");

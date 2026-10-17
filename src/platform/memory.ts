@@ -4,9 +4,10 @@ import initSqlJs from "sql.js";
 import { sqlJsSql } from "./sqljs";
 import type { Platform } from "./types";
 
-export async function createMemoryPlatform(llm?: Platform["llm"]): Promise<Platform> {
+/** `data` opens a saved database; `exportDb` saves one (eval scripts keep games for later probes). */
+export async function createMemoryPlatform(llm?: Platform["llm"], options: { data?: Uint8Array } = {}): Promise<Platform & { exportDb(): Uint8Array }> {
   const SQL = await initSqlJs();
-  const db = new SQL.Database();
+  const db = new SQL.Database(options.data);
   db.exec("PRAGMA foreign_keys = ON;");
   const secrets = new Map<string, { value: string; boundBaseUrl: string }>();
   const unsupported = async () => {
@@ -37,5 +38,6 @@ export async function createMemoryPlatform(llm?: Platform["llm"]): Promise<Platf
     },
     files: { exportText: unsupported, importText: unsupported },
     system: { requestNotifications: async () => true, onBack: () => () => {} },
+    exportDb: () => db.export(),
   };
 }

@@ -629,7 +629,7 @@ export class Game {
     const ratio = await this.tokenRatio();
     return {
       era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name, state,
-      history: await this.repo.path(base.id, 40), notes: (base.meta.notes as string[] | undefined) ?? [],
+      ...(await this.repo.path(base.id).then((path) => ({ history: path.slice(-40), allTurns: path }))), notes: (base.meta.notes as string[] | undefined) ?? [],
       taboos: (base.meta.taboos as TabooHit[] | undefined) ?? [],
       pins: (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text),
       chapters: await this.repo.chaptersOnPath(worldId, base.id),
@@ -675,10 +675,10 @@ export class Game {
   }
 
   /** The next turn's request, layer by layer, for the developer context viewer (R04-T004). */
-  async previewContext(worldId: string): Promise<ContextPreview> {
+  async previewContext(worldId: string, action: { mode: ActionMode; text: string } = { mode: "do", text: "（下一回合的行动）" }): Promise<ContextPreview> {
     const head = (await tree.cursor(this.repo, worldId)).head;
     const ratio = await this.tokenRatio();
-    const { messages, layers, chars, budgetChars } = buildTurnContext(await this.turnInput(worldId, head, { mode: "do", text: "（下一回合的行动）" }));
+    const { messages, layers, chars, budgetChars } = buildTurnContext(await this.turnInput(worldId, head, action));
     return { messages, layers, chars, budgetChars, ratio: ratio.value, calibrated: ratio.calibrated };
   }
 

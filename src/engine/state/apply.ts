@@ -102,6 +102,13 @@ function describeMinutes(minutes: number): string {
   return "片刻";
 }
 
+/** Coins and units of money as an item name: "铜钱", "开元通宝", "三百文", "碎银". */
+function isCurrency(name: string, currency: Currency): boolean {
+  const n = name.trim();
+  if (/通宝|^铜钱$|^钱$|^碎银|^银两$|^铜板$/.test(n)) return true;
+  return currency.units.some((u) => u.name && (n === u.name || new RegExp(`^[\\d零〇一二两三四五六七八九十百千万]+${u.name}$`).test(n)));
+}
+
 function attitudeOf(text: string | undefined): Attitude | null {
   if (!text) return null;
   return ATTITUDES.find((a) => text.includes(a)) ?? null;
@@ -237,6 +244,8 @@ export function applyRecord(
   for (const raw of record.items ?? []) {
     const delta = typeof raw?.delta === "number" ? raw.delta : Number(String(raw?.delta ?? "").replace(/[^\d+-]/g, ""));
     if (!raw?.name || !Number.isFinite(delta)) { log.push(`物品记录不完整：${JSON.stringify(raw)}`); continue; }
+    // Money is counted in money, not in the bag ("开元通宝×180" next to 钱 +180).
+    if (isCurrency(raw.name, ctx.currency)) { log.push(`“${raw.name}”是钱，按钱记，不放进行囊`); continue; }
     if (delta > 0 && purchaseFailed) { log.push(`钱不够，未获得 ${raw.name}`); continue; }
     let item = matchName(me.items, raw.name);
     if (delta === 0 && item && raw.place !== undefined) {

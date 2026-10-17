@@ -655,7 +655,7 @@ describe("context budget", () => {
     const preview = await game.previewContext(worldId);
     // 100 reported tokens for a few thousand characters: far below the floor, so it is clamped.
     expect(preview).toMatchObject({ calibrated: true, ratio: 0.3, budgetChars: 40000 });
-    expect(preview.layers.map((l) => l.key)).toEqual(["rules", "premise", "era", "recap", "history", "state", "world", "essentials", "cards", "directive", "notes", "action", "spec"]);
+    expect(preview.layers.map((l) => l.key)).toEqual(["rules", "premise", "era", "recap", "history", "state", "world", "essentials", "cards", "recall", "directive", "notes", "action", "spec"]);
     expect(preview.layers.find((l) => l.key === "action")!.content).toContain("（下一回合的行动）");
   });
 });

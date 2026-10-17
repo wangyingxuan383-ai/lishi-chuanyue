@@ -12,8 +12,9 @@ import { FORTUNE_TEXT, type Fortune } from "../fortune";
 import { parseDurationMinutes } from "../calendar/duration";
 import { worldBlock } from "../timeline";
 import { tabooReminder, type TabooHit } from "../era/taboo";
+import { RECALL_BUDGET, recallBlock } from "../memory/recall";
 
-export const PROMPT_VERSION = "turn-11";
+export const PROMPT_VERSION = "turn-12";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -49,7 +50,8 @@ const RECORD_SPEC = `【输出格式】先写正文。正文结束后另起一�
 ${RECORD_FIELDS}
 </record>
 记录必须与正文一致：正文里付了钱、得到或失去东西、受伤、结识人物，记录里都要写；正文没有发生的，记录里不要写。人物、物品、目标沿用【当前】中的原名。
-items 只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写。people 只写本回合真正出场或打过交道的人。`;
+items 只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写，钱不算物品。people 只写本回合真正出场或打过交道的人。
+主角许下的承诺、欠下的人情或债、和人约好的事，在 goals 里记成支线目标（如“后日落锁前补齐房钱六十文”），兑现了写 done，落空了写 fail。`;
 
 const OPENING_EXTRA = `开场的记录块另有要求：
 - "date"：故事开始的日期，写成对象 {"era":"年号（西方背景写“公元”或“公元前”）","year":第几年,"month":月,"day":日,"ceYear":对应的公元年份（公元前为负数）}；中国背景用农历月日。如 {"era":"天宝","year":7,"month":11,"day":17,"ceYear":748}、{"era":"公元前","year":44,"month":3,"day":14,"ceYear":-44}。之后的日期由程序按经过的时间推算；
@@ -149,14 +151,16 @@ const ACTION_TEXT: Record<ActionMode, (text: string) => string> = {
   direct: (t) => `【玩家没有行动，只给叙事者一个幕后要求，照做但不要在正文中提及】${t}\n主角只做等待、观察这类被动动作，由他人和环境推动剧情。`,
   continue: () => "【玩家选择继续】主角只做等待、观察这类被动动作，由他人和环境推动剧情，小幅推进时间。",
   skip: (t) => `【玩家选择过些日子】${t}
-用一段“时光流逝”的叙述（三五百字）概括这段日子：主角大致怎么过的、钱的进出、身体如何、和谁有过往来；世事照常推进，进行中的目标该有进展就写进展。遇到需要主角亲自决定的事（有人找上门、出了意外、机会来了），就提前停下，写到主角需要决定为止。
+用一段“时光流逝”的叙述（三五百字）概括这段日子：主角大致怎么过的、钱的进出、身体如何、和谁有过往来；世事照常推进，进行中的目标该有进展就写进展。日子过得越长，越可能遇到需要主角亲自决定的事（有人找上门、出了变故、机会来了）：遇到了就停在那里，写到主角需要决定为止，不要一口气写完；真的风平浪静才写完整段。
 记录里的 time 写实际过了多久（提前停下就写到停下时），钱、物品、人物照实记；另加 "report"：{"world":"这段时间的天下风声，一两句，符合时代","local":"本地物价或市面，一句","people":"人情往来，一句"}。`,
 };
 
 export interface TurnPromptInput extends StoryContext {
   state: WorldState;
-  /** Committed story so far on the current path, oldest first (opening included). */
+  /** Committed story so far on the current path, oldest first (opening included); the newest 40 nodes. */
   history: StoryNode[];
+  /** The whole path, for 【相关旧事】 from turns long gone from the window. */
+  allTurns?: StoryNode[];
   mode: ActionMode;
   text: string;
   directorNote?: string | null;
@@ -216,7 +220,7 @@ function presentPeople(state: WorldState, recent: string): Set<string> {
 
 /** One layer of a turn's context, for the developer context viewer (PLAN §5.3). */
 export interface ContextLayer {
-  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "directive" | "notes" | "action" | "spec";
+  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "recall" | "directive" | "notes" | "action" | "spec";
   label: string;
   chars: number;
   /** Why it is in, and what was left out. */
@@ -260,15 +264,24 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const allCards = activeCardLines(input.state, recent);
   let cardLines = allCards;
   const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + notes.length + action.length;
-  // First pass reserves room for the recap; the second gives the window whatever the recap left.
-  let window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - (chapters.length ? RECAP_BUDGET : 0));
+  // Turns that left the window, numbered from the opening (0), for 【相关旧事】.
+  const story = (input.allTurns ?? input.history).filter((n) => n.kind !== "edit");
+  const older = (ids: Set<string>) => story.map((node, turn) => ({ node, turn })).filter(({ node }) => !ids.has(node.id));
+  // First pass reserves room for the recap and recall; the second gives the window whatever they left.
+  const reserve = (chapters.length ? RECAP_BUDGET : 0) + (story.length > 3 ? RECALL_BUDGET : 0);
+  let window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - reserve);
   let recap = recapBlock(chapters, (id) => window.ids.has(id));
-  if (chapters.length) {
-    window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - recap.length);
+  let recall = recallBlock(input.state, recent, older(window.ids));
+  if (reserve) {
+    window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - recap.length - recall.length);
     recap = recapBlock(chapters, (id) => window.ids.has(id));
+    recall = recallBlock(input.state, recent, older(window.ids));
   }
   const historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
-  const total = () => fixed + cardsBlock(cardLines).length + recap.length + historyChars;
+  const total = () => fixed + cardsBlock(cardLines).length + recap.length + recall.length + historyChars;
+  // Over the hard cap: recall goes first, then the recap shrinks to gists, then cards.
+  const recallDropped = total() > hardCap && !!recall;
+  if (recallDropped) recall = "";
   let gistsOnly = false;
   if (total() > hardCap && recap) {
     recap = recapBlock(chapters, (id) => window.ids.has(id), RECAP_BUDGET, 0);
@@ -278,7 +291,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
 
   const cards = cardsBlock(cardLines);
   const system = joinSystem(parts, recap);
-  const user = `${state}${essentials}${world}${cards}${directive}${notes}${action}`;
+  const user = `${state}${essentials}${world}${cards}${recall}${directive}${notes}${action}`;
   const messages: ChatMessage[] = [{ role: "system", content: system }, ...window.messages, { role: "user", content: user }];
 
   const turnsIn = input.history.filter((n) => n.kind !== "edit" && window.ids.has(n.id)).length;
@@ -304,6 +317,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
       key: "cards", label: "相关设定", content: cards,
       note: allCards.length ? `最近三回合或本次行动提到的，所在地优先${cardLines.length < allCards.length ? `；超出上限，去掉了 ${allCards.length - cardLines.length} 张` : ""}` : "最近没有提到设定集里的东西",
     },
+    { key: "recall", label: "相关旧事", content: recall, note: recall ? "原文窗口以外、提到眼下这些人和物的句子（最早一次和最近一次）" : recallDropped ? "超出上限，这回合没放" : "眼下提到的人和物在更早的剧情里没出现过，或都还在原文里" },
     { key: "directive", label: "叙事方针", content: directive, note: directive ? "玩家写的，每回合都有" : "没写" },
     { key: "notes", label: "程序提示", content: notes, note: notes ? `${input.notes?.length ? "上回合程序修正过的变化；" : ""}${input.fortune ? `本回合运势：${input.fortune}` : ""}` : "没有" },
     { key: "action", label: "玩家行动", content: action, note: "本回合的行动与幕后要求" },
