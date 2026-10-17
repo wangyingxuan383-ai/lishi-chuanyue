@@ -28,10 +28,17 @@ export function tabooTerms(eraCard: Card | null, pack: EraPack | null): TabooTer
   return terms;
 }
 
+/** Longer words that contain a term but mean something else (a 火折子 is not a memorial). */
+const OTHER_WORDS: Record<string, string[]> = { 折子: ["火折子"] };
+
 /** The taboo words in a passage, each once. */
 export function findTaboos(text: string, terms: TabooTerm[]): TabooHit[] {
   const hits = new Map<string, TabooHit>();
-  for (const t of terms) if (text.includes(t.term) && !hits.has(t.term)) hits.set(t.term, { term: t.term, instead: t.instead });
+  for (const t of terms) {
+    if (hits.has(t.term)) continue;
+    const plain = (OTHER_WORDS[t.term] ?? []).reduce((s, w) => s.split(w).join("　"), text);
+    if (plain.includes(t.term)) hits.set(t.term, { term: t.term, instead: t.instead });
+  }
   return [...hits.values()];
 }
 
