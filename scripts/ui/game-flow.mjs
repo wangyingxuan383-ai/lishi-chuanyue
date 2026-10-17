@@ -692,6 +692,164 @@ await page.locator(".ending-card").waitFor({ state: "detached" });
 check("going back from the ending brings the story back", (await page.locator(".ending-card").count()) === 0);
 await page.getByRole("button", { name: "返回", exact: true }).click();
 
+// AUDIT_V4 §8 / AUDIT_V4_FUNCTION F6–F10, G1, H1, D5, D6, D8: the character panel's own editors.
+await page.locator(".world-card", { hasText: dyingWorld }).first().locator(".world-open").click();
+await page.locator(".turn").last().waitFor();
+await page.getByRole("button", { name: "角色" }).click();
+check("我 opens with a 人物小传: serif name, identity and 此时此地", (await page.locator(".bio-name").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))) === 22 && (await page.locator(".bio-card").textContent()).includes("此时此地"));
+await page.waitForTimeout(400);
+await shot("17a-me");
+await page.getByRole("button", { name: "改小传" }).click();
+await page.locator(".sheet").getByLabel("名字").fill("一二三四五六七八九十甲乙丙");
+check("a name over 12 characters is marked and cannot be saved", (await page.locator(".sheet .field-suffix").textContent()) === "13/12" && await page.locator(".sheet").getByRole("button", { name: "保存" }).isDisabled());
+await page.locator(".sheet").getByLabel("名字").fill("沈长安");
+await page.locator(".sheet").getByLabel("年龄").fill("150");
+check("an age outside 1–120 is marked inline", (await page.locator(".sheet").textContent()).includes("年龄要在 1～120 岁之间") && await page.locator(".sheet").getByRole("button", { name: "保存" }).isDisabled());
+await page.locator(".sheet").getByLabel("年龄").fill("24");
+await page.locator(".sheet").getByLabel("金手指").fill("熟读唐史");
+await page.waitForTimeout(300);
+await shot("17b-bio");
+await page.locator(".sheet").getByRole("button", { name: "保存" }).click();
+await page.locator(".bio-name", { hasText: "沈长安" }).waitFor();
+check("the 人物小传 saves name, age and 金手指", (await page.locator(".bio-card").textContent()).includes("24 岁") && (await page.locator(".bio-card").textContent()).includes("熟读唐史"));
+// Stats are edited by the words the panel shows; money is a whole number with its hint in the field.
+await page.getByRole("button", { name: "修改", exact: true }).click();
+check("health is edited by level words, not 0–100", (await page.getByRole("group", { name: "健康" }).getByRole("button").allTextContents()).join() === "康健,微恙,带伤,重伤,垂危");
+await page.getByLabel("钱", { exact: true }).fill("12.7");
+check("money takes whole numbers only, the hint stays inside the field", (await page.getByLabel("钱", { exact: true }).inputValue()) === "127" && (await page.locator(".field-line .field-suffix").count()) === 1);
+await page.getByRole("group", { name: "精力" }).getByRole("button", { name: "疲惫" }).click();
+await page.waitForTimeout(300);
+await shot("17c-me-edit");
+await page.getByRole("button", { name: "保存修改" }).click();
+await page.getByRole("button", { name: "修改", exact: true }).waitFor();
+check("a level saves as that word", (await page.locator(".stat", { hasText: "精力" }).textContent()).includes("疲惫"));
+// 行囊: one editor per item; a name already there asks to merge.
+await page.getByRole("tab", { name: /行囊/ }).click();
+await page.getByRole("button", { name: "＋ 添加物品" }).click();
+await page.locator(".sheet").getByLabel("名称").fill("紫毫笔");
+await page.locator(".sheet").getByLabel("数量").fill("2");
+await page.locator(".sheet").getByLabel("单位").fill("支");
+await page.locator(".sheet").getByLabel("放在哪").fill("书箱");
+await page.locator(".sheet").getByRole("button", { name: "保存" }).click();
+await page.locator(".codex-item", { hasText: "紫毫笔" }).waitFor();
+check("a new item has its unit and place", (await page.locator(".codex-item", { hasText: "紫毫笔" }).textContent()).includes("2 支") && (await page.locator(".codex-item", { hasText: "紫毫笔" }).textContent()).includes("放在书箱"));
+await page.getByRole("button", { name: "＋ 添加物品" }).click();
+await page.locator(".sheet").getByLabel("名称").fill("紫毫笔");
+await page.locator(".sheet").getByRole("button", { name: "保存" }).click();
+await page.locator(".dialog").waitFor();
+check("adding an item already in the bag asks whether to merge", (await page.textContent(".dialog")).includes("合并"));
+await page.locator(".dialog").getByRole("button", { name: "合并" }).click();
+await page.locator(".codex-item", { hasText: "3 支" }).waitFor();
+await page.locator(".codex-item", { hasText: "紫毫笔" }).click();
+await page.locator(".sheet").getByLabel("名称").fill("湖笔");
+await page.locator(".sheet").getByLabel("备注").fill("西市买的");
+await page.waitForTimeout(300);
+await shot("17d-item");
+await page.locator(".sheet").getByRole("button", { name: "保存" }).click();
+await page.locator(".codex-item", { hasText: "湖笔" }).waitFor();
+check("an item can be renamed and noted in its own editor", (await page.locator(".codex-item", { hasText: "湖笔" }).textContent()).includes("西市买的"));
+await page.waitForTimeout(300);
+await shot("17e-bag");
+// Attitudes are coloured by closeness.
+await page.getByRole("tab", { name: /人物/ }).click();
+check("attitude tags carry a closeness class", (await page.locator(".person-side .tag[class*='att-']").count()) === (await page.locator(".person-side .tag").count()));
+await page.waitForTimeout(300);
+await shot("17f-people");
+// 年表: the date is checked before saving, and an event can be edited.
+await page.getByRole("tab", { name: "记事" }).click();
+await page.getByRole("button", { name: "添加大事" }).click();
+await page.getByLabel(/^日期/).fill("明年");
+await page.getByLabel("发生什么").fill("城里闹瘟疫");
+check("a date the game cannot count is flagged and cannot be saved", (await page.locator(".sheet").textContent()).includes("换算不了") && await page.locator(".sheet").getByRole("button", { name: "添加", exact: true }).isDisabled());
+await page.getByLabel(/^日期/).fill(`${yearNow}腊月`);
+await page.waitForTimeout(300);
+await shot("17g-event");
+await page.locator(".sheet").getByRole("button", { name: "添加", exact: true }).click();
+await page.locator(".codex-item", { hasText: "城里闹瘟疫" }).click();
+await page.locator(".sheet").getByRole("button", { name: "修改", exact: true }).click();
+await page.getByLabel("发生什么").fill("城里闹时疫");
+await page.locator(".sheet").getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".codex-item", { hasText: "城里闹时疫" }).waitFor();
+check("a great event can be edited", (await page.locator(".codex-item", { hasText: "城里闹瘟疫" }).count()) === 0);
+// A chapter title cannot be emptied.
+await page.locator(".codex-item", { hasText: "第 1 章" }).first().click();
+await page.locator(".sheet").getByRole("button", { name: "修改", exact: true }).click();
+await page.getByLabel("标题").fill("");
+check("an empty chapter title disables save with a reason", await page.locator(".sheet").getByRole("button", { name: "保存", exact: true }).isDisabled() && (await page.locator(".sheet").textContent()).includes("标题不能空着"));
+await page.keyboard.press("Escape");
+// H1: an edit that changes nothing adds no line and says why.
+await page.getByRole("tab", { name: /目标/ }).click();
+const editsBeforeWish = await page.evaluate(async (title) => {
+  const { game } = window.__lishi;
+  const world = (await game.repo.listWorlds()).find((w) => w.title === title);
+  const line = await game.repo.getLine(world.currentLineId);
+  return { id: line.nodeId, goal: (await game.repo.getState(line.nodeId)).goals.find((g) => g.status === "进行中")?.name ?? null };
+}, dyingWorld);
+if (editsBeforeWish.goal) {
+  const rejected = await page.evaluate(async ({ title, goal }) => {
+    const { game } = window.__lishi;
+    const world = (await game.repo.listWorlds()).find((w) => w.title === title);
+    try { await game.editState(world.id, { goals: [{ op: "add", kind: "心愿", name: goal }] }, `新心愿：${goal}`); return null; } catch (e) { return e.reason ?? String(e); }
+  }, { title: dyingWorld, goal: editsBeforeWish.goal });
+  check("an edit the engine refuses adds no node and says why", typeof rejected === "string" && rejected.includes("已经有目标"));
+}
+await page.keyboard.press("Escape");
+await page.locator(".panel").waitFor({ state: "detached" });
+// G1: a bookmark named like an existing route gets a number and shows its game time.
+const markTurn = page.locator(".turn").last();
+await markTurn.scrollIntoViewIfNeeded();
+const markBox = await markTurn.boundingBox();
+await page.mouse.move(markBox.x + 40, markBox.y + 40);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+await page.getByRole("button", { name: "加书签" }).click();
+await page.getByLabel("名称", { exact: true }).fill("刚穿越来时");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.getByText(/已加书签/).waitFor();
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "世界线" }).click();
+await page.locator(".line-row").first().waitFor();
+check("a duplicate bookmark name gets a number", (await page.locator(".line-row", { hasText: "刚穿越来时（2）" }).count()) === 1);
+check("route and bookmark cards show their game time", (await page.locator(".line-row .line-when").count()) === (await page.locator(".line-row:visible").count()));
+await page.waitForTimeout(300);
+await shot("17h-lines");
+await page.keyboard.press("Escape");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+// D5, D6: 我的开局 can be renamed and deleted; the one-line idea is kept with the draft.
+await page.getByRole("button", { name: "开始新的故事" }).click();
+await page.locator("[aria-label=\"一句话想法\"], [aria-label=\"名字\"]").first().waitFor();
+if (await page.getByLabel("名字", { exact: true }).count()) { await page.getByRole("button", { name: "返回" }).first().click(); await page.getByLabel("一句话想法").waitFor(); }
+await page.getByLabel("一句话想法").fill("我是长安城里的一个小郎中");
+await page.locator(".template-row > button.template-card").first().click();
+await page.getByRole("button", { name: "存为我的开局" }).click();
+await page.locator(".dialog input").fill("举子开局");
+await page.locator(".dialog").getByRole("button", { name: "保存" }).click();
+await page.getByText("已保存到“我的开局”").waitFor();
+await page.waitForTimeout(800);
+await page.getByRole("button", { name: "返回" }).click();
+await page.getByRole("button", { name: "返回" }).click();
+await page.getByRole("button", { name: "开始新的故事" }).click();
+// A draft with a name reopens on its setup; the idea lives on the first step.
+await page.getByLabel("名字", { exact: true }).waitFor();
+await page.getByRole("button", { name: "返回" }).first().click();
+await page.getByLabel("一句话想法").waitFor();
+const ideaKept = await page.getByLabel("一句话想法").inputValue();
+check("the one-line idea is kept with the draft", ideaKept === "我是长安城里的一个小郎中", ideaKept);
+await page.getByRole("button", { name: "“举子开局”的更多操作" }).click();
+await page.getByRole("button", { name: "改名", exact: true }).click();
+await page.locator(".dialog input").fill("我的举子");
+await page.locator(".dialog").getByRole("button", { name: "保存" }).click();
+await page.locator(".my-template", { hasText: "我的举子" }).waitFor();
+await page.waitForTimeout(300);
+await shot("17i-my-templates");
+await page.getByRole("button", { name: "“我的举子”的更多操作" }).click();
+await page.getByRole("button", { name: "删除", exact: true }).click();
+await page.locator(".dialog").getByRole("button", { name: "删除" }).click();
+await page.locator(".my-template", { hasText: "我的举子" }).waitFor({ state: "detached" });
+check("我的开局 can be renamed and deleted", (await page.locator(".toast .toast-action", { hasText: "撤销" }).count()) === 1);
+await page.getByRole("button", { name: "返回" }).click();
+
 // No horizontal overflow, no page errors.
 check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
 check("no page errors", errors.length === 0, errors.join(" | "));

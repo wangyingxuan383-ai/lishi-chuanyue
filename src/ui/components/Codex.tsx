@@ -2,6 +2,7 @@
 // The era card, places and the other cards, each editable on its own; every
 // save becomes an edit node that can be undone.
 import { useApp } from "../app/context";
+import { rejectedReason } from "../../engine/game";
 import { useState } from "react";
 import type { EraContext } from "../../engine/era";
 import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
@@ -25,7 +26,7 @@ const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.tri
 const preview = (text: string, max = 60) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
 function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: WorldState; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void> }) {
-  const { ask } = useApp();
+  const { ask, toast } = useApp();
   const isEra = editing.type === "card" && editing.kind === "时代";
   const original = editing.type === "card" ? editing.card : editing.place;
   // The era card of an old save comes from its pack and is not stored yet.
@@ -42,7 +43,7 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } finally { setSaving(false); }
+    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
   const save = () => {
     const clean = name.trim();

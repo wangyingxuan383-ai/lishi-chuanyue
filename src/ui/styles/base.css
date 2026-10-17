@@ -464,3 +464,38 @@ button.danger-text { color: var(--loss); }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
 :root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+
+/* ---------- 角色面板与编辑（AUDIT_V4 8.1、8.3、8.4；AUDIT_V4_FUNCTION F6–F8、G1、D5、D8） ---------- */
+/* 人物小传 at the top of 我 */
+.bio-card { padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; background: var(--surface); display: grid; gap: 6px; }
+.bio-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.bio-name { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: 0.04em; }
+.bio-head .muted { font-size: 14px; }
+.bio-edit { margin-left: auto; align-self: center; }
+.bio-identity { margin: 0; font-family: var(--serif); font-size: 15px; line-height: 1.75; }
+.bio-line { margin: 0; font-size: 14px; line-height: 1.6; color: var(--fg); }
+.bio-line > span { display: inline-block; min-width: 4.5em; margin-right: 6px; color: var(--muted); font-size: 13px; }
+/* An input with a hint inside the same line: 钱 "120 文", 名字 "3/12". */
+.field-line { position: relative; display: flex; align-items: center; }
+.field-line > input { flex: 1; min-width: 0; padding-right: 96px; }
+.field-suffix { position: absolute; right: 10px; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--muted); pointer-events: none; }
+.field-suffix.over { color: var(--warn); font-weight: 600; }
+.bio-fields .field-line > input { padding-right: 52px; }
+.level-buttons button { flex: 1 1 auto; padding: 6px 10px; font-family: var(--serif); }
+/* 行囊 */
+.item-count { align-self: center; white-space: nowrap; font-family: var(--serif); color: var(--muted); }
+/* Attitudes by closeness */
+.tag.att-hostile { border-color: var(--loss); color: var(--loss); }
+.tag.att-cold { border-color: var(--line); color: var(--muted); }
+.tag.att-plain { border-color: var(--line); color: var(--fg); }
+.tag.att-friendly { border-color: var(--gain); color: var(--gain); }
+.tag.att-close { border-color: #a8791e; color: #8a5f0c; background: rgba(212, 160, 76, 0.12); }
+:root[data-theme="night"] .tag.att-close { border-color: var(--accent); color: var(--accent); }
+/* 世界线 cards: route or bookmark, and the game time */
+.line-mark { display: inline-block; margin-right: 6px; padding: 0 4px; font-size: 12px; border: 1px solid var(--accent); color: var(--accent); border-radius: 2px; vertical-align: 2px; font-weight: 400; }
+.line-mark.bookmark { border-color: var(--warn); color: var(--warn); }
+.line-row .card p.line-when { color: var(--fg); font-size: 13px; }
+/* 我的开局 with its own ⋯ */
+.my-template { position: relative; display: grid; }
+.my-template .template-card { padding-right: 36px; }
+.my-template-menu { position: absolute; top: 0; right: 0; min-height: var(--tap); min-width: 36px; border: none; background: transparent; color: var(--muted); }

@@ -124,6 +124,33 @@ function failReason(error: unknown): { reason: FailReason; status?: number; deta
 const retryable = (e: unknown) => e instanceof ChatError && !e.partial
   && (e.kind === "network" || e.kind === "timeout_first" || (e.kind === "http" && (e.status === 429 || (e.status ?? 0) >= 500)));
 
+/** Lines of an apply log that say what happened, not what was refused. */
+const INFO_LOG = /^新人物：|只记录不提醒/;
+
+/**
+ * A panel edit the engine did not carry out (AUDIT_V4_FUNCTION H1): nothing
+ * would change, or part of it was refused. `reason` is for the player.
+ */
+export class EditRejected extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = "EditRejected";
+  }
+}
+
+/** The player-facing reason when `e` is an EditRejected; other errors are rethrown. */
+export function rejectedReason(e: unknown): string {
+  if (e instanceof EditRejected) return e.reason;
+  throw e;
+}
+
+/** Why an edit had no effect, in the player's words; the log's raw data is left out. */
+function rejection(before: WorldState, after: WorldState, log: string[]): string | null {
+  const refused = log.filter((l) => !INFO_LOG.test(l)).map((l) => l.replace(/：[{[].*$/, ""));
+  if (refused.length) return refused[0];
+  return JSON.stringify(before) === JSON.stringify(after) ? "和现在的内容一样，没有需要保存的改动" : null;
+}
+
 export class Game {
   readonly repo: Repo;
   /** Dice for fortune rolls; tests replace it. */
@@ -141,7 +168,10 @@ export class Game {
 
   static async open(platform: Platform, llm: LlmConfig | null = null): Promise<Game> {
     await migrate(platform);
-    return new Game(platform, llm);
+    const game = new Game(platform, llm);
+    // Routes in the trash for 30 days go at start, not only when 世界线 is opened (AUDIT_V4_FUNCTION G2).
+    await game.repo.purgeAllTrash().catch(() => 0);
+    return game;
   }
 
   /** Runs `fn` after everything already queued for the world. */
@@ -270,7 +300,9 @@ export class Game {
     });
     const patch = result ? codexPatch(result.text, state, opts) : null;
     await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.auxModelName())]);
-    return patch ? this.editState(worldId, patch, codexSummary(patch), "AI") : null;
+    if (!patch) return null;
+    const edited = await this.serial(worldId, () => this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI" }));
+    return "rejected" in edited ? null : edited;
   }
 
   async createWorld(input: NewWorld, onEvent: (e: TurnEvent) => void): Promise<string | null> {
@@ -429,17 +461,29 @@ export class Game {
 
   // ---------- turns ----------
 
-  /** A hidden edit node after the head; `by` marks edits the AI made for the player (organizing). */
-  editState(worldId: string, patch: TurnRecord, summary: string, by?: "AI"): Promise<tree.Cursor> {
-    return this.serial(worldId, () => this.appendEdit(worldId, patch, summary, by ? { by } : {}));
+  /**
+   * A hidden edit node after the head; `by` marks edits the AI made for the player (organizing).
+   * Rejects with EditRejected, and adds no node, when the edit would change nothing or was refused (H1).
+   */
+  async editState(worldId: string, patch: TurnRecord, summary: string, by?: "AI"): Promise<tree.Cursor> {
+    const result = await this.serial(worldId, () => this.appendEdit(worldId, patch, summary, by ? { by } : {}));
+    if ("rejected" in result) throw new EditRejected(result.rejected);
+    return result;
   }
 
-  private async appendEdit(worldId: string, patch: TurnRecord, summary: string, meta: Record<string, unknown> = {}): Promise<tree.Cursor> {
+  /**
+   * The player's edits are all or nothing: one refused part rejects the whole
+   * edit, so the summary never claims what did not happen. The AI's own edits
+   * keep what applied and are dropped only when nothing changed.
+   */
+  private async appendEdit(worldId: string, patch: TurnRecord, summary: string, meta: Record<string, unknown> = {}): Promise<tree.Cursor | { rejected: string }> {
     const c = await tree.cursor(this.repo, worldId);
     const state = await this.repo.getState(c.head.id);
     const world = (await this.repo.getWorld(worldId))!;
     const era = eraContext(world.eraId, state);
     const applied = applyRecord(state, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock }, { advanceTime: false });
+    const rejected = rejection(state, applied.state, meta.by === "AI" ? [] : applied.log);
+    if (rejected) return { rejected };
     return tree.append(this.repo, c, {
       kind: "edit", narrative: "", actionText: summary, record: patch, choices: [],
       state: applied.state, meta: { chips: applied.chips, ...meta },
@@ -537,7 +581,11 @@ export class Game {
       }
       if (result.usage?.promptTokens) await this.learnRatio(result.usage.promptTokens / chars);
       const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent, fortune);
-      if (edit) cursor.cursor = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
+      if (edit) {
+        // Carried as it was; an edit the new version already makes needs no second node.
+        const carried = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
+        if (!("rejected" in carried)) cursor.cursor = carried;
+      }
       await this.repo.setSetting("pending", null);
       onEvent({ type: "done", cursor: cursor.cursor, node: cursor.node, chips: cursor.chips });
       if (kind === "turn") {
@@ -840,7 +888,7 @@ export class Game {
         const outcome = !result ? "failed" : !onPath ? "stale" : patch ? "ok" : "no_record";
         await this.platform.sql.batch([this.usage(worldId, head.id, "upkeep", result, outcome, this.auxModelName())]);
         if (!patch) return;
-        await this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI", promptVersion: UPKEEP_PROMPT_VERSION });
+        if ("rejected" in await this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI", promptVersion: UPKEEP_PROMPT_VERSION })) return;
         for (const fn of this.listeners) fn(worldId);
       });
     } finally {
