@@ -166,3 +166,106 @@ fn writes_return_empty_rows_even_with_returning() {
         .is_empty());
     assert_eq!(store.query("SELECT x FROM t", vec![]).unwrap()[0]["x"], 1);
 }
+
+fn app_store(directory: &std::path::Path) -> SqlStore {
+    let store = SqlStore::open(directory.into()).unwrap();
+    store
+        .batch(vec![statement(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (1);
+             CREATE TABLE t(x);",
+            vec![],
+        )])
+        .unwrap();
+    store
+}
+
+fn values(store: &SqlStore) -> Vec<Value> {
+    store
+        .query("SELECT x FROM t ORDER BY x", vec![])
+        .unwrap()
+        .into_iter()
+        .map(|row| row["x"].clone())
+        .collect()
+}
+
+#[test]
+fn restore_replaces_live_data_and_saves_it_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = app_store(directory.path());
+    store.query("INSERT INTO t VALUES (1)", vec![]).unwrap();
+    let good = store.backup("auto").unwrap();
+    store.query("INSERT INTO t VALUES (2)", vec![]).unwrap();
+    store.query("CREATE TABLE later(y)", vec![]).unwrap();
+
+    let saved = store.restore(&good).unwrap();
+    assert!(saved.ends_with("-before-restore.sqlite"));
+    assert_eq!(values(&store), vec![json!(1)]);
+    assert!(store.query("SELECT * FROM later", vec![]).is_err());
+    // The reopened connection is usable and writable.
+    store.query("INSERT INTO t VALUES (3)", vec![]).unwrap();
+    assert_eq!(values(&store), vec![json!(1), json!(3)]);
+    // The before-restore backup holds what was replaced, so a restore can be undone.
+    store.restore(&saved).unwrap();
+    assert_eq!(values(&store), vec![json!(1), json!(2)]);
+    let before_restore = store
+        .list_backups()
+        .unwrap()
+        .into_iter()
+        .filter(|b| b.name.ends_with("-before-restore.sqlite"))
+        .count();
+    assert_eq!(before_restore, 2);
+    // A store opened afresh sees the restored data on disk.
+    drop(store);
+    let reopened = SqlStore::open(directory.path().into()).unwrap();
+    assert_eq!(values(&reopened), vec![json!(1), json!(2)]);
+}
+
+#[test]
+fn restore_rejects_foreign_corrupt_newer_and_unsafe_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = app_store(directory.path());
+    store.query("INSERT INTO t VALUES (7)", vec![]).unwrap();
+    let backups = directory.path().join("backups");
+    fs::create_dir_all(&backups).unwrap();
+
+    // A SQLite file without schema_version is not one of ours.
+    let foreign = Connection::open(backups.join("20990101T000000Z-foreign.sqlite")).unwrap();
+    foreign.execute_batch("CREATE TABLE other(x);").unwrap();
+    drop(foreign);
+    // Not a database at all.
+    fs::write(
+        backups.join("20990101T000001Z-garbage.sqlite"),
+        b"not a database, just text that is long enough to have a header",
+    )
+    .unwrap();
+    // An app database from a newer version.
+    let newer = Connection::open(backups.join("20990101T000002Z-newer.sqlite")).unwrap();
+    newer
+        .execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (99);",
+        )
+        .unwrap();
+    drop(newer);
+
+    for (name, code) in [
+        ("20990101T000000Z-foreign.sqlite", "sql_restore_invalid"),
+        ("20990101T000001Z-garbage.sqlite", "sql_restore_invalid"),
+        ("20990101T000002Z-newer.sqlite", "sql_restore_newer"),
+        ("missing-file.sqlite", "sql_restore_missing"),
+        ("../game.sqlite", "sql_restore_missing"),
+        ("..\\game.sqlite", "sql_restore_missing"),
+        ("backups/x.sqlite", "sql_restore_missing"),
+        ("x.txt", "sql_restore_missing"),
+    ] {
+        assert_eq!(store.restore(name).unwrap_err().code, code, "{name}");
+    }
+    // Nothing changed, and no before-restore backup was made for a rejected file.
+    assert_eq!(values(&store), vec![json!(7)]);
+    assert!(!store
+        .list_backups()
+        .unwrap()
+        .iter()
+        .any(|b| b.name.contains("before-restore")));
+}

@@ -24,9 +24,14 @@ export function llmFor(profile: Profile | null): LlmConfig | null {
   };
 }
 
+/** Each theme's --bg (styles), for the phone's status and navigation bars. */
+const BAR_COLORS = { paper: "#efe5cf", day: "#faf7f0", night: "#131518" } as const;
+
 function applyReading(r: Reading) {
   const root = document.documentElement;
-  root.dataset.theme = resolvedTheme(r.theme);
+  const theme = resolvedTheme(r.theme);
+  root.dataset.theme = theme;
+  void getPlatform().then((p) => p.system.setSystemBars(BAR_COLORS[theme], theme === "night")).catch(() => {});
   root.dataset.font = r.serif ? "serif" : "sans";
   root.dataset.motion = r.motion;
   root.dataset.indent = r.indent ? "on" : "off";

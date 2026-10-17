@@ -51,6 +51,7 @@ export async function createTauriPlatform(): Promise<Platform> {
         call("sql_batch", { statements: statements.map((s) => ({ sql: s.sql, params: s.params ?? [] })) }),
       backup: (label) => call("sql_backup", { label }),
       listBackups: () => call("sql_list_backups"),
+      restore: (name) => call("sql_restore", { name }),
     },
     secrets: {
       set: (slot, value, boundBaseUrl) => call("secret_set", { slot, value, boundBaseUrl }),
@@ -80,6 +81,14 @@ export async function createTauriPlatform(): Promise<Platform> {
       notificationStatus: () => call("plugin:notifications|notification_status"),
       openSystemSettings: (which) => call(which === "notifications" ? "plugin:notifications|open_notification_settings" : "plugin:notifications|open_app_settings"),
       openUrl: (url) => call("plugin:notifications|open_url", { url }),
+      setSystemBars: (background, dark) =>
+        name === "android" ? call("plugin:notifications|set_system_bars", { background, dark }) : Promise.resolve(),
+      // Android: a native haptic, which needs no VIBRATE permission and follows the
+      // system's touch-feedback switch. Elsewhere the web API, where it exists.
+      haptic: () =>
+        name === "android"
+          ? call<boolean>("plugin:notifications|haptic")
+          : Promise.resolve(navigator.vibrate?.(10) ?? false),
       onBack(handler) {
         backHandlers.push(handler);
         listenBack();

@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { getPlatform } from "../../platform";
 
 /**
  * Long press (≈450 ms) without moving; a scroll gesture cancels it. A press
@@ -21,7 +22,10 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
       start.current = { x: e.clientX, y: e.clientY };
       timer.current = setTimeout(() => {
         fired.current = true;
-        if (document.documentElement.dataset.haptics !== "off") navigator.vibrate?.(10);
+        if (document.documentElement.dataset.haptics !== "off") {
+          // Native on Android (no VIBRATE permission there); navigator.vibrate elsewhere.
+          void getPlatform().then((p) => p.system.haptic()).catch(() => {});
+        }
         onLongPress();
       }, 450);
     },

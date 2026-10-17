@@ -65,6 +65,13 @@ export interface Platform {
     batch(statements: SqlStatement[]): Promise<void>;
     backup(label: string): Promise<string>;
     listBackups(): Promise<BackupInfo[]>;
+    /**
+     * Replaces the whole database with the backup `name` after saving the
+     * current data as a "before-restore" backup; resolves with that backup's
+     * name. Rejects when the file is not an intact database of this app. The
+     * app should reload afterwards: everything it holds in memory is stale.
+     */
+    restore(name: string): Promise<string>;
   };
   secrets: {
     set(slot: string, value: string, boundBaseUrl: string): Promise<void>;
@@ -98,6 +105,13 @@ export interface Platform {
     openUrl(url: string): Promise<void>;
     /** The handler returns true when it consumed the back press. */
     onBack(handler: () => boolean): () => void;
+    /**
+     * Matches the phone's status and navigation bars to the app theme's
+     * background (`#rrggbb`); `dark` asks for light icons. A no-op off Android.
+     */
+    setSystemBars(background: string, dark: boolean): Promise<void>;
+    /** A short native tap of the vibration motor (long press); false when there is none. */
+    haptic(): Promise<boolean>;
   };
 }
 

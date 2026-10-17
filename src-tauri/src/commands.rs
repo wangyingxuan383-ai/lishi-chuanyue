@@ -37,6 +37,13 @@ pub async fn sql_list_backups(store: State<'_, Arc<SqlStore>>) -> Result<Vec<Bac
     blocking(move || store.list_backups()).await
 }
 
+/// Replaces the live database with a backup; returns the before-restore backup's name.
+#[tauri::command]
+pub async fn sql_restore(store: State<'_, Arc<SqlStore>>, name: String) -> Result<String> {
+    let store = Arc::clone(store.inner());
+    blocking(move || store.restore(&name)).await
+}
+
 #[tauri::command]
 pub async fn secret_set(
     secrets: State<'_, Arc<Credentials>>,

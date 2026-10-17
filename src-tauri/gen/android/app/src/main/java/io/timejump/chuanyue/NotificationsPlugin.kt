@@ -4,9 +4,11 @@ import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.HapticFeedbackConstants
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -20,6 +22,12 @@ import app.tauri.plugin.Plugin
 @InvokeArg
 class UrlArgs {
     var url: String? = null
+}
+
+@InvokeArg
+class SystemBarsArgs {
+    var background: String? = null
+    var dark: Boolean = false
 }
 
 @TauriPlugin(permissions = [Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "notifications")])
@@ -89,6 +97,34 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (error: Exception) {
             invoke.reject("no browser")
+        }
+    }
+
+    /** Status and navigation bars in the app theme's background; `dark` = light icons. */
+    @Command
+    fun set_system_bars(invoke: Invoke) {
+        val args = invoke.parseArgs(SystemBarsArgs::class.java)
+        val color = try {
+            Color.parseColor(args.background ?: "")
+        } catch (error: IllegalArgumentException) {
+            invoke.reject("bad colour"); return
+        }
+        activity.runOnUiThread {
+            SystemBars.apply(activity, color, args.dark)
+            SystemBars.remember(activity, color, args.dark)
+            invoke.resolve()
+        }
+    }
+
+    /**
+     * A light tap for a long press. performHapticFeedback needs no VIBRATE
+     * permission and respects the system's touch-feedback switch.
+     */
+    @Command
+    fun haptic(invoke: Invoke) {
+        activity.runOnUiThread {
+            val done = activity.window.decorView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            invoke.resolve(JSObject().put("done", done))
         }
     }
 

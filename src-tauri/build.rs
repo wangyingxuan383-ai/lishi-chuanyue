@@ -7,6 +7,8 @@ fn main() {
             "open_notification_settings",
             "open_app_settings",
             "open_url",
+            "set_system_bars",
+            "haptic",
         ]),
     ))
     .expect("Tauri build failed")
