@@ -72,6 +72,23 @@ export interface Card {
   source?: "卡组" | "AI" | "玩家";
 }
 
+/** A chapter summary (R04-T003); used only while its last node is on the current path. */
+export interface Chapter {
+  id: string;
+  worldId: string;
+  firstNodeId: string;
+  lastNodeId: string;
+  title: string;
+  /** One line, for older chapters in the recap. */
+  gist: string;
+  summary: string;
+  model: string | null;
+  promptVersion: string | null;
+  /** The player changed it; it is not rewritten automatically. */
+  edited: boolean;
+  createdAt: string;
+}
+
 export interface Protagonist {
   name: string;
   aliases: string[];
@@ -131,6 +148,8 @@ export interface WorldSettings {
   directive: string;
   /** Let the auxiliary model keep the 设定集 up to date every few turns (R04-T001, D122). */
   autoUpkeep: boolean;
+  /** Turns per chapter summary; 0 turns automatic summaries off (R04-T003). */
+  chapterEvery: number;
 }
 
 export const DEFAULT_SETTINGS: WorldSettings = {
@@ -145,6 +164,7 @@ export const DEFAULT_SETTINGS: WorldSettings = {
   intensity: { violence: "写实", romance: "写实", darkness: "写实" },
   directive: "",
   autoUpkeep: true,
+  chapterEvery: 12,
 };
 
 export interface World {

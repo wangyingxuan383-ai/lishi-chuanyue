@@ -7,9 +7,12 @@ import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
 import { useBack } from "../app/context";
 import { Codex } from "./Codex";
+import { Journal } from "./Journal";
 import { People } from "./People";
 
-const TABS = ["我", "行囊", "人物", "目标", "设定"] as const;
+const TABS = ["我", "行囊", "人物", "目标", "记事", "设定"] as const;
+/** Tabs with their own editors instead of the panel-wide 修改. */
+const OWN_EDITOR: readonly string[] = ["人物", "记事", "设定"];
 type Tab = (typeof TABS)[number];
 
 function level(n: number, words: string[]): string {
@@ -26,7 +29,8 @@ function Stat({ label, value, n }: { label: string; value: string; n?: number })
   );
 }
 
-export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, busy }: {
+export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSave, onOpenStory, onOrganize, busy }: {
+  worldId: string; headId: string; chapterEvery: number;
   state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
   onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean) => Promise<boolean>; busy: boolean;
 }) {
@@ -93,10 +97,10 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, bu
       <div className="topbar">
         <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>
         <div className="title"><h1>{me.name}</h1><div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div></div>
-        {!editing && tab !== "设定" && tab !== "人物" && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
+        {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
-        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && (t === "设定" || t === "人物")} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
+        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && OWN_EDITOR.includes(t)} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
       </div>
       <div className="panel-body" style={saving ? { pointerEvents: "none" } : undefined}>
         {tab === "我" && (
@@ -147,6 +151,7 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, bu
           {editing && <button onClick={() => change((d) => { d.protagonist.items.push({ name: "", quantity: 1, unit: "", place: null, note: "" }); })}>＋ 添加物品</button>}
         </div>}
         {tab === "人物" && <People state={state} era={era} busy={busy} onSave={onSave} />}
+        {tab === "记事" && <Journal worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} />}
         {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && (
           <div className="stack">

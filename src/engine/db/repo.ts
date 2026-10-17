@@ -1,8 +1,8 @@
-// Data access for worlds, nodes, lines, pins and settings. All writes that must
+// Data access for worlds, nodes, lines, pins, chapters and settings. All writes that must
 // land together go through one sql.batch call.
 import type { Json, Platform, Row, SqlStatement } from "../../platform";
 import {
-  DEFAULT_SETTINGS, type Line, type Pin, type StoryNode, type World, type WorldSettings, type WorldState,
+  DEFAULT_SETTINGS, type Chapter, type Line, type Pin, type StoryNode, type World, type WorldSettings, type WorldState,
 } from "../types";
 
 const now = () => new Date().toISOString();
@@ -214,6 +214,50 @@ export class Repo {
       [nodeId, worldId],
     );
     return rows.map((r) => ({ id: r.id as string, worldId: r.world_id as string, originNodeId: r.origin_node_id as string, text: r.text as string, createdAt: r.created_at as string }));
+  }
+
+  async addChapter(c: Omit<Chapter, "id" | "createdAt" | "edited">): Promise<Chapter> {
+    const chapter: Chapter = { ...c, id: newId(), edited: false, createdAt: now() };
+    await this.q(
+      `INSERT INTO chapters (id, world_id, first_node_id, last_node_id, title, gist, summary, model, prompt_version, edited, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      [chapter.id, c.worldId, c.firstNodeId, c.lastNodeId, c.title, c.gist, c.summary, c.model, c.promptVersion, chapter.createdAt],
+    );
+    return chapter;
+  }
+
+  /** A rewrite by the model (edited stays as it was) or by the player (edited = true). */
+  async updateChapter(id: string, fields: Pick<Chapter, "title" | "gist" | "summary"> & Partial<Pick<Chapter, "model" | "promptVersion" | "edited">>): Promise<void> {
+    const sets = ["title = ?", "gist = ?", "summary = ?"];
+    const params: Json[] = [fields.title, fields.gist, fields.summary];
+    if (fields.model !== undefined) { sets.push("model = ?"); params.push(fields.model); }
+    if (fields.promptVersion !== undefined) { sets.push("prompt_version = ?"); params.push(fields.promptVersion); }
+    if (fields.edited !== undefined) { sets.push("edited = ?"); params.push(fields.edited ? 1 : 0); }
+    await this.q(`UPDATE chapters SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+  }
+
+  async deleteChapter(id: string): Promise<void> {
+    await this.q("DELETE FROM chapters WHERE id = ?", [id]);
+  }
+
+  /** Chapters whose last node is on the path from the root to `nodeId`, oldest first. */
+  async chaptersOnPath(worldId: string, nodeId: string): Promise<Chapter[]> {
+    const rows = await this.q(
+      `WITH RECURSIVE up(id, depth) AS (
+         SELECT id, 0 FROM nodes WHERE id = ?
+         UNION ALL
+         SELECT n.parent_id, up.depth + 1 FROM nodes n JOIN up ON n.id = up.id WHERE n.parent_id IS NOT NULL
+       )
+       SELECT c.* FROM chapters c JOIN up ON c.last_node_id = up.id
+       WHERE c.world_id = ?
+       ORDER BY up.depth DESC, c.created_at`,
+      [nodeId, worldId],
+    );
+    return rows.map((r) => ({
+      id: r.id as string, worldId: r.world_id as string, firstNodeId: r.first_node_id as string, lastNodeId: r.last_node_id as string,
+      title: r.title as string, gist: r.gist as string, summary: r.summary as string, model: (r.model as string) ?? null,
+      promptVersion: (r.prompt_version as string) ?? null, edited: !!r.edited, createdAt: r.created_at as string,
+    }));
   }
 
   async getState(nodeId: string): Promise<WorldState> {

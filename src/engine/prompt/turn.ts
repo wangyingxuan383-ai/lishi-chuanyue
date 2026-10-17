@@ -6,7 +6,8 @@ import { formatDate } from "../calendar/date";
 import type { EraContext } from "../era";
 import { ERA_CARD_LIMIT, activeCardLines } from "../memory/cards";
 import { formatMoney } from "../money";
-import type { ActionMode, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
+import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
+import { RECAP_BUDGET, recapBlock } from "./chapter";
 
 export const PROMPT_VERSION = "turn-6";
 
@@ -57,7 +58,8 @@ export interface StoryContext {
   protagonistName: string;
 }
 
-function systemPrompt(ctx: StoryContext): string {
+/** `recap` is the 【前情提要】 of chapters that left the raw-text window (R04-T003). */
+function systemPrompt(ctx: StoryContext, recap = ""): string {
   const { era, settings } = ctx;
   const i = settings.intensity;
   const premise = settings.premise.trim();
@@ -78,7 +80,7 @@ function systemPrompt(ctx: StoryContext): string {
 - 每回合结尾留一个自然的行动点。${settings.choiceCount > 0 ? `在记录里给出 ${settings.choiceCount} 个简短、彼此不同的建议行动（各不超过二十字）` : "记录里的 choices 写空数组 []"}。
 ${premise ? `\n【故事设定】（玩家写的，始终遵守）\n${premise}\n` : ""}${rules ? `\n【玩家给你的额外规则】（始终遵守）\n${rules}\n` : ""}
 ${eraBlock}
-
+${recap ? `\n${recap}\n` : ""}
 ${RECORD_SPEC}`;
 }
 
@@ -142,13 +144,16 @@ export interface TurnPromptInput extends StoryContext {
   rewriteHint?: string | null;
   /** 要点 remembered from passages on the current path (D106). */
   pins?: string[];
+  /** Chapter summaries on the current path, oldest first (R04-T003). */
+  chapters?: Chapter[];
   /** Rough input budget in characters (≈ tokens for Chinese). */
   budgetChars?: number;
 }
 
-/** Recent turns as chat history, newest kept first until the budget runs out (minimum three). */
-function historyMessages(history: StoryNode[], budget: number): ChatMessage[] {
+/** Recent turns as chat history, newest kept first until the budget runs out (minimum three); `ids` are the turns it kept. */
+function historyWindow(history: StoryNode[], budget: number): { messages: ChatMessage[]; ids: Set<string> } {
   const pairs: ChatMessage[][] = [];
+  const ids = new Set<string>();
   let used = 0;
   const turns = history.filter((n) => n.kind !== "edit");
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -157,9 +162,10 @@ function historyMessages(history: StoryNode[], budget: number): ChatMessage[] {
     const cost = action.length + n.narrative.length;
     if (pairs.length >= 3 && used + cost > budget) break;
     used += cost;
+    ids.add(n.id);
     pairs.unshift([{ role: "user", content: action }, { role: "assistant", content: n.narrative }]);
   }
-  return pairs.flat();
+  return { messages: pairs.flat(), ids };
 }
 
 function essentialsBlock(settings: WorldSettings, pins: string[] = []): string {
@@ -184,16 +190,20 @@ function presentPeople(state: WorldState, recent: string): Set<string> {
 }
 
 export function turnMessages(input: TurnPromptInput): ChatMessage[] {
-  const system = systemPrompt(input);
+  const base = systemPrompt(input);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
   const notes = input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : "";
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
-  const budget = (input.budgetChars ?? 12000) - system.length - 1500;
+  // Chapters take their share of the budget first; the raw-text window gets the rest.
+  const chapters = input.chapters ?? [];
+  const budget = (input.budgetChars ?? 12000) - base.length - 1500 - (chapters.length ? RECAP_BUDGET : 0);
+  const window = historyWindow(input.history, budget);
+  const recap = recapBlock(chapters, (id) => window.ids.has(id));
   const recent = recentText(input);
   return [
-    { role: "system", content: system },
-    ...historyMessages(input.history, budget),
+    { role: "system", content: recap ? systemPrompt(input, recap) : base },
+    ...window.messages,
     {
       role: "user",
       content: `${renderState(input.state, input.era, presentPeople(input.state, recent))}${essentialsBlock(input.settings, input.pins)}${cardsBlock(input, recent)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,

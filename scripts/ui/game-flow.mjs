@@ -303,6 +303,23 @@ await page.locator(".edit-line", { hasText: "AI 整理了设定集：铜鹰符" 
 await page.getByRole("button", { name: "角色" }).click();
 await page.getByRole("tab", { name: "设定" }).click();
 check("AI files new cards every six turns", (await page.locator(".codex-item", { hasText: "铜鹰符" }).textContent()).includes("AI 整理"));
+
+// 记事 (R04-T003): write the turns so far as a chapter, then rename it.
+await page.getByRole("tab", { name: "记事" }).click();
+await page.getByText("本章进行中 · 第 1～6 回合").waitFor();
+await page.getByRole("button", { name: "把第 1～6 回合写成一章" }).click();
+await page.locator(".codex-item", { hasText: "第 1 章 · 西市谋生" }).waitFor({ timeout: 20000 });
+await page.waitForTimeout(400);
+await shot("06r-journal");
+await page.locator(".codex-item", { hasText: "第 1 章" }).click();
+await page.waitForTimeout(400);
+await shot("06s-chapter");
+await page.getByRole("button", { name: "修改", exact: true }).click();
+await page.getByLabel("标题").fill("初到西市");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".codex-item", { hasText: "第 1 章 · 初到西市" }).waitFor();
+check("journal writes a chapter and the player can rename it", true);
+check("panel tabs fit the phone width", !(await page.evaluate(() => { const t = document.querySelector(".tabs"); return t.scrollWidth > t.clientWidth; })));
 await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 

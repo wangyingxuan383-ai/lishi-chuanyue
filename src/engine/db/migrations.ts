@@ -121,4 +121,13 @@ CREATE TABLE settings (
 );
 `,
   },
+  {
+    // R04-T003: chapter titles and one-line gists.
+    version: 2,
+    sql: `
+ALTER TABLE chapters ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE chapters ADD COLUMN gist TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS chapters_world ON chapters(world_id);
+`,
+  },
 ];

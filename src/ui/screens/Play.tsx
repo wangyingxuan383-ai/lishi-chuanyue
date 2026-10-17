@@ -478,7 +478,7 @@ export default function Play({ worldId }: { worldId: string }) {
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
       {sheet === "story" && <StorySheet world={world} headId={head.id} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
-      {panel && <Panel state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }}
+      {panel && <Panel worldId={worldId} headId={head.id} chapterEvery={world.settings.chapterEvery} state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }}
         onOrganize={async (replaceOwnEra) => {
           const c = await game.organize(worldId, { replaceOwnEra });
           if (!c) { toast("这次没整理出来，稍后再试"); return false; }
@@ -610,6 +610,11 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
           {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={s.autoUpkeep === v} onClick={() => onChange({ autoUpkeep: v })}>{l}</button>)}
         </div>
         <p className="muted" style={{ margin: 0 }}>开着时，每过 6 回合 AI 会把新出现的势力、物品和地点记进设定集，多一次辅助模型的调用。</p>
+        <span className="muted">章节摘要</span>
+        <div className="segmented">
+          {[0, 8, 12, 20].map((n) => <button key={n} aria-pressed={s.chapterEvery === n} onClick={() => onChange({ chapterEvery: n })}>{n ? `每 ${n} 回合` : "关"}</button>)}
+        </div>
+        <p className="muted" style={{ margin: 0 }}>每过这么多回合，AI 把这段剧情写成一章摘要，更早的剧情靠它记住；在“角色 · 记事”里查看和修改。</p>
         {intensity("violence", "暴力与伤亡")}
         {intensity("romance", "感情与亲密")}
         {intensity("darkness", "黑暗与压抑")}

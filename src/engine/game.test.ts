@@ -565,3 +565,83 @@ describe("设定集 upkeep during play", () => {
     expect((await game.repo.getState(c.head.id)).cards.some((x) => x.name === "漕帮")).toBe(false);
   });
 });
+
+describe("chapter summaries", () => {
+  const ANSWER = (title: string) => ({ text: JSON.stringify({ title, gist: `${title}的梗概`, summary: `${title}：崔怀远查到鱼袋下落。` }) });
+  const isChapter = (body: any) => String(body.messages?.[0]?.content).includes("写成章节摘要");
+
+  /** Turn and chapter calls get their own scripts. */
+  async function world(turnScripts: Script[], chapterScripts: Script[], settings: Partial<import("./types").WorldSettings>) {
+    const story = fakeLlm([{ text: OPENING }, ...turnScripts]);
+    const aux = fakeLlm(chapterScripts);
+    const llm = { ...story, stream: (request: any, onEvent: any) => (isChapter(request.body) ? aux : story).stream(request, onEvent) };
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "长安", eraId: "tang-748", settings: { premise: "天宝七载，长安。", autoUpkeep: false, ...settings },
+      protagonist: { name: "李安", gender: "男", age: 22, identity: "你是落第举子，欠房钱。" },
+      arrival: "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: "" },
+    }, () => {}))!;
+    return { game, worldId, story, aux };
+  }
+  const long = (n: number) => Array.from({ length: n }, (_, i) => ({ text: `第${i + 1}段`.padEnd(3000, "雪") + RECORD({}) }));
+
+  it("writes a chapter every few turns and recaps it once its turns leave the window", async () => {
+    const { game, worldId, story, aux } = await world(long(7), [ANSWER("鱼袋失踪"), ANSWER("夜闯死牢")], { chapterEvery: 3 });
+    for (let i = 1; i <= 3; i++) await play(game, worldId, `走第${i}步`);
+    await game.settled();
+    expect(JSON.stringify(aux.calls[0].body)).toContain("第 1～3 回合");
+    const head = (await tree.cursor(game.repo, worldId)).head;
+    const [first] = await game.repo.chaptersOnPath(worldId, head.id);
+    expect(first).toMatchObject({ title: "鱼袋失踪", lastNodeId: head.id, promptVersion: "chapter-1", model: "aux" });
+    for (let i = 4; i <= 6; i++) await play(game, worldId, `走第${i}步`);
+    await game.settled();
+    expect(JSON.stringify(aux.calls[1].body)).toContain("第 1 章 · 鱼袋失踪：鱼袋失踪的梗概");
+    await play(game, worldId, "走第7步");
+    // Only the minimum three turns fit the window: chapter 1 is recapped, chapter 2 is still raw text.
+    const system = story.calls[7].body.messages[0].content as string;
+    expect(system).toContain("【前情提要】");
+    expect(system).toContain("第 1 章 · 鱼袋失踪：鱼袋失踪：崔怀远查到鱼袋下落。");
+    expect(system).not.toContain("夜闯死牢");
+  });
+
+  it("leaves a chapter out once the player goes back before its end", async () => {
+    const { game, worldId, story } = await world([...long(3), { text: "另走一步。" + RECORD({}) }], [ANSWER("鱼袋失踪")], { chapterEvery: 3 });
+    for (let i = 1; i <= 3; i++) await play(game, worldId, `走第${i}步`);
+    await game.settled();
+    const c = await tree.cursor(game.repo, worldId);
+    await tree.goBackTo(game.repo, c, (await game.repo.path(c.head.id))[2].id);
+    expect(await game.repo.chaptersOnPath(worldId, (await tree.cursor(game.repo, worldId)).head.id)).toEqual([]);
+    await play(game, worldId, "另走一步");
+    expect(JSON.stringify(story.calls[4].body)).not.toContain("前情提要");
+  });
+
+  it("tries a failed summary again three turns later without holding up play", async () => {
+    const turns = Array.from({ length: 5 }, (_, i) => ({ text: `第${i + 1}段。` + RECORD({}) }));
+    const { game, worldId, aux } = await world(turns, [{ text: "写不出来" }, ANSWER("鱼袋失踪")], { chapterEvery: 2 });
+    for (let i = 1; i <= 4; i++) {
+      await play(game, worldId, `走第${i}步`);
+      await game.settled();
+    }
+    expect(aux.calls).toHaveLength(1);
+    await play(game, worldId, "走第5步");
+    await game.settled();
+    expect(aux.calls).toHaveLength(2);
+    const head = (await tree.cursor(game.repo, worldId)).head;
+    expect((await game.repo.chaptersOnPath(worldId, head.id)).map((c) => c.title)).toEqual(["鱼袋失踪"]);
+    expect(JSON.stringify(aux.calls[1].body)).toContain("第 1～5 回合");
+  });
+
+  it("writes a chapter on request when automatic summaries are off, and rewrites it", async () => {
+    const turns = Array.from({ length: 2 }, (_, i) => ({ text: `第${i + 1}段。` + RECORD({}) }));
+    const { game, worldId, aux } = await world(turns, [ANSWER("鱼袋失踪"), ANSWER("重写的章")], { chapterEvery: 0 });
+    for (let i = 1; i <= 2; i++) await play(game, worldId, `走第${i}步`);
+    await game.settled();
+    expect(aux.calls).toHaveLength(0);
+    const chapter = (await game.writeChapter(worldId))!;
+    expect(chapter.title).toBe("鱼袋失踪");
+    expect(await game.writeChapter(worldId)).toBeNull();
+    await game.repo.updateChapter(chapter.id, { title: "我改的", gist: "我改的", summary: "我改的", edited: true });
+    expect(await game.rewriteChapter(worldId, chapter.id)).toMatchObject({ title: "重写的章", edited: false });
+    expect(JSON.stringify(aux.calls[1].body)).toContain("第 1～2 回合");
+  });
+});

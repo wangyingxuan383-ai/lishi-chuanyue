@@ -73,6 +73,27 @@ describe("Repo", () => {
     expect(await repo.pinsOnPath(world.id, b.id)).toEqual([]);
   });
 
+  it("uses a chapter only while its last node is on the path, oldest first, and edits it", async () => {
+    const { world, node: root, line } = await repo.createWorld({
+      title: "长安", eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "开场", state: sampleState() },
+    });
+    const a = await repo.appendNode(world.id, line.id, { parentId: root.id, kind: "turn", narrative: "甲", state: sampleState() });
+    const b = await repo.appendNode(world.id, line.id, { parentId: a.id, kind: "turn", narrative: "乙", state: sampleState() });
+    const c = await repo.appendNode(world.id, line.id, { parentId: b.id, kind: "turn", narrative: "丙", state: sampleState() });
+    const branch = await repo.appendNode(world.id, line.id, { parentId: a.id, kind: "turn", narrative: "另一条路", state: sampleState() });
+    const fields = { worldId: world.id, gist: "梗概", model: "aux", promptVersion: "chapter-1" };
+    const second = await repo.addChapter({ ...fields, firstNodeId: c.id, lastNodeId: c.id, title: "第二章", summary: "丙" });
+    const first = await repo.addChapter({ ...fields, firstNodeId: a.id, lastNodeId: b.id, title: "第一章", summary: "甲乙" });
+    expect((await repo.chaptersOnPath(world.id, c.id)).map((x) => x.title)).toEqual(["第一章", "第二章"]);
+    expect((await repo.chaptersOnPath(world.id, b.id)).map((x) => x.title)).toEqual(["第一章"]);
+    expect(await repo.chaptersOnPath(world.id, branch.id)).toEqual([]);
+    await repo.updateChapter(first.id, { title: "改过的", gist: "新梗概", summary: "新摘要", edited: true });
+    expect((await repo.chaptersOnPath(world.id, b.id))[0]).toMatchObject({ title: "改过的", gist: "新梗概", summary: "新摘要", edited: true, model: "aux" });
+    await repo.deleteChapter(second.id);
+    expect(await repo.chaptersOnPath(world.id, c.id)).toHaveLength(1);
+  });
+
   it("rolls back the whole append when one statement fails", async () => {
     const { world, node: root, line } = await repo.createWorld({
       title: "长安", eraId: "tang-748",

@@ -15,13 +15,14 @@ import {
 } from "./prompt/turn";
 import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
 import { UPKEEP_EVERY, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
+import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
 import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
 import { parseMoney } from "./money";
 import * as tree from "./tree";
-import { DEFAULT_SETTINGS, type ActionMode, type StoryNode, type WorldSettings, type WorldState } from "./types";
+import { DEFAULT_SETTINGS, type ActionMode, type Chapter, type StoryNode, type WorldSettings, type WorldState } from "./types";
 
 export interface LlmConfig {
   slot: string;
@@ -107,6 +108,7 @@ export class Game {
   /** Per world: the tail of the queue that turns and edits wait on, so nodes are never appended concurrently. */
   private queues = new Map<string, Promise<unknown>>();
   private upkeeping = new Set<string>();
+  private chaptering = new Set<string>();
   private background = new Set<Promise<void>>();
   private listeners = new Set<(worldId: string) => void>();
 
@@ -137,7 +139,7 @@ export class Game {
     void work.catch(() => {}).then(() => this.background.delete(work));
   }
 
-  /** Told when a world changed in the background (the AI kept its 设定集 up to date). Returns an unsubscribe. */
+  /** Told when a world changed in the background (设定集 upkeep, a new chapter). Returns an unsubscribe. */
   subscribe(fn: (worldId: string) => void): () => void {
     this.listeners.add(fn);
     return () => { this.listeners.delete(fn); };
@@ -425,9 +427,10 @@ export class Game {
       const era = eraContext(world.eraId, state);
       const history = await this.repo.path(base.id, 40);
       const pins = (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text);
+      const chapters = await this.repo.chaptersOnPath(worldId, base.id);
       const messages = turnMessages({
         era, settings: world.settings, protagonistName: state.protagonist.name, state, history, mode: action.mode, text: action.text,
-        directorNote: action.directorNote, notes: (base.meta.notes as string[] | undefined) ?? [], rewriteHint: hint, pins,
+        directorNote: action.directorNote, notes: (base.meta.notes as string[] | undefined) ?? [], rewriteHint: hint, pins, chapters,
       });
 
       const splitter = new RecordSplitter();
@@ -473,7 +476,10 @@ export class Game {
       if (edit) cursor.cursor = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
       await this.repo.setSetting("pending", null);
       onEvent({ type: "done", cursor: cursor.cursor, node: cursor.node, chips: cursor.chips });
-      if (kind === "turn") this.inBackground(this.upkeep(worldId, cursor.node));
+      if (kind === "turn") {
+        this.inBackground(this.upkeep(worldId, cursor.node));
+        this.inBackground(this.chapterIfDue(worldId, cursor.node));
+      }
     });
     return {
       stop: () => {
@@ -540,6 +546,7 @@ export class Game {
       const base = (node.meta.messages as ChatMessage[] | undefined) ?? turnMessages({
         era, settings: world.settings, protagonistName: state.protagonist.name, state, history: await this.repo.path(node.parentId, 40),
         mode: node.actionMode ?? "continue", text: node.actionText ?? "", pins: (await this.repo.pinsOnPath(worldId, node.parentId)).map((p) => p.text),
+        chapters: await this.repo.chaptersOnPath(worldId, node.parentId),
       });
       const splitter = new RecordSplitter();
       let shown = node.narrative;
@@ -573,6 +580,90 @@ export class Game {
       onEvent({ type: "done", cursor: { ...c, head: updated }, node: updated, chips: applied.chips });
     });
     return { stop: () => handle?.cancel(), catchUp: async () => { await handle?.catchUp(); }, done };
+  }
+
+  /**
+   * Writes a chapter once `chapterEvery` turns have passed on this path since the
+   * last one (R04-T003). A failed summary is tried again three turns later.
+   */
+  private async chapterIfDue(worldId: string, head: StoryNode): Promise<void> {
+    const every = (await this.repo.getWorld(worldId))?.settings.chapterEvery ?? 0;
+    if (!every || !this.llm) return;
+    const pending = await this.unsummarized(worldId, head);
+    if (pending.turns.length >= every && (pending.turns.length - every) % 3 === 0) await this.writeChapter(worldId, head);
+  }
+
+  /** The turns on the path to `head` after the last chapter, with the chapters and the number of the first turn. */
+  private async unsummarized(worldId: string, head: StoryNode): Promise<{ chapters: Chapter[]; turns: StoryNode[]; firstTurn: number }> {
+    const chapters = await this.repo.chaptersOnPath(worldId, head.id);
+    const path = await this.repo.path(head.id);
+    const last = chapters.at(-1);
+    const from = last ? path.findIndex((n) => n.id === last.lastNodeId) + 1 : 0;
+    return {
+      chapters,
+      turns: path.slice(from).filter((n) => n.kind === "turn" && n.status !== "interrupted"),
+      firstTurn: path.slice(0, from).filter((n) => n.kind === "turn").length + 1,
+    };
+  }
+
+  /** One summary call; null when it failed or came back without a summary. */
+  private async summarize(worldId: string, nodeId: string, input: Parameters<typeof chapterMessages>[0]): Promise<Pick<Chapter, "title" | "gist" | "summary"> | null> {
+    let result: ChatResult | null = null;
+    try {
+      result = await this.call(chapterMessages(input), { aux: true, timeouts: CODEX_TIMEOUT });
+    } catch { /* play goes on without it */ }
+    const parsed = result ? parseChapter(result.text) : null;
+    await this.platform.sql.batch([this.usage(worldId, nodeId, "chapter", result, parsed ? "ok" : result ? "no_record" : "failed", this.llm!.auxModel || this.llm!.model)]);
+    return parsed;
+  }
+
+  /**
+   * Summarizes the turns since the last chapter on the current path (or up to
+   * `head`) as a new chapter. Null when there is nothing to summarize, another
+   * summary of this world is running, or the call failed.
+   */
+  async writeChapter(worldId: string, head?: StoryNode): Promise<Chapter | null> {
+    if (this.chaptering.has(worldId) || !this.llm) return null;
+    this.chaptering.add(worldId);
+    try {
+      const at = head ?? (await tree.cursor(this.repo, worldId)).head;
+      const { chapters, turns, firstTurn } = await this.unsummarized(worldId, at);
+      if (!turns.length) return null;
+      const world = (await this.repo.getWorld(worldId))!;
+      const protagonist = (await this.repo.getState(at.id)).protagonist.name;
+      const parsed = await this.summarize(worldId, at.id, { premise: world.settings.premise, protagonist, previous: chapters, turns, firstTurn });
+      if (!parsed) return null;
+      const chapter = await this.repo.addChapter({
+        worldId, firstNodeId: turns[0].id, lastNodeId: turns[turns.length - 1].id, ...parsed,
+        model: this.llm.auxModel || this.llm.model, promptVersion: CHAPTER_PROMPT_VERSION,
+      });
+      for (const fn of this.listeners) fn(worldId);
+      return chapter;
+    } finally {
+      this.chaptering.delete(worldId);
+    }
+  }
+
+  /** Summarizes an existing chapter again from its turns; the player's edits are replaced. */
+  async rewriteChapter(worldId: string, chapterId: string): Promise<Chapter | null> {
+    if (!this.llm) return null;
+    const chapters = await this.repo.chaptersOnPath(worldId, (await tree.cursor(this.repo, worldId)).head.id);
+    const index = chapters.findIndex((c) => c.id === chapterId);
+    if (index < 0) return null;
+    const chapter = chapters[index];
+    const path = await this.repo.path(chapter.lastNodeId);
+    const from = path.findIndex((n) => n.id === chapter.firstNodeId);
+    const turns = path.slice(from).filter((n) => n.kind === "turn" && n.status !== "interrupted");
+    const world = (await this.repo.getWorld(worldId))!;
+    const protagonist = (await this.repo.getState(chapter.lastNodeId)).protagonist.name;
+    const parsed = await this.summarize(worldId, chapter.lastNodeId, {
+      premise: world.settings.premise, protagonist, previous: chapters.slice(0, index), turns,
+      firstTurn: path.slice(0, from).filter((n) => n.kind === "turn").length + 1,
+    });
+    if (!parsed) return null;
+    const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: CHAPTER_PROMPT_VERSION, edited: false };
+    await this.repo.updateChapter(chapter.id, fields);
+    return { ...chapter, ...fields };
   }
 
   /**
