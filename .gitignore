@@ -55,3 +55,6 @@ Thumbs.db
 Desktop.ini
 *.tmp
 *.bak
+
+# Agent worktrees
+.claude/worktrees/
