@@ -5,6 +5,18 @@
 - 方法：只读代码与官方文档，没有接手机、没有运行 adb。凡是需要真机确认的结论都标了【待验证】。
 - 读过的代码：`src-tauri/gen/android/app/src/main/AndroidManifest.xml`、`GenerationService.kt`、`NotificationsPlugin.kt`、`MainActivity.kt`、`DocumentPickerPlugin.kt`、`generated/WryActivity.kt`、`generated/TauriActivity.kt`、Tauri 自带的 `AppPlugin.kt` 和 `PluginHandle.kt`（cargo 缓存中的 tauri-2.12.3）、`src-tauri/src/keep_alive.rs`、`notifications.rs`、`stream.rs`、`tauri.conf.json`、`build.gradle.kts`、`res/values*/themes.xml`、`src/platform/tauri.ts`、`src/ui/screens/Play.tsx`、`src/ui/components/useLongPress.ts`、`src/ui/app/context.tsx`、`src/ui/App.tsx`，以及台账中的 R01-T005、R01-T007、R02-T010、R08-T002。
 
+## 已经处理的项目（2026-10-17 更新）
+
+下面几项已在代码里改好，并通过 Rust/前端测试和 Android 发行包构建；凡是要看手机上实际效果的，都还是【待验证】。
+
+| 项目（见第二部分） | 怎么改的 | 还要在手机上看什么 |
+|---|---|---|
+| 系统栏颜色跟随应用主题（2.2、2.4） | 在 notifications 插件里新增原生命令 `set_system_bars(background, dark)`（`SystemBars.kt` + `NotificationsPlugin.kt`）。边到边保持开启、两条栏保持透明；`MainActivity` 给 `android.R.id.content` 加了系统栏内边距，栏下面露出来的正是这块内边距，所以命令把 content 视图和窗口背景都刷成当前主题的 `--bg`（纸 `#efe5cf`、日 `#faf7f0`、夜 `#131518`），并用 `WindowInsetsControllerCompat` 切换图标深浅；同时关掉系统给三键导航栏加的半透明遮罩（`isNavigationBarContrastEnforced = false`）。`App.tsx` 的 `applyReading` 每次换主题都调用它。颜色存进 `SharedPreferences`，下次启动时 `MainActivity` 在页面加载前就先刷上 | 三种主题 × 系统深/浅色 × 手势/三键导航，状态栏和导航栏是否和页面连成一片、图标是否看得清【待验证】；启动画面本身仍取 `windowBackground`（跟系统走），只有 Activity 创建后才换成应用主题 |
+| 长按振动（2.5） | 在 notifications 插件里新增原生命令 `haptic`，调用 `performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)`，不需要 VIBRATE 权限，遵守系统“触感反馈”开关。前端是 `platform.system.haptic()`；Android 上走原生，其他平台仍用 `navigator.vibrate` | 长按段落、首页世界卡片时有没有轻微震动；关掉系统触感反馈后是否不再震动【待验证】 |
+| 导出世界的文件类型（2.6） | `DocumentPickerPlugin.kt` 按建议文件名选择 MIME：以 `.json` 结尾用 `application/json`，其余仍是 `text/plain` | 小米“文件管理”和系统 DocumentsUI 保存出来是否是 `xxx.lishi.json`【待验证】 |
+| 主题图标（2.7） | 自适应图标加了 `<monochrome>` 图层，复用通知小图标的印章剪影（`drawable/ic_launcher_monochrome.xml`） | HyperOS / 原生桌面打开“主题图标”后的样子【待验证】 |
+| 电视（leanback）（2.7） | 删掉了清单里的 `LEANBACK_LAUNCHER` 分类和 `android.software.leanback` 声明 | — |
+
 ---
 
 ## 第一部分：通知为什么不出现

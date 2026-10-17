@@ -25,9 +25,13 @@ internal fun buildImportDocumentIntent(): Intent = Intent(Intent.ACTION_OPEN_DOC
     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 }
 
+/** World archives (`.json`) are JSON, so file managers keep the name instead of adding `.txt`. */
+internal fun exportMimeType(suggestedName: String): String =
+    if (suggestedName.endsWith(".json", ignoreCase = true)) "application/json" else "text/plain"
+
 internal fun buildExportDocumentIntent(suggestedName: String): Intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
     addCategory(Intent.CATEGORY_OPENABLE)
-    type = "text/plain"
+    type = exportMimeType(suggestedName)
     putExtra(Intent.EXTRA_TITLE, suggestedName)
     addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
 }

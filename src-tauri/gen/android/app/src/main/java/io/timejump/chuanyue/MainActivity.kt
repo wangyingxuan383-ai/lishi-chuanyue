@@ -41,6 +41,8 @@ class MainActivity : TauriActivity() {
       WindowInsetsCompat.CONSUMED
     }
     content.post { ViewCompat.requestApplyInsets(content) }
+    // Bars in the app's theme from the first frame (the page sets them again once loaded).
+    SystemBars.restore(this)
   }
 
   override fun onResume() {

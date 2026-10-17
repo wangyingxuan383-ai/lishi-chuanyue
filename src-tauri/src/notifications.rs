@@ -123,6 +123,65 @@ async fn open_url<R: Runtime>(app: tauri::AppHandle<R>, url: String) -> Result<(
     }
 }
 
+/// `#rrggbb` only: the colour goes straight to `Color.parseColor` on Android.
+fn is_hex_color(value: &str) -> bool {
+    value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Paints the area behind the status and navigation bars with the app theme's
+/// background and picks icon contrast to match (`dark` = light icons).
+#[tauri::command]
+async fn set_system_bars<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    background: String,
+    dark: bool,
+) -> Result<(), String> {
+    if !is_hex_color(&background) {
+        return Err("background must be #rrggbb".into());
+    }
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>(
+                "set_system_bars",
+                serde_json::json!({ "background": background, "dark": dark }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, dark);
+        Ok(())
+    }
+}
+
+/// A light native haptic (no VIBRATE permission needed); false where there is none.
+#[tauri::command]
+async fn haptic<R: Runtime>(app: tauri::AppHandle<R>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        #[derive(serde::Deserialize)]
+        struct Reply {
+            done: bool,
+        }
+        let reply: Reply = app
+            .state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async("haptic", serde_json::json!({}))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(reply.done)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(false)
+    }
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("notifications")
         .invoke_handler(tauri::generate_handler![
@@ -130,7 +189,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             notification_status,
             open_notification_settings,
             open_app_settings,
-            open_url
+            open_url,
+            set_system_bars,
+            haptic
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]
@@ -143,4 +204,27 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_hex_color;
+
+    #[test]
+    fn system_bar_colour_is_plain_hex_only() {
+        for ok in ["#efe5cf", "#FAF7F0", "#131518"] {
+            assert!(is_hex_color(ok), "{ok}");
+        }
+        for bad in [
+            "efe5cf",
+            "#efe5c",
+            "#efe5cf00",
+            "#gggggg",
+            "red",
+            "",
+            "#abc\u{4e2d}",
+        ] {
+            assert!(!is_hex_color(bad), "{bad}");
+        }
+    }
 }

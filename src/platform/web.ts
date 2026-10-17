@@ -37,6 +37,30 @@ async function idbPut(key: string, value: unknown): Promise<void> {
   });
 }
 
+async function idbKeys(): Promise<string[]> {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(IDB_STORE).objectStore(IDB_STORE).getAllKeys();
+    request.onsuccess = () => resolve(request.result.map(String));
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function idbDelete(key: string): Promise<void> {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Backups live in IndexedDB as `backup/<name>` and hold `{ at, bytes }` (older ones: bare bytes).
+type StoredBackup = { at: string; bytes: Uint8Array } | Uint8Array;
+const BACKUP_PREFIX = "backup/";
+const KEEP_BACKUPS = 20;
+
 async function bridge<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`/__dev/${path}`, {
     method: "POST",
@@ -57,14 +81,63 @@ export async function createWebPlatform(): Promise<Platform> {
   db.exec("PRAGMA foreign_keys = ON;");
 
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  // After a restore the stored database is the restored one; the page reloads
+  // and nothing from the old in-memory copy may overwrite it.
+  let restored = false;
   const persist = () => {
     clearTimeout(persistTimer);
+    if (restored) return;
     persistTimer = setTimeout(() => void idbPut(DB_KEY, exportDatabase(db)), 1000);
   };
   window.addEventListener("pagehide", () => {
     clearTimeout(persistTimer);
-    void idbPut(DB_KEY, exportDatabase(db));
+    if (!restored) void idbPut(DB_KEY, exportDatabase(db));
   });
+
+  const listBackups = async () => {
+    const backups: { name: string; at: string; size: number }[] = [];
+    for (const key of await idbKeys()) {
+      if (!key.startsWith(BACKUP_PREFIX)) continue;
+      const stored = await idbGet<StoredBackup>(key);
+      if (!stored) continue;
+      const bytes = stored instanceof Uint8Array ? stored : stored.bytes;
+      const at = stored instanceof Uint8Array ? new Date(0).toISOString() : stored.at;
+      backups.push({ name: key.slice(BACKUP_PREFIX.length), at, size: bytes.length });
+    }
+    return backups.sort((a, b) => (a.name < b.name ? 1 : -1));
+  };
+  const backup = async (label: string, keep?: string) => {
+    const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
+    await idbPut(`${BACKUP_PREFIX}${name}`, { at: new Date().toISOString(), bytes: exportDatabase(db) });
+    for (const old of (await listBackups()).slice(KEEP_BACKUPS)) {
+      if (old.name !== keep) await idbDelete(`${BACKUP_PREFIX}${old.name}`);
+    }
+    return name;
+  };
+  // Same checks as the native SqlStore.restore: an intact database of this app, not from a newer version.
+  const restore = async (name: string) => {
+    const stored = await idbGet<StoredBackup>(`${BACKUP_PREFIX}${name}`);
+    if (!stored) throw new PlatformError("sql_restore_missing", "没有这份备份");
+    const bytes = stored instanceof Uint8Array ? stored : stored.bytes;
+    const version = (database: InstanceType<typeof SQL.Database>) =>
+      Number(database.exec("SELECT MAX(version) FROM schema_version")[0]?.values[0]?.[0] ?? 0);
+    let candidate: number;
+    try {
+      const copy = new SQL.Database(bytes);
+      try { candidate = version(copy); } finally { copy.close(); }
+    } catch {
+      candidate = 0;
+    }
+    if (!candidate) throw new PlatformError("sql_restore_invalid", "这份备份已损坏，或不是本应用的存档");
+    let live = 0;
+    try { live = version(db); } catch { /* an empty database has no schema yet */ }
+    if (live && candidate > live) throw new PlatformError("sql_restore_newer", "这份备份来自更新版本的应用，请先更新");
+    const saved = await backup("before-restore", name);
+    clearTimeout(persistTimer);
+    restored = true;
+    await idbPut(DB_KEY, bytes);
+    return saved;
+  };
 
   // Stream events are kept in memory so resume() behaves like the native cache.
   const streams = new Map<string, { events: StreamEvent[]; controller: AbortController; active: boolean }>();
@@ -78,11 +151,9 @@ export async function createWebPlatform(): Promise<Platform> {
     name: "web-dev",
     sql: sqlJsSql(db, {
       persist,
-      async backup(label) {
-        const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
-        await idbPut(`backup/${name}`, exportDatabase(db));
-        return name;
-      },
+      backup: (label) => backup(label),
+      listBackups,
+      restore,
     }),
     secrets: {
       set: (slot, value, boundBaseUrl) => bridge("secret/set", { slot, value, boundBaseUrl }),
@@ -178,6 +249,8 @@ export async function createWebPlatform(): Promise<Platform> {
       notificationStatus: async () => ({ granted: true, enabled: true }),
       openSystemSettings: async () => {},
       openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
+      setSystemBars: async () => {},
+      haptic: async () => navigator.vibrate?.(10) ?? false,
       onBack(handler) {
         backHandlers.push(handler);
         return () => {

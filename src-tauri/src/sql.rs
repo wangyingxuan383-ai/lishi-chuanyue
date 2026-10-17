@@ -1,9 +1,14 @@
 use crate::error::{io_error, PlatformError, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params_from_iter, types::ValueRef, Connection};
+use rusqlite::{params_from_iter, types::ValueRef, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{fs, path::PathBuf, sync::Mutex, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
 
 const MAX_INTEGER: i64 = 9_007_199_254_740_991;
 
@@ -66,6 +71,14 @@ fn parameters(params: Vec<Value>) -> Result<Vec<rusqlite::types::Value>> {
 impl SqlStore {
     pub fn open(directory: PathBuf) -> Result<Self> {
         fs::create_dir_all(&directory).map_err(|_| io_error())?;
+        let connection = Self::connect(&directory)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            directory,
+        })
+    }
+
+    fn connect(directory: &Path) -> Result<Connection> {
         let connection = Connection::open(directory.join("game.sqlite")).map_err(sql_error)?;
         connection
             .busy_timeout(Duration::from_millis(5000))
@@ -73,10 +86,7 @@ impl SqlStore {
         connection
             .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(sql_error)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            directory,
-        })
+        Ok(connection)
     }
 
     pub fn query(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Map<String, Value>>> {
@@ -167,6 +177,57 @@ impl SqlStore {
     }
 
     pub fn backup(&self, label: &str) -> Result<String> {
+        let connection = self.connection.lock().map_err(|_| io_error())?;
+        self.backup_locked(&connection, label, None)
+    }
+
+    /// Replaces the live database with the backup `name` (B2); returns the
+    /// name of the `before-restore` backup holding the data it replaced.
+    ///
+    /// The file must be an intact SQLite database of this app (it has a
+    /// `schema_version` table, no newer than the live one). Pages are copied
+    /// into the live connection with SQLite's online backup API, which is
+    /// WAL-safe and leaves the database as it was if the copy fails; the
+    /// connection is then reopened so no cached schema or session state survives.
+    pub fn restore(&self, name: &str) -> Result<String> {
+        let missing = || PlatformError::new("sql_restore_missing", "没有这份备份");
+        if !valid_backup_name(name) {
+            return Err(missing());
+        }
+        let path = self.directory.join("backups").join(name);
+        if !path.is_file() {
+            return Err(missing());
+        }
+        let version = backup_schema_version(&path)?;
+        let mut connection = self.connection.lock().map_err(|_| io_error())?;
+        if let Ok(Some(live)) = schema_version(&connection) {
+            if version > live {
+                return Err(PlatformError::new(
+                    "sql_restore_newer",
+                    "这份备份来自更新版本的应用，请先更新",
+                ));
+            }
+        }
+        let saved = self.backup_locked(&connection, "before-restore", Some(name))?;
+        connection
+            .restore(
+                rusqlite::MAIN_DB,
+                &path,
+                None::<fn(rusqlite::backup::Progress)>,
+            )
+            .map_err(sql_error)?;
+        *connection = Self::connect(&self.directory)?;
+        Ok(saved)
+    }
+
+    /// Snapshots `connection` into backups/ and keeps the newest 20, never
+    /// pruning `keep` (the file a restore is about to read).
+    fn backup_locked(
+        &self,
+        connection: &Connection,
+        label: &str,
+        keep: Option<&str>,
+    ) -> Result<String> {
         if !(1..=40).contains(&label.len())
             || !label
                 .bytes()
@@ -174,7 +235,6 @@ impl SqlStore {
         {
             return Err(PlatformError::new("sql_backup_label", "备份标签格式不正确"));
         }
-        let connection = self.connection.lock().map_err(|_| io_error())?;
         let directory = self.directory.join("backups");
         fs::create_dir_all(&directory).map_err(|_| io_error())?;
         let name = format!("{}-{label}.sqlite", Utc::now().format("%Y%m%dT%H%M%S%.9fZ"));
@@ -183,7 +243,12 @@ impl SqlStore {
             let _ = fs::remove_file(&path);
             return Err(sql_error(error));
         }
-        for old in self.list_backups()?.into_iter().skip(20) {
+        for old in self
+            .list_backups()?
+            .into_iter()
+            .skip(20)
+            .filter(|old| Some(old.name.as_str()) != keep)
+        {
             fs::remove_file(directory.join(old.name)).map_err(|_| io_error())?;
         }
         Ok(name)
@@ -215,6 +280,44 @@ impl SqlStore {
         }
         backups.sort_by(|a, b| b.name.cmp(&a.name));
         Ok(backups)
+    }
+}
+
+/// A plain file name in backups/: no separators, no `..`, ends in `.sqlite`.
+fn valid_backup_name(name: &str) -> bool {
+    (8..=120).contains(&name.len())
+        && name.ends_with(".sqlite")
+        && !name.starts_with('.')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
+fn schema_version(connection: &Connection) -> rusqlite::Result<Option<i64>> {
+    connection.query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+}
+
+/// The backup's schema version, or an error unless it is an intact database of this app.
+fn backup_schema_version(path: &Path) -> Result<i64> {
+    let invalid =
+        || PlatformError::new("sql_restore_invalid", "这份备份已损坏，或不是本应用的存档");
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| invalid())?;
+    let check: String = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|_| invalid())?;
+    if check != "ok" {
+        return Err(invalid());
+    }
+    match schema_version(&connection) {
+        Ok(Some(version)) if version > 0 => Ok(version),
+        _ => Err(invalid()),
     }
 }
 

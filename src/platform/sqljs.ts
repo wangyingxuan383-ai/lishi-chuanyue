@@ -50,7 +50,12 @@ function run(db: Database, sql: string, params: Json[]): Row[] {
 
 export function sqlJsSql(
   db: Database,
-  hooks: { persist?: () => void; backup?: (label: string) => Promise<string> } = {},
+  hooks: {
+    persist?: () => void;
+    backup?: (label: string) => Promise<string>;
+    listBackups?: () => Promise<{ name: string; at: string; size: number }[]>;
+    restore?: (name: string) => Promise<string>;
+  } = {},
 ): Platform["sql"] {
   const backups: { name: string; at: string; size: number }[] = [];
   return {
@@ -80,7 +85,11 @@ export function sqlJsSql(
       return name;
     },
     async listBackups() {
-      return [...backups];
+      return hooks.listBackups ? hooks.listBackups() : [...backups];
+    },
+    async restore(name) {
+      if (!hooks.restore) throw new PlatformError("sql_restore_unsupported", "这里不支持从备份恢复");
+      return hooks.restore(name);
     },
   };
 }
