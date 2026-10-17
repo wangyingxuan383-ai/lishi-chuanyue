@@ -3,6 +3,7 @@
 // Memory probes (R04-T005): --probe-at 60,100,150 asks, out of band and with the
 // next turn's own context, questions written from turns --probe-from 3-20.
 // --save-db <file> keeps the finished game for scripts/eval/probe.ts.
+// --skip-every 25 spends every 25th turn on 过些日子 (a month), as players would.
 import fs from "node:fs";
 import path from "node:path";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
@@ -181,6 +182,8 @@ async function main() {
   // Every goal in progress must reach the next turn's context (R05-T003); checked locally, no calls.
   const goalChecks = { turns: 0, missing: [] as { turn: number; goal: string }[] };
   const deaths: number[] = [];
+  const skipEvery = Number(arg("skip-every", "0"));
+  const skips: { turn: number; days: number; stoppedEarly: boolean; report: boolean }[] = [];
   async function checkGoals(): Promise<void> {
     const head = (await cursor(game.repo, worldId!)).head;
     const active = (await game.repo.getState(head.id)).goals.filter((g) => g.status === "进行中");
@@ -281,6 +284,22 @@ async function main() {
   let consecutiveFailures = 0;
   for (turn = 1; worldId && turn <= turns; turn++) {
     if (calls.length >= maxCalls) { stopReason = "max_calls"; break; }
+    // 过些日子 instead of a player's move: no player call, the narrator's own pass of time.
+    if (skipEvery && turn % skipEvery === 0) {
+      const before = (await game.repo.getState((await cursor(game.repo, worldId)).head.id)).time.elapsedMinutes;
+      begin("turn");
+      const callStart = calls.length;
+      const entry = await capture("skip", "过一个月；这段时间照常过日子", (onEvent) => game.play(worldId!, { mode: "skip", text: "过一个月；这段时间照常过日子" }, onEvent).done);
+      entry.calls = calls.slice(callStart);
+      entries.push(entry);
+      const head = (await cursor(game.repo, worldId)).head;
+      const days = Math.round(((await game.repo.getState(head.id)).time.elapsedMinutes - before) / 1440);
+      skips.push({ turn, days, stoppedEarly: days < 28, report: !!(head.record as { report?: unknown } | null)?.report });
+      console.log(`第 ${turn} 回合 · 过些日子 · 过了 ${days} 天 · 调用 ${calls.length}/${maxCalls}`);
+      if (probeAt.includes(turn)) { await game.settled(); await askQuestions().catch(() => console.log(`第 ${turn} 回合记忆探针失败`)); }
+      if (probeAt.length && turn === probeTo) await writeQuestions().catch(() => console.log("记忆探针出题失败"));
+      continue;
+    }
     const { head } = await cursor(game.repo, worldId);
     const recent = (await game.repo.path(head.id, 2)).map((n) => n.narrative).join("\n\n---\n\n");
     const isContinue = turn % 10 === 0;
@@ -420,7 +439,7 @@ async function main() {
     timeMismatches, upkeep, chapters: chapterList,
     fortune: { byLevel: fortuneStats, riskyTurns: entries.filter((e) => e.risk).length, luckyFailRate: failRate(["大顺", "顺"]), unluckyFailRate: failRate(["不顺", "大不顺"]) },
     probes: probeAt.length ? { from: `${probeFrom}-${probeTo}`, ...probes } : null,
-    goalsInContext: goalChecks, deaths,
+    goalsInContext: goalChecks, deaths, skips,
     tokenCurve: entries.filter((e) => e.turn % 10 === 0).map((e) => ({ turn: e.turn, promptTokens: e.usage?.promptTokens ?? null })),
     latencyMs: { firstToken: latency(entries.map((e) => e.firstTokenMs)), total: latency(entries.filter((e) => e.calls.some((c) => c.purpose === "turn")).map((e) => e.totalMs)) },
     calls: { total: calls.length, byPurpose: counts(calls.map((c) => c.purpose)), failuresByReason: counts(calls.filter((c) => c.failure).map((c) => c.failure!.status ? `${c.failure!.reason}:${c.failure!.status}` : c.failure!.reason)) },
