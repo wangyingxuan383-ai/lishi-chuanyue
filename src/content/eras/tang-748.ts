@@ -224,6 +224,15 @@ export const TANG_748: EraPack = {
     { words: ["折扇"], instead: "团扇" },
     { words: ["多宝格"], instead: "柜、架" },
     { words: ["珐琅"], instead: "螺钿、金银平脱" },
+    // Later things eval I found in a Tang story.
+    { words: ["神臂弓", "神臂弩"], instead: "擘张弩、伏远弩" },
+    { words: ["机油"], instead: "油脂、膏油" },
+    { words: ["马灯"], instead: "灯笼、风灯" },
+    { words: ["烧刀子"], instead: "浊酒、烈酒" },
+    { words: ["贼配军"], instead: "流人、囚徒" },
+    { words: ["哨棒"], instead: "白棒、木梃" },
+    { words: ["江洋大盗"], instead: "群盗、亡命之徒" },
+    { words: ["垂花门", "抄手游廊"], instead: "中门、廊庑" },
   ],
   style: "白话叙述，偶带唐人口语；对白简短，称谓随身份。多写街鼓、坊门、胡饼炉、驼铃这类具体声色，少写空泛的盛世感慨。别写成明清公案腔（捕头、三班衙役、差爷官爷、相爷、小的、咱们）。",
   names: {

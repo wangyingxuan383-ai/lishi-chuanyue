@@ -288,6 +288,9 @@ export function applyRecord(
         : "主角伤重濒死、命悬一线：叙述里要写出来；在伤势好转之前再受重伤，就会死去。");
     } else {
       me.stats.health = 1;
+      // Health stays at 1, so 健康 ↓ would show a loss that did nothing (eval I); say what happened.
+      const lost = chips.findIndex((c) => c.text === "健康 ↓");
+      if (lost >= 0) chips.splice(lost, 1, { text: "伤上加伤", tone: "warn" });
       notes.push("主角仍然垂危：再受重伤就会死去；真写到他死了，记录里写 died: true。");
     }
   } else if (dying && me.stats.health > 30) {

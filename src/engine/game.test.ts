@@ -402,6 +402,24 @@ describe("Game", () => {
     expect((await tree.cursor(game.repo, worldId)).head.kind).toBe("opening");
   });
 
+  it("does not save a provider's notice sent as text (eval I)", async () => {
+    const notice = "The prompt could not be submitted. The prompt contains sensitive words that violate Google's Generative AI Prohibited Use policy. Try rephrasing the prompt.";
+    const { game, worldId, llm } = await setup([{ text: notice }]);
+    const calls = llm.calls.length;
+    expect((await play(game, worldId, "动手")).at(-1)).toMatchObject({ type: "failed", reason: "refused", partialSaved: false });
+    expect((await tree.cursor(game.repo, worldId)).head.kind).toBe("opening");
+    expect(llm.calls.length).toBe(calls + 1); // no extraction of the notice
+  });
+
+  it("answers 查一查, and says so in plain words when the service refused", async () => {
+    const { game, worldId } = await setup([
+      { text: "王掌柜是西市卖胡饼的，为人和气。" },
+      { text: "The prompt could not be submitted. The prompt contains sensitive words that violate the usage policy." },
+    ]);
+    expect(await game.ask(worldId, "王掌柜是谁？", () => {})).toBe("王掌柜是西市卖胡饼的，为人和气。");
+    expect(await game.ask(worldId, "再问一次", () => {})).toContain("被服务拒绝了");
+  });
+
   it("treats a content_filter finish as refused", async () => {
     const { game, worldId } = await setup([{ text: "……", finish: "content_filter" }]);
     expect((await play(game, worldId, "动手")).at(-1)).toMatchObject({ reason: "refused" });

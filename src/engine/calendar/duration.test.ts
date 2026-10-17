@@ -28,6 +28,13 @@ describe("parseDurationMinutes", () => {
     ["一个月", 43200],
     ["2小时", 120],
     ["半个时辰左右", 60],
+    ["十几息", 1],
+    ["数日", 4320],
+    ["几个时辰", 360],
+    ["片刻", 5],
+    ["须臾之间", 5],
+    ["转眼", 1],
+    ["一会儿", 10],
   ])("%s → %i", (text, minutes) => {
     expect(parseDurationMinutes(text)).toBe(minutes);
   });
@@ -38,7 +45,8 @@ describe("parseDurationMinutes", () => {
   });
 
   it("returns null when nothing is recognisable", () => {
-    expect(parseDurationMinutes("片刻")).toBeNull();
+    expect(parseDurationMinutes("很久")).toBeNull();
+    expect(parseDurationMinutes("日头偏西")).toBeNull();
     expect(parseDurationMinutes("")).toBeNull();
     expect(parseDurationMinutes(undefined)).toBeNull();
   });

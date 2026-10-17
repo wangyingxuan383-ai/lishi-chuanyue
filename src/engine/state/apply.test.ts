@@ -205,6 +205,8 @@ describe("applyRecord", () => {
     const hanging = apply(first.state, { stats: { health: -5 } });
     expect(hanging.state.protagonist.stats.health).toBe(1);
     expect(hanging.chips.map((c) => c.text)).not.toContain("你死了");
+    expect(hanging.chips.map((c) => c.text)).toContain("伤上加伤");
+    expect(hanging.chips.map((c) => c.text)).not.toContain("健康 ↓");
     expect(hanging.notes.join()).toContain("仍然垂危");
     // A passage that writes the death kills.
     const dead = apply(first.state, { stats: { health: -10 }, died: true });
@@ -233,6 +235,11 @@ describe("applyRecord", () => {
     // Without an hour, or for an ordinary turn, the span is taken as it is.
     expect(applyRecord(s, { time: "一个月" }, { mode: "skip", difficulty: "标准", currency: TANG_CURRENCY, clock }).state.time.elapsedMinutes).toBe(330 + 43200);
     expect(applyRecord(s, { time: "一天", hour: 6 }, { mode: "do", difficulty: "标准", currency: TANG_CURRENCY, clock }).state.time.elapsedMinutes).toBe(330 + 1440);
+    // A skip that stops after a few breaths moves the clock that little, and says why it stopped (eval I).
+    const stopped = applyRecord(s, { time: "十几息" }, { mode: "skip", difficulty: "标准", currency: TANG_CURRENCY, clock, asked: 43200 });
+    expect(stopped.state.time.elapsedMinutes).toBe(331);
+    expect(stopped.chips.map((c) => c.text)).toEqual(["快进停在这里：有事要你拿主意"]);
+    expect(stopped.log.join()).not.toContain("无法识别");
   });
 
   it("keeps at most twelve statuses after a turn, dropping the oldest but never 垂危", () => {

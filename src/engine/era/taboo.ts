@@ -33,7 +33,7 @@ export function tabooTerms(eraCard: Card | null, pack: EraPack | null): TabooTer
 }
 
 /** Longer words that contain a term but mean something else (a 火折子 is not a memorial). */
-const OTHER_WORDS: Record<string, string[]> = { 折子: ["火折子"] };
+const OTHER_WORDS: Record<string, string[]> = { 折子: ["火折子"], 马灯: ["走马灯"] };
 
 /** The taboo words in a passage, each once. */
 export function findTaboos(text: string, terms: TabooTerm[]): TabooHit[] {

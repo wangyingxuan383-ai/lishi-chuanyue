@@ -8,7 +8,8 @@ import type { Platform, SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
 import { ChatError, parseChunk, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "./llm/chat";
-import { isRefusal } from "./llm/refusal";
+import { explainFailure } from "./llm/providers";
+import { isNotice, isRefusal } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
   turnMessages, type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
@@ -328,6 +329,10 @@ export class Game {
       const split = splitter.finish();
       narrative = split.narrative;
       record = parseRecord(split.recordText).record;
+      if (isRefusal({ finishReason: result?.finishReason ?? null, narrative, hasRecord: !!record })) {
+        onEvent({ type: "failed", reason: "refused", partialSaved: false });
+        return null;
+      }
       if (!record) {
         onEvent({ type: "organizing" });
         record = (await this.extract(era, initial, "（开场）", narrative)).record;
@@ -682,11 +687,13 @@ export class Game {
       pins: (await this.repo.pinsOnPath(worldId, head.id)).map((p) => p.text),
     });
     let result: ChatResult | null = null;
+    let refused = false;
     try {
       result = await this.call(messages, { aux: true, timeouts: CODEX_TIMEOUT, onText: (_d, full) => onText(full) });
-      return result.text.trim();
+      refused = isRefusal({ finishReason: result.finishReason, narrative: result.text, hasRecord: false }) || isNotice(result.text);
+      return refused ? explainFailure("refused") : result.text.trim();
     } finally {
-      await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, result ? "ok" : "failed", this.llm!.auxModel || this.llm!.model)]);
+      await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, !result ? "failed" : refused ? "refused" : "ok", this.llm!.auxModel || this.llm!.model)]);
     }
   }
 
