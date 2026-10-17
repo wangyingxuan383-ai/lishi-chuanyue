@@ -5,6 +5,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../engine/llm/providers";
 import type { Intensity, Perspective } from "../../engine/types";
+import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
 import type { Row } from "../../platform";
 import { useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
@@ -196,12 +197,17 @@ function PlayPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: (d
       <Choice label="难度" value={defaults.difficulty}
         note={defaults.difficulty === "宽松" ? "运气偏好；受了重伤也只是昏过去，不会死。" : defaults.difficulty === "残酷" ? "运气偏差；重伤可能直接丧命。" : "运气平常；伤重时先“垂危”，剧情真写到才会死。"}
         options={[["宽松", "宽松"], ["标准", "标准"], ["残酷", "残酷"]]} onChange={(v) => onChange({ ...defaults, difficulty: v })} />
+      <h3 className="settings-sub">玩法</h3>
+      <Choice label="运势" note={FORTUNE_MODE_NOTE[defaults.fortune]} value={defaults.fortune} options={FORTUNE_MODES} onChange={(v) => onChange({ ...defaults, fortune: v })} />
+      <Choice label="用词提醒" note={defaults.tabooHints ? "AI 用了这个朝代不该有的说法，下一段提醒它改。" : "不提醒，AI 偶尔会用到后世的说法。"} value={defaults.tabooHints}
+        options={[[true, "开"], [false, "关"]]} onChange={(v) => onChange({ ...defaults, tabooHints: v })} />
+      <Note>章节摘要和设定集自动整理在“记忆与整理”里。</Note>
       <h3 className="settings-sub">内容尺度</h3>
       {intensity("violence", "暴力与伤亡")}
       {intensity("romance", "感情与亲密")}
       {intensity("darkness", "黑暗与压抑")}
       <Note>“浓烈”仍受所用 AI 服务自己的规则限制。这些是新开一局的默认，已经开始的故事在“本局设置”里改。</Note>
-      <button className="ghost reset" onClick={() => onChange({ ...defaults, difficulty: BUILTIN_DEFAULTS.difficulty, intensity: BUILTIN_DEFAULTS.intensity })}>恢复默认</button>
+      <button className="ghost reset" onClick={() => onChange({ ...defaults, difficulty: BUILTIN_DEFAULTS.difficulty, fortune: BUILTIN_DEFAULTS.fortune, tabooHints: BUILTIN_DEFAULTS.tabooHints, intensity: BUILTIN_DEFAULTS.intensity })}>恢复默认</button>
     </>
   );
 }

@@ -703,11 +703,11 @@ describe("fortune", () => {
     const events = await play(game, worldId, "求掌柜赊账");
     const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
     expect(done.chips).toContainEqual({ text: "签·大不顺 · 说服掌柜赊账 · 没成", tone: "loss" });
-    expect(JSON.stringify(llm.calls[1].body)).toContain("【本回合运势（玩家看不到）】大不顺");
+    expect(JSON.stringify(llm.calls[1].body)).toContain("【本回合运势（玩家看不到，只作参考）】大不顺");
     await game.regenerate(worldId, null, () => {}).done;
-    expect(JSON.stringify(llm.calls[2].body)).toContain("【本回合运势（玩家看不到）】大不顺");
+    expect(JSON.stringify(llm.calls[2].body)).toContain("【本回合运势（玩家看不到，只作参考）】大不顺");
     await game.regenerate(worldId, "换个结果", () => {}).done;
-    expect(JSON.stringify(llm.calls[3].body)).toContain("【本回合运势（玩家看不到）】大顺");
+    expect(JSON.stringify(llm.calls[3].body)).toContain("【本回合运势（玩家看不到，只作参考）】大顺");
   });
 
   it("leaves luck out of what the player writes or directs, and out of 过些日子", async () => {
@@ -721,6 +721,46 @@ describe("fortune", () => {
     await play(game, worldId, "让王掌柜突然来访", "direct");
     await play(game, worldId, "过一个月", "skip");
     for (const call of llm.calls.slice(1)) expect(JSON.stringify(call.body)).not.toContain("本回合运势");
+  });
+
+  it("tells luck as a hint by default, more firmly when 有影响, and not at all when 关 (R11-T008)", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "掌柜不肯。" + RECORD({ risk: { what: "说服掌柜赊账", result: "败" } }) },
+      { text: "掌柜还是不肯。" + RECORD({}) },
+      { text: "掌柜不理你。" + RECORD({ risk: { what: "说服掌柜赊账", result: "败" } }) },
+    ]);
+    game.random = () => 0.99;
+    await play(game, worldId, "求掌柜赊账");
+    const hint = JSON.stringify(llm.calls[1].body);
+    expect(hint).toContain("【本回合运势（玩家看不到，只作参考）】大不顺");
+    expect(hint).toContain("不写荒唐的倒霉，也不写荒唐的走运");
+    const world = (await game.repo.getWorld(worldId))!;
+    await game.repo.updateSettings(worldId, { ...world.settings, fortune: "on" });
+    await game.regenerate(worldId, null, () => {}).done;
+    const on = JSON.stringify(llm.calls[2].body);
+    expect(on).toContain("【本回合运势（玩家看不到）】大不顺——玩家这次的行动若有风险、胜负难料，结果失败");
+    expect(on).toContain("局面悬殊的");
+    await game.repo.updateSettings(worldId, { ...world.settings, fortune: "off" });
+    const head = (await tree.cursor(game.repo, worldId)).head;
+    const rolledBefore = (await game.repo.getNode(head.parentId!))!.meta.fortune;
+    game.random = () => { throw new Error("no roll when luck is off"); };
+    const events: TurnEvent[] = [];
+    await game.regenerate(worldId, "换个结果", (e) => events.push(e)).done;
+    const off = JSON.stringify(llm.calls[3].body);
+    expect(off).not.toContain("运势");
+    const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
+    expect(done.chips.some((c) => c.text.startsWith("签·"))).toBe(false);
+    expect((await game.repo.getNode(head.parentId!))!.meta.fortune).toBe(rolledBefore);
+  });
+
+  it("treats a world saved before the setting as 只作参考", async () => {
+    const { game, worldId, llm } = await setup([{ text: "掌柜不肯。" + RECORD({}) }]);
+    const world = (await game.repo.getWorld(worldId))!;
+    const { fortune: _, ...old } = world.settings;
+    await game.repo.updateSettings(worldId, old as typeof world.settings);
+    game.random = () => 0.99;
+    await play(game, worldId, "求掌柜赊账");
+    expect(JSON.stringify(llm.calls[1].body)).toContain("只作参考");
   });
 });
 
@@ -770,6 +810,18 @@ describe("era words", () => {
     expect(done.node.meta.taboos).toEqual([{ term: "银两", instead: "铜钱、绢帛" }]);
     await play(game, worldId, "出门");
     expect(JSON.stringify(llm.calls[2].body)).toContain("【用词提醒】上一段用了这个时代不该有的说法：“银两”（该用：铜钱、绢帛）");
+  });
+
+  it("leaves the reminder out when 用词提醒 is off", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "你掏出一锭银两拍在柜上。" + RECORD({}) },
+      { text: "掌柜收了铜钱。" + RECORD({}) },
+    ]);
+    const world = (await game.repo.getWorld(worldId))!;
+    await game.repo.updateSettings(worldId, { ...world.settings, tabooHints: false });
+    await play(game, worldId, "付房钱");
+    await play(game, worldId, "出门");
+    expect(JSON.stringify(llm.calls[2].body)).not.toContain("用词提醒");
   });
 });
 

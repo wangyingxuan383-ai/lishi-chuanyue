@@ -25,6 +25,7 @@ import { useShortcuts } from "../components/useShortcuts";
 import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { Icon } from "../components/Icon";
+import { FORTUNE_MODES, FORTUNE_MODE_NOTE, fortuneMode } from "../../engine/fortune";
 
 const PAGE = 30;
 const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
@@ -910,6 +911,17 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
         <div className="segmented">
           {(["白话", "半文半白"] as const).map((v) => <button key={v} aria-pressed={s.style === v} onClick={() => onChange({ style: v })}>{v}</button>)}
         </div>
+        <h3 className="settings-sub">玩法</h3>
+        <span className="muted">运势 {mark("fortune")}</span>
+        <div className="segmented">
+          {FORTUNE_MODES.map(([v, l]) => <button key={v} aria-pressed={fortuneMode(s.fortune) === v} onClick={() => onChange({ fortune: v })}>{l}</button>)}
+        </div>
+        <p className="muted" style={{ margin: 0 }}>{FORTUNE_MODE_NOTE[fortuneMode(s.fortune)]}</p>
+        <span className="muted">用词提醒 {mark("tabooHints")}</span>
+        <div className="segmented">
+          {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={(s.tabooHints ?? true) === v} onClick={() => onChange({ tabooHints: v })}>{l}</button>)}
+        </div>
+        <p className="muted" style={{ margin: 0 }}>开着时，AI 用了这个朝代不该有的说法，下一段会提醒它改。</p>
         <span className="muted">设定集自动整理 {mark("autoUpkeep")}</span>
         <div className="segmented">
           {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={s.autoUpkeep === v} onClick={() => onChange({ autoUpkeep: v })}>{l}</button>)}
@@ -920,13 +932,14 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
           {[0, 8, 12, 20].map((n) => <button key={n} aria-pressed={s.chapterEvery === n} onClick={() => onChange({ chapterEvery: n })}>{n ? `每 ${n} 回合` : "关"}</button>)}
         </div>
         <p className="muted" style={{ margin: 0 }}>每过这么多回合，AI 把这段剧情写成一章摘要，更早的剧情靠它记住；在“我 → 记事”里查看和修改。</p>
+        <h3 className="settings-sub">内容尺度</h3>
         {intensity("violence", "暴力与伤亡")}
         {intensity("romance", "感情与亲密")}
         {intensity("darkness", "黑暗与压抑")}
         <p className="muted">“浓烈”仍受所用 AI 服务的规则限制。</p>
         {defaults && differs.length > 0 && <div className="row" style={{ flexWrap: "wrap" }}>
-          <button onClick={() => { onChange({ difficulty: defaults.difficulty, length: defaults.length, choiceCount: defaults.choiceCount, perspective: defaults.perspective, style: defaults.style, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery, intensity: defaults.intensity }); toast("已恢复为默认"); }}>全部恢复为默认</button>
-          <button className="ghost" onClick={() => { const next = { ...defaults, difficulty: s.difficulty, length: s.length, choiceCount: s.choiceCount, perspective: s.perspective, style: s.style, autoUpkeep: s.autoUpkeep, chapterEvery: s.chapterEvery, intensity: s.intensity }; void savePlayDefaults(game.repo, next).then(() => { setDefaults(next); toast("以后新开一局都用这些设置"); }); }}>设为以后的默认</button>
+          <button onClick={() => { onChange({ difficulty: defaults.difficulty, length: defaults.length, choiceCount: defaults.choiceCount, perspective: defaults.perspective, style: defaults.style, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery, fortune: defaults.fortune, tabooHints: defaults.tabooHints, intensity: defaults.intensity }); toast("已恢复为默认"); }}>全部恢复为默认</button>
+          <button className="ghost" onClick={() => { const next = { ...defaults, difficulty: s.difficulty, length: s.length, choiceCount: s.choiceCount, perspective: s.perspective, style: s.style, autoUpkeep: s.autoUpkeep, chapterEvery: s.chapterEvery, fortune: fortuneMode(s.fortune), tabooHints: s.tabooHints ?? true, intensity: s.intensity }; void savePlayDefaults(game.repo, next).then(() => { setDefaults(next); toast("以后新开一局都用这些设置"); }); }}>设为以后的默认</button>
         </div>}
         <button className="ghost" style={{ textAlign: "left" }} onClick={onRules}>纪年与货币 ›</button>
       </div>

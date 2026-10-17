@@ -4,7 +4,7 @@
 import { DEFAULT_SETTINGS, type WorldSettings } from "../../engine/types";
 import type { Repo } from "../../engine/db/repo";
 
-export type PlayDefaults = Pick<WorldSettings, "perspective" | "length" | "choiceCount" | "style" | "difficulty" | "intensity" | "autoUpkeep" | "chapterEvery"> & {
+export type PlayDefaults = Pick<WorldSettings, "perspective" | "length" | "choiceCount" | "style" | "difficulty" | "intensity" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints"> & {
   /** Extra rules every new world starts with (the world can change them). */
   rules: string;
 };
@@ -12,7 +12,8 @@ export type PlayDefaults = Pick<WorldSettings, "perspective" | "length" | "choic
 export const BUILTIN_DEFAULTS: PlayDefaults = {
   perspective: DEFAULT_SETTINGS.perspective, length: DEFAULT_SETTINGS.length, choiceCount: DEFAULT_SETTINGS.choiceCount,
   style: DEFAULT_SETTINGS.style, difficulty: DEFAULT_SETTINGS.difficulty, intensity: DEFAULT_SETTINGS.intensity,
-  autoUpkeep: DEFAULT_SETTINGS.autoUpkeep, chapterEvery: DEFAULT_SETTINGS.chapterEvery, rules: "",
+  autoUpkeep: DEFAULT_SETTINGS.autoUpkeep, chapterEvery: DEFAULT_SETTINGS.chapterEvery,
+  fortune: DEFAULT_SETTINGS.fortune, tabooHints: DEFAULT_SETTINGS.tabooHints, rules: "",
 };
 
 export async function loadPlayDefaults(repo: Repo): Promise<PlayDefaults> {
@@ -26,6 +27,8 @@ export function savePlayDefaults(repo: Repo, defaults: PlayDefaults): Promise<vo
 
 /** Which play settings of a world differ from the defaults (shown as 本局 in 本局设置). */
 export function differsFromDefaults(settings: WorldSettings, defaults: PlayDefaults): (keyof PlayDefaults)[] {
+  // A world saved before a setting existed has it as the built-in default (e.g. 运势 → 只作参考).
+  const value = (k: keyof PlayDefaults) => settings[k as keyof WorldSettings] ?? BUILTIN_DEFAULTS[k];
   return (Object.keys(BUILTIN_DEFAULTS) as (keyof PlayDefaults)[]).filter((k) =>
-    k === "rules" ? false : JSON.stringify(settings[k as keyof WorldSettings]) !== JSON.stringify(defaults[k]));
+    k === "rules" ? false : JSON.stringify(value(k)) !== JSON.stringify(defaults[k]));
 }
