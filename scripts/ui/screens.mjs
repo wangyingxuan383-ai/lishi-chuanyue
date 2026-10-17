@@ -147,12 +147,14 @@ for (const theme of THEMES) {
   // Set the reading theme in 设置, as a player would.
   await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByRole("button", { name: theme.label, exact: true }).click();
+  await page.locator(".settings-entry", { hasText: "阅读与外观" }).click();
+  await page.locator(".theme-card", { hasText: theme.label }).click();
+  await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.locator(".card", { hasText: "长安雪夜" }).waitFor();
   await settle();
   await capture(theme, "1-home");
-  await page.locator(".card", { hasText: "长安雪夜" }).click();
+  await page.locator(".world-open", { hasText: "长安雪夜" }).click();
   await page.locator(".turn").last().waitFor();
   // The last turn from its action down: shows how the player's own line looks.
   await page.evaluate(() => { const s = document.querySelector(".story"); const turns = s.querySelectorAll(".turn"); s.scrollTop = turns[turns.length - 1].offsetTop - 10; });

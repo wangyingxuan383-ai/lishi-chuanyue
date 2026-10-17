@@ -35,10 +35,19 @@ export function lastSentence(text: string): string {
   return last.length > 40 ? `…${last.slice(-40)}` : last;
 }
 
-/** The first character of the period, for the card's little seal: 唐, 宋, 明… */
+/** Reign names the templates and packs use, and their dynasty. */
+const REIGNS: [RegExp, string][] = [
+  [/始皇/, "秦"], [/建安|建兴|中平|初平|元狩|元封/, "汉"], [/永嘉|太康|永和/, "晋"], [/大业|开皇/, "隋"],
+  [/天宝|开元|贞观|武德|永徽|元和|长庆|大中|天授/, "唐"], [/宣和|靖康|政和|崇宁|元祐|熙宁|庆历|绍兴|景德|嘉祐/, "宋"],
+  [/至正|至元|大德/, "元"], [/崇祯|万历|永乐|洪武|嘉靖|天启|正德|成化|弘治|隆庆/, "明"],
+  [/康熙|乾隆|雍正|光绪|道光|咸丰|同治|嘉庆|宣统/, "清"],
+];
+/** The dynasty for the card's little seal: 唐, 宋, 明…, from the dynasty or reign named in the date. */
 function dynastyMark(clock: string): string {
   const named = clock.match(/^(秦|汉|唐|宋|元|明|清|晋|隋|周)/)?.[1];
-  return named ?? clock.replace(/\s/g, "").slice(0, 1) ?? "世";
+  if (named) return named;
+  const reign = REIGNS.find(([re]) => re.test(clock));
+  return reign ? reign[1] : clock.replace(/\s/g, "").slice(0, 1) || "世";
 }
 
 function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen: () => void; onMenu: () => void; featured?: boolean }) {
