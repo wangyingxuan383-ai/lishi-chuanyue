@@ -89,6 +89,9 @@ export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "place
 
 /** "时代卡、天地会、西市等" for the edit line. */
 export function codexSummary(patch: TurnRecord): string {
-  const names = [...(patch.cards ?? []).map((c) => (c.kind === "时代" ? "时代卡" : c.name ?? "")), ...(patch.places ?? []).map((p) => p.name ?? "")].filter(Boolean);
+  const names = [
+    ...(patch.cards ?? []).map((c) => (c.kind === "时代" ? "时代卡" : c.name ?? "")), ...(patch.places ?? []).map((p) => p.name ?? ""),
+    ...(patch.people ?? []).map((p) => p.name),
+  ].filter(Boolean);
   return `AI 整理了设定集：${names.slice(0, 3).join("、")}${names.length > 3 ? "等" : ""}`;
 }

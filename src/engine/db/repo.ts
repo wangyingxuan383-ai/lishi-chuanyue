@@ -300,8 +300,10 @@ export class Repo {
     return (await this.getNode(nodeId))!;
   }
 
-  async setMeta(nodeId: string, meta: Record<string, unknown>): Promise<void> {
-    await this.q("UPDATE nodes SET meta_json = ? WHERE id = ?", [JSON.stringify(meta), nodeId]);
+  /** Adds fields to a node's meta, keeping what others wrote meanwhile. */
+  async mergeMeta(nodeId: string, patch: Record<string, unknown>): Promise<void> {
+    const node = await this.getNode(nodeId);
+    if (node) await this.q("UPDATE nodes SET meta_json = ? WHERE id = ?", [JSON.stringify({ ...node.meta, ...patch }), nodeId]);
   }
 
   async updateNarrative(nodeId: string, narrative: string): Promise<void> {

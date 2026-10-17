@@ -163,7 +163,14 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
   if (units.length) r.currency = units.sort((a, b) => b.value - a.value);
 
   if (str(v.log)) r.log = str(v.log);
-  if (str(v.risk)) r.risk = str(v.risk);
+  // risk: {"what": …, "result": "成/败/半成"}, or just the words.
+  const risk = v.risk && typeof v.risk === "object" ? (v.risk as Record<string, unknown>) : { what: v.risk };
+  const what = str(risk.what);
+  if (what) {
+    const said = str(risk.result) ?? "";
+    const result = /半/.test(said) ? "半成" : /败|没成|未成|不成/.test(said) ? "败" : /成/.test(said) ? "成" : undefined;
+    r.risk = { what, ...(result ? { result } : {}) };
+  }
   r.choices = arr(v.choices)
     .map((c) => str(c) ?? str((c as Record<string, unknown>)?.text))
     .filter((c): c is string => !!c)

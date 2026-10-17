@@ -72,6 +72,19 @@ describe("设定集 upkeep", () => {
     ]);
   });
 
+  it("adds recurring people the ledger missed, and updates a place it described before", () => {
+    const patch = upkeepPatch(answer({
+      people: [
+        { name: "崔县尉", role: "万年县尉，主角的上司", attitude: "冷淡", note: "限三日破案" },
+        { name: "赵四", role: "已在人物表" },
+        { name: "鬼市", role: "玩家删过的名字" },
+      ],
+      updates: [{ name: "崔仁坊", content: "不存在" }, { name: "崇仁坊", content: "铁匣已被取走" }, { name: "西市", content: "卡组写的，不改" }],
+    }), world())!;
+    expect(patch.people).toEqual([{ name: "崔县尉", role: "万年县尉，主角的上司", attitude: "冷淡", note: "限三日破案" }]);
+    expect(patch.places).toEqual([{ op: "update", id: "y", name: "崇仁坊", description: "铁匣已被取走", source: "AI" }]);
+  });
+
   it("returns null when nothing is worth keeping", () => {
     expect(upkeepPatch(answer({ cards: [], places: [], updates: [] }), world())).toBeNull();
     expect(upkeepPatch("没有需要记的", world())).toBeNull();
@@ -80,12 +93,13 @@ describe("设定集 upkeep", () => {
 
   it("shows what may be updated and keeps the newest story within budget", () => {
     const turns = Array.from({ length: 12 }, (_, i) => ({ actionText: `行动${i + 1}`, narrative: `第${i + 1}段`.padEnd(600, "。") }));
-    const [system, user] = upkeepMessages({ premise: "天宝七载，长安。", state: world(), turns });
+    const [system, user] = upkeepMessages({ premise: "天宝七载，长安。", state: world(), turns, taboos: "钱庄；飞钱" });
+    expect(user.content).toContain("【这个时代不该出现的东西】钱庄；飞钱");
     expect(system.content).toContain("人物不建卡");
     expect(user.content).toContain("势力 · 相府（AI 整理，可以更新）：李林甫的宅第与幕僚");
     expect(user.content).toContain("势力 · 天地会（玩家写的，不要改）");
     expect(user.content).toContain("平康坊（还没有描述）");
-    expect(user.content).toContain("【人物表里已有的人物（不要建卡）】赵四");
+    expect(user.content).toContain("【人物表里已有的人物（不要建卡，也不要再写进 people）】赵四");
     expect(user.content).toContain("【玩家删掉的，不要再建】鬼市");
     expect(user.content).toContain("行动12");
     expect(user.content).not.toContain("行动1\n");

@@ -505,7 +505,7 @@ describe("设定集 upkeep during play", () => {
     expect(aux.calls[0].body.model).toBe("aux");
     expect(JSON.stringify(aux.calls[0].body)).toContain("走第6步");
     const c = await tree.cursor(game.repo, worldId);
-    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：漕帮、西市旁邸店", meta: { by: "AI", promptVersion: "upkeep-1" } });
+    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：漕帮、西市旁邸店", meta: { by: "AI", promptVersion: "upkeep-2" } });
     expect((await game.repo.getNode(c.head.parentId!))!.meta.upkeep).toBe(true);
     const state = await game.repo.getState(c.head.id);
     expect(state.cards.find((x) => x.name === "漕帮")).toMatchObject({ kind: "势力", source: "AI" });
@@ -657,5 +657,25 @@ describe("context budget", () => {
     expect(preview).toMatchObject({ calibrated: true, ratio: 0.3, budgetChars: 40000 });
     expect(preview.layers.map((l) => l.key)).toEqual(["rules", "premise", "era", "recap", "history", "state", "essentials", "cards", "directive", "notes", "action", "spec"]);
     expect(preview.layers.find((l) => l.key === "action")!.content).toContain("（下一回合的行动）");
+  });
+});
+
+describe("fortune", () => {
+  it("rolls once per parent: a regenerate keeps it, 换个结果 rolls again, and the narrator is told", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "掌柜不肯。" + RECORD({ risk: { what: "说服掌柜赊账", result: "败" } }) },
+      { text: "掌柜还是不肯。" + RECORD({}) },
+      { text: "掌柜点了头。" + RECORD({ risk: { what: "说服掌柜赊账", result: "成" } }) },
+    ]);
+    const dice = [0.95, 0.01];
+    game.random = () => dice.shift() ?? 0.5;
+    const events = await play(game, worldId, "求掌柜赊账");
+    const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
+    expect(done.chips).toContainEqual({ text: "🎲 大不顺 · 说服掌柜赊账 · 没成", tone: "loss" });
+    expect(JSON.stringify(llm.calls[1].body)).toContain("【本回合运势（玩家看不到）】大不顺");
+    await game.regenerate(worldId, null, () => {}).done;
+    expect(JSON.stringify(llm.calls[2].body)).toContain("【本回合运势（玩家看不到）】大不顺");
+    await game.regenerate(worldId, "换个结果", () => {}).done;
+    expect(JSON.stringify(llm.calls[3].body)).toContain("【本回合运势（玩家看不到）】大顺");
   });
 });

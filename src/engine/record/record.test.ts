@@ -101,6 +101,15 @@ describe("parseRecord", () => {
     expect(parseRecord('{"time":"0","date":"宣和四年春二月","choices":["a"]}').record?.date).toBe("宣和四年春二月");
   });
 
+  it("reads what the fortune was used for and how it went", () => {
+    const parse = (risk: unknown) => parseRecord(JSON.stringify({ time: "一刻", log: "略", choices: ["甲"], risk })).record!.risk;
+    expect(parse({ what: "说服掌柜赊账", result: "败" })).toEqual({ what: "说服掌柜赊账", result: "败" });
+    expect(parse({ what: "翻墙", result: "没成" })).toEqual({ what: "翻墙", result: "败" });
+    expect(parse({ what: "讨价还价", result: "半成" })).toEqual({ what: "讨价还价", result: "半成" });
+    expect(parse("撬锁")).toEqual({ what: "撬锁" });
+    expect(parse(null)).toBeUndefined();
+  });
+
   it("returns null for hopeless input", () => {
     expect(parseRecord("<record>完全不是 JSON</record>").record).toBeNull();
     expect(lenientJson("[1,2]")).toBeNull();

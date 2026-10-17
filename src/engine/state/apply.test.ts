@@ -163,6 +163,12 @@ describe("applyRecord", () => {
     expect(before.protagonist.stats.health).toBe(80);
   });
 
+  it("shows the fortune behind a risky action", () => {
+    const r = applyRecord(sampleState(), { risk: { what: "说服掌柜赊账", result: "败" } }, { ...ctx(), fortune: "不顺" });
+    expect(r.chips).toContainEqual({ text: "🎲 不顺 · 说服掌柜赊账 · 没成", tone: "loss" });
+    expect(apply(sampleState(), { risk: { what: "说服掌柜赊账", result: "成" } }).chips.some((c) => c.text.startsWith("🎲"))).toBe(false);
+  });
+
   it("moves to a new place", () => {
     const r = apply(sampleState(), { place: "西市货栈" });
     expect(r.state.places[0].name).toBe("西市货栈");

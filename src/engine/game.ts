@@ -20,6 +20,7 @@ import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
+import { isFortune, rollFortune, type Fortune } from "./fortune";
 import { parseMoney } from "./money";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS, type ActionMode, type Chapter, type StoryNode, type WorldSettings, type WorldState } from "./types";
@@ -119,6 +120,8 @@ const retryable = (e: unknown) => e instanceof ChatError && !e.partial
 
 export class Game {
   readonly repo: Repo;
+  /** Dice for fortune rolls; tests replace it. */
+  random: () => number = Math.random;
   /** Per world: the tail of the queue that turns and edits wait on, so nodes are never appended concurrently. */
   private queues = new Map<string, Promise<unknown>>();
   private upkeeping = new Set<string>();
@@ -439,8 +442,9 @@ export class Game {
       const action: PlayerAction = actionIn ?? { mode: c.head.actionMode ?? "continue", text: c.head.actionText ?? "", directorNote: c.head.directorNote };
       const state = await this.repo.getState(base.id);
       const era = eraContext(world.eraId, state);
+      const fortune = await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果");
       const { messages, chars } = buildTurnContext(await this.turnInput(worldId, base, {
-        mode: action.mode, text: action.text, directorNote: action.directorNote, rewriteHint: hint,
+        mode: action.mode, text: action.text, directorNote: action.directorNote, rewriteHint: hint, fortune,
       }));
 
       const splitter = new RecordSplitter();
@@ -483,7 +487,7 @@ export class Game {
         return;
       }
       if (result.usage?.promptTokens) await this.learnRatio(result.usage.promptTokens / chars);
-      const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent);
+      const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent, fortune);
       if (edit) cursor.cursor = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
       await this.repo.setSetting("pending", null);
       onEvent({ type: "done", cursor: cursor.cursor, node: cursor.node, chips: cursor.chips });
@@ -507,7 +511,7 @@ export class Game {
   private async commit(
     c: tree.Cursor, base: StoryNode, kind: "turn" | "variant", action: PlayerAction, narrative: string,
     recordIn: TurnRecord | null, issues: string[], state: WorldState, era: EraContext, settings: WorldSettings,
-    result: ChatResult & { attempts: number }, onEvent: (e: TurnEvent) => void,
+    result: ChatResult & { attempts: number }, onEvent: (e: TurnEvent) => void, fortune?: Fortune,
   ): Promise<{ cursor: tree.Cursor; node: StoryNode; chips: Chip[] }> {
     let record = recordIn;
     let extractResult: ChatResult | null = null;
@@ -517,7 +521,7 @@ export class Game {
       extractResult = extracted.result;
       if (extracted.record) record = record ? { ...extracted.record, ...record, choices: extracted.record.choices } : extracted.record;
     }
-    const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock });
+    const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune });
     const model = this.llm!.model;
     const node = {
       kind: "turn" as const, actionMode: action.mode, actionText: action.text, directorNote: action.directorNote ?? null,
@@ -591,8 +595,20 @@ export class Game {
     return { stop: () => handle?.cancel(), catchUp: async () => { await handle?.catchUp(); }, done };
   }
 
+  /**
+   * The hidden fortune of the turn after `base` (R05-T002): rolled once per parent
+   * node and kept there, so regenerating does not reroll it; "换个结果" does.
+   */
+  private async fortuneFor(base: StoryNode, difficulty: WorldSettings["difficulty"], reroll: boolean): Promise<Fortune> {
+    const kept = (await this.repo.getNode(base.id))?.meta.fortune;
+    if (isFortune(kept) && !reroll) return kept;
+    const fortune = rollFortune(difficulty, this.random);
+    await this.repo.mergeMeta(base.id, { fortune });
+    return fortune;
+  }
+
   /** Everything a turn prompt needs, read for the turn that follows `base`. */
-  private async turnInput(worldId: string, base: StoryNode, action: Pick<TurnPromptInput, "mode" | "text" | "directorNote" | "rewriteHint">): Promise<TurnPromptInput> {
+  private async turnInput(worldId: string, base: StoryNode, action: Pick<TurnPromptInput, "mode" | "text" | "directorNote" | "rewriteHint" | "fortune">): Promise<TurnPromptInput> {
     const world = (await this.repo.getWorld(worldId))!;
     const state = await this.repo.getState(base.id);
     const ratio = await this.tokenRatio();
@@ -731,11 +747,12 @@ export class Game {
     this.upkeeping.add(worldId);
     try {
       // Marked first, so a failed pass waits for the next window instead of retrying every turn.
-      await this.repo.setMeta(head.id, { ...head.meta, upkeep: true });
+      await this.repo.mergeMeta(head.id, { upkeep: true });
       const state = await this.repo.getState(head.id);
       let result: ChatResult | null = null;
       try {
-        result = await this.call(upkeepMessages({ premise: world.settings.premise, state, turns }), { aux: true, timeouts: CODEX_TIMEOUT });
+        const taboos = eraContext(world.eraId, state).eraCard?.content.split("\n").find((l) => l.startsWith("不要出现："))?.slice(5);
+        result = await this.call(upkeepMessages({ premise: world.settings.premise, state, turns, taboos }), { aux: true, timeouts: CODEX_TIMEOUT });
       } catch { /* the story goes on without it */ }
       await this.serial(worldId, async () => {
         const c = await tree.cursor(this.repo, worldId);

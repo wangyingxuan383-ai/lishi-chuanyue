@@ -6,7 +6,11 @@ import { coerceDate, formatDate } from "../calendar/date";
 import { parseDurationMinutes } from "../calendar/duration";
 import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
+import type { Fortune } from "../fortune";
 import type { ActionMode, Attitude, Card, CardKind, Difficulty, Person, WorldState } from "../types";
+
+export type RiskResult = "成" | "败" | "半成";
+const RISK_TEXT: Record<RiskResult, string> = { 成: "成了", 败: "没成", 半成: "成了一半" };
 import { matchName } from "./names";
 
 /** The normalised record every output format is converted into. */
@@ -22,7 +26,8 @@ export interface TurnRecord {
   status?: { op: string; name: string; detail?: string }[] | null;
   goals?: { op: string; name: string; detail?: string; kind?: string }[] | null;
   log?: string | null;
-  risk?: string | null;
+  /** The risky part of the action and how it went, when the fortune mattered (R05-T002). */
+  risk?: { what: string; result?: RiskResult } | null;
   choices?: string[] | null;
   /** Opening only: the start date (an object for coerceDate, or words), hour of day and the era's currency units. */
   date?: string | Record<string, unknown> | null;
@@ -98,7 +103,7 @@ const clamp = (n: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
 export function applyRecord(
   before: WorldState,
   record: TurnRecord | null,
-  ctx: { mode: ActionMode; difficulty: Difficulty; currency: Currency; clock?: GameClock },
+  ctx: { mode: ActionMode; difficulty: Difficulty; currency: Currency; clock?: GameClock; fortune?: Fortune },
   opts?: { advanceTime?: boolean },
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
@@ -122,6 +127,12 @@ export function applyRecord(
     chips.push({ text: `${newYears === 1 ? "过年了" : `过了 ${newYears} 个年`}${me.age != null ? `，${me.age} 岁` : ""}`, tone: "info" });
   }
   if (!record) return { state: s, chips, notes, log: [...log, "本回合没有记录"], minutes };
+
+  // The fortune behind a risky action, shown so the outcome is not a black box (PLAN §5.5).
+  if (record.risk?.what && ctx.fortune) {
+    const result = record.risk.result;
+    chips.push({ text: `🎲 ${ctx.fortune} · ${record.risk.what}${result ? ` · ${RISK_TEXT[result]}` : ""}`, tone: result === "败" ? "loss" : result === "成" ? "gain" : "info" });
+  }
 
   // Place
   if (record.place && typeof record.place === "string") {

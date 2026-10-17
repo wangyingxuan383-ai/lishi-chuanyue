@@ -1,15 +1,16 @@
 // Keeping the 设定集 up to date during play (R04-T001, D122): every few turns
 // the auxiliary model reads the recent story and proposes cards for what has a
 // name and will likely come back, describes places that have no description,
-// and updates cards the AI wrote before. What the player or a built-in pack
-// wrote is never changed. Changes are logged in ./CHANGES.md.
+// updates cards the AI wrote before, and adds recurring people the ledger
+// missed. What the player or a built-in pack wrote is never changed. Changes
+// are logged in ./CHANGES.md.
 import type { ChatMessage } from "../llm/chat";
 import { lenientJson } from "../record/parse";
 import type { CardPatch, PlacePatch, TurnRecord } from "../state/apply";
 import { matchName } from "../state/names";
 import type { CardKind, StoryNode, WorldState } from "../types";
 
-export const UPKEEP_PROMPT_VERSION = "upkeep-1";
+export const UPKEEP_PROMPT_VERSION = "upkeep-2";
 /** Turns between two passes. */
 export const UPKEEP_EVERY = 6;
 /** Most new cards, updates and places taken from one pass. */
@@ -22,6 +23,8 @@ export interface UpkeepInput {
   state: Pick<WorldState, "cards" | "places" | "people" | "dismissed">;
   /** The turns since the last pass, oldest first. */
   turns: Pick<StoryNode, "actionText" | "narrative">[];
+  /** The era card's "不要出现" line, so cards use the era's own words. */
+  taboos?: string;
 }
 
 const short = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
@@ -49,19 +52,20 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你是一部历史互动小说的资料员，替作者维护“设定集”：读最近几回合的剧情，把以后写作用得着的资料记成卡片。
+      content: `你是一部历史互动小说的资料员，替作者维护“设定集”：读最近几回合的剧情，把以后写作用得着的资料记下来。
 要求：
-- 新卡只记剧情里有名字、以后很可能再出现的东西：势力（官署、帮会、商号、家族、党派）、物品（关键物件、信物、证据）、设定（规矩、案子、传闻、暗号）。一次最多 3 张，宁缺毋滥；已有的卡片和地点不要重复建。
-- 人物不建卡（另有人物表）。主角随身的普通东西不建卡。
+- 新卡只记剧情里有名字、以后很可能再出现的东西，一张卡只写一样东西。先记反复出现的势力（官署、军队、帮会、商号、家族、党派），再记关键物件（信物、证据）和设定（规矩、案子、暗号）。一次最多 3 张，宁缺毋滥；已有的卡片和地点不要重复建。
+- 人物表里没有、却在剧情里反复出现、有名字或固定称呼的人，写进 people（身份、对主角的态度、一句备注），一次最多 3 个；人物表里已有的不写，人物不建卡。
 - 剧情里到过或详细写到的地点：没有描述的补一句描述；没有的新地点可以新建。
-- 标着“AI 整理，可以更新”的卡片和地点，最近的剧情让它的情况变了（易主、被毁、真相揭开、立场改变），就重写它的正文；没变的不要动。标着“不要改”的一律不动。
-- 只写剧情里写到或能直接推出的事实，不编造、不预告；用资料口吻写，每张不超过 80 字。
-- 名称用剧情里的叫法；剧情里对它的其他叫法写进别名。
+- 逐张检查标着“AI 整理，可以更新”的卡片和地点：最近的剧情让它过时了（东西被取走、人死了、地方被毁、真相揭开、立场改变），就重写它的正文；没变的不要动。标着“不要改”的一律不动。
+- 只写剧情里写到的事实，不编造、不预告；别人转述的话、传闻和猜测要写明“某某说”“传闻”，不要写成定论。同一件事只写在最相关的那一张卡里。用资料口吻，每张不超过 80 字。
+- 名称用剧情里的叫法，其他叫法写进别名；但要用这个时代该有的说法，不要照抄正文里不合时代的词（附有【这个时代不该出现的东西】时，避开里面的说法）。
 - 没有值得记的就输出空数组。
 只输出一个 JSON 对象：
 {"cards":[{"kind":"势力","name":"名称","keys":["别名"],"content":"……"}],
  "places":[{"name":"地点名","aliases":["别名"],"description":"……"}],
- "updates":[{"name":"已有卡片的名称","content":"新的正文"}]}`,
+ "updates":[{"name":"已有卡片或地点的名称","content":"新的正文"}],
+ "people":[{"name":"人物名","role":"身份","attitude":"仇视/敌意/冷淡/一般/友善/亲近/生死之交","note":"一句备注"}]}`,
     },
     {
       role: "user",
@@ -73,7 +77,7 @@ ${cards.join("\n") || "（无）"}
 【已有的地点】
 ${places.join("\n") || "（无）"}
 
-【人物表里已有的人物（不要建卡）】${people.join("、") || "（无）"}${state.dismissed?.length ? `\n\n【玩家删掉的，不要再建】${state.dismissed.join("、")}` : ""}
+【人物表里已有的人物（不要建卡，也不要再写进 people）】${people.join("、") || "（无）"}${state.dismissed?.length ? `\n\n【玩家删掉的，不要再建】${state.dismissed.join("、")}` : ""}${input.taboos ? `\n\n【这个时代不该出现的东西】${input.taboos}` : ""}
 
 【最近的剧情】
 ${storyBlock(input.turns)}`,
@@ -92,13 +96,14 @@ const names = (v: unknown) => (Array.isArray(v) ? v.map((k) => text(k, 20)).filt
  * player deleted; updates only touch what the AI wrote. Null when nothing is left.
  */
 export function upkeepPatch(raw: string, state: Pick<WorldState, "cards" | "places" | "people" | "dismissed">): TurnRecord | null {
-  const value = lenientJson(raw) as { cards?: unknown; places?: unknown; updates?: unknown } | null;
+  const value = lenientJson(raw) as { cards?: unknown; places?: unknown; updates?: unknown; people?: unknown } | null;
   if (!value || typeof value !== "object") return null;
   const dismissed = new Set(state.dismissed ?? []);
   const cardNames = state.cards.filter((c) => c.kind !== "时代").map((c) => ({ id: c.id, name: c.name, aliases: c.keys }));
   const known = (name: string) => dismissed.has(name) || !!matchName(cardNames, name) || !!matchName(state.people, name) || !!matchName(state.places, name);
   const cards: CardPatch[] = [];
   const places: PlacePatch[] = [];
+  const people: NonNullable<TurnRecord["people"]> = [];
 
   for (const item of list(value.cards)) {
     if (cards.length >= MAX_EACH) break;
@@ -111,12 +116,23 @@ export function upkeepPatch(raw: string, state: Pick<WorldState, "cards" | "plac
   let updates = 0;
   for (const item of list(value.updates)) {
     if (updates >= MAX_EACH) break;
-    const found = matchName(cardNames, text(item.name, 20));
+    const name = text(item.name, 20);
+    const found = matchName(cardNames, name);
     const card = found && state.cards.find((c) => c.id === found.id);
     const content = text(item.content, 200);
-    if (!card || card.source !== "AI" || !content || content === card.content) continue;
-    cards.push({ op: "update", id: card.id, name: card.name, content, source: "AI" });
-    updates++;
+    if (!content) continue;
+    if (card) {
+      if (card.source !== "AI" || content === card.content) continue;
+      cards.push({ op: "update", id: card.id, name: card.name, content, source: "AI" });
+      updates++;
+      continue;
+    }
+    // An outdated place the AI described before can be updated the same way.
+    const place = matchName(state.places, name);
+    if (place?.source === "AI" && content !== place.description && !places.some((p) => p.id === place.id)) {
+      places.push({ op: "update", id: place.id, name: place.name, description: content, source: "AI" });
+      updates++;
+    }
   }
   for (const item of list(value.places)) {
     if (places.length >= MAX_EACH) break;
@@ -132,6 +148,12 @@ export function upkeepPatch(raw: string, state: Pick<WorldState, "cards" | "plac
       places.push({ op: "add", name, aliases: names(item.aliases), description, source: "AI" });
     }
   }
-  if (!cards.length && !places.length) return null;
-  return { ...(cards.length ? { cards } : {}), ...(places.length ? { places } : {}) };
+  for (const item of list(value.people)) {
+    if (people.length >= MAX_EACH) break;
+    const name = text(item.name, 20);
+    if (!name || known(name) || people.some((p) => p.name === name)) continue;
+    people.push({ name, role: text(item.role, 30), ...(text(item.attitude, 6) ? { attitude: text(item.attitude, 6) } : {}), note: text(item.note, 80) });
+  }
+  if (!cards.length && !places.length && !people.length) return null;
+  return { ...(cards.length ? { cards } : {}), ...(places.length ? { places } : {}), ...(people.length ? { people } : {}) };
 }

@@ -8,8 +8,9 @@ import { ERA_CARD_LIMIT, activeCardLines } from "../memory/cards";
 import { formatMoney } from "../money";
 import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 import { RECAP_BUDGET, recapBlock } from "./chapter";
+import { FORTUNE_TEXT, type Fortune } from "../fortune";
 
-export const PROMPT_VERSION = "turn-6";
+export const PROMPT_VERSION = "turn-7";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -36,6 +37,7 @@ const RECORD_FIELDS = `{"time":"本回合经过的时长，如：一刻 / 半个
  "status":[{"op":"add 或 remove","name":"伤病或状态名","detail":"说明"}],
  "goals":[{"op":"add / progress / done / fail","name":"目标名（已有目标沿用原名）","detail":"进展"}],
  "log":"一句话记下本回合发生了什么",
+ "risk":{"what":"玩家的行动里有风险或要看运气的那件事（没有就不写 risk）","result":"成 / 败 / 半成"},
  "choices":["建议行动1","建议行动2","建议行动3"]}`;
 
 const RECORD_SPEC = `【输出格式】先写正文。正文结束后另起一行，输出记录块（只写有变化的字段；time、log、choices 每回合都要有）：
@@ -158,6 +160,8 @@ export interface TurnPromptInput extends StoryContext {
   pins?: string[];
   /** Chapter summaries on the current path, oldest first (R04-T003). */
   chapters?: Chapter[];
+  /** This turn's hidden fortune (R05-T002). */
+  fortune?: Fortune;
   /** Rough input budget in characters (≈ tokens for Chinese). */
   budgetChars?: number;
 }
@@ -234,7 +238,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const state = renderState(input.state, input.era, present);
   const essentials = essentialsBlock(input.settings, input.pins);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
-  const notes = input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : "";
+  const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${input.fortune ? `\n【本回合运势（玩家看不到）】${FORTUNE_TEXT[input.fortune]}没有风险的日常行动不受运势影响，也不要在正文里提运势。` : ""}`;
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
   const action = `\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
@@ -288,7 +292,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
       note: allCards.length ? `最近三回合或本次行动提到的，所在地优先${cardLines.length < allCards.length ? `；超出上限，去掉了 ${allCards.length - cardLines.length} 张` : ""}` : "最近没有提到设定集里的东西",
     },
     { key: "directive", label: "叙事方针", content: directive, note: directive ? "玩家写的，每回合都有" : "没写" },
-    { key: "notes", label: "上回合的实际结果", content: notes, note: notes ? "程序修正过的变化" : "没有" },
+    { key: "notes", label: "程序提示", content: notes, note: notes ? `${input.notes?.length ? "上回合程序修正过的变化；" : ""}${input.fortune ? `本回合运势：${input.fortune}` : ""}` : "没有" },
     { key: "action", label: "玩家行动", content: action, note: "本回合的行动与幕后要求" },
     { key: "spec", label: "输出格式", content: parts.spec, note: "每回合都有，不裁剪" },
   ] as Omit<ContextLayer, "chars">[]).map((l) => ({ ...l, chars: l.content.length }));

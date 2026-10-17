@@ -136,6 +136,7 @@ check("turn appended with player action", (await page.textContent("body")).inclu
 
 // The scripted fake replies rotate: this turn paid 30 coins.
 check("money chip after paying", (await page.locator(".chip", { hasText: /钱 −30/ }).count()) === 1);
+check("fortune chip shows what the roll was used for", (await page.locator(".chip", { hasText: /^🎲 (大顺|顺|平|不顺|大不顺) · 求掌柜宽限余款 · 成了一半$/ }).count()) === 1);
 
 // Choice tap → the next scripted turn introduces a person.
 await page.locator(".choice").first().click();
