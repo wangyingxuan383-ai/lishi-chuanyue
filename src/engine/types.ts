@@ -1,8 +1,11 @@
 // Core game types. See docs/PLAN_V3.md §6.
 import type { CalendarRules, GameDate } from "./calendar/date";
 
-/** do/say: the protagonist acts; write: the player writes narrative directly; direct: instruction to the narrator. */
-export type ActionMode = "do" | "say" | "write" | "direct" | "continue";
+/**
+ * do/say: the protagonist acts; write: the player writes narrative directly; direct: instruction to the narrator;
+ * skip: "过些日子", time passes until the span ends or something needs the player (R05-T001).
+ */
+export type ActionMode = "do" | "say" | "write" | "direct" | "continue" | "skip";
 export type NodeKind = "opening" | "turn" | "fastforward" | "edit";
 export type NodeStatus = "ok" | "interrupted" | "no_record";
 export type Attitude = "仇视" | "敌意" | "冷淡" | "一般" | "友善" | "亲近" | "生死之交";

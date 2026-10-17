@@ -182,6 +182,14 @@ describe("applyRecord", () => {
     expect(before.protagonist.stats.health).toBe(80);
   });
 
+  it("says long spans in months and years", () => {
+    const chip = (time: string) => apply(sampleState(), { time }).chips[0].text;
+    expect(chip("一个月")).toBe("过了 1 个月");
+    expect(chip("一季")).toBe("过了 3 个月");
+    expect(chip("一年")).toBe("过了 1 年");
+    expect(chip("十天")).toBe("过了 10 天");
+  });
+
   it("shows the fortune behind a risky action", () => {
     const r = applyRecord(sampleState(), { risk: { what: "说服掌柜赊账", result: "败" } }, { ...ctx(), fortune: "不顺" });
     expect(r.chips).toContainEqual({ text: "🎲 不顺 · 说服掌柜赊账 · 没成", tone: "loss" });

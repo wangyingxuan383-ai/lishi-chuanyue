@@ -26,6 +26,8 @@ export interface TurnRecord {
   status?: { op: string; name: string; detail?: string }[] | null;
   goals?: { op: string; name: string; detail?: string; kind?: string; id?: string }[] | null;
   log?: string | null;
+  /** "过些日子" only: what the protagonist heard while time passed (R05-T001). */
+  report?: { world?: string; local?: string; people?: string } | null;
   /** The risky part of the action and how it went, when the fortune mattered (R05-T002). */
   risk?: { what: string; result?: RiskResult } | null;
   choices?: string[] | null;
@@ -81,11 +83,13 @@ export interface ApplyResult {
   minutes: number;
 }
 
-const DEFAULT_MINUTES: Record<ActionMode, number> = { do: 15, say: 5, write: 30, continue: 30, direct: 30 };
+const DEFAULT_MINUTES: Record<ActionMode, number> = { do: 15, say: 5, write: 30, continue: 30, direct: 30, skip: 1440 };
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
 const STAT_SOFT_CAP = 40;
 
 function describeMinutes(minutes: number): string {
+  if (minutes >= 525600 * 0.95) return `过了 ${Math.round(minutes / 525600)} 年`;
+  if (minutes >= 43200 * 0.95) return `过了 ${Math.round(minutes / 43200)} 个月`;
   if (minutes >= 1440) return `过了 ${Math.round(minutes / 1440)} 天`;
   if (minutes >= 120) return `过了 ${Math.round(minutes / 120)} 个时辰`;
   if (minutes === 60) return "过了半个时辰";

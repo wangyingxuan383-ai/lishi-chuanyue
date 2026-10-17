@@ -10,7 +10,7 @@ import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldS
 import { RECAP_BUDGET, recapBlock } from "./chapter";
 import { FORTUNE_TEXT, type Fortune } from "../fortune";
 
-export const PROMPT_VERSION = "turn-8";
+export const PROMPT_VERSION = "turn-9";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -144,6 +144,9 @@ const ACTION_TEXT: Record<ActionMode, (text: string) => string> = {
   write: (t) => `【玩家以作者身份亲手写下了接下来的情节，视为已经发生，不要复述，直接接着往下写】\n${t}`,
   direct: (t) => `【玩家没有行动，只给叙事者一个幕后要求，照做但不要在正文中提及】${t}\n主角只做等待、观察这类被动动作，由他人和环境推动剧情。`,
   continue: () => "【玩家选择继续】主角只做等待、观察这类被动动作，由他人和环境推动剧情，小幅推进时间。",
+  skip: (t) => `【玩家选择过些日子】${t}
+用一段“时光流逝”的叙述（三五百字）概括这段日子：主角大致怎么过的、钱的进出、身体如何、和谁有过往来；世事照常推进，进行中的目标该有进展就写进展。遇到需要主角亲自决定的事（有人找上门、出了意外、机会来了），就提前停下，写到主角需要决定为止。
+记录里的 time 写实际过了多久（提前停下就写到停下时），钱、物品、人物照实记；另加 "report"：{"world":"这段时间的天下风声，一两句，符合时代","local":"本地物价或市面，一句","people":"人情往来，一句"}。`,
 };
 
 export interface TurnPromptInput extends StoryContext {

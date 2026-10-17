@@ -102,6 +102,11 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .turn-action.say::before { content: "你说："; }
 .turn-action.direct::before { content: "幕后："; }
 .turn-action.continue::before { content: ""; }
+.turn-action.skip::before { content: "过些日子："; }
+.report-card { margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 14px; }
+.report-card b { display: block; margin-bottom: 4px; }
+.report-card p { margin: 2px 0; line-height: 1.6; }
+.report-card span { color: var(--muted); margin-right: 8px; }
 .turn-action.continue { font-style: italic; }
 .story-text {
   font-size: var(--story-size); line-height: var(--story-leading);

@@ -413,7 +413,7 @@ async function main() {
     ],
     opening, entries,
   };
-  const labels: Record<ActionMode, string> = { do: "做", say: "说", write: "写", direct: "导演", continue: "继续" };
+  const labels: Record<ActionMode, string> = { do: "做", say: "说", write: "写", direct: "导演", continue: "继续", skip: "过些日子" };
   const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}；运势：${e.fortune ?? "（无）"}${e.risk ? `；风险：${e.risk.what}${e.risk.result ? ` · ${e.risk.result}` : ""}` : ""}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");

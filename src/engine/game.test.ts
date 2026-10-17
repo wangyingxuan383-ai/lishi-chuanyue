@@ -25,7 +25,7 @@ async function setup(scripts: Script[]) {
   return { llm, platform, game, worldId, events };
 }
 
-async function play(game: Game, worldId: string, text: string, mode: "do" | "say" | "continue" = "do") {
+async function play(game: Game, worldId: string, text: string, mode: "do" | "say" | "continue" | "skip" = "do") {
   const events: TurnEvent[] = [];
   await game.play(worldId, { mode, text }, (e) => events.push(e)).done;
   return events;
@@ -677,5 +677,22 @@ describe("fortune", () => {
     expect(JSON.stringify(llm.calls[2].body)).toContain("【本回合运势（玩家看不到）】大不顺");
     await game.regenerate(worldId, "换个结果", () => {}).done;
     expect(JSON.stringify(llm.calls[3].body)).toContain("【本回合运势（玩家看不到）】大顺");
+  });
+});
+
+describe("过些日子", () => {
+  it("lets a year pass: the narrator is told, the clock moves and the protagonist turns a year older", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "一年过去了。" + RECORD({ time: "一年", money: 3000, report: { world: "边镇又有战事", local: "米价稍涨" } }) },
+    ]);
+    const before = await game.repo.getState((await tree.cursor(game.repo, worldId)).head.id);
+    const events = await play(game, worldId, "过一年；这段时间读书", "skip");
+    const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
+    const after = await game.repo.getState(done.node.id);
+    expect(JSON.stringify(llm.calls[1].body)).toContain("【玩家选择过些日子】过一年；这段时间读书");
+    expect(after.time.elapsedMinutes - before.time.elapsedMinutes).toBe(525600);
+    expect(after.protagonist.age).toBe((before.protagonist.age ?? 0) + 1);
+    expect(done.chips.map((c) => c.text)).toEqual(expect.arrayContaining(["过了 1 年", `过年了，${after.protagonist.age} 岁`]));
+    expect((done.node.record as { report?: unknown }).report).toEqual({ world: "边镇又有战事", local: "米价稍涨" });
   });
 });

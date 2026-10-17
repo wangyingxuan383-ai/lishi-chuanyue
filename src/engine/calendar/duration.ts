@@ -25,7 +25,7 @@ export function parseChineseNumber(text: string): number | null {
 const UNIT_MINUTES: Record<string, number> = {
   时辰: 120, 小时: 60, 钟头: 60, 刻钟: 15, 刻: 15, 分钟: 1, 分: 1,
   炷香: 30, 柱香: 30, 盏茶: 10, 天: 1440, 日: 1440, 夜: 720, 晚: 720,
-  旬: 14400, 月: 43200, 年: 525600, 载: 525600,
+  旬: 14400, 月: 43200, 季: 129600, 年: 525600, 载: 525600,
 };
 
 // amount? 个? 半? unit 半?   e.g. 一个半时辰 / 半个时辰 / 一个时辰半 / 两刻钟 / 90分钟

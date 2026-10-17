@@ -163,6 +163,11 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
   if (units.length) r.currency = units.sort((a, b) => b.value - a.value);
 
   if (str(v.log)) r.log = str(v.log);
+  if (v.report && typeof v.report === "object" && !Array.isArray(v.report)) {
+    const o = v.report as Record<string, unknown>;
+    const report = { world: str(o.world), local: str(o.local), people: str(o.people) };
+    if (report.world || report.local || report.people) r.report = Object.fromEntries(Object.entries(report).filter(([, x]) => x)) as typeof r.report;
+  }
   // risk: {"what": …, "result": "成/败/半成"}, or just the words.
   const risk = v.risk && typeof v.risk === "object" ? (v.risk as Record<string, unknown>) : { what: v.risk };
   const what = str(risk.what);

@@ -339,6 +339,18 @@ check("a finished goal moves to the ended list", true);
 await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 
+// 过些日子 (R05-T001): a month passes, with the report card and a month chip.
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "过些日子" }).click();
+await page.getByRole("button", { name: "一个月", exact: true }).click();
+await page.getByRole("button", { name: "读书", exact: true }).click();
+await page.getByRole("button", { name: "开始", exact: true }).click();
+await page.locator(".report-card").waitFor({ timeout: 20000 });
+await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+await page.waitForTimeout(400);
+await shot("07c-skip");
+check("a month passes with a report and the time chip", (await page.locator(".turn").last().textContent()).includes("过一个月；这段时间读书") && (await page.locator(".chip", { hasText: "过了 1 个月" }).count()) === 1 && (await page.locator(".report-card").textContent()).includes("米价"));
+
 // Stop mid-generation keeps partial text as interrupted.
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "本局设置" }).click();

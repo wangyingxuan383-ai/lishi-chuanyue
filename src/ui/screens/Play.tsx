@@ -5,7 +5,7 @@ import { eraContext } from "../../engine/era";
 import { nowOf, timeRows } from "../../engine/calendar/clock";
 import type { ContextPreview, TurnEvent, TurnHandle } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
-import type { Chip } from "../../engine/state/apply";
+import type { Chip, TurnRecord } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
 import type { ActionMode, Intensity, Pin, StoryNode, World, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
@@ -24,6 +24,11 @@ const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
   { mode: "direct", label: "导演", placeholder: "给叙事者的幕后要求，如“这段写紧张些”…" },
 ];
 const HINTS = ["写短一点", "写长一点", "换个结果", "让对方拒绝", "多些对话", "节奏快一些"];
+/** "过些日子" (PLAN §4.6): how long, and how the protagonist spends it. */
+const SPANS: [string, string][] = [
+  ["到明天", "过到第二天"], ["几天", "过几天"], ["一个月", "过一个月"], ["一季", "过一季（约三个月）"], ["一年", "过一年"], ["直到有事发生", "一直过下去，直到有事发生"],
+];
+const PASTIMES = ["照常过日子", "读书", "经营", "练武"];
 
 interface Gen {
   phase: "starting" | "thinking" | "writing" | "organizing";
@@ -35,6 +40,14 @@ interface Gen {
 function ChipRow({ chips }: { chips: Chip[] }) {
   if (!chips?.length) return null;
   return <div className="chips">{chips.map((c, i) => <span key={i} className={`chip ${c.tone}`}>{c.text}</span>)}</div>;
+}
+
+/** What the protagonist heard while time passed (R05-T001). */
+function ReportCard({ report }: { report?: TurnRecord["report"] }) {
+  if (!report) return null;
+  const rows = [["天下", report.world], ["市面", report.local], ["人情", report.people]].filter(([, text]) => text);
+  if (!rows.length) return null;
+  return <div className="report-card"><b>这段日子</b>{rows.map(([label, text]) => <p key={label}><span>{label}</span>{text}</p>)}</div>;
 }
 
 function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; children?: React.ReactNode }) {
@@ -50,6 +63,7 @@ function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: Sto
       )}
       {node.kind !== "opening" && node.actionMode === "continue" && <div className="turn-action continue">（继续）</div>}
       <StoryText text={node.narrative} />
+      {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
       <ChipRow chips={(node.meta.chips as Chip[]) ?? []} />
       {children}
     </div>
@@ -76,7 +90,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
@@ -395,7 +409,7 @@ export default function Play({ worldId }: { worldId: string }) {
           onClose={() => setMenuNode(null)}
           items={[
             { label: "改写这段文字", hidden: menuNode.kind === "edit", onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
-            { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue", onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
+            { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue" || menuNode.actionMode === "skip", onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
             { label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
             { label: "回到这里", hidden: menuNode.id === head.id, onSelect: () => void goBack(menuNode) },
             { label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
@@ -451,6 +465,7 @@ export default function Play({ worldId }: { worldId: string }) {
           ))}
         </Sheet>
       )}
+      {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
         <Sheet title="重说时希望…" onClose={() => setSheet(null)}>
           <div className="segmented">
@@ -465,6 +480,7 @@ export default function Play({ worldId }: { worldId: string }) {
           items={[
             { label: "撤销", hidden: !head.parentId || !!gen, onSelect: async () => { await tree.undo(game.repo, cursor); await refresh(); } },
             { label: "重做", hidden: !tree.canRedo(cursor) || !!gen, onSelect: async () => { await tree.redo(game.repo, cursor); await refresh(); } },
+            { label: "过些日子", hidden: !!gen, onSelect: () => setSheet("skip") },
             { label: "附加幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
@@ -508,6 +524,30 @@ export default function Play({ worldId }: { worldId: string }) {
         <div className="row"><button className="primary" onClick={() => void answerNotifications(true)}>允许</button><button onClick={() => void answerNotifications(false)}>不用了</button></div>
       </Sheet>}
     </div>
+  );
+}
+
+function SkipSheet({ onStart, onClose }: { onStart: (text: string) => void; onClose: () => void }) {
+  const [span, setSpan] = useState("一个月");
+  const [pastime, setPastime] = useState("照常过日子");
+  const [own, setOwn] = useState("");
+  const how = pastime === "自己写" ? own.trim() : pastime;
+  return (
+    <Sheet title="过些日子" onClose={onClose}>
+      <div className="stack">
+        <span className="muted">过多久</span>
+        <div className="segmented">
+          {SPANS.map(([label]) => <button key={label} aria-pressed={span === label} onClick={() => setSpan(label)}>{label}</button>)}
+        </div>
+        <span className="muted">这段时间做什么</span>
+        <div className="segmented">
+          {[...PASTIMES, "自己写"].map((p) => <button key={p} aria-pressed={pastime === p} onClick={() => setPastime(p)}>{p}</button>)}
+        </div>
+        {pastime === "自己写" && <input aria-label="这段时间做什么" value={own} onChange={(e) => setOwn(e.target.value)} placeholder="如：在西市摆摊替人写信" />}
+        <p className="muted" style={{ margin: 0 }}>遇到要你拿主意的事，会提前停下来。</p>
+        <button className="primary" disabled={!how} onClick={() => onStart(`${SPANS.find(([label]) => label === span)![1]}；这段时间${how}`)}>开始</button>
+      </div>
+    </Sheet>
   );
 }
 

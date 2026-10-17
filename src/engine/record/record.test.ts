@@ -101,6 +101,13 @@ describe("parseRecord", () => {
     expect(parseRecord('{"time":"0","date":"宣和四年春二月","choices":["a"]}').record?.date).toBe("宣和四年春二月");
   });
 
+  it("reads the report of a span of days", () => {
+    const parse = (report: unknown) => parseRecord(JSON.stringify({ time: "一个月", log: "略", choices: ["甲"], report })).record!.report;
+    expect(parse({ world: "陇右又打了胜仗", local: "米价涨了", people: "" })).toEqual({ world: "陇右又打了胜仗", local: "米价涨了" });
+    expect(parse({ world: "" })).toBeUndefined();
+    expect(parse("一句话")).toBeUndefined();
+  });
+
   it("reads what the fortune was used for and how it went", () => {
     const parse = (risk: unknown) => parseRecord(JSON.stringify({ time: "一刻", log: "略", choices: ["甲"], risk })).record!.risk;
     expect(parse({ what: "说服掌柜赊账", result: "败" })).toEqual({ what: "说服掌柜赊账", result: "败" });
