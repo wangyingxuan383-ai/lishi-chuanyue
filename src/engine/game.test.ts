@@ -25,7 +25,7 @@ async function setup(scripts: Script[]) {
   return { llm, platform, game, worldId, events };
 }
 
-async function play(game: Game, worldId: string, text: string, mode: "do" | "say" | "continue" | "skip" = "do") {
+async function play(game: Game, worldId: string, text: string, mode: "do" | "say" | "write" | "direct" | "continue" | "skip" = "do") {
   const events: TurnEvent[] = [];
   await game.play(worldId, { mode, text }, (e) => events.push(e)).done;
   return events;
@@ -677,6 +677,17 @@ describe("fortune", () => {
     expect(JSON.stringify(llm.calls[2].body)).toContain("【本回合运势（玩家看不到）】大不顺");
     await game.regenerate(worldId, "换个结果", () => {}).done;
     expect(JSON.stringify(llm.calls[3].body)).toContain("【本回合运势（玩家看不到）】大顺");
+  });
+
+  it("leaves luck out of what the player writes or directs", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "杨钊被赐死。" + RECORD({}) },
+      { text: "王掌柜来了。" + RECORD({}) },
+    ]);
+    game.random = () => 0.99;
+    await play(game, worldId, "数月后，杨钊被赐死于狱中。", "write");
+    await play(game, worldId, "让王掌柜突然来访", "direct");
+    for (const call of llm.calls.slice(1)) expect(JSON.stringify(call.body)).not.toContain("本回合运势");
   });
 });
 
