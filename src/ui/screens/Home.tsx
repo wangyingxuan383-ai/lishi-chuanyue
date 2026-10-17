@@ -57,7 +57,8 @@ function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen
 }
 
 export default function Home() {
-  const { game, push, profile, toast, ask } = useApp();
+  const { game, push, profile, toast, ask, askName } = useApp();
+  const [deleted, setDeleted] = useState<World[]>([]);
   const [cards, setCards] = useState<WorldCard[] | null>(null);
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
   const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
@@ -83,6 +84,7 @@ export default function Home() {
   };
   const finishImport = async (mode: "new" | "replace") => {
     if (!incoming) return;
+    if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
     await importWorld(game.repo, incoming.file, mode);
     toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${incoming.title}”`);
     setIncoming(null);
@@ -104,6 +106,8 @@ export default function Home() {
       });
     }
     setCards(out);
+    await game.repo.purgeDeletedWorlds();
+    setDeleted(await game.repo.deletedWorlds());
   };
   useEffect(() => { void load(); }, []);
 
@@ -121,7 +125,8 @@ export default function Home() {
     })();
   }, []);
 
-  const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup" }));
+  // Without a service, connecting leads straight on to the new story (AUDIT_V4_FUNCTION C4).
+  const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup", first: true }));
   const again = async (worldId: string) => {
     const setup = await game.setupOf(worldId);
     if (!setup) return;
@@ -165,13 +170,29 @@ export default function Home() {
             ))}
           </div>
         )}
+        {deleted.length > 0 && <details className="recent-deleted">
+          <summary className="muted">最近删除（{deleted.length}，30 天后自动清除）</summary>
+          <div className="stack" style={{ gap: 4, marginTop: 8 }}>
+            {deleted.map((w) => (
+              <div key={w.id} className="item-row">
+                <span className="grow">{w.title}</span>
+                <button className="ghost" onClick={async () => { await game.repo.restoreWorld(w.id); toast(`已恢复“${w.title}”`); void load(); }}>恢复</button>
+                <button className="ghost danger-text" onClick={async () => {
+                  if (!await ask({ title: `彻底删除“${w.title}”？`, message: "所有路线和存档都会删掉，不能恢复。", confirm: "彻底删除", danger: true })) return;
+                  await game.repo.deleteWorld(w.id);
+                  void load();
+                }}>彻底删除</button>
+              </div>
+            ))}
+          </div>
+        </details>}
         <button className="ghost" onClick={() => void importOne()}>从文件导入世界…</button>
         {incoming && <MenuSheet
           title={`已经有“${incoming.title}”了`}
           onClose={() => setIncoming(null)}
           items={[
-            { label: "另存为新的世界", onSelect: () => void finishImport("new") },
-            { label: "覆盖现有的", danger: true, onSelect: () => void finishImport("replace") },
+            { label: "另存为新的世界（两个都留着，新的标“导入”）", onSelect: () => void finishImport("new") },
+            { label: "覆盖现有的（会先自动备份一次）", danger: true, onSelect: () => void finishImport("replace") },
           ]}
         />}
       </div>
@@ -181,15 +202,23 @@ export default function Home() {
           onClose={() => setMenuFor(null)}
           items={[
             { label: "继续游玩", onSelect: () => push({ name: "play", worldId: menuFor.world.id }) },
+            { label: "改名", onSelect: async () => {
+              const title = await askName({ title: "给这个故事改名", initial: menuFor.world.title });
+              if (!title) return;
+              await game.repo.renameWorld(menuFor.world.id, title);
+              toast("已改名");
+              void load();
+            } },
             { label: "用同样设定再开一局", onSelect: () => void again(menuFor.world.id) },
             { label: "导出成文件", onSelect: () => void exportOne(menuFor) },
             {
               label: "删除这个世界", danger: true,
+              // Into the recycle bin, with a way back right away (AUDIT_V4_FUNCTION C2).
               onSelect: async () => {
-                if (!await ask({ title: `删除“${menuFor.world.title}”？`, message: "这个世界的所有路线和存档都会删掉，不能恢复。想留一份可以先导出。", confirm: "删除", danger: true })) return;
+                const { id, title } = menuFor.world;
                 try {
-                  await game.repo.deleteWorld(menuFor.world.id);
-                  toast("已删除");
+                  await game.repo.trashWorld(id);
+                  toast(`已删除“${title}”，30 天内可以在“最近删除”里恢复`, { label: "撤销", run: () => void game.repo.restoreWorld(id).then(() => load()) });
                 } catch {
                   toast("没删掉，请再试一次");
                 }

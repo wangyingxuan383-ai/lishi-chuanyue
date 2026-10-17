@@ -73,6 +73,7 @@ function TurnView({ node, onMenu, pressed, children }: { node: StoryNode; onMenu
       )}
       {node.kind !== "opening" && node.actionMode === "continue" && <div className="turn-action continue">（继续）</div>}
       <StoryText text={node.narrative} />
+      {node.rewritten && <span className="rewritten-mark">已改写</span>}
       {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
       <ChipRow chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
       {children}
@@ -367,13 +368,14 @@ export default function Play({ worldId }: { worldId: string }) {
     if (!cursor || !node.parentId) return;
     await tree.goBackTo(game.repo, cursor, node.parentId);
     await refresh();
-    send({ mode: node.actionMode === "say" ? "say" : "do", text });
+    const mode = node.actionMode === "say" || node.actionMode === "write" || node.actionMode === "direct" ? node.actionMode : "do";
+    send({ mode, text }, node.directorNote ?? null);
   };
 
   const saveRewrite = async (node: StoryNode, text: string) => {
     await game.repo.updateNarrative(node.id, text);
     await refresh();
-    toast("已改写，后面的剧情会按改过的文字继续");
+    toast("已改写，后面的剧情会按改过的文字继续", { label: "撤回", run: () => void game.repo.restoreNarrative(node.id).then(() => refresh()) });
   };
 
   const loadMore = async () => {
@@ -477,7 +479,10 @@ export default function Play({ worldId }: { worldId: string }) {
                 {notice.actions.length > 0 && <div className="row">{notice.actions.map((a) => <button key={a.label} onClick={() => { setNotice(null); a.run(); }}>{a.label}</button>)}</div>}
               </div>
             )}
-            {dead && <div className="notice">你已经死了。长按任意一段，可以回到那时重新来过。</div>}
+            {dead && <EndingCard state={state} world={world} now={now.text} turns={nodes.filter((n) => n.kind === "turn").length}
+              onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
+              onLines={() => setSheet("lines")}
+              onAgain={async () => { const setup = await game.setupOf(worldId); if (!setup) return; await game.repo.setSetting("newgameDraft", fromSetup(setup)); replace({ name: "newgame" }); }} />}
           </div>
         </div>
         {!following && <button className="to-bottom" onClick={() => { follow.current = true; setFollowing(true); toBottom(true); }}>回到底部 ↓</button>}
@@ -527,10 +532,11 @@ export default function Play({ worldId }: { worldId: string }) {
           title={`“${menuNode.narrative.replace(/\s+/g, "").slice(0, 16)}…”`}
           onClose={() => setMenuNode(null)}
           items={[
-            { label: "改写这段文字", hidden: menuNode.kind === "edit", onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
-            { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue" || menuNode.actionMode === "skip", onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
-            { label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
-            { label: "回到这里", hidden: menuNode.id === head.id, onSelect: () => void goBack(menuNode) },
+            { label: "改写这段文字", hidden: menuNode.kind === "edit" || !!gen, onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
+            { label: "恢复 AI 写的原文", hidden: !menuNode.rewritten || typeof menuNode.meta.original !== "string" || !!gen, onSelect: () => void game.repo.restoreNarrative(menuNode.id).then(() => { void refresh(); toast("已恢复原文"); }) },
+            { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue" || menuNode.actionMode === "skip" || !!gen, onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
+            { label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim() || !!gen, onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
+            { label: "回到这里", hidden: menuNode.id === head.id || !!gen, onSelect: () => void goBack(menuNode) },
             { label: "加书签", hidden: menuNode.kind === "edit", onSelect: () => setBookmark({ node: menuNode, name: menuNode.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
             { label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
             { label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuNode) },
@@ -656,6 +662,34 @@ export default function Play({ worldId }: { worldId: string }) {
       </Sheet>}
     </div>
     {wide && <div className="play-side"><Panel {...panelProps} docked /></div>}
+    </div>
+  );
+}
+
+/**
+ * The end of a life (AUDIT_V4 5.6): a card in the book's style, with where
+ * and when it ended, what the protagonist had, and the ways on — back a few
+ * turns, another route, or the same setup again. Nothing is lost.
+ */
+function EndingCard({ state, world, now, turns, onBack, onLines, onAgain }: {
+  state: WorldState; world: World; now: string; turns: number; onBack: (steps: number) => void; onLines: () => void; onAgain: () => void;
+}) {
+  const me = state.protagonist;
+  const known = state.people.filter((p) => p.alive !== false).length;
+  const done = state.goals.filter((g) => g.status === "完成").length;
+  return (
+    <div className="ending-card" role="status">
+      <div className="ending-seal" aria-hidden="true"><span>终</span></div>
+      <h2>{me.name}{me.age ? `，年${me.age}` : ""}</h2>
+      <p className="ending-line">卒于{now}。{turns ? `历 ${turns} 回合，` : ""}结识 {known} 人{done ? `，了却 ${done} 桩心愿` : ""}。</p>
+      <p className="muted">这一世到此为止。走过的路都还在，可以回到之前的某一刻重来。</p>
+      <div className="ending-actions">
+        <button className="primary" onClick={() => onBack(1)}>回到上一回合</button>
+        <button onClick={() => onBack(3)}>回到三回合前</button>
+        <button onClick={onLines}>看看别的路线</button>
+        <button className="ghost" onClick={onAgain}>同样设定再开一局</button>
+      </div>
+      <p className="muted" style={{ margin: 0, fontSize: 13 }}>{world.settings.difficulty === "残酷" ? "残酷难度下，重伤可能直接丧命。" : "长按任意一段，也可以回到那时。"}</p>
     </div>
   );
 }
@@ -826,7 +860,7 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
         <div className="segmented">
           {[0, 8, 12, 20].map((n) => <button key={n} aria-pressed={s.chapterEvery === n} onClick={() => onChange({ chapterEvery: n })}>{n ? `每 ${n} 回合` : "关"}</button>)}
         </div>
-        <p className="muted" style={{ margin: 0 }}>每过这么多回合，AI 把这段剧情写成一章摘要，更早的剧情靠它记住；在“角色 · 记事”里查看和修改。</p>
+        <p className="muted" style={{ margin: 0 }}>每过这么多回合，AI 把这段剧情写成一章摘要，更早的剧情靠它记住；在“我 → 记事”里查看和修改。</p>
         {intensity("violence", "暴力与伤亡")}
         {intensity("romance", "感情与亲密")}
         {intensity("darkness", "黑暗与压抑")}

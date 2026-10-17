@@ -23,6 +23,22 @@ describe("migrate", () => {
   });
 });
 
+describe("world recycle bin and names (AUDIT_V4_FUNCTION C1, C2)", () => {
+  it("renames, trashes, restores and purges worlds", async () => {
+    const { world } = await repo.createWorld({ title: "长安", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "开场", choices: [], state: sampleState() } });
+    await repo.renameWorld(world.id, "长安雪夜");
+    expect((await repo.getWorld(world.id))!.title).toBe("长安雪夜");
+    await repo.trashWorld(world.id);
+    expect((await repo.listWorlds()).map((w) => w.id)).not.toContain(world.id);
+    expect((await repo.deletedWorlds()).map((w) => w.id)).toEqual([world.id]);
+    await repo.restoreWorld(world.id);
+    expect((await repo.listWorlds()).map((w) => w.id)).toContain(world.id);
+    await repo.trashWorld(world.id);
+    expect(await repo.purgeDeletedWorlds(0)).toBe(1);
+    expect(await repo.getWorld(world.id)).toBeNull();
+  });
+});
+
 describe("Repo", () => {
   it("creates a world with opening node, state and main line", async () => {
     const { world, node, line } = await repo.createWorld({

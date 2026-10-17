@@ -132,6 +132,36 @@ export class Repo {
     };
   }
 
+  /** A world's name (AUDIT_V4_FUNCTION C1). */
+  async renameWorld(worldId: string, title: string): Promise<void> {
+    await this.q("UPDATE worlds SET title = ?, updated_at = ? WHERE id = ?", [title, now(), worldId]);
+  }
+
+  /**
+   * Deleting a world puts it in the recycle bin (C2): `archived` 2 means deleted,
+   * with the time in updated_at; it comes back with restoreWorld, and goes for
+   * good after 30 days (purgeDeletedWorlds) or when emptied.
+   */
+  async trashWorld(worldId: string): Promise<void> {
+    await this.q("UPDATE worlds SET archived = 2, updated_at = ? WHERE id = ?", [now(), worldId]);
+  }
+
+  async restoreWorld(worldId: string): Promise<void> {
+    await this.q("UPDATE worlds SET archived = 0, played_at = ? WHERE id = ?", [now(), worldId]);
+  }
+
+  async deletedWorlds(): Promise<World[]> {
+    return (await this.q("SELECT * FROM worlds WHERE archived = 2 ORDER BY updated_at DESC")).map(toWorld);
+  }
+
+  /** Worlds in the bin for more than `days` days are deleted for good. */
+  async purgeDeletedWorlds(days = 30): Promise<number> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const old = await this.q("SELECT id FROM worlds WHERE archived = 2 AND updated_at <= ?", [cutoff]);
+    for (const row of old) await this.deleteWorld(row.id as string);
+    return old.length;
+  }
+
   async updateSettings(worldId: string, settings: WorldSettings): Promise<void> {
     await this.q("UPDATE worlds SET settings_json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(settings), now(), worldId]);
   }
@@ -331,8 +361,21 @@ export class Repo {
     if (node) await this.q("UPDATE nodes SET meta_json = ? WHERE id = ?", [JSON.stringify({ ...node.meta, ...patch }), nodeId]);
   }
 
+  /** The player rewrote a passage; the first original is kept in meta.original so it can come back (AUDIT_V4_FUNCTION E2). */
   async updateNarrative(nodeId: string, narrative: string): Promise<void> {
-    await this.q("UPDATE nodes SET narrative = ?, rewritten = 1 WHERE id = ?", [narrative, nodeId]);
+    const node = await this.getNode(nodeId);
+    if (!node) return;
+    const original = typeof node.meta.original === "string" ? node.meta.original : node.narrative;
+    await this.q("UPDATE nodes SET narrative = ?, rewritten = 1, meta_json = ? WHERE id = ?", [narrative, JSON.stringify({ ...node.meta, original }), nodeId]);
+  }
+
+  /** Puts the AI's original text back after a rewrite. */
+  async restoreNarrative(nodeId: string): Promise<boolean> {
+    const node = await this.getNode(nodeId);
+    if (!node || typeof node.meta.original !== "string") return false;
+    const { original, ...meta } = node.meta;
+    await this.q("UPDATE nodes SET narrative = ?, rewritten = 0, meta_json = ? WHERE id = ?", [original as string, JSON.stringify(meta), nodeId]);
+    return true;
   }
 
   async setLastChild(nodeId: string, childId: string): Promise<void> {

@@ -463,6 +463,12 @@ describe("Game", () => {
     ]);
     await play(game, worldId, "求情");
     const c = await tree.cursor(game.repo, worldId);
+    const before = c.head.narrative;
+    await game.repo.updateNarrative(c.head.id, "掌柜叹了口气，答应宽限三日。");
+    // The original is kept and can come back (AUDIT_V4_FUNCTION E2).
+    const rewritten = (await game.repo.getNode(c.head.id))!;
+    expect(rewritten.rewritten).toBe(true);
+    expect(rewritten.meta.original).toBe(before);
     await game.repo.updateNarrative(c.head.id, "掌柜叹了口气，答应宽限三日。");
     expect((await tree.cursor(game.repo, worldId)).head).toMatchObject({ narrative: "掌柜叹了口气，答应宽限三日。", rewritten: true });
     await play(game, worldId, "道谢");

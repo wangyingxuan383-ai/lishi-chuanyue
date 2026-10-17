@@ -231,6 +231,13 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
   background: var(--accent-soft); font-size: 14px; line-height: 1.6; animation: fade-up 0.24s ease-out both;
 }
 .notice .row { margin-top: 8px; flex-wrap: wrap; }
+.ending-card { margin: 18px 0 8px; padding: 22px 18px 16px; text-align: center; border: 1px solid var(--line); border-top: 3px double var(--line); border-bottom: 3px double var(--line); background: var(--surface); display: grid; gap: 8px; justify-items: center; animation: fade-up 0.4s ease-out both; }
+.ending-seal { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 4px; background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 26px; font-weight: 700; box-shadow: inset 0 0 0 3px var(--accent), inset 0 0 0 4px color-mix(in srgb, var(--on-accent) 55%, transparent); }
+.ending-card h2 { margin: 4px 0 0; font-family: var(--serif); font-size: 21px; letter-spacing: 0.12em; }
+.ending-line { margin: 0; font-family: var(--serif); font-size: 16px; line-height: 1.8; }
+.ending-card .muted { margin: 0; }
+.ending-actions { display: grid; gap: 8px; width: 100%; max-width: 320px; margin: 6px 0; }
+.rewritten-mark { display: inline-block; margin: 2px 0; font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: 3px; padding: 0 6px; }
 .edit-line { font-size: 13px; color: var(--muted); padding: 4px 0; }
 .load-more { display: block; margin: 8px auto; font-size: 14px; }
 .to-bottom {

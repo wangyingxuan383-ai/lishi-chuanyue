@@ -627,24 +627,28 @@ await page.locator(".world-card h3", { hasText: `${exportedTitle}（导入）` }
 check("the same world imports again as a new one", (await page.locator(".world-card").count()) === worldsBefore + 1);
 await page.waitForTimeout(400);
 await shot("14-imported");
-// Deleting a world takes everything under it, 要点 included (they point at turns).
-const importedBox = await page.locator(".world-card", { hasText: `${exportedTitle}（导入）` }).boundingBox();
-await page.mouse.move(importedBox.x + 30, importedBox.y + 20);
-await page.mouse.down();
-await page.waitForTimeout(650);
-await page.mouse.up();
+// Deleting a world puts it in the bin with an undo; emptying the bin takes everything, 要点 included.
+const importedTitle = `${exportedTitle}（导入）`;
+await page.locator(".world-card", { hasText: importedTitle }).locator(".world-menu").click();
+await page.getByRole("button", { name: "改名" }).click();
+await page.locator(".dialog input").fill("导入的那一局");
+await page.locator(".dialog").getByRole("button", { name: "保存" }).click();
+await page.locator(".world-card", { hasText: "导入的那一局" }).waitFor();
+check("a world can be renamed from its ⋯ menu", true);
+await page.locator(".world-card", { hasText: "导入的那一局" }).locator(".world-menu").click();
 await page.getByRole("button", { name: "删除这个世界" }).click();
-await page.locator(".dialog").getByRole("button", { name: "取消" }).click();
-check("cancelling the delete dialog keeps the world", (await page.locator(".dialog").count()) === 0 && (await page.locator(".world-card").count()) === worldsBefore + 1);
-await page.mouse.move(importedBox.x + 30, importedBox.y + 20);
-await page.mouse.down();
-await page.waitForTimeout(650);
-await page.mouse.up();
+await page.getByText(/已删除“导入的那一局”/).waitFor();
+check("deleting a world puts it in 最近删除 with an undo", (await page.locator(".world-card").count()) === worldsBefore && (await page.locator(".toast .toast-action", { hasText: "撤销" }).count()) === 1 && (await page.locator(".recent-deleted").count()) === 1);
+await page.locator(".toast .toast-action", { hasText: "撤销" }).click();
+await page.locator(".world-card", { hasText: "导入的那一局" }).waitFor();
+check("undo brings the deleted world back", (await page.locator(".world-card").count()) === worldsBefore + 1);
+await page.locator(".world-card", { hasText: "导入的那一局" }).locator(".world-menu").click();
 await page.getByRole("button", { name: "删除这个世界" }).click();
-await page.locator(".dialog").getByRole("button", { name: "删除" }).click();
-await page.getByText("已删除").waitFor();
-await page.waitForTimeout(300);
-check("a world with 要点 can be deleted", (await page.locator(".world-card").count()) === worldsBefore && (await page.evaluate(async () => (await window.__lishi.game.platform.sql.query("SELECT COUNT(*) AS n FROM pins WHERE world_id NOT IN (SELECT id FROM worlds)"))[0].n)) === 0);
+await page.locator(".recent-deleted summary").click();
+await page.locator(".recent-deleted").getByRole("button", { name: "彻底删除" }).click();
+await page.locator(".dialog").getByRole("button", { name: "彻底删除" }).click();
+await page.locator(".recent-deleted").waitFor({ state: "detached" });
+check("a world with 要点 can be deleted for good", (await page.locator(".world-card").count()) === worldsBefore && (await page.evaluate(async () => (await window.__lishi.game.platform.sql.query("SELECT COUNT(*) AS n FROM pins WHERE world_id NOT IN (SELECT id FROM worlds)"))[0].n)) === 0);
 
 // D124: while 垂危 the play screen keeps a warning above the input.
 const dyingWorld = await page.evaluate(async () => {
@@ -659,6 +663,20 @@ await page.locator(".world-card", { hasText: dyingWorld }).first().click();
 await page.locator(".turn").last().waitFor();
 check("a dying protagonist sees a standing warning", await page.getByText("你伤重垂危").isVisible());
 await shot("15-dying");
+// A death is an ending card with ways on, not an error line (AUDIT_V4 5.6).
+await page.evaluate(async (title) => {
+  const { game } = window.__lishi;
+  const world = (await game.repo.listWorlds()).find((w) => w.title === title);
+  await game.editState(world.id, { setStats: { health: 0 } }, "测试：死亡");
+}, dyingWorld);
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".world-card", { hasText: dyingWorld }).first().click();
+await page.locator(".ending-card").waitFor();
+check("a death shows an ending card with ways back", (await page.locator(".ending-card").textContent()).includes("卒于") && (await page.locator(".ending-actions button").count()) === 4);
+await shot("16-ending");
+await page.getByRole("button", { name: "回到上一回合" }).click();
+await page.locator(".ending-card").waitFor({ state: "detached" });
+check("going back from the ending brings the story back", (await page.locator(".ending-card").count()) === 0);
 await page.getByRole("button", { name: "返回", exact: true }).click();
 
 // No horizontal overflow, no page errors.

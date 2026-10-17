@@ -179,6 +179,11 @@ export class Game {
     return () => { this.listeners.delete(fn); };
   }
 
+  /** The model used for side jobs (records, 设定集, chapters, 查一查), for usage rows; empty when no service. */
+  private auxModelName(): string {
+    return this.llm ? this.llm.auxModel || this.llm.model : "";
+  }
+
   private requireLlm(): LlmConfig {
     if (!this.llm) throw new ChatError("no_secret");
     return this.llm;
@@ -236,7 +241,7 @@ export class Game {
     try {
       const result = await this.call(assistMessages(idea, current), { aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
       const value = lenientJson(result.text) as Partial<SetupDraft> | null;
-      await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.llm!.auxModel || this.llm!.model)]);
+      await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
     } catch {
       return null;
@@ -264,7 +269,7 @@ export class Game {
       known: [...state.cards.filter((c) => c.kind !== "时代").map((c) => c.name), ...state.places.map((p) => p.name)],
     });
     const patch = result ? codexPatch(result.text, state, opts) : null;
-    await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.llm!.auxModel || this.llm!.model)]);
+    await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.auxModelName())]);
     return patch ? this.editState(worldId, patch, codexSummary(patch), "AI") : null;
   }
 
@@ -386,7 +391,7 @@ export class Game {
     const { money: _m, time: _t, date: _d, hour: _h, currency: _c, ...rest } = record;
     const applied = applyRecord(initial, rest, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency }, { advanceTime: false });
 
-    const model = this.llm!.model;
+    const model = this.llm?.model ?? "";
     const { world, node } = await this.repo.createWorld({
       title: input.title.trim() || `${p.name || "无名"}的故事`, eraId: pack?.id ?? "free", settings,
       opening: {
@@ -400,7 +405,7 @@ export class Game {
       },
     });
     const usage = result ? [this.usage(world.id, node.id, "opening", result, "ok", model)] : [];
-    if (organize) usage.push(this.usage(world.id, node.id, "codex", codexResult, initial.cards.length ? "ok" : "no_record", this.llm!.auxModel || model));
+    if (organize) usage.push(this.usage(world.id, node.id, "codex", codexResult, initial.cards.length ? "ok" : "no_record", this.auxModelName()));
     if (usage.length) await this.platform.sql.batch(usage);
     onEvent({ type: "done", cursor: await tree.cursor(this.repo, world.id), node, chips: [] });
     return world.id;
@@ -526,7 +531,7 @@ export class Game {
       const parsed = parseRecord(recordText);
       if (isRefusal({ finishReason: result.finishReason, narrative, hasRecord: !!parsed.record })) {
         await this.repo.setSetting("pending", null);
-        await this.platform.sql.batch([this.usage(worldId, null, "turn", result, "refused", this.llm!.model)]);
+        await this.platform.sql.batch([this.usage(worldId, null, "turn", result, "refused", (this.llm?.model ?? ""))]);
         onEvent({ type: "failed", reason: "refused", partialSaved: false });
         return;
       }
@@ -559,7 +564,8 @@ export class Game {
   ): Promise<{ cursor: tree.Cursor; node: StoryNode; chips: Chip[] }> {
     let record = recordIn;
     let extractResult: ChatResult | null = null;
-    if (!record || !record.choices?.length) {
+    // A record without choices needs a fill-in only when choices were asked for (AUDIT_V4_FUNCTION #6).
+    if (!record || (settings.choiceCount > 0 && !record.choices?.length)) {
       onEvent({ type: "organizing" });
       const extracted = await this.extract(era, state, action.text || "（继续）", narrative);
       extractResult = extracted.result;
@@ -567,7 +573,7 @@ export class Game {
     }
     const asked = action.mode === "skip" ? skipSpanMinutes(action.text) ?? undefined : undefined;
     const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune, asked });
-    const model = this.llm!.model;
+    const model = this.llm?.model ?? "";
     // Words the era card says must not appear (R07-T002): shown in developer mode, reminded next turn.
     const taboos = findTaboos(narrative, tabooTerms(era.eraCard, eraPack(era.packId)));
     const node = {
@@ -581,7 +587,7 @@ export class Game {
     };
     const next = kind === "variant" ? await tree.addVariant(this.repo, c, node) : await tree.append(this.repo, { ...c, head: base }, node);
     const usage = [this.usage(c.worldId, next.head.id, "turn", result, "ok", model)];
-    if (extractResult) usage.push(this.usage(c.worldId, next.head.id, "extract", extractResult, "ok", this.llm!.auxModel || model));
+    if (extractResult) usage.push(this.usage(c.worldId, next.head.id, "extract", extractResult, "ok", this.auxModelName()));
     await this.platform.sql.batch(usage);
     return { cursor: next, node: next.head, chips: applied.chips };
   }
@@ -636,7 +642,7 @@ export class Game {
       const updated = await this.repo.completeNode(node.id, {
         narrative, record, choices: record?.choices ?? [], status: record ? "ok" : "no_record",
         meta: { ...node.meta, messages: undefined, chips: applied.chips, notes: applied.notes, log: applied.log, resumed: true, usage: result.usage },
-      }, applied.state, [this.usage(worldId, node.id, "continue", result, "ok", this.llm!.model)]);
+      }, applied.state, [this.usage(worldId, node.id, "continue", result, "ok", (this.llm?.model ?? ""))]);
       onEvent({ type: "done", cursor: { ...c, head: updated }, node: updated, chips: applied.chips });
     });
     return { stop: () => handle?.cancel(), catchUp: async () => { await handle?.catchUp(); }, done };
@@ -705,7 +711,7 @@ export class Game {
       refused = refusedFinish(result.finishReason) || isNotice(result.text);
       return refused ? explainFailure("refused") : result.text.trim();
     } finally {
-      await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, !result ? "failed" : refused ? "refused" : "ok", this.llm!.auxModel || this.llm!.model)]);
+      await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, !result ? "failed" : refused ? "refused" : "ok", this.auxModelName())]);
     }
   }
 
@@ -748,7 +754,7 @@ export class Game {
       result = await this.call(chapterMessages(input), { aux: true, timeouts: CODEX_TIMEOUT });
     } catch { /* play goes on without it */ }
     const parsed = result ? parseChapter(result.text) : null;
-    await this.platform.sql.batch([this.usage(worldId, nodeId, "chapter", result, parsed ? "ok" : result ? "no_record" : "failed", this.llm!.auxModel || this.llm!.model)]);
+    await this.platform.sql.batch([this.usage(worldId, nodeId, "chapter", result, parsed ? "ok" : result ? "no_record" : "failed", this.auxModelName())]);
     return parsed;
   }
 
@@ -832,7 +838,7 @@ export class Game {
         const onPath = (await this.repo.path(c.head.id, UPKEEP_EVERY * 4)).some((n) => n.id === head.id);
         const patch = result && onPath ? upkeepPatch(result.text, await this.repo.getState(c.head.id)) : null;
         const outcome = !result ? "failed" : !onPath ? "stale" : patch ? "ok" : "no_record";
-        await this.platform.sql.batch([this.usage(worldId, head.id, "upkeep", result, outcome, this.llm!.auxModel || this.llm!.model)]);
+        await this.platform.sql.batch([this.usage(worldId, head.id, "upkeep", result, outcome, this.auxModelName())]);
         if (!patch) return;
         await this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI", promptVersion: UPKEEP_PROMPT_VERSION });
         for (const fn of this.listeners) fn(worldId);
