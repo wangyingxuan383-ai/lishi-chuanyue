@@ -235,6 +235,12 @@ describe("applyRecord", () => {
     expect(applyRecord(s, { time: "一天", hour: 6 }, { mode: "do", difficulty: "标准", currency: TANG_CURRENCY, clock }).state.time.elapsedMinutes).toBe(330 + 1440);
   });
 
+  it("tells the player when 过些日子 stopped well short of what was asked", () => {
+    const ctx = { mode: "skip" as const, difficulty: "标准" as const, currency: TANG_CURRENCY, asked: 43200 };
+    expect(applyRecord(sampleState(), { time: "半个时辰" }, ctx).chips.map((c) => c.text)).toContain("快进停在这里：有事要你拿主意");
+    expect(applyRecord(sampleState(), { time: "一个月" }, ctx).chips.map((c) => c.text)).not.toContain("快进停在这里：有事要你拿主意");
+  });
+
   it("says long spans in months and years", () => {
     const chip = (time: string) => apply(sampleState(), { time }).chips[0].text;
     expect(chip("一个月")).toBe("过了 1 个月");

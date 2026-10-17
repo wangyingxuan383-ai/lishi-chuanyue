@@ -143,7 +143,11 @@ function renote(person: Person, note: string): void {
 export function applyRecord(
   before: WorldState,
   record: TurnRecord | null,
-  ctx: { mode: ActionMode; difficulty: Difficulty; currency: Currency; clock?: GameClock; fortune?: Fortune },
+  ctx: {
+    mode: ActionMode; difficulty: Difficulty; currency: Currency; clock?: GameClock; fortune?: Fortune;
+    /** 过些日子: the span the player asked for, in minutes. */
+    asked?: number;
+  },
   opts?: { advanceTime?: boolean },
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
@@ -161,6 +165,8 @@ export function applyRecord(
   const minutes = ctx.mode === "skip" ? endingAt(stated, record?.hour, s.time.elapsedMinutes, ctx.clock) : stated;
   s.time.elapsedMinutes += minutes;
   if (stated >= 15) chips.push({ text: describeMinutes(stated), tone: "info" });
+  // A skip that stopped well short of what was asked says why, so it does not look like a failure.
+  if (ctx.mode === "skip" && ctx.asked && opts?.advanceTime !== false && stated < ctx.asked / 2) chips.push({ text: "快进停在这里：有事要你拿主意", tone: "warn" });
   // Ages count the Chinese way (虚岁): everyone grows a year at New Year.
   const newYears = ctx.clock ? newYearsBetween(ctx.clock, before.time.elapsedMinutes, s.time.elapsedMinutes) : 0;
   // Great events whose time has come (R05-T004): fixed ones happen; changeable ones are what the books say.

@@ -22,6 +22,7 @@ import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
+import { parseDurationMinutes } from "./calendar/duration";
 import { isFortune, rollFortune, type Fortune } from "./fortune";
 import { packTimeline } from "./timeline";
 import { newId } from "./db/repo";
@@ -548,7 +549,8 @@ export class Game {
       extractResult = extracted.result;
       if (extracted.record) record = record ? { ...extracted.record, ...record, choices: extracted.record.choices } : extracted.record;
     }
-    const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune });
+    const asked = action.mode === "skip" ? parseDurationMinutes(action.text) ?? undefined : undefined;
+    const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune, asked });
     const model = this.llm!.model;
     // Words the era card says must not appear (R07-T002): shown in developer mode, reminded next turn.
     const taboos = findTaboos(narrative, tabooTerms(era.eraCard, eraPack(era.packId)));
