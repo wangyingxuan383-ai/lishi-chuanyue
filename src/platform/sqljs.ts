@@ -68,8 +68,7 @@ export function sqlJsSql(
       hooks.persist?.();
     },
     async backup(label) {
-      if (hooks.backup) return hooks.backup(label);
-      const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
+      const name = hooks.backup ? await hooks.backup(label) : `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
       backups.unshift({ name, at: new Date().toISOString(), size: db.export().length });
       return name;
     },

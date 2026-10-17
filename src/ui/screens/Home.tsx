@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { archiveProblems, exportWorld, importWorld } from "../../engine/archive";
 import { eraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
 import type { World } from "../../engine/types";
@@ -46,6 +47,34 @@ export default function Home() {
   const { game, push, profile, toast } = useApp();
   const [cards, setCards] = useState<WorldCard[] | null>(null);
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
+  const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
+
+  // R08-T001: a world as one file.
+  const exportOne = async (card: WorldCard) => {
+    const archive = await exportWorld(game.repo, card.world.id);
+    if (await game.platform.files.exportText(`${card.world.title}.lishi.json`, JSON.stringify(archive)).catch(() => false)) toast("已导出");
+  };
+  const importOne = async () => {
+    const text = await game.platform.files.importText().catch(() => null);
+    if (!text) return;
+    let file: unknown = null;
+    try { file = JSON.parse(text); } catch { /* reported below */ }
+    const problems = archiveProblems(file);
+    if (problems.length) { toast(`没有导入：${problems[0]}`); return; }
+    const world = (file as { world: { id: string; title: string } }).world;
+    // The same world is already here: ask whether to replace it or keep both.
+    if (await game.repo.getWorld(world.id)) { setIncoming({ file, title: world.title }); return; }
+    await importWorld(game.repo, file, "replace");
+    toast(`已导入“${world.title}”`);
+    void load();
+  };
+  const finishImport = async (mode: "new" | "replace") => {
+    if (!incoming) return;
+    await importWorld(game.repo, incoming.file, mode);
+    toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${incoming.title}”`);
+    setIncoming(null);
+    void load();
+  };
 
   const load = async () => {
     const worlds = await game.repo.listWorlds();
@@ -97,6 +126,15 @@ export default function Home() {
             ))}
           </div>
         )}
+        <button className="ghost" onClick={() => void importOne()}>从文件导入世界…</button>
+        {incoming && <MenuSheet
+          title={`已经有“${incoming.title}”了`}
+          onClose={() => setIncoming(null)}
+          items={[
+            { label: "另存为新的世界", onSelect: () => void finishImport("new") },
+            { label: "覆盖现有的", danger: true, onSelect: () => void finishImport("replace") },
+          ]}
+        />}
       </div>
       {menuFor && (
         <MenuSheet
@@ -105,6 +143,7 @@ export default function Home() {
           items={[
             { label: "继续游玩", onSelect: () => push({ name: "play", worldId: menuFor.world.id }) },
             { label: "用同样设定再开一局", onSelect: () => void again(menuFor.world.id) },
+            { label: "导出成文件", onSelect: () => void exportOne(menuFor) },
             {
               label: "删除这个世界", danger: true,
               onSelect: async () => {

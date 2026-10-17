@@ -537,6 +537,29 @@ await page.getByRole("button", { name: "设置", exact: true }).click();
 await page.getByLabel(/开发者模式/).uncheck();
 check("disabling developer mode hides call history", (await page.getByText("调用记录", { exact: true }).count()) === 0);
 
+// R08-T001: export a world to a file and import it back as a new world.
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.getByText("继续游玩").waitFor();
+const worldsBefore = await page.locator(".card").count();
+const exportedTitle = (await page.locator(".card h3").first().textContent()).trim();
+const homeCard = await page.locator(".card").first().boundingBox();
+await page.mouse.move(homeCard.x + 30, homeCard.y + 20);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "导出成文件" }).click()]);
+const archivePath = `${out}/world-export.json`;
+await download.saveAs(archivePath);
+const archive = JSON.parse(fs.readFileSync(archivePath, "utf8"));
+check("a world exports with its turns, lines and states", archive.format === "lishi-world" && archive.nodes.length > 5 && archive.states.length === archive.nodes.length && archive.lines.length >= 2);
+const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.getByRole("button", { name: "从文件导入世界…" }).click()]);
+await chooser.setFiles(archivePath);
+await page.getByRole("button", { name: "另存为新的世界" }).click();
+await page.locator(".card h3", { hasText: `${exportedTitle}（导入）` }).waitFor();
+check("the same world imports again as a new one", (await page.locator(".card").count()) === worldsBefore + 1);
+await page.waitForTimeout(400);
+await shot("14-imported");
+
 // No horizontal overflow, no page errors.
 check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
 check("no page errors", errors.length === 0, errors.join(" | "));

@@ -42,6 +42,7 @@ export default function App() {
     void (async () => {
       const platform = await getPlatform();
       const game = await Game.open(platform);
+      void game.autoBackup();
       const profiles = await listProfiles(game.repo);
       const activeId = await game.repo.getSetting<string | null>("activeProfile", null);
       const active = profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null;

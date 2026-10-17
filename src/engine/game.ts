@@ -150,6 +150,17 @@ export class Game {
     return next;
   }
 
+  /**
+   * A database backup a day (R08-T001): at start, when the newest automatic
+   * backup is older than a day. The native side keeps the latest 20.
+   */
+  async autoBackup(now = Date.now()): Promise<string | null> {
+    const backups = await this.platform.sql.listBackups().catch(() => []);
+    const last = backups.filter((b) => b.name.includes("-auto.")).map((b) => Date.parse(b.at)).sort((a, b) => b - a)[0];
+    if (last && now - last < 86_400_000) return null;
+    return this.platform.sql.backup("auto").catch(() => null);
+  }
+
   /** Resolves once background work (设定集 upkeep) has finished; for tests and evals. */
   async settled(): Promise<void> {
     while (this.background.size) await Promise.allSettled([...this.background]);

@@ -728,3 +728,13 @@ describe("era words", () => {
     expect(JSON.stringify(llm.calls[2].body)).toContain("【用词提醒】上一段用了这个时代不该有的说法：“银两”（该用：铜钱、绢帛）");
   });
 });
+
+describe("daily backup", () => {
+  it("backs up at start once a day", async () => {
+    const { game } = await setup([]);
+    const now = Date.now();
+    expect(await game.autoBackup(now)).toMatch(/-auto\.sqlite$/);
+    expect(await game.autoBackup(now + 3_600_000)).toBeNull();
+    expect(await game.autoBackup(now + 2 * 86_400_000)).toMatch(/-auto\.sqlite$/);
+  });
+});
