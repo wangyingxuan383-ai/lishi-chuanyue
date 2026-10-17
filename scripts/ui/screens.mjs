@@ -37,7 +37,7 @@ const settle = async () => {
 
 // The boot screen, held for a moment by delaying the database engine.
 await page.route("**/*.wasm", async (route) => { await new Promise((r) => setTimeout(r, 12000)); await route.continue(); });
-await page.goto("http://127.0.0.1:1420/");
+await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
 await page.locator(".boot").waitFor();
 await settle();
 await page.screenshot({ path: `${shots}/once-0-boot.png` });
@@ -145,7 +145,7 @@ await page.waitForTimeout(1500); // the harness saves one second after the last 
 const capture = async (theme, name) => page.screenshot({ path: `${shots}/${theme.id}-${name}.png` });
 for (const theme of THEMES) {
   // Set the reading theme in 设置, as a player would.
-  await page.goto("http://127.0.0.1:1420/");
+  await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("button", { name: theme.label, exact: true }).click();
   await page.getByRole("button", { name: "返回", exact: true }).click();

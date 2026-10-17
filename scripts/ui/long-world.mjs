@@ -7,7 +7,7 @@ import { chromium } from "playwright-core";
 const browser = await chromium.launch({ channel: "msedge" });
 const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
 const page = await context.newPage();
-await page.goto("http://127.0.0.1:1420/");
+await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
 // A fresh profile starts at the service setup; connect the fake model first.
 await page.getByText("连接 AI 服务").waitFor();
 await page.getByRole("button", { name: "自定义" }).click();

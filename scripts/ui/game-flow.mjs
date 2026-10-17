@@ -11,7 +11,7 @@ const results = [];
 const check = (name, ok, detail = "") => results.push(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 const browser = await chromium.launch({ channel: "msedge" });
 const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
-await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
+await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(process.env.LISHI_APP ?? "http://127.0.0.1:1420/").origin });
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -25,7 +25,7 @@ process.on("uncaughtException", async (error) => {
   process.exit(1);
 });
 
-await page.goto("http://127.0.0.1:1420/");
+await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
 
 // First launch → AI service setup.
 await page.getByText("连接 AI 服务").waitFor();
@@ -230,7 +230,7 @@ await page.locator(".edit-line", { hasText: "新建势力卡：天地会" }).wai
 await page.locator(".inputbar textarea").fill("去打听会党的消息");
 await page.locator(".send-btn").click();
 await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
-const sent = JSON.stringify(await (await fetch("http://127.0.0.1:18800/debug/last-request")).json());
+const sent = JSON.stringify(await (await fetch(`http://127.0.0.1:${process.env.LISHI_FAKE_PORT ?? 18800}/debug/last-request`)).json());
 check("mentioned card sent to the AI", sent.includes("【势力】天地会（又称会党）：一伙行走江湖的人"));
 check("era card sent with the turn", sent.includes("【时代】测试时代") && sent.includes("时局：天下太平"));
 

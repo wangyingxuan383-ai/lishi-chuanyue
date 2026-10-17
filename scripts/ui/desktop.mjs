@@ -19,7 +19,7 @@ const context = await browser.newContext({ viewport: { width: 1280, height: 800 
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
-await page.goto("http://127.0.0.1:1420/");
+await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
 await page.getByText("连接 AI 服务").waitFor();
 await connectFake(page);
 await page.waitForFunction(() => !!window.__lishi);

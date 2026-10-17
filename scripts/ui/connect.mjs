@@ -1,7 +1,7 @@
 // Connects the local fake model on the AI service screen (scripts/fake-llm.mjs).
 // Shared by the UI scripts so a change to that screen is made once.
 //   await connectFake(page, { port: 18800, model: "fake-normal" })
-export async function connectFake(page, { port = 18800, model = "fake-normal", check } = {}) {
+export async function connectFake(page, { port = Number(process.env.LISHI_FAKE_PORT ?? 18800), model = "fake-normal", check } = {}) {
   await page.getByRole("button", { name: /^服务商：/ }).click();
   await page.locator(".sheet .mode-option", { hasText: "自定义" }).click();
   await page.getByLabel("服务地址").fill(`http://127.0.0.1:${port}/v1`);
