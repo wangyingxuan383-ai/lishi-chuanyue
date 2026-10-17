@@ -193,7 +193,7 @@ export class Game {
     return this.platform.sql.backup("auto").catch(() => null);
   }
 
-  /** Resolves once background work (设定集 upkeep) has finished; for tests and evals. */
+  /** Resolves once background work (设定集 upkeep) has finished; before a restore, and for tests and evals. */
   async settled(): Promise<void> {
     while (this.background.size) await Promise.allSettled([...this.background]);
   }

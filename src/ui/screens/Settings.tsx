@@ -9,7 +9,7 @@ import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
 import type { Row } from "../../platform";
 import { useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
-import { REPO_URL, latestRelease, newer, type ReleaseInfo } from "../app/update";
+import { REPO_URL, latestRelease, openLink, newer, type ReleaseInfo } from "../app/update";
 import { exportWorld } from "../../engine/archive";
 import { PURPOSES, UsageSheet } from "../components/Usage";
 import { Seal } from "../components/Seal";
@@ -276,7 +276,7 @@ function DataPage() {
   const [usageOpen, setUsageOpen] = useState(false);
   const load = () => {
     void game.platform.sql.listBackups().then((b) => setBackups([...b].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)))).catch(() => setBackups([]));
-    void game.platform.sql.query("SELECT (SELECT COUNT(*) FROM usage) AS calls, (SELECT COUNT(*) FROM worlds) AS worlds")
+    void game.platform.sql.query("SELECT (SELECT COUNT(*) FROM usage) AS calls, (SELECT COUNT(*) FROM worlds WHERE archived < 2) AS worlds")
       .then((r) => setUsage({ calls: Number(r[0].calls), worlds: Number(r[0].worlds) }));
   };
   useEffect(load, []);
@@ -301,7 +301,7 @@ function DataPage() {
       </div>
       {backups.length > 0 && <details>
         <summary className="muted">从备份恢复（{backups.length} 份）</summary>
-        <BackupRestore refresh={backups.length} />
+        <BackupRestore refresh={backups[0]?.name ?? ""} />
       </details>}
       <h3 className="settings-sub">导出与导入</h3>
       <Note>导出的文件可以在另一台手机或电脑上导入。单个世界在首页的“⋯”菜单里导出。</Note>
@@ -366,8 +366,8 @@ function AboutPage() {
         {latest && latest !== "error" && hasNew && <small className="release-notes">{latest.notes.split("\n").filter((l) => l.trim()).slice(0, 8).join("\n")}</small>}
         {latest === "error" && <small>可能是网络问题，或者 GitHub 暂时访问不了；需要的话可以在“网络与代理”里设置代理。</small>}
         <div className="row">
-          <button className={hasNew ? "primary" : ""} disabled={checking} onClick={() => (hasNew ? void game.platform.system.openUrl((latest as ReleaseInfo).url) : void check())}>{hasNew ? "去下载" : "检查更新"}</button>
-          <button className="ghost" onClick={() => void game.platform.system.openUrl(`${REPO_URL}/releases`)}>全部版本</button>
+          <button className={hasNew ? "primary" : ""} disabled={checking} onClick={() => (hasNew ? void openLink(game.platform, toast, (latest as ReleaseInfo).url) : void check())}>{hasNew ? "去下载" : "检查更新"}</button>
+          <button className="ghost" onClick={() => void openLink(game.platform, toast, `${REPO_URL}/releases`)}>全部版本</button>
         </div>
         <small>安卓更新时下载新的安装包直接覆盖安装，不要先卸载（卸载会删掉所有世界）。</small>
       </div>
@@ -378,8 +378,8 @@ function AboutPage() {
         <dt>数据</dt><dd>所有世界都存在这台设备上，不上传。</dd>
         <dt>Key</dt><dd>加密保存在系统的安全存储里，只发给你自己填的服务。</dd>
         <dt>网络</dt><dd>只连你的 AI 服务；检查更新时连一次 GitHub。</dd>
-        <dt>源代码</dt><dd><button className="link" onClick={() => void game.platform.system.openUrl(REPO_URL)}>GitHub 仓库</button></dd>
-        <dt>反馈</dt><dd><button className="link" onClick={() => void game.platform.system.openUrl(`${REPO_URL}/issues`)}>提交问题</button></dd>
+        <dt>源代码</dt><dd><button className="link" onClick={() => void openLink(game.platform, toast, REPO_URL)}>GitHub 仓库</button></dd>
+        <dt>反馈</dt><dd><button className="link" onClick={() => void openLink(game.platform, toast, `${REPO_URL}/issues`)}>提交问题</button></dd>
       </dl>
       <DevSwitch onToggled={(on) => toast(on ? "开发者模式已打开" : "开发者模式已关闭")} />
     </>

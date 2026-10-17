@@ -54,7 +54,8 @@ export function presetForUrl(url: string): ProviderPreset | null {
 }
 
 /** Looks like a key rather than an address, or the other way round (pasted into the wrong box). */
-export const looksLikeUrl = (text: string) => /^(https?:\/\/|[\w-]+(\.[\w-]+)+(:\d+)?(\/|$))/i.test(text.trim());
+// A host needs a scheme or a path: 智谱 keys are `id.secret`, a bare dotted word.
+export const looksLikeUrl = (text: string) => /^(https?:\/\/|[\w-]+(\.[\w-]+)+(:\d+)?\/)/i.test(text.trim());
 
 /**
  * A name for a new service (J-02): the preset's name, or the address's host

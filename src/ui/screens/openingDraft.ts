@@ -58,7 +58,7 @@ export function fromTemplate(t: OpeningTemplate, keep: Draft, gender?: "男" | "
   };
 }
 
-export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery">>): NewWorld {
+export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints">>): NewWorld {
   return {
     title: d.title,
     eraId: d.eraId,

@@ -90,15 +90,21 @@ function TurnView({ node, onMenu, pressed, children }: { node: StoryNode; onMenu
 }
 
 export default function Play({ worldId }: { worldId: string }) {
-  const { game, push, replace, toast, devMode, pop } = useApp();
+  const { game, push, replace, toast, devMode, pop, profile } = useApp();
   const [world, setWorld] = useState<World | null>(null);
   const [cursor, setCursor] = useState<tree.Cursor | null>(null);
+  // The head now, for toast actions: one offered before a newer turn or edit does nothing.
+  const headRef = useRef<string | null>(null);
+  headRef.current = cursor?.head.id ?? null;
+  const busyRef = useRef(false);
+  const still = (headId: string, run: () => void) => () => { if (headRef.current === headId && !busyRef.current) run(); else toast("故事已经往下走了，这一步不再适用"); };
   const [nodes, setNodes] = useState<StoryNode[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [limit, setLimit] = useState(PAGE);
   const [state, setState] = useState<WorldState | null>(null);
   const [variants, setVariants] = useState<tree.Variants | null>(null);
   const [gen, setGen] = useState<Gen | null>(null);
+  busyRef.current = !!gen;
   /** One message under the story at a time (AUDIT 5.1): what happened, and what to do now. */
   const [notice, setNotice] = useState<{ text: string; actions: { label: string; run: () => void }[] } | null>(null);
   const failures = useRef(0);
@@ -266,7 +272,7 @@ export default function Play({ worldId }: { worldId: string }) {
         if (e.reason === "cancelled") return;
         failures.current++;
         const actions: { label: string; run: () => void }[] = [];
-        if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup" }) });
+        if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup", profileId: profile?.id }) });
         else {
           if (retry.current) { const again = retry.current; actions.push({ label: e.reason === "refused" ? "原样再试" : "再试一次", run: again }); }
           if (failures.current >= 2 || e.reason === "quota" || e.reason === "refused") actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
@@ -359,8 +365,8 @@ export default function Play({ worldId }: { worldId: string }) {
     setNotice(null);
     await refresh();
     // Going back never deletes anything (it is a new route, or redo returns); say so, and offer the way back.
-    if (c.line.id !== before) toast("已回到这里，原来的路线保留在“世界线”里", { label: "回原路线", run: () => void tree.switchLine(game.repo, worldId, before).then(() => refresh()) });
-    else toast("已回到这里", { label: "撤回", run: () => void redoAll(c, cursor.head.id) });
+    if (c.line.id !== before) toast("已回到这里，原来的路线保留在“世界线”里", { label: "回原路线", run: still(c.head.id, () => void tree.switchLine(game.repo, worldId, before).then(() => refresh())) });
+    else toast("已回到这里", { label: "撤回", run: still(c.head.id, () => void redoAll(c, cursor.head.id)) });
   };
   /** Steps forward again to `target` after going back on the same line. */
   const redoAll = async (from: tree.Cursor, target: string) => {
@@ -375,7 +381,7 @@ export default function Play({ worldId }: { worldId: string }) {
     setNotice(null);
     await refresh();
     const what = undone.kind === "edit" ? "这次修改" : undone.actionText ? `“${undone.actionText.slice(0, 12)}${undone.actionText.length > 12 ? "…" : ""}”` : "上一段";
-    toast(`已撤销${what}`, { label: "重做", run: () => void tree.redo(game.repo, c).then(() => refresh()) });
+    toast(`已撤销${what}`, { label: "重做", run: still(c.head.id, () => void tree.redo(game.repo, c).then(() => refresh())) });
   };
   const redo = async () => {
     if (!cursor) return;
@@ -717,7 +723,7 @@ export default function Play({ worldId }: { worldId: string }) {
               await game.repo.setSetting("newgameDraft", fromSetup(setup));
               replace({ name: "newgame" });
             } },
-            { label: "回到首页", onSelect: () => pop() },
+            { label: "回到首页", onSelect: () => (gen ? toast("正在写，先停止或等写完") : pop()) },
           ]}
         />
       )}

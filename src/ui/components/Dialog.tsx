@@ -6,6 +6,8 @@ import { useBack } from "../app/context";
 
 export interface ConfirmRequest {
   kind: "confirm";
+  /** Unique per request: the dialog's key. */
+  id: number;
   title: string;
   message?: string;
   /** The button that does it, e.g. "删除". */
@@ -15,6 +17,7 @@ export interface ConfirmRequest {
 }
 export interface NameRequest {
   kind: "name";
+  id: number;
   title: string;
   initial: string;
   placeholder?: string;
@@ -33,11 +36,12 @@ export function Dialog({ request, onDone }: { request: DialogRequest; onDone: ()
     onDone();
   };
   useBack(() => { cancel(); return true; });
-  useEffect(() => { if (request.kind === "name") { input.current?.focus(); input.current?.select(); } }, []);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (request.kind === "name") { input.current?.focus(); input.current?.select(); } else box.current?.focus(); }, []);
   return (
     <>
       <div className="backdrop dialog-backdrop" onClick={cancel} />
-      <div className="dialog" role="alertdialog" aria-label={request.title}>
+      <div ref={box} tabIndex={-1} className="dialog" role="alertdialog" aria-modal="true" aria-label={request.title}>
         <h2>{request.title}</h2>
         {request.kind === "confirm" && request.message && <p>{request.message}</p>}
         {request.kind === "name" && (

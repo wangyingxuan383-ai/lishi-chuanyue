@@ -30,3 +30,8 @@ export async function latestRelease(platform: Platform): Promise<ReleaseInfo | n
     url: release.html_url, publishedAt: release.published_at, prerelease: release.prerelease,
   };
 }
+
+/** Opens a link in the browser; says so when nothing could open it. */
+export async function openLink(platform: Platform, toast: (text: string) => void, url: string) {
+  try { await platform.system.openUrl(url); } catch { toast("没能打开浏览器，链接已复制"); await navigator.clipboard?.writeText(url).catch(() => {}); }
+}

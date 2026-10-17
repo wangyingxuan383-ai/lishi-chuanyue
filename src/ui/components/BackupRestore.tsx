@@ -25,8 +25,8 @@ const when = (iso: string) =>
  * confirmation. The current data is saved as a backup first, then the app
  * reloads on the restored data. `refresh` changes when the parent makes a new backup.
  */
-export function BackupRestore({ refresh = 0 }: { refresh?: number }) {
-  const { platform, ask, toast } = useApp();
+export function BackupRestore({ refresh = "" }: { refresh?: string | number }) {
+  const { platform, game, ask, toast } = useApp();
   const [backups, setBackups] = useState<BackupInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -46,6 +46,8 @@ export function BackupRestore({ refresh = 0 }: { refresh?: number }) {
     if (!ok) return;
     setBusy(true);
     try {
+      // Background upkeep from the last turn finishes first, so it cannot write into the restored save.
+      await game.settled();
       await platform.sql.restore(b.name);
       toast("已恢复，正在重新打开");
       setTimeout(() => location.reload(), 600);

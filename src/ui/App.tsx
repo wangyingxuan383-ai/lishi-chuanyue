@@ -9,7 +9,7 @@ import { archiveProblems, importWorld } from "../engine/archive";
 import { useMouse } from "./components/useMedia";
 import { useShortcuts } from "./components/useShortcuts";
 import Home from "./screens/Home";
-import Setup from "./screens/Setup";
+import Setup, { sweepDraftKey } from "./screens/Setup";
 import NewGame from "./screens/NewGame";
 import Play from "./screens/Play";
 import Settings from "./screens/Settings";
@@ -146,6 +146,7 @@ export default function App() {
       // The network choice applies to every request from the start.
       const network = await game.repo.getSetting<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>("network", { proxy: "none" });
       void platform.llm.setNetwork(network).catch(() => {});
+      void sweepDraftKey(platform, game.repo).catch(() => {});
       applyReading(r);
       setReadingState(r);
       setDevModeState(await game.repo.getSetting("devMode", false));
@@ -161,10 +162,17 @@ export default function App() {
   const push = useCallback((r: Route) => { clearToast(); setStack((s) => [...s, r]); }, [clearToast]);
   const replace = useCallback((r: Route) => { clearToast(); setStack((s) => [...s.slice(0, -1), r]); }, [clearToast]);
   const pop = useCallback(() => { clearToast(); setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)); }, [clearToast]);
+  // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
+  // a new request answers the one it replaces as cancelled.
+  const dialogId = useRef(0);
+  const openDialog = useCallback((next: DialogRequest) => setDialog((old) => {
+    if (old) (old.resolve as (v: boolean | string | null) => void)(old.kind === "confirm" ? false : null);
+    return next;
+  }), []);
   const ask = useCallback((o: { title: string; message?: string; confirm: string; danger?: boolean }) =>
-    new Promise<boolean>((resolve) => setDialog({ kind: "confirm", ...o, resolve })), []);
+    new Promise<boolean>((resolve) => openDialog({ kind: "confirm", ...o, id: ++dialogId.current, resolve })), [openDialog]);
   const askName = useCallback((o: { title: string; initial?: string; placeholder?: string; confirm?: string }) =>
-    new Promise<string | null>((resolve) => setDialog({ kind: "name", ...o, initial: o.initial ?? "", resolve })), []);
+    new Promise<string | null>((resolve) => openDialog({ kind: "name", ...o, initial: o.initial ?? "", id: ++dialogId.current, resolve })), [openDialog]);
 
   // Screen-level back, registered once so overlays opened later run first:
   // pop the stack; on the home screen, press twice to exit.
@@ -247,7 +255,7 @@ export default function App() {
           {toastState.action && <button className="toast-action" onClick={() => { const run = toastState.action!.run; clearToast(); run(); }}>{toastState.action.label}</button>}
         </div>
       )}
-      {dialog && <Dialog key={String(Math.random())} request={dialog} onDone={() => setDialog(null)} />}
+      {dialog && <Dialog key={dialog.id} request={dialog} onDone={() => setDialog(null)} />}
     </AppProvider>
   );
 }

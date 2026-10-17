@@ -9,8 +9,10 @@ import {
   PRESETS, chatCompletionsUrl, chatModels, cleanBaseUrl, defaultProfileName, explainFailure, fetchModels, listProfiles,
   looksLikeUrl, presetForUrl, recommendAuxModel, recommendModel, saveProfile, serviceBase, type Profile,
 } from "../../engine/llm/providers";
-import { newId } from "../../engine/db/repo";
+import { newId, type Repo } from "../../engine/db/repo";
+import type { Platform } from "../../platform";
 import { useApp } from "../app/context";
+import { openLink } from "../app/update";
 import { Sheet } from "../components/Sheet";
 import { Icon } from "../components/Icon";
 
@@ -39,6 +41,8 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   /** The key is kept in a draft slot until 保存 (J-09): nothing lands in the service list before that. */
   const draftSlot = useRef(`draft-${newId().slice(0, 12)}`);
   const draftKeyBase = useRef<string | null>(null);
+  // The last write to the draft slot: removing waits for it, so a late write cannot leave the key behind.
+  const draftWrite = useRef<Promise<unknown>>(Promise.resolve());
   const saved = useRef(false);
   const preset = PRESETS.find((p) => p.id === presetId)!;
 
@@ -63,7 +67,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
       }
     })();
     // A key typed and then abandoned is not left behind.
-    return () => { if (!saved.current) void platform.secrets.remove(draftSlot.current).catch(() => {}); };
+    return () => { if (!saved.current) void dropDraft(platform, draftWrite.current, draftSlot.current); };
   }, []);
 
   const cleanUrl = cleanBaseUrl(baseUrl);
@@ -92,7 +96,11 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
     if (key.trim()) {
       const base = serviceBase(cleanUrl);
       if (draftKeyBase.current !== `${base}\n${key.trim()}`) {
-        await platform.secrets.set(draftSlot.current, key.trim(), base);
+        // Noted first, so a crash before 保存 is cleaned up at the next start.
+        const write = game.repo.setSetting(DRAFT_SLOT_SETTING, draftSlot.current)
+          .then(() => platform.secrets.set(draftSlot.current, key.trim(), base));
+        draftWrite.current = write.catch(() => {});
+        await write;
         draftKeyBase.current = `${base}\n${key.trim()}`;
       }
       return draftSlot.current;
@@ -175,7 +183,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
         includeUsage, allowHttp, contextTokens: existing?.contextTokens,
       }, key.trim() || null);
       saved.current = true;
-      void platform.secrets.remove(draftSlot.current).catch(() => {});
+      void dropDraft(platform, draftWrite.current, draftSlot.current);
       setProfile(profile);
       await game.repo.setSetting("welcomed", true);
       toast(line ? `已连接：${line}` : "已保存");
@@ -189,6 +197,8 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
     }
   };
 
+  // Leaving the first-run page by the system back key counts as 稍后再说.
+  useEffect(() => { if (first) return () => { if (!saved.current) void game.repo.setSetting("welcomed", true); }; }, []);
   const skip = async () => {
     await game.repo.setSetting("welcomed", true);
     pop();
@@ -222,8 +232,8 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
           </button>
           {preset.keyUrl && (
             <p className="links">
-              <button className="link" onClick={() => void platform.system.openUrl(preset.keyUrl!)}>申请 Key</button>
-              {preset.priceUrl && <> · <button className="link" onClick={() => void platform.system.openUrl(preset.priceUrl!)}>价格</button></>}
+              <button className="link" onClick={() => void openLink(platform, toast, preset.keyUrl!)}>申请 Key</button>
+              {preset.priceUrl && <> · <button className="link" onClick={() => void openLink(platform, toast, preset.priceUrl!)}>价格</button></>}
             </p>
           )}
         </section>
@@ -343,4 +353,20 @@ function ModelPicker({ models, current, recommended, title, note, onPick, onClos
       </div>
     </Sheet>
   );
+}
+
+const DRAFT_SLOT_SETTING = "setupDraftSlot";
+
+/** Removes a draft key slot after any write still in flight. */
+async function dropDraft(platform: Platform, pending: Promise<unknown>, slot: string) {
+  await pending;
+  await platform.secrets.remove(slot).catch(() => {});
+}
+
+/** At start: a draft key left by a setup page that never closed (the app was killed) is removed. */
+export async function sweepDraftKey(platform: Platform, repo: Repo) {
+  const slot = await repo.getSetting<string | null>(DRAFT_SLOT_SETTING, null);
+  if (!slot) return;
+  await platform.secrets.remove(slot).catch(() => {});
+  await repo.setSetting(DRAFT_SLOT_SETTING, null);
 }

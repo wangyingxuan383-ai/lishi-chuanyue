@@ -6,6 +6,8 @@ import { getPlatform } from "../../platform";
  * that starts on a button inside belongs to that button (AUDIT 4.4: a long
  * press on 重说 also opened the passage's menu). With a mouse, a right click
  * does what a long press does (UX_APP_BASICS #57); touch keeps the long press.
+ * A click with no pointer press before it (Enter, Space, a screen reader's
+ * double tap) is a tap too.
  */
 export function useLongPress(onLongPress: () => void, onTap?: () => void) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -39,6 +41,13 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
       const wasTap = start.current && !fired.current;
       cancel();
       if (wasTap) onTap?.();
+    },
+    onClick(e: React.MouseEvent) {
+      // A pointer click (detail ≥ 1) was handled on pointer up.
+      if (e.detail !== 0) return;
+      const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");
+      if (inner && inner !== e.currentTarget) return;
+      onTap?.();
     },
     onPointerCancel: cancel,
     onPointerLeave: cancel,

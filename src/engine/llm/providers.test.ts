@@ -16,6 +16,9 @@ describe("service setup helpers (UX_PROVIDERS J-02, J-03, J-05)", () => {
     expect(presetForUrl("https://relay.example.com/v1")).toBeNull();
     expect(looksLikeUrl("api.deepseek.com/v1")).toBe(true);
     expect(looksLikeUrl("sk-abc123")).toBe(false);
+    // 智谱 keys look like id.secret: a dot without a scheme or a path is not an address.
+    expect(looksLikeUrl("0a1b2c3d4e5f.AbCdEfGhIj")).toBe(false);
+    expect(looksLikeUrl("sk-abc.def")).toBe(false);
   });
 
   it("names services so two custom ones differ", () => {

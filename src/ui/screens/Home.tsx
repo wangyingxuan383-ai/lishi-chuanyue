@@ -9,7 +9,7 @@ import { MenuSheet } from "../components/Sheet";
 import { useLongPress } from "../components/useLongPress";
 import { fromSetup } from "./openingDraft";
 import { Seal } from "../components/Seal";
-import { latestRelease, newer, type ReleaseInfo } from "../app/update";
+import { latestRelease, openLink, newer, type ReleaseInfo } from "../app/update";
 import { Icon } from "../components/Icon";
 
 interface WorldCard {
@@ -156,7 +156,7 @@ export default function Home() {
           <div className="notice">
             有新版本 {update.version}，覆盖安装即可，不要先卸载。
             <div className="row">
-              <button className="primary" onClick={() => void game.platform.system.openUrl(update.url)}>去下载</button>
+              <button className="primary" onClick={() => void openLink(game.platform, toast, update.url)}>去下载</button>
               <button className="ghost" onClick={() => { void game.repo.setSetting("updateSkipped", update.version); setUpdate(null); }}>这版不提醒</button>
             </div>
           </div>
