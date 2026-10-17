@@ -333,6 +333,8 @@ async function main() {
   const newPeople = [...new Set(log.filter((l) => l.startsWith("新人物")).map((l) => l.replace(/^新人物[:：]?\s*/, "")).filter(Boolean))];
   const head = worldId ? (await cursor(game.repo, worldId)).head : null;
   const state = head ? await game.repo.getState(head.id) : null;
+  // Chapter summaries on the final path, so their accuracy can be read against the story (R04-T003).
+  const chapterList = head ? (await game.repo.chaptersOnPath(worldId!, head.id)).map((c) => ({ title: c.title, gist: c.gist, summary: c.summary })) : [];
   const upkeep = {
     calls: calls.filter((c) => c.purpose === "upkeep").length,
     edits: head ? (await game.repo.path(head.id)).filter((n) => n.kind === "edit" && n.meta.by === "AI").map((n) => n.actionText ?? "") : [],
@@ -394,7 +396,7 @@ async function main() {
     newPeople, suspectedDuplicates, cliches: frequency(CLICHES),
     anachronisms: pack ? { eraId: pack.id, ...frequency(tabooKeywords) } : null,
     clock: { start: opening.clock?.text ?? null, end: entries.at(-1)?.clock?.text ?? null, elapsedMinutes: entries.at(-1)?.clock?.elapsedMinutes ?? null },
-    timeMismatches, upkeep,
+    timeMismatches, upkeep, chapters: chapterList,
     fortune: { byLevel: fortuneStats, riskyTurns: entries.filter((e) => e.risk).length, luckyFailRate: failRate(["大顺", "顺"]), unluckyFailRate: failRate(["不顺", "大不顺"]) },
     probes: probeAt.length ? { from: `${probeFrom}-${probeTo}`, ...probes } : null,
     goalsInContext: goalChecks,
@@ -417,7 +419,7 @@ async function main() {
   const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}；运势：${e.fortune ?? "（无）"}${e.risk ? `；风险：${e.risk.what}${e.risk.result ? ` · ${e.risk.result}` : ""}` : ""}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
-  fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n${probes.questions.length ? `\n## 记忆探针（第 ${probeFrom}～${probeTo} 回合出题）\n\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}\n   标准答案：${x.a}${probes.rounds.map((r) => `\n   第 ${r.turn} 回合：${r.answers[i]}`).join("")}`).join("\n")}\n` : ""}`, "utf8");
+  fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n${chapterList.length ? `\n## 章节摘要\n\n${chapterList.map((c, i) => `### 第 ${i + 1} 章 · ${c.title}\n\n梗概：${c.gist}\n\n${c.summary}`).join("\n\n")}\n` : ""}${probes.questions.length ? `\n## 记忆探针（第 ${probeFrom}～${probeTo} 回合出题）\n\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}\n   标准答案：${x.a}${probes.rounds.map((r) => `\n   第 ${r.turn} 回合：${r.answers[i]}`).join("")}`).join("\n")}\n` : ""}`, "utf8");
   const { opening: _opening, entries: _entries, ...totals } = summary;
   console.log(JSON.stringify(totals, null, 2));
   console.log(`结果：${path.relative(ROOT, out)}`);
