@@ -1,6 +1,7 @@
 // R09: every main screen at phone size in the three reading themes (纸张,
 // 白天, 夜间), plus the boot screen, the service setup, a new game and the
-// empty home, then one board per theme for review (and the README).
+// empty home, then one board per theme for review (and the README); and a
+// board of the writing and housekeeping tools on paper (R14: screens-tools).
 // Web fonts stand in for the phone's own serif (Noto Serif SC, OFL).
 //   node scripts/fake-llm.mjs & pnpm dev &  node scripts/ui/screens.mjs [--out docs/images]
 import { connectFake } from "./connect.mjs";
@@ -179,6 +180,53 @@ for (const theme of THEMES) {
   await capture(theme, "9-settings");
 }
 
+// The writing and housekeeping tools (R13, reviewed in R14), on paper.
+await page.goto((process.env.LISHI_APP ?? "http://127.0.0.1:1420/"));
+await page.getByRole("button", { name: "设置", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "阅读与外观" }).click();
+await page.locator(".theme-card", { hasText: "纸张" }).click();
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.getByRole("button", { name: "返回", exact: true }).click();
+const tool = (name) => page.screenshot({ path: `${shots}/tools-${name}.png` });
+await page.getByRole("button", { name: /看看新增/ }).click();
+await settle();
+await tool("1-whatsnew");
+await page.getByRole("dialog", { name: "这一版新增" }).getByRole("button", { name: "知道了" }).click();
+await page.locator(".world-open", { hasText: "长安雪夜" }).click();
+await page.locator(".turn").last().waitFor();
+await page.locator(".inputbar textarea").fill("隔着门问一声是谁");
+await page.getByRole("button", { name: "展开输入", exact: true }).click();
+await page.locator("summary", { hasText: "常用行动" }).click();
+await settle();
+await tool("2-desk");
+await page.keyboard.press("Escape");
+await page.locator(".inputbar textarea").fill("");
+await page.locator(".inputbar textarea").blur();
+await page.getByRole("button", { name: "这一段还能做什么" }).click();
+await page.getByRole("button", { name: "AI 改写", exact: true }).click();
+await settle();
+await tool("3-rewrite");
+await page.keyboard.press("Escape");
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "故事设定与要点" }).click();
+await page.locator("summary", { hasText: "我的要求组" }).click();
+await page.locator(".writing-presets").scrollIntoViewIfNeeded();
+await settle();
+await tool("4-presets");
+await page.keyboard.press("Escape");
+await page.getByRole("button", { name: "角色" }).click();
+await page.getByRole("tab", { name: /设定/ }).click();
+await page.getByRole("button", { name: "批量删除" }).click();
+await page.getByLabel("选择地点：西市").check();
+await settle();
+await tool("5-codex");
+await page.keyboard.press("Escape");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.getByRole("button", { name: "设置", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "用量与花费" }).click();
+await settle();
+await tool("6-budget");
+
 // One board per theme, and the first screens.
 const board = await browser.newPage({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
 const img = (file) => `data:image/png;base64,${fs.readFileSync(file).toString("base64")}`;
@@ -194,6 +242,9 @@ for (const theme of THEMES) {
   await board.setContent(`${style}<h1>${theme.name}</h1><div class="grid">${figures}</div>`);
   await board.screenshot({ path: `${out}/screens-${theme.id}.jpg`, type: "jpeg", quality: 84, fullPage: true });
 }
+const tools = [["1-whatsnew", "这一版新增"], ["2-desk", "展开输入与常用行动"], ["3-rewrite", "AI 改写"], ["4-presets", "我的要求组"], ["5-codex", "设定集 · 批量删除"], ["6-budget", "用量与花费"]];
+await board.setContent(`${style}<h1>写作与整理工具</h1><div class="grid">${tools.map(([k, label]) => `<figure><img src="${img(`${shots}/tools-${k}.png`)}"><figcaption>${label}</figcaption></figure>`).join("")}</div>`);
+await board.screenshot({ path: `${out}/screens-tools.jpg`, type: "jpeg", quality: 84, fullPage: true });
 const firsts = [["once-0-boot", "启动"], ["once-1-setup", "连接 AI 服务"], ["once-2-newgame", "开局"], ["once-3-empty-home", "第一次打开的首页"]];
 await board.setContent(`${style}<h1>第一次打开</h1><div class="grid">${firsts.map(([k, label]) => `<figure><img src="${img(`${shots}/${k}.png`)}"><figcaption>${label}</figcaption></figure>`).join("")}</div>`);
 await board.screenshot({ path: `${out}/screens-first.jpg`, type: "jpeg", quality: 84, fullPage: true });

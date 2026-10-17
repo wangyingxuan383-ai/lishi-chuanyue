@@ -1,4 +1,5 @@
 import { useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useApp, useBack } from "../app/context";
 import { Icon } from "./Icon";
 
@@ -7,6 +8,13 @@ import { Icon } from "./Icon";
  * close it. A sheet holding a form passes `dirty` while it has unsaved
  * changes: closing then asks "放弃修改？" first (saving still calls onClose
  * directly, so it is never asked).
+ *
+ * It is drawn on <body>, wherever it is opened from: inside a box that is
+ * animating (a transform) or isolated, a fixed sheet would be laid out
+ * within that box instead of over the screen (R14 review). Each sheet has
+ * its own layer, so one opened from another, or from the character panel,
+ * still covers and dims everything under it. React events still reach the
+ * component that opened it.
  */
 export function Sheet({ title, onClose, dirty = false, children }: { title?: string; onClose: () => void; dirty?: boolean; children: ReactNode }) {
   const { ask } = useApp();
@@ -23,8 +31,8 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
     requestClose();
     return true;
   });
-  return (
-    <>
+  return createPortal(
+    <div className="sheet-layer">
       <div className="backdrop" onClick={requestClose} />
       <div className="sheet" role="dialog" aria-label={title}>
         <div className="sheet-handle" />
@@ -32,7 +40,8 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
         {title && <h2>{title}</h2>}
         {children}
       </div>
-    </>
+    </div>,
+    document.body,
   );
 }
 

@@ -14,11 +14,11 @@ import {
   assistMessages, buildTurnContext, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
   turnMessages, type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
 } from "./prompt/turn";
-import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
-import { UPKEEP_EVERY, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
+import { CODEX_FREE_PROMPT_VERSION, CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
+import { UPKEEP_EVERY, UPKEEP_FREE_PROMPT_VERSION, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
 import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
 import { askMessages } from "./prompt/ask";
-import { findTaboos, tabooTerms, type TabooHit } from "./era/taboo";
+import { findTaboos, tabooLine, tabooTerms, type TabooHit } from "./era/taboo";
 import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
@@ -28,8 +28,12 @@ import { fortuneMode, isFortune, rollFortune, type Fortune } from "./fortune";
 import { packTimeline } from "./timeline";
 import { newId } from "./db/repo";
 import { parseMoney } from "./money";
+import { challengeInputOf, newChallenge, newScript, scriptInputOf, scriptProgress, type ChallengeInput, type ScriptInput } from "./modes";
+import { draftChallengeMessages, draftScriptMessages, parseChallengeDraft, parseScriptDraft, type DraftInput } from "./prompt/draft";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS, type ActionMode, type Chapter, type StoryNode, type WorldSettings, type WorldState } from "./types";
+
+export type { ChallengeInput, ScriptInput } from "./modes";
 
 export interface LlmConfig {
   slot: string;
@@ -74,6 +78,33 @@ export interface NewWorld {
   opening: { mode: "ai"; hint: string } | { mode: "player"; text: string };
   /** Without a built-in pack: let the AI organize the 设定集 from the premise (R03-T008). */
   organize?: boolean;
+  /** 剧本 and 挑战 (R14); 旁观 is settings.pilot. */
+  script?: ScriptInput | null;
+  challenge?: ChallengeInput | null;
+}
+
+/** Why a 连播 ended (R14). */
+export type AutoplayStop =
+  | "count"     // every step was played
+  | "stopped"   // the player pressed stop
+  | "failed"    // a step failed (never retried)
+  | "died"      // the protagonist died
+  | "challenge" // the challenge ended
+  | "script"    // the last beat was played
+  | "busy"      // something was already being written; nothing started
+  | "player";   // the player plays the protagonist (not 旁观); nothing started
+
+export type AutoplayEvent =
+  | TurnEvent
+  | { type: "step"; index: number; total: number }
+  | { type: "finished"; steps: number; reason: AutoplayStop };
+
+export interface AutoplayHandle {
+  /** Stops the step being written (keeping what was written, as a normal stop does) and starts no other. */
+  stop(): void;
+  /** Call when the page returns to the foreground. */
+  catchUp(): Promise<void>;
+  done: Promise<{ steps: number; reason: AutoplayStop }>;
 }
 
 export interface PlayerAction {
@@ -99,9 +130,32 @@ interface Pending {
   action: PlayerAction;
 }
 
+interface UsageScope { worldId: string | null; nodeId: string | null; purpose: string }
+interface CallControl { signal?: AbortSignal; onHandle?: (h: ChatHandle) => void }
+type CarriedEdit = Pick<StoryNode, "record" | "actionText">;
+
+/** One stop owns every request of a turn, including record/choice extraction. */
+function turnControl() {
+  const controller = new AbortController();
+  let handle: ChatHandle | null = null;
+  let committing = false;
+  const check = () => { if (controller.signal.aborted) throw new ChatError("cancelled"); };
+  return {
+    signal: controller.signal,
+    onHandle(h: ChatHandle) { handle = h; },
+    check,
+    // Once storage begins, the completed operation can no longer be cancelled.
+    beginCommit() { check(); committing = true; },
+    stop() { if (!committing) controller.abort(); },
+    async catchUp() { await handle?.catchUp(); },
+  };
+}
+
 const EXTRACT_TIMEOUT = { firstByteMs: 20_000, idleMs: 20_000, totalMs: 40_000 };
 const DEFAULT_CONTEXT_TOKENS = 12_000;
 const CODEX_TIMEOUT = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 75_000 };
+// Free-mode wording is applied at the call site, keeping the shared chapter helper unchanged.
+const FREE_CHAPTER_PROMPT_VERSION = "chapter-2-free";
 
 function failReason(error: unknown): { reason: FailReason; status?: number; detail?: string } {
   if (!(error instanceof ChatError)) return { reason: "network", detail: String(error) };
@@ -125,7 +179,18 @@ const retryable = (e: unknown) => e instanceof ChatError && !e.partial
   && (e.kind === "network" || e.kind === "timeout_first" || (e.kind === "http" && (e.status === 429 || (e.status ?? 0) >= 500)));
 
 /** Lines of an apply log that say what happened, not what was refused. */
-const INFO_LOG = /^新人物：|只记录不提醒/;
+const INFO_LOG = /^新人物：|只记录不提醒|按不限时处理/;
+
+/** As the death card has it: no health left on a difficulty that kills. */
+const isDead = (state: WorldState, settings: WorldSettings) => state.protagonist.stats.health <= 0 && settings.difficulty !== "宽松";
+
+/**
+ * What the player writes (写) or directs (幕后) happens as written: no luck in it (G5: a 大不顺 roll had the narrator jail
+ * the protagonist in a scene the player wrote). Nor in 过些日子, which is no risky act (eval H: a roll jailed him for a month).
+ * A world with luck off (R11-T008) rolls nothing at all, so no 签 chip either.
+ */
+const luckApplies = (mode: ActionMode, settings: WorldSettings) =>
+  mode !== "write" && mode !== "direct" && mode !== "skip" && fortuneMode(settings.fortune) !== "off";
 
 /**
  * A panel edit the engine did not carry out (AUDIT_V4_FUNCTION H1): nothing
@@ -155,6 +220,9 @@ export class Game {
   readonly repo: Repo;
   /** Dice for fortune rolls; tests replace it. */
   random: () => number = Math.random;
+  /** The pause between two steps of a 连播; tests shorten it. */
+  autoplayPauseMs = 1000;
+  private autoplaying = new Set<string>();
   /** Per world: the tail of the queue that turns and edits wait on, so nodes are never appended concurrently. */
   private queues = new Map<string, Promise<unknown>>();
   private upkeeping = new Set<string>();
@@ -203,6 +271,12 @@ export class Game {
     void work.catch(() => {}).then(() => this.background.delete(work));
   }
 
+  /** A complete, selected story has reached storage; notification failures never undo it. */
+  private announceCommitted(worldId: string, node: StoryNode): void {
+    if (node.status !== "ok") return;
+    this.inBackground(Promise.resolve().then(() => this.platform.system.storyCommitted(`${worldId}:${node.id}`)));
+  }
+
   /** Told when a world changed in the background (设定集 upkeep, a new chapter). Returns an unsubscribe. */
   subscribe(fn: (worldId: string) => void): () => void {
     this.listeners.add(fn);
@@ -224,24 +298,51 @@ export class Game {
   /** One streamed call with a single retry before any data arrives. */
   private async call(
     messages: ChatMessage[],
-    opts: { aux?: boolean; timeouts?: typeof EXTRACT_TIMEOUT; onThinking?: () => void; onText?: (d: string, full: string) => void; onHandle?: (h: ChatHandle) => void },
+    opts: CallControl & { aux?: boolean; timeouts?: typeof EXTRACT_TIMEOUT; onThinking?: () => void; onText?: (d: string, full: string) => void; usage: UsageScope },
   ): Promise<ChatResult & { attempts: number }> {
     const llm = this.requireLlm();
+    const model = opts.aux ? llm.auxModel || llm.model : llm.model;
     for (let attempt = 1; ; attempt++) {
+      if (opts.signal?.aborted) throw new ChatError("cancelled");
+      let partial = "";
+      let received: ChatResult | null = null;
       const handle = streamChat(this.platform, {
-        slot: llm.slot, url: llm.url, model: opts.aux ? llm.auxModel || llm.model : llm.model, messages,
+        slot: llm.slot, url: llm.url, model, messages,
         maxTokens: llm.maxTokens ?? 2048, includeUsage: llm.includeUsage, timeouts: opts.timeouts,
         extra: llm.extra as never,
-      }, { onThinking: opts.onThinking, onText: opts.onText });
+      }, {
+        onThinking: () => { if (!opts.signal?.aborted) opts.onThinking?.(); },
+        onText: (delta, full) => { if (!opts.signal?.aborted) { partial = full; opts.onText?.(delta, full); } },
+      });
+      let cancel!: () => void;
+      const cancellation = new Promise<never>((_, reject) => {
+        cancel = () => {
+          void handle.streamId.then((id) => this.platform.llm.cancel(id)).catch(() => {});
+          reject(new ChatError("cancelled", undefined, partial));
+        };
+      });
+      opts.signal?.addEventListener("abort", cancel, { once: true });
       opts.onHandle?.(handle);
+      if (opts.signal?.aborted) cancel();
       try {
-        const result = await handle.result;
-        void handle.streamId.then((id) => this.platform.llm.ack(id)).catch(() => {});
-        return { ...result, attempts: attempt };
+        received = await Promise.race([handle.result, cancellation]);
+        if (opts.signal?.aborted) throw new ChatError("cancelled", undefined, partial);
+        return { ...received, attempts: attempt };
       } catch (error) {
-        void handle.streamId.then((id) => this.platform.llm.ack(id)).catch(() => {});
-        if (attempt === 1 && retryable(error)) continue;
+        const retry = !opts.signal?.aborted && attempt === 1 && retryable(error);
+        // Callers retain their successful business usage rows. Every failed request
+        // has its own unknown usage; local credential/binding refusals sent nothing.
+        const unsent = error instanceof ChatError && (error.kind === "no_secret" || error.kind === "url_not_bound");
+        if (!unsent) {
+          const scope = opts.usage;
+          await this.platform.sql.batch([this.usage(scope.worldId, scope.nodeId, scope.purpose, received,
+            error instanceof ChatError && error.kind === "cancelled" ? "cancelled" : "failed", model)]);
+        }
+        if (retry) continue;
         throw error;
+      } finally {
+        opts.signal?.removeEventListener("abort", cancel);
+        void handle.streamId.then((id) => this.platform.llm.ack(id)).catch(() => {});
       }
     }
   }
@@ -250,16 +351,20 @@ export class Game {
     return this.repo.usageStatement({
       worldId, nodeId, purpose, model,
       promptTokens: result?.usage?.promptTokens ?? null, completionTokens: result?.usage?.completionTokens ?? null,
-      estimated: !result?.usage, firstTokenMs: result?.firstTokenMs ?? null, totalMs: result?.totalMs ?? null, outcome,
+      estimated: result?.usage?.promptTokens == null || result.usage.completionTokens == null,
+      firstTokenMs: result?.firstTokenMs ?? null, totalMs: result?.totalMs ?? null, outcome,
     });
   }
 
   /** The 补记 fallback: extracts a record from the narrative with the auxiliary model. */
-  private async extract(era: EraContext, state: WorldState, action: string, narrative: string): Promise<{ record: TurnRecord | null; result: ChatResult | null }> {
+  private async extract(era: EraContext, state: WorldState, action: string, narrative: string, settings?: WorldSettings,
+    control: CallControl = {}, usage: UsageScope = { worldId: null, nodeId: null, purpose: "extract" },
+  ): Promise<{ record: TurnRecord | null; result: ChatResult | null }> {
     try {
-      const result = await this.call(extractMessages({ era, state, action, narrative }), { aux: true, timeouts: EXTRACT_TIMEOUT });
+      const result = await this.call(extractMessages({ era, state, action, narrative, settings: { ...settings, mode: state.era.mode ?? settings?.mode } }), { ...control, usage, aux: true, timeouts: EXTRACT_TIMEOUT });
       return { record: parseRecord(`<record>${result.text}`).record, result };
-    } catch {
+    } catch (error) {
+      if (error instanceof ChatError && error.kind === "cancelled") throw error;
       return { record: null, result: null };
     }
   }
@@ -269,7 +374,7 @@ export class Game {
   /** Expands a rough idea into a full setup; fields the player filled are kept. */
   async assist(idea: string, current: Partial<SetupDraft>): Promise<Partial<SetupDraft> | null> {
     try {
-      const result = await this.call(assistMessages(idea, current), { aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
+      const result = await this.call(assistMessages(idea, current), { usage: { worldId: null, nodeId: null, purpose: "assist" }, aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
       const value = lenientJson(result.text) as Partial<SetupDraft> | null;
       await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
@@ -278,10 +383,31 @@ export class Game {
     }
   }
 
-  /** One organizing call (R03-T008); null when it fails, which never blocks play. */
-  private async codex(input: CodexInput): Promise<ChatResult | null> {
+  /** “AI 帮我拟大纲” (R14): an outline from the opening filled in so far; null when it fails or gives no beat. */
+  draftScript(current: DraftInput): Promise<ScriptInput | null> {
+    return this.draft(draftScriptMessages(current), "outline", parseScriptDraft);
+  }
+
+  /** “AI 帮我出题” (R14): a challenge that suits the opening; null when it fails or gives no goal. */
+  draftChallenge(current: DraftInput): Promise<ChallengeInput | null> {
+    return this.draft(draftChallengeMessages(current), "challenge", parseChallengeDraft);
+  }
+
+  private async draft<T>(messages: ChatMessage[], purpose: string, parse: (value: unknown) => T | null): Promise<T | null> {
     try {
-      return await this.call(codexMessages(input), { aux: true, timeouts: CODEX_TIMEOUT });
+      const result = await this.call(messages, { usage: { worldId: null, nodeId: null, purpose }, aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
+      const value = parse(lenientJson(result.text));
+      await this.platform.sql.batch([this.usage(null, null, purpose, result, value ? "ok" : "no_record", this.auxModelName())]);
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  /** One organizing call (R03-T008); null when it fails, which never blocks play. */
+  private async codex(input: CodexInput, usage: UsageScope = { worldId: null, nodeId: null, purpose: "codex" }): Promise<ChatResult | null> {
+    try {
+      return await this.call(codexMessages(input), { usage, aux: true, timeouts: CODEX_TIMEOUT });
     } catch {
       return null;
     }
@@ -294,20 +420,28 @@ export class Game {
     const state = await this.repo.getState((await tree.cursor(this.repo, worldId)).head.id);
     const me = state.protagonist;
     const result = await this.codex({
+      mode: state.era.mode,
       premise: world.settings.premise, protagonist: { name: me.name, gender: me.gender, age: me.age, identity: me.identity },
       arrival: (await this.setupOf(worldId))?.arrival ?? "魂穿",
       known: [...state.cards.filter((c) => c.kind !== "时代").map((c) => c.name), ...state.places.map((p) => p.name)],
-    });
-    const patch = result ? codexPatch(result.text, state, opts) : null;
-    await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.auxModelName())]);
+    }, { worldId, nodeId: null, purpose: "codex" });
+    let patch = result ? codexPatch(result.text, state, opts) : null;
+    // Great events only fill a timeline that has none from a pack or an earlier pass, on a CE-dated start.
+    const seeded = state.timeline?.some((e) => e.source === "卡组" || e.source === "AI");
+    if (patch?.timeline && (seeded || eraContext(world.eraId, state).clock.date?.ceYear == null)) {
+      const { timeline: _t, ...rest } = patch;
+      patch = rest.cards || rest.places ? rest : null;
+    }
+    if (result) await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.auxModelName())]);
     if (!patch) return null;
-    const edited = await this.serial(worldId, () => this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI" }));
+    const edited = await this.serial(worldId, () => this.appendEdit(worldId, patch, codexSummary(patch, state), { by: "AI", promptVersion: state.era.mode === "free" ? CODEX_FREE_PROMPT_VERSION : CODEX_PROMPT_VERSION }));
     return "rejected" in edited ? null : edited;
   }
 
   async createWorld(input: NewWorld, onEvent: (e: TurnEvent) => void): Promise<string | null> {
-    const pack = eraPack(input.eraId);
     const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
+    const free = settings.mode === "free";
+    const pack = free ? null : eraPack(input.eraId);
     const p = input.protagonist;
     // A built-in pack is only a preset: its era card, places, calendar and currency are copied in (D121).
     const preset = pack ? packCards(pack) : { cards: [], places: [] };
@@ -318,30 +452,56 @@ export class Game {
       protagonist: {
         name: p.name, aliases: [], age: p.age, gender: p.gender, identity: p.identity,
         origin: input.arrival === "不穿越" ? "" : input.origin, cheat: "",
+        ...(settings.heroPanel !== undefined ? { panel: settings.heroPanel } : {}),
         stats: { money: 0, debt: 0, health: 80, energy: 70, fame: 10 }, statuses: [], items: [],
       },
       people: [], places: preset.places, cards: preset.cards, goals: [], deviations: [],
-      era: { packId: pack?.id ?? null, ...(pack ? { calendar: structuredClone(pack.calendar), currency: structuredClone(pack.currency) } : {}) },
+      era: {
+        packId: pack?.id ?? null,
+        ...(settings.mode ? { mode: settings.mode } : {}),
+        ...(settings.clockStyle ? { clockStyle: settings.clockStyle } : free ? { clockStyle: "elapsed" as const } : {}),
+        ...(pack ? { calendar: structuredClone(pack.calendar), currency: structuredClone(pack.currency) } : {}),
+      },
     };
+    // Play modes (R14): the challenge's limit counts from the start.
+    const script = input.script ? newScript(input.script) : null;
+    const challenge = input.challenge ? newChallenge(input.challenge, 0) : null;
+    if (script) initial.script = script;
+    if (challenge) initial.challenge = challenge;
+    const setupLog = challenge?.limit && challenge.deadlineMinute === null ? [`期限“${challenge.limit}”无法换算，按不限时处理`] : [];
     const era = eraContext(pack?.id ?? null, initial);
-    const opening = { era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "" };
+    const opening = {
+      era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "",
+      script: initial.script, challenge: initial.challenge,
+    };
     // Organizing starts once the opening is under way, so it never delays the first words.
     const organize = !pack && input.organize === true;
     let codex: Promise<ChatResult | null> | null = null;
     const startCodex = (): Promise<ChatResult | null> | null => {
-      if (organize && !codex) codex = this.codex({ premise: settings.premise, protagonist: p, arrival: input.arrival });
+      if (organize && !codex) codex = this.codex({ mode: initial.era.mode, premise: settings.premise, protagonist: p, arrival: input.arrival });
       return codex;
+    };
+    // When the opening fails after organizing began, that request was still made: book it as unused.
+    const dropCodex = () => {
+      const started: Promise<ChatResult | null> | null = codex;
+      if (!started) return;
+      this.inBackground(started.then(async (r) => {
+        if (r) await this.platform.sql.batch([this.usage(null, null, "codex", r, "stale", this.auxModelName())]);
+      }));
     };
 
     let narrative: string;
     let record: TurnRecord | null;
     let result: ChatResult | null = null;
+    let extractResult: ChatResult | null = null;
+    const openingModel = input.opening.mode === "player" ? this.auxModelName() : this.llm?.model ?? "";
+    const openingUsage: UsageScope = { worldId: null, nodeId: null, purpose: "opening" };
     if (input.opening.mode === "player") {
       // The player wrote the opening: keep it verbatim and only extract the state.
       narrative = input.opening.text.trim();
       onEvent({ type: "organizing" });
       try {
-        result = await this.call(openingExtractMessages({ ...opening, text: narrative }), { aux: true, timeouts: EXTRACT_TIMEOUT });
+        result = await this.call(openingExtractMessages({ ...opening, text: narrative }), { usage: openingUsage, aux: true, timeouts: EXTRACT_TIMEOUT });
         record = parseRecord(`<record>${result.text}`).record;
       } catch (error) {
         onEvent({ type: "failed", ...failReason(error), partialSaved: false });
@@ -353,6 +513,7 @@ export class Game {
       let sent = 0;
       try {
         result = await this.call(openingMessages(opening), {
+          usage: openingUsage,
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
             startCodex();
@@ -365,6 +526,7 @@ export class Game {
           },
         });
       } catch (error) {
+        dropCodex();
         onEvent({ type: "failed", ...failReason(error), partialSaved: false });
         return null;
       }
@@ -372,22 +534,30 @@ export class Game {
       narrative = split.narrative;
       record = parseRecord(split.recordText).record;
       if (isRefusal({ finishReason: result?.finishReason ?? null, narrative, hasRecord: !!record })) {
+        dropCodex();
+        await this.platform.sql.batch([this.usage(null, null, "opening", result, "refused", openingModel)]);
         onEvent({ type: "failed", reason: "refused", partialSaved: false });
         return null;
       }
       if (!record) {
         onEvent({ type: "organizing" });
-        record = (await this.extract(era, initial, "（开场）", narrative)).record;
+        const extracted = await this.extract(era, initial, "（开场）", narrative, settings);
+        record = extracted.record;
+        extractResult = extracted.result;
       }
     }
     if (!record) {
+      dropCodex();
+      const usage = result ? [this.usage(null, null, "opening", result, "no_record", openingModel)] : [];
+      if (extractResult) usage.push(this.usage(null, null, "extract", extractResult, "no_record", this.auxModelName()));
+      if (usage.length) await this.platform.sql.batch(usage);
       onEvent({ type: "failed", reason: "no_record", partialSaved: false });
       return null;
     }
 
     // The organized 设定集 goes into the opening state before the opening's own record.
     let codexResult: ChatResult | null = null;
-    // Organized great events wait until the opening has fixed the start date they are counted from.
+    // Its great events wait until the opening has fixed the start date they are counted from.
     let codexTimeline: TurnRecord["timeline"] = null;
     if (organize) {
       onEvent({ type: "organizing" });
@@ -402,8 +572,8 @@ export class Game {
 
     // Opening-only fields: date, hour, currency and the starting purse (an absolute amount).
     // The program counts every later date (D119); a pack's date stays when the opening gave no usable one.
-    const rules = pack?.calendar ?? {};
-    if (record.date != null) {
+    const rules = era.clock.rules;
+    if (record.date != null && era.clock.clockStyle !== "elapsed") {
       const date = readDate(record.date, rules);
       if (date) {
         initial.time.date = date;
@@ -415,9 +585,12 @@ export class Game {
     if (record.hour != null) initial.time.startHour = record.hour;
     if (!pack && record.currency?.length) initial.era.currency = { units: record.currency };
     const startEra = eraContext(pack?.id ?? null, initial);
-    // The world's timeline (R05-T004): a pack's events, then the organizer's, placed against the start.
+    // The great events (R05-T004) for the player's 记事 page: a pack's, or the organizer's for a real,
+    // CE-dated dynasty; free worlds have none. The narrator only hears of each once its time has come (D129).
     if (pack) initial.timeline = packTimeline(pack.timeline, startEra.clock).map((e) => ({ id: newId(), ...e }));
-    if (codexTimeline?.length) Object.assign(initial, applyRecord(initial, { timeline: codexTimeline }, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency, clock: startEra.clock }, { advanceTime: false }).state);
+    else if (codexTimeline?.length && startEra.clock.date?.ceYear != null) {
+      Object.assign(initial, applyRecord(initial, { timeline: codexTimeline }, { mode: "do", difficulty: settings.difficulty, currency: startEra.currency, clock: startEra.clock }, { advanceTime: false }).state);
+    }
     const purse = record.money != null ? parseMoney(record.money, startEra.currency) : null;
     initial.protagonist.stats.money = Math.max(0, purse ?? pack?.startMoney ?? 0);
     const { money: _m, time: _t, date: _d, hour: _h, currency: _c, ...rest } = record;
@@ -431,14 +604,17 @@ export class Game {
         meta: {
           promptVersion: PROMPT_VERSION, model, playerWritten: input.opening.mode === "player",
           setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "", organize },
-          ...(organize ? { codexPromptVersion: CODEX_PROMPT_VERSION, codexOk: !!codexResult } : {}),
+          ...(organize ? { codexPromptVersion: free ? CODEX_FREE_PROMPT_VERSION : CODEX_PROMPT_VERSION, codexOk: !!codexResult } : {}),
+          ...(setupLog.length ? { log: setupLog } : {}),
           firstTokenMs: result?.firstTokenMs, totalMs: result?.totalMs, usage: result?.usage, raw: result?.text,
         },
       },
     });
-    const usage = result ? [this.usage(world.id, node.id, "opening", result, "ok", model)] : [];
-    if (organize) usage.push(this.usage(world.id, node.id, "codex", codexResult, initial.cards.length ? "ok" : "no_record", this.auxModelName()));
+    const usage = result ? [this.usage(world.id, node.id, "opening", result, "ok", openingModel)] : [];
+    if (extractResult) usage.push(this.usage(world.id, node.id, "extract", extractResult, "ok", this.auxModelName()));
+    if (codexResult) usage.push(this.usage(world.id, node.id, "codex", codexResult, initial.cards.length ? "ok" : "no_record", this.auxModelName()));
     if (usage.length) await this.platform.sql.batch(usage);
+    this.announceCommitted(world.id, node);
     onEvent({ type: "done", cursor: await tree.cursor(this.repo, world.id), node, chips: [] });
     return world.id;
   }
@@ -448,14 +624,19 @@ export class Game {
     const world = await this.repo.getWorld(worldId);
     const opening = world ? await this.repo.opening(worldId) : null;
     if (!world || !opening) return null;
-    const me = (await this.repo.getState(opening.id)).protagonist;
+    const state = await this.repo.getState(opening.id);
+    const me = state.protagonist;
     const setup = (opening.meta.setup ?? {}) as { arrival?: Arrival; hint?: string; organize?: boolean };
     return {
-      title: world.title, eraId: eraPack(world.eraId)?.id ?? null, settings: world.settings,
+      title: world.title, eraId: state.era.mode === "free" ? null : eraPack(world.eraId)?.id ?? null,
+      settings: { ...world.settings, mode: state.era.mode, clockStyle: state.era.clockStyle, heroPanel: me.panel },
       protagonist: { name: me.name, gender: me.gender, age: me.age, identity: me.identity },
       arrival: setup.arrival ?? (me.origin ? "魂穿" : "不穿越"), origin: me.origin,
       opening: opening.meta.playerWritten ? { mode: "player", text: opening.narrative } : { mode: "ai", hint: setup.hint ?? "" },
-      organize: setup.organize ?? !eraPack(world.eraId),
+      organize: setup.organize ?? (state.era.mode === "free" || !eraPack(world.eraId)),
+      // The script and challenge as the story began, for “再挑战一次”.
+      ...(state.script ? { script: scriptInputOf(state.script) } : {}),
+      ...(state.challenge ? { challenge: challengeInputOf(state.challenge) } : {}),
     };
   }
 
@@ -500,25 +681,85 @@ export class Game {
     return this.run(worldId, null, "variant", hint, onEvent);
   }
 
-  private run(worldId: string, actionIn: PlayerAction | null, kind: "turn" | "variant", hint: string | null, onEvent: (e: TurnEvent) => void): TurnHandle {
-    let handle: ChatHandle | null = null;
+  /**
+   * 连播 (R14): up to `turns` ordinary “继续” turns in a row while the AI plays
+   * the protagonist (settings.pilot "ai"), with a short pause between them. It
+   * ends early when a step fails, the protagonist dies, the challenge ends or the
+   * script's last beat is played. Every step is billed and saved like any turn.
+   */
+  autoplay(worldId: string, opts: { turns: number }, onEvent: (e: AutoplayEvent) => void): AutoplayHandle {
+    const total = Math.max(0, Math.floor(opts.turns));
     let stopped = false;
+    let steps = 0;
+    let step: TurnHandle | null = null;
+    let wake = () => {};
+    const head = async () => this.repo.getState((await tree.cursor(this.repo, worldId)).head.id);
+    const pause = () => new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, this.autoplayPauseMs);
+      wake = () => { clearTimeout(timer); resolve(); };
+    });
+    const run = async (): Promise<AutoplayStop> => {
+      for (;;) {
+        if (stopped) return "stopped";
+        if (steps >= total) return "count";
+        if (steps > 0) {
+          await pause();
+          if (stopped) return "stopped";
+        }
+        // Read again after the pause: the player may have changed the settings, script or challenge meanwhile.
+        const world = await this.repo.getWorld(worldId);
+        if (!world) return "failed";
+        if (world.settings.pilot !== "ai") return "player";
+        const before = await head();
+        if (isDead(before, world.settings)) return "died";
+        onEvent({ type: "step", index: steps + 1, total });
+        let failed = false;
+        step = this.play(worldId, { mode: "continue", text: "" }, (e) => {
+          if (e.type === "failed") failed = true;
+          onEvent(e);
+        });
+        await step.done.catch(() => { failed = true; });
+        step = null;
+        if (failed) return stopped ? "stopped" : "failed";
+        steps++;
+        const after = await head();
+        if (isDead(after, world.settings)) return "died";
+        if (before.challenge?.status === "active" && after.challenge?.status !== "active") return "challenge";
+        if (scriptProgress(before)?.finished === false && scriptProgress(after)?.finished) return "script";
+      }
+    };
+    // Anything already being written for this world, a 连播 included, comes first: nothing starts.
+    const busy = this.autoplaying.has(worldId) || this.queues.has(worldId);
+    if (!busy) this.autoplaying.add(worldId);
+    const reason = busy ? Promise.resolve<AutoplayStop>("busy")
+      : run().catch((): AutoplayStop => "failed").finally(() => this.autoplaying.delete(worldId));
+    const done = reason.then((r) => {
+      onEvent({ type: "finished", steps, reason: r });
+      return { steps, reason: r };
+    });
+    return {
+      stop: () => { stopped = true; step?.stop(); wake(); },
+      catchUp: async () => { await step?.catchUp(); },
+      done,
+    };
+  }
+
+  private run(worldId: string, actionIn: PlayerAction | null, kind: "turn" | "variant", hint: string | null, onEvent: (e: TurnEvent) => void): TurnHandle {
+    const control = turnControl();
+    let active = true;
     const done = this.serial(worldId, async () => {
       let c = await tree.cursor(this.repo, worldId);
-      let edit: StoryNode | null = null;
+      let edits: CarriedEdit[] = [];
       if (kind === "variant") {
-        // The player's edit closest to the turn is carried to the new version; the AI's
-        // edits came from the old text and are left behind.
-        const edits: StoryNode[] = [];
+        // Replay, in order, every player edit made after the turn on the current path; AI edits
+        // describe the old version. Edits the player undid or went back past are not on the path
+        // (only a redo pointer keeps them) and stay undone.
+        const pathEdits: StoryNode[] = [];
         while (c.head.kind === "edit") {
-          edits.unshift(c.head);
+          pathEdits.unshift(c.head);
           c = { ...c, head: (await this.repo.getNode(c.head.parentId!))! };
         }
-        edit = edits.find((e) => e.meta.by !== "AI") ?? null;
-        if (!edits.length && c.head.lastChildId) {
-          const child = await this.repo.getNode(c.head.lastChildId);
-          if (child?.kind === "edit" && child.meta.by !== "AI") edit = child;
-        }
+        edits = [...((c.head.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...pathEdits.filter((e) => e.meta.by !== "AI")];
       }
       const world = (await this.repo.getWorld(worldId))!;
       // For a variant, the turn is re-played from the head's parent with the same action.
@@ -526,11 +767,7 @@ export class Game {
       const action: PlayerAction = actionIn ?? { mode: c.head.actionMode ?? "continue", text: c.head.actionText ?? "", directorNote: c.head.directorNote };
       const state = await this.repo.getState(base.id);
       const era = eraContext(world.eraId, state);
-      // What the player writes (写) or directs (幕后) happens as written: no luck in it (G5: a 大不顺 roll had the narrator jail
-      // the protagonist in a scene the player wrote). Nor in 过些日子, which is no risky act (eval H: a roll jailed him for a month).
-      // A world with luck off (R11-T008) rolls nothing at all, so no 签 chip either.
-      const noLuck = action.mode === "write" || action.mode === "direct" || action.mode === "skip" || fortuneMode(world.settings.fortune) === "off";
-      const fortune = noLuck ? undefined : await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果");
+      const fortune = luckApplies(action.mode, world.settings) ? await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果") : undefined;
       const { messages, chars } = buildTurnContext(await this.turnInput(worldId, base, {
         mode: action.mode, text: action.text, directorNote: action.directorNote, rewriteHint: hint, fortune,
       }));
@@ -539,8 +776,20 @@ export class Game {
       let shown = "";
       let sent = 0;
       let result: ChatResult & { attempts: number };
+      const fail = async (error: unknown) => {
+        await this.repo.setSetting("pending", null);
+        const partial = error instanceof ChatError ? error.partial : "";
+        const narrative = splitter.finish().narrative || partial;
+        if (narrative) {
+          const cursor = await this.saveInterrupted(c, base, kind, action, narrative, state, hint, edits);
+          onEvent({ type: "failed", ...failReason(error), partialSaved: true, cursor });
+        } else {
+          onEvent({ type: "failed", ...failReason(error), partialSaved: false });
+        }
+      };
       try {
         result = await this.call(messages, {
+          signal: control.signal, usage: { worldId, nodeId: null, purpose: "turn" },
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
             const visible = splitter.push(delta);
@@ -552,23 +801,17 @@ export class Game {
             sent = shown.length;
           },
           onHandle: (h) => {
-            handle = h;
-            if (stopped) h.cancel();
-            void h.streamId.then((streamId) => this.repo.setSetting("pending", {
-              worldId, lineId: c.line.id, parentId: base.id, streamId, kind, action,
-            } satisfies Pending));
+            control.onHandle(h);
+            void h.streamId.then((streamId) => {
+              if (!active || control.signal.aborted) return;
+              return this.repo.setSetting("pending", {
+                worldId, lineId: c.line.id, parentId: base.id, streamId, kind, action,
+              } satisfies Pending);
+            }).catch(() => {});
           },
         });
       } catch (error) {
-        await this.repo.setSetting("pending", null);
-        const partial = error instanceof ChatError ? error.partial : "";
-        const narrative = partial ? splitter.finish().narrative || partial : "";
-        if (narrative) {
-          const cursor = await this.saveInterrupted(c, base, kind, action, narrative, state, messages);
-          onEvent({ type: "failed", ...failReason(error), partialSaved: true, cursor });
-        } else {
-          onEvent({ type: "failed", ...failReason(error), partialSaved: false });
-        }
+        await fail(error);
         return;
       }
 
@@ -581,50 +824,54 @@ export class Game {
         return;
       }
       if (result.usage?.promptTokens) await this.learnRatio(result.usage.promptTokens / chars);
-      const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent, fortune);
-      if (edit) {
+      let cursor: Awaited<ReturnType<Game["commit"]>>;
+      try {
+        cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent, fortune, control);
+      } catch (error) {
+        if (!(error instanceof ChatError) || error.kind !== "cancelled") throw error;
+        // The narrative request finished before cancellation during extraction/storage preparation.
+        await this.platform.sql.batch([this.usage(worldId, null, "turn", result, "cancelled", this.llm?.model ?? "")]);
+        await fail(error);
+        return;
+      }
+      for (const edit of edits) {
         // Carried as it was; an edit the new version already makes needs no second node.
         const carried = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
         if (!("rejected" in carried)) cursor.cursor = carried;
       }
       await this.repo.setSetting("pending", null);
+      this.announceCommitted(worldId, cursor.node);
       onEvent({ type: "done", cursor: cursor.cursor, node: cursor.node, chips: cursor.chips });
       if (kind === "turn") {
         this.inBackground(this.upkeep(worldId, cursor.node));
         this.inBackground(this.chapterIfDue(worldId, cursor.node));
       }
-    });
-    return {
-      stop: () => {
-        stopped = true;
-        handle?.cancel();
-      },
-      catchUp: async () => {
-        await handle?.catchUp();
-      },
-      done,
-    };
+    }).finally(() => { active = false; });
+    return { stop: control.stop, catchUp: control.catchUp, done };
   }
 
   private async commit(
     c: tree.Cursor, base: StoryNode, kind: "turn" | "variant", action: PlayerAction, narrative: string,
     recordIn: TurnRecord | null, issues: string[], state: WorldState, era: EraContext, settings: WorldSettings,
-    result: ChatResult & { attempts: number }, onEvent: (e: TurnEvent) => void, fortune?: Fortune,
+    result: ChatResult & { attempts: number }, onEvent: (e: TurnEvent) => void, fortune?: Fortune, control?: ReturnType<typeof turnControl>,
   ): Promise<{ cursor: tree.Cursor; node: StoryNode; chips: Chip[] }> {
+    control?.check();
     let record = recordIn;
     let extractResult: ChatResult | null = null;
     // A record without choices needs a fill-in only when choices were asked for (AUDIT_V4_FUNCTION #6).
     if (!record || (settings.choiceCount > 0 && !record.choices?.length)) {
       onEvent({ type: "organizing" });
-      const extracted = await this.extract(era, state, action.text || "（继续）", narrative);
+      const extracted = await this.extract(era, state, action.text || "（继续）", narrative, settings, control, { worldId: c.worldId, nodeId: base.id, purpose: "extract" });
       extractResult = extracted.result;
+      if (extractResult) await this.platform.sql.batch([this.usage(c.worldId, base.id, "extract", extractResult, extracted.record ? "ok" : "no_record", this.auxModelName())]);
       if (extracted.record) record = record ? { ...extracted.record, ...record, choices: extracted.record.choices } : extracted.record;
     }
+    control?.check();
     const asked = action.mode === "skip" ? skipSpanMinutes(action.text) ?? undefined : undefined;
     const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune, asked });
     const model = this.llm?.model ?? "";
     // Words the era card says must not appear (R07-T002): shown in developer mode, reminded next turn.
-    const taboos = findTaboos(narrative, tabooTerms(era.eraCard, eraPack(era.packId)));
+    const taboos = state.era.mode === "free" ? [] : findTaboos(narrative, tabooTerms(era.eraCard, eraPack(era.packId)));
     const node = {
       kind: "turn" as const, actionMode: action.mode, actionText: action.text, directorNote: action.directorNote ?? null,
       narrative, record, choices: record?.choices ?? [], status: record ? ("ok" as const) : ("no_record" as const), state: applied.state,
@@ -634,25 +881,29 @@ export class Game {
         extracted: !!extractResult, raw: result.text,
       },
     };
+    control?.beginCommit();
     const next = kind === "variant" ? await tree.addVariant(this.repo, c, node) : await tree.append(this.repo, { ...c, head: base }, node);
     const usage = [this.usage(c.worldId, next.head.id, "turn", result, "ok", model)];
-    if (extractResult) usage.push(this.usage(c.worldId, next.head.id, "extract", extractResult, "ok", this.auxModelName()));
     await this.platform.sql.batch(usage);
     return { cursor: next, node: next.head, chips: applied.chips };
   }
 
-  private async saveInterrupted(c: tree.Cursor, base: StoryNode, kind: "turn" | "variant", action: PlayerAction, narrative: string, state: WorldState, messages: ChatMessage[]): Promise<tree.Cursor> {
+  /** `hint` is a variant's 重说 direction, kept so 续写 asks for the same thing. */
+  private async saveInterrupted(c: tree.Cursor, base: StoryNode, kind: "turn" | "variant", action: PlayerAction, narrative: string, state: WorldState, hint: string | null, edits: CarriedEdit[] = []): Promise<tree.Cursor> {
     const node = {
       kind: "turn" as const, actionMode: action.mode, actionText: action.text, directorNote: action.directorNote ?? null,
       narrative, choices: [], status: "interrupted" as const, state,
-      meta: { chips: [], promptVersion: PROMPT_VERSION, model: this.llm?.model, messages },
+      meta: { chips: [], promptVersion: PROMPT_VERSION, model: this.llm?.model,
+        ...(hint ? { rewriteHint: hint } : {}),
+        ...(edits.length ? { carriedEdits: edits.map(({ record, actionText }) => ({ record, actionText })) } : {}),
+      },
     };
     return kind === "variant" ? tree.addVariant(this.repo, c, node) : tree.append(this.repo, { ...c, head: base }, node);
   }
 
   /** Continues an interrupted head turn in place. */
   resumeInterrupted(worldId: string, onEvent: (e: TurnEvent) => void): TurnHandle {
-    let handle: ChatHandle | null = null;
+    const control = turnControl();
     const done = this.serial(worldId, async () => {
       const c = await tree.cursor(this.repo, worldId);
       const node = c.head;
@@ -660,41 +911,62 @@ export class Game {
       const world = (await this.repo.getWorld(worldId))!;
       const state = await this.repo.getState(node.parentId);
       const era = eraContext(world.eraId, state);
-      const base = (node.meta.messages as ChatMessage[] | undefined) ?? turnMessages(await this.turnInput(worldId, (await this.repo.getNode(node.parentId))!, {
-        mode: node.actionMode ?? "continue", text: node.actionText ?? "",
+      // Rebuilt from the current settings (a cached prompt could carry a panel since turned off),
+      // with the turn's own luck, kept on the parent, and its 重说 direction.
+      const parent = (await this.repo.getNode(node.parentId))!;
+      const mode = node.actionMode ?? "continue";
+      const fortune = luckApplies(mode, world.settings) && isFortune(parent.meta.fortune) ? parent.meta.fortune : undefined;
+      const base = turnMessages(await this.turnInput(worldId, parent, {
+        mode, text: node.actionText ?? "", directorNote: node.directorNote, fortune,
+        rewriteHint: typeof node.meta.rewriteHint === "string" ? node.meta.rewriteHint : null,
       }));
       const splitter = new RecordSplitter();
       let shown = node.narrative;
-      let result: ChatResult & { attempts: number };
+      let result: (ChatResult & { attempts: number }) | null = null;
       try {
         result = await this.call(continueMessages(base, node.narrative), {
+          ...control, usage: { worldId, nodeId: node.id, purpose: "continue" },
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
             const visible = splitter.push(delta);
             if (visible) { shown += visible; onEvent({ type: "text", delta: visible, full: shown }); }
           },
-          onHandle: (h) => (handle = h),
         });
+        const { narrative: addition, recordText } = splitter.finish();
+        const narrative = `${node.narrative}${addition}`;
+        let record = parseRecord(recordText).record;
+        if (!record || (world.settings.choiceCount > 0 && !record.choices?.length)) {
+          onEvent({ type: "organizing" });
+          const extracted = await this.extract(era, state, node.actionText ?? "", narrative, world.settings, control, { worldId, nodeId: node.id, purpose: "extract" });
+          if (extracted.result) await this.platform.sql.batch([this.usage(worldId, node.id, "extract", extracted.result, extracted.record ? "ok" : "no_record", this.auxModelName())]);
+          if (extracted.record) record = record ? { ...extracted.record, ...record, choices: extracted.record.choices } : extracted.record;
+        }
+        control.check();
+        const applied = applyRecord(state, record, { mode, difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock, fortune });
+        control.beginCommit();
+        const updated = await this.repo.completeNode(node.id, {
+          narrative, record, choices: record?.choices ?? [], status: record ? "ok" : "no_record",
+          meta: { ...node.meta, messages: undefined, carriedEdits: undefined, rewriteHint: undefined, chips: applied.chips, notes: applied.notes, log: applied.log, resumed: true, usage: result.usage },
+        }, applied.state, [this.usage(worldId, node.id, "continue", result, "ok", (this.llm?.model ?? ""))]);
+        let cursor = { ...c, head: updated };
+        for (const edit of (node.meta.carriedEdits as CarriedEdit[] | undefined) ?? []) {
+          const carried = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
+          if (!("rejected" in carried)) cursor = carried;
+        }
+        this.announceCommitted(worldId, updated);
+        onEvent({ type: "done", cursor, node: updated, chips: applied.chips });
       } catch (error) {
-        onEvent({ type: "failed", ...failReason(error), partialSaved: true, cursor: c });
-        return;
+        if (!(error instanceof ChatError)) throw error;
+        // Retain newly received continuation text too, without applying any record.
+        const narrative = `${node.narrative}${splitter.finish().narrative}`;
+        const updated = await this.repo.completeNode(node.id, {
+          narrative, record: null, choices: [], status: "interrupted",
+          meta: { ...node.meta, messages: undefined, chips: [] },
+        }, state, result ? [this.usage(worldId, node.id, "continue", result, "cancelled", this.llm?.model ?? "")] : []);
+        onEvent({ type: "failed", ...failReason(error), partialSaved: true, cursor: { ...c, head: updated } });
       }
-      const { narrative: addition, recordText } = splitter.finish();
-      const narrative = `${node.narrative}${addition}`;
-      let record = parseRecord(recordText).record;
-      if (!record) {
-        onEvent({ type: "organizing" });
-        record = (await this.extract(era, state, node.actionText ?? "", narrative)).record;
-      }
-      const action = { mode: node.actionMode ?? ("continue" as const), text: node.actionText ?? "" };
-      const applied = applyRecord(state, record, { mode: action.mode, difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock });
-      const updated = await this.repo.completeNode(node.id, {
-        narrative, record, choices: record?.choices ?? [], status: record ? "ok" : "no_record",
-        meta: { ...node.meta, messages: undefined, chips: applied.chips, notes: applied.notes, log: applied.log, resumed: true, usage: result.usage },
-      }, applied.state, [this.usage(worldId, node.id, "continue", result, "ok", (this.llm?.model ?? ""))]);
-      onEvent({ type: "done", cursor: { ...c, head: updated }, node: updated, chips: applied.chips });
     });
-    return { stop: () => handle?.cancel(), catchUp: async () => { await handle?.catchUp(); }, done };
+    return { stop: control.stop, catchUp: control.catchUp, done };
   }
 
   /**
@@ -717,7 +989,7 @@ export class Game {
     return {
       era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name, state,
       ...(await this.repo.path(base.id).then((path) => ({ history: path.slice(-40), allTurns: path }))), notes: (base.meta.notes as string[] | undefined) ?? [],
-      taboos: (base.meta.taboos as TabooHit[] | undefined) ?? [],
+      taboos: state.era.mode === "free" ? [] : (base.meta.taboos as TabooHit[] | undefined) ?? [],
       pins: (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text),
       chapters: await this.repo.chaptersOnPath(worldId, base.id),
       budgetChars: Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value),
@@ -755,12 +1027,12 @@ export class Game {
     let result: ChatResult | null = null;
     let refused = false;
     try {
-      result = await this.call(messages, { aux: true, timeouts: CODEX_TIMEOUT, onText: (_d, full) => { if (hasChinese(full)) onText(full); } });
+      result = await this.call(messages, { usage: { worldId, nodeId: head.id, purpose: "ask" }, aux: true, timeouts: CODEX_TIMEOUT, onText: (_d, full) => { if (hasChinese(full)) onText(full); } });
       // An honest "抱歉，我无法确定……" is an answer; only the response's own signal or a notice is a refusal.
       refused = refusedFinish(result.finishReason) || isNotice(result.text);
       return refused ? explainFailure("refused") : result.text.trim();
     } finally {
-      await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, !result ? "failed" : refused ? "refused" : "ok", this.auxModelName())]);
+      if (result) await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, refused ? "refused" : "ok", this.auxModelName())]);
     }
   }
 
@@ -800,10 +1072,15 @@ export class Game {
   private async summarize(worldId: string, nodeId: string, input: Parameters<typeof chapterMessages>[0]): Promise<Pick<Chapter, "title" | "gist" | "summary"> | null> {
     let result: ChatResult | null = null;
     try {
-      result = await this.call(chapterMessages(input), { aux: true, timeouts: CODEX_TIMEOUT });
+      const messages = chapterMessages(input);
+      if ((await this.repo.getState(nodeId)).era.mode === "free") {
+        messages[0].content = messages[0].content.replace("历史互动小说", "互动小说")
+          + "\n沿用本局世界设定与称呼，不补写年表或未来事件，不输出 timeline、deviation。";
+      }
+      result = await this.call(messages, { usage: { worldId, nodeId, purpose: "chapter" }, aux: true, timeouts: CODEX_TIMEOUT });
     } catch { /* play goes on without it */ }
     const parsed = result ? parseChapter(result.text) : null;
-    await this.platform.sql.batch([this.usage(worldId, nodeId, "chapter", result, parsed ? "ok" : result ? "no_record" : "failed", this.auxModelName())]);
+    if (result) await this.platform.sql.batch([this.usage(worldId, nodeId, "chapter", result, parsed ? "ok" : "no_record", this.auxModelName())]);
     return parsed;
   }
 
@@ -820,12 +1097,13 @@ export class Game {
       const { chapters, turns, firstTurn } = await this.unsummarized(worldId, at);
       if (!turns.length) return null;
       const world = (await this.repo.getWorld(worldId))!;
-      const protagonist = (await this.repo.getState(at.id)).protagonist.name;
+      const state = await this.repo.getState(at.id);
+      const protagonist = state.protagonist.name;
       const parsed = await this.summarize(worldId, at.id, { premise: world.settings.premise, protagonist, previous: chapters, turns, firstTurn });
       if (!parsed) return null;
       const chapter = await this.repo.addChapter({
         worldId, firstNodeId: turns[0].id, lastNodeId: turns[turns.length - 1].id, ...parsed,
-        model: this.llm.auxModel || this.llm.model, promptVersion: CHAPTER_PROMPT_VERSION,
+        model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
       });
       for (const fn of this.listeners) fn(worldId);
       return chapter;
@@ -845,13 +1123,14 @@ export class Game {
     const from = path.findIndex((n) => n.id === chapter.firstNodeId);
     const turns = path.slice(from).filter((n) => n.kind === "turn" && n.status !== "interrupted");
     const world = (await this.repo.getWorld(worldId))!;
-    const protagonist = (await this.repo.getState(chapter.lastNodeId)).protagonist.name;
+    const state = await this.repo.getState(chapter.lastNodeId);
+    const protagonist = state.protagonist.name;
     const parsed = await this.summarize(worldId, chapter.lastNodeId, {
       premise: world.settings.premise, protagonist, previous: chapters.slice(0, index), turns,
       firstTurn: path.slice(0, from).filter((n) => n.kind === "turn").length + 1,
     });
     if (!parsed) return null;
-    const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: CHAPTER_PROMPT_VERSION, edited: false };
+    const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION, edited: false };
     await this.repo.updateChapter(chapter.id, fields);
     return { ...chapter, ...fields };
   }
@@ -879,17 +1158,17 @@ export class Game {
       const state = await this.repo.getState(head.id);
       let result: ChatResult | null = null;
       try {
-        const taboos = eraContext(world.eraId, state).eraCard?.content.split("\n").find((l) => l.startsWith("不要出现："))?.slice(5);
-        result = await this.call(upkeepMessages({ premise: world.settings.premise, state, turns, taboos }), { aux: true, timeouts: CODEX_TIMEOUT });
+        const taboos = state.era.mode === "free" ? undefined : tabooLine(eraContext(world.eraId, state).eraCard?.content) ?? undefined;
+        result = await this.call(upkeepMessages({ premise: world.settings.premise, state, turns, taboos }), { usage: { worldId, nodeId: head.id, purpose: "upkeep" }, aux: true, timeouts: CODEX_TIMEOUT });
       } catch { /* the story goes on without it */ }
       await this.serial(worldId, async () => {
         const c = await tree.cursor(this.repo, worldId);
         const onPath = (await this.repo.path(c.head.id, UPKEEP_EVERY * 4)).some((n) => n.id === head.id);
         const patch = result && onPath ? upkeepPatch(result.text, await this.repo.getState(c.head.id)) : null;
         const outcome = !result ? "failed" : !onPath ? "stale" : patch ? "ok" : "no_record";
-        await this.platform.sql.batch([this.usage(worldId, head.id, "upkeep", result, outcome, this.auxModelName())]);
+        if (result) await this.platform.sql.batch([this.usage(worldId, head.id, "upkeep", result, outcome, this.auxModelName())]);
         if (!patch) return;
-        if ("rejected" in await this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI", promptVersion: UPKEEP_PROMPT_VERSION })) return;
+        if ("rejected" in await this.appendEdit(worldId, patch, codexSummary(patch, state), { by: "AI", promptVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION })) return;
         for (const fn of this.listeners) fn(worldId);
       });
     } finally {
@@ -931,7 +1210,7 @@ export class Game {
       await this.commit(cur, base, pending.kind, pending.action, narrative, parsed.record, parsed.issues, state, era, world.settings,
         { text, finishReason: null, usage: null, firstTokenMs: null, totalMs: 0, attempts: 1 }, () => {});
     } else {
-      await this.saveInterrupted(cur, base, pending.kind, pending.action, narrative || text, state, []);
+      await this.saveInterrupted(cur, base, pending.kind, pending.action, narrative || text, state, null);
     }
     return pending.worldId;
   }

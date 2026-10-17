@@ -7,7 +7,7 @@ import * as tree from "../../engine/tree";
 import type { Line, StoryNode } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
-import { isStory, rangeLabel, segments, type Segment } from "./treeSegments";
+import { isStory, lineMarks, rangeLabel, segments, type Segment } from "./treeSegments";
 
 const brief = (text: string, max = 18) => {
   const t = text.replace(/\s+/g, "");
@@ -52,15 +52,11 @@ export function TreeView({ worldId, onClose, onJumped }: { worldId: string; onCl
     void (async () => {
       const [nodes, lines, c] = await Promise.all([game.repo.allNodes(worldId), game.repo.lines(worldId), tree.cursor(game.repo, worldId)]);
       const path = new Set((await game.repo.path(c.head.id)).map((n) => n.id));
-      setData({ nodes, lines: lines.filter((l) => !l.deletedAt), path });
+      setData({ nodes, lines, path });
     })();
   }, [worldId]);
-  const root = useMemo(() => (data ? segments(data.nodes) : null), [data]);
-  const marks = useMemo(() => {
-    const m = new Map<string, string[]>();
-    for (const l of data?.lines ?? []) m.set(l.nodeId, [...(m.get(l.nodeId) ?? []), l.kind === "bookmark" ? `书签：${l.name}` : l.name]);
-    return m;
-  }, [data]);
+  const roots = useMemo(() => (data ? segments(data.nodes) : []), [data]);
+  const marks = useMemo(() => lineMarks(data?.lines ?? []), [data]);
   const jump = async (node: StoryNode, number: number) => {
     await tree.jumpTo(game.repo, worldId, node.id, number === 0 ? "从开场重来的路" : `第 ${number} 回合后的另一条路`);
     onJumped(number === 0 ? "已回到开场" : `已回到第 ${number} 回合`);
@@ -68,7 +64,7 @@ export function TreeView({ worldId, onClose, onJumped }: { worldId: string; onCl
   return (
     <Sheet title="回合树" onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>没有岔路的一段合成一行，点开能看每一回合。红框是你现在走的路。</p>
-      <div className="tree">{root && data ? <SegmentRow seg={root} depth={0} marks={marks} onPath={data.path} onJump={(n, i) => void jump(n, i)} /> : <p className="muted">正在读取…</p>}</div>
+      <div className="tree">{data ? roots.map((root) => <SegmentRow key={root.nodes[0].id} seg={root} depth={0} marks={marks} onPath={data.path} onJump={(n, i) => void jump(n, i)} />) : <p className="muted">正在读取…</p>}</div>
     </Sheet>
   );
 }

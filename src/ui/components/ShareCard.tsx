@@ -3,12 +3,13 @@
 // sheet and saved. The browser downloads a PNG; the app has only a text
 // export, so there the picture is saved inside an .html file, and the sheet
 // says so.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { eraContext } from "../../engine/era";
-import { dateText, excerpt } from "../../engine/life";
+import { dateText } from "../../engine/life";
 import type { StoryNode, World } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { checkCardSize, checkCardText } from "./shareLimits";
 
 export type CardLayout = "册页" | "手卷" | "简洁";
 export const LAYOUTS: { id: CardLayout; note: string }[] = [
@@ -76,7 +77,10 @@ export function drawSeal(ctx: CanvasRenderingContext2D, x: number, y: number, si
   ctx.restore();
 }
 
-const NO_LINE_START = "，。、；：！？）」』”’》…—";
+/** Between passages on a card of several: the story's own divider, centred. */
+export const SEPARATOR = "◇";
+
+const NO_LINE_START ="，。、；：！？）」』”’》…—";
 
 /** Wraps Chinese text by character, keeping closing punctuation off a line's start. */
 export function wrap(measure: (s: string) => number, text: string, width: number): string[] {
@@ -103,6 +107,7 @@ function footer(c: CardContent): string[] {
 
 /** Draws the card and returns the canvas; width 1080 for the horizontal layouts. */
 export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvasElement {
+  checkCardText(content.body);
   const font = fontStack();
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
@@ -116,13 +121,14 @@ export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvas
   const lead = bodySize * 1.9;
   ctx.font = `${bodySize}px ${font}`;
   const indent = plain ? "" : "　　";
-  const body = content.body.split("\n").map((p) => indent + p).join("\n");
+  const body = content.body.split("\n").map((p) => (p === SEPARATOR ? p : indent + p)).join("\n");
   const lines = wrap((s) => ctx.measureText(s).width, body, W - pad * 2);
   const headH = (content.heading ? 150 : 0) + 120;
   const footH = 220;
   // At least 4:5, so a short passage is still a card and not a strip; then its text sits a little above the middle.
   const needed = pad + headH + lines.length * lead + footH + pad;
   const H = Math.max(1350, needed);
+  checkCardSize(W, H);
   canvas.width = W;
   canvas.height = H;
 
@@ -166,7 +172,14 @@ export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvas
   ctx.fillStyle = PAPER.ink;
   ctx.font = `${bodySize}px ${font}`;
   for (const line of lines) {
-    ctx.fillText(line, pad, y);
+    if (line === SEPARATOR) {
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.fillStyle = PAPER.seal;
+      ctx.font = `${Math.round(bodySize * 0.6)}px ${font}`;
+      ctx.fillText(line, W / 2, y - bodySize * 0.25);
+      ctx.restore();
+    } else ctx.fillText(line, pad, y);
     y += lead;
   }
 
@@ -193,6 +206,10 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
   const perCol = Math.floor((H - top * 2) / (size * 1.12));
   const cols: string[][] = [];
   for (const para of content.body.split("\n")) {
+    if (para === SEPARATOR) {
+      cols.push([...Array<string>(Math.floor(perCol / 2)).fill("　"), SEPARATOR]);
+      continue;
+    }
     let col: string[] = ["　", "　"];
     for (const ch of [...para]) {
       if (col.length >= perCol && !NO_LINE_START.includes(ch)) { cols.push(col); col = []; }
@@ -203,6 +220,7 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
   const titleCols = content.heading ? 2 : 1;
   const footCols = footer(content).length;
   const W = Math.max(1080, 140 * 2 + (titleCols + cols.length) * colW + footCols * 52 + 260);
+  checkCardSize(W, H);
   canvas.width = W;
   canvas.height = H;
   ctx.fillStyle = PAPER.bg;
@@ -240,15 +258,25 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
 }
 
 /** Preview, layout choice and saving. */
-export function CardSheet({ content, onClose, title = "书摘卡" }: { content: CardContent; onClose: () => void; title?: string }) {
+export function CardSheet({ content, onClose, title = "书摘卡", controls }: { content: CardContent; onClose: () => void; title?: string; controls?: ReactNode }) {
   const { game, toast } = useApp();
   const [layout, setLayout] = useState<CardLayout>("册页");
   const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState("");
   const browser = game.platform.name === "web-dev";
   useEffect(() => {
     // After the fonts the page uses are ready, so the canvas draws with them.
     let live = true;
-    void (document.fonts?.ready ?? Promise.resolve()).then(() => { if (live) setUrl(renderCard(content, layout).toDataURL("image/png")); });
+    setUrl(null); setError("");
+    void (document.fonts?.ready ?? Promise.resolve()).then(() => {
+      if (!live) return;
+      const canvas = renderCard(content, layout);
+      try {
+        const result = canvas.toDataURL("image/png");
+        if (!result.startsWith("data:image/png")) throw new Error("设备没能画出这张图，请少选几段再试。");
+        setUrl(result);
+      } finally { canvas.width = 0; canvas.height = 0; }
+    }).catch((e: unknown) => { if (live) setError(e instanceof Error ? e.message : "没能画出图片，请重试。"); });
     return () => { live = false; };
   }, [content, layout]);
   const name = `${content.heading ?? content.title}-${layout}`.replace(/[\\/:*?"<>|\s]/g, "");
@@ -266,13 +294,16 @@ export function CardSheet({ content, onClose, title = "书摘卡" }: { content: 
   return (
     <Sheet title={title} onClose={onClose}>
       <div className="stack">
-        <div className="segmented" role="group" aria-label="样式">
-          {LAYOUTS.map((l) => <button key={l.id} aria-pressed={layout === l.id} onClick={() => setLayout(l.id)}>{l.id}</button>)}
+        {controls}
+        <div className="stack" style={{ gap: 6 }}>
+          <span className="muted">样式 · {LAYOUTS.find((l) => l.id === layout)!.note}</span>
+          <div className="segmented" role="group" aria-label="样式">
+            {LAYOUTS.map((l) => <button key={l.id} aria-pressed={layout === l.id} onClick={() => setLayout(l.id)}>{l.id}</button>)}
+          </div>
         </div>
-        <p className="muted" style={{ margin: 0, fontSize: 13 }}>{LAYOUTS.find((l) => l.id === layout)!.note}</p>
         <div className={`share-preview${layout === "手卷" ? " scroll" : ""}`}>
           {/* A 手卷 reads from the right: start the preview there. */}
-          {url ? <img src={url} alt="书摘卡预览" onLoad={(e) => { const box = e.currentTarget.parentElement; if (box) box.scrollLeft = box.scrollWidth; }} /> : <p className="muted">正在画…</p>}
+          {url ? <img src={url} alt="书摘卡预览" onLoad={(e) => { const box = e.currentTarget.parentElement; if (box) box.scrollLeft = box.scrollWidth; }} /> : <p className={error ? "notice" : "muted"} role={error ? "alert" : undefined}>{error || "正在画…"}</p>}
         </div>
         <button className="primary" disabled={!url} onClick={() => void save()}>保存图片</button>
         {!browser && <p className="muted" style={{ margin: 0, fontSize: 13 }}>手机上暂时不能直接存进相册：会存成一个网页文件（.html），用浏览器打开就能看到这张图，再长按图片保存。</p>}
@@ -289,6 +320,14 @@ function escapeHtml(s: string): string {
 export function PassageCardSheet({ world, node, onClose }: { world: World; node: StoryNode; onClose: () => void }) {
   const { game } = useApp();
   const [meta, setMeta] = useState<{ date: string; place: string; name: string } | null>(null);
+  const [passages, setPassages] = useState<StoryNode[]>([node]);
+  const [count, setCount] = useState(1);
+  useEffect(() => {
+    let live = true;
+    setCount(1); setPassages([node]);
+    void game.repo.path(node.id, 50).then((path) => { if (live) setPassages(path.filter((p) => p.kind !== "edit" && p.narrative.trim()).slice(-5)); }).catch(() => {});
+    return () => { live = false; };
+  }, [game, node]);
   useEffect(() => {
     void game.repo.getState(node.id).then((state) => {
       const era = eraContext(world.eraId, state);
@@ -299,7 +338,20 @@ export function PassageCardSheet({ world, node, onClose }: { world: World; node:
       });
     }).catch(() => setMeta({ date: "", place: "", name: "" }));
   }, [game, world.eraId, node.id]);
-  const content = useMemo<CardContent | null>(() => meta && { title: world.title, body: excerpt(node.narrative), ...meta }, [meta, world.title, node.narrative]);
+  const content = useMemo<CardContent | null>(() => meta && {
+    title: world.title, body: count === 1 ? node.narrative : passages.slice(-count).map((p) => p.narrative).join(`\n\n${SEPARATOR}\n\n`), ...meta,
+  }, [meta, world.title, node.narrative, passages, count]);
   if (!content) return null;
-  return <CardSheet content={content} onClose={onClose} />;
+  // Up to five passages ending with this one, along the route it is on; the date is this one's.
+  const range = passages.length > 1 && (
+    <div className="stack" style={{ gap: 6 }}>
+      <span className="muted">连同前面几段</span>
+      <div className="segmented" role="group" aria-label="分享范围">
+        {passages.map((_, i) => (
+          <button key={i} aria-pressed={count === i + 1} onClick={() => setCount(i + 1)}>{i === 0 ? "只这一段" : `共 ${i + 1} 段`}</button>
+        ))}
+      </div>
+    </div>
+  );
+  return <CardSheet content={content} onClose={onClose} controls={range} />;
 }

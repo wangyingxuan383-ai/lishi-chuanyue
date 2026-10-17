@@ -13,6 +13,7 @@ import { matchName } from "../state/names";
 import type { CardKind, StoryNode, WorldState } from "../types";
 
 export const UPKEEP_PROMPT_VERSION = "upkeep-3";
+export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-4";
 /** Turns between two passes. */
 export const UPKEEP_EVERY = 6;
 /** Most new cards, updates and places taken from one pass. */
@@ -22,7 +23,7 @@ const SOURCE_TEXT = { 卡组: "内置卡组", AI: "AI 整理", 玩家: "玩家�
 
 export interface UpkeepInput {
   premise: string;
-  state: Pick<WorldState, "cards" | "places" | "people" | "dismissed" | "protagonist">;
+  state: Pick<WorldState, "cards" | "places" | "people" | "dismissed" | "protagonist"> & Partial<Pick<WorldState, "era">>;
   /** The turns since the last pass, oldest first. */
   turns: Pick<StoryNode, "actionText" | "narrative">[];
   /** The era card's "不要出现" line, so cards use the era's own words. */
@@ -46,6 +47,8 @@ function storyBlock(turns: UpkeepInput["turns"]): string {
 
 export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
   const { state } = input;
+  const free = state.era?.mode === "free";
+  const worldCard = free ? state.cards.find((c) => c.kind === "时代") : null;
   const cards = state.cards.filter((c) => c.kind !== "时代").map((c) => c.source === "AI"
     ? `- ${c.kind} · ${c.name}（AI 整理，可以更新）：${short(c.content, 100)}`
     : `- ${c.kind} · ${c.name}（${SOURCE_TEXT[c.source ?? "玩家"]}，不要改）`);
@@ -54,16 +57,16 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你是一部历史互动小说的资料员，替作者维护“设定集”：读最近几回合的剧情，把以后写作用得着的资料记下来。
+      content: `你是一部${free ? "" : "历史"}互动小说的资料员，替作者维护“设定集”：读最近几回合的剧情，把以后写作用得着的资料记下来。
 要求：
-- 新卡只记剧情里有名字、以后很可能再出现的东西，一张卡只写一样东西。先记反复出现的势力（官署、军队、帮会、商号、家族、党派），再记关键物件（信物、证据）和设定（规矩、案子、暗号）。一次最多 3 张，宁缺毋滥；已有的卡片和地点不要重复建。
+- 新卡只记剧情里有名字、以后很可能再出现的东西，一张卡只写一样东西。${free ? "记下反复出现的组织、关键物品和设定。" : "先记反复出现的势力（官署、军队、帮会、商号、家族、党派），再记关键物件（信物、证据）和设定（规矩、案子、暗号）。"}一次最多 3 张，宁缺毋滥；已有的卡片和地点不要重复建。
 - 主角就是【主角】里写的那个人，剧情里的“你”就是主角。主角做的事、拿到的东西记在主角名下（卡片里写“主角”或主角的名字），不要记到别人头上，也不要给主角另起名字。
 - 人物表里没有、却在剧情里反复出现、有名字或固定称呼的人，写进 people（身份、对主角的态度、一句备注），一次最多 3 个；人物表里已有的不写，人物不建卡。人物表里的人，剧情写明已经死了的，写进 deaths。
 - 剧情里到过或详细写到的地点：没有描述的补一句描述；没有的新地点可以新建。已有地点里面的一处（院子、偏厅、牢房）写进那个地点的描述，不要另建一张。
 - 【主角的状况】里不是身体或精神状况的（东西、知道的事、处境、别人的态度），和剧情里早已好了、过去了的，写进 statusRemove。
 - 逐张检查标着“AI 整理，可以更新”的卡片和地点：最近的剧情让它过时了（东西被取走、人死了、地方被毁、真相揭开、立场改变），就重写它的正文；没变的不要动。标着“不要改”的一律不动。
 - 只写剧情里写到的事实，不编造、不预告；别人转述的话、传闻和猜测要写明“某某说”“传闻”，不要写成定论。同一件事只写在最相关的那一张卡里。用资料口吻，每张不超过 80 字。
-- 名称用剧情里的叫法，其他叫法写进别名；但要用这个时代该有的说法，不要照抄正文里不合时代的词（附有【这个时代不该出现的东西】时，避开里面的说法）。
+- ${free ? "名称和称呼沿用剧情与世界卡，其他叫法写进别名。世界卡只供参考，不改写；不自动编排未来事件，不输出 timeline、deviation。" : "名称用剧情里的叫法，其他叫法写进别名；但要用这个时代该有的说法，不要照抄正文里不合时代的词（附有【这个时代不该出现的东西】时，避开里面的说法）。"}
 - 没有值得记的就输出空数组。
 只输出一个 JSON 对象：
 {"cards":[{"kind":"势力","name":"名称","keys":["别名"],"content":"……"}],
@@ -79,7 +82,7 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
 
 【主角的状况】${state.protagonist.statuses.map((x) => x.name).join("、") || "（无）"}
 
-【故事设定】\n${short(input.premise.trim(), 600) || "（未写）"}
+【故事设定】\n${short(input.premise.trim(), 600) || "（未写）"}${worldCard ? `\n\n【世界卡】${worldCard.name}\n${short(worldCard.content, 600)}` : ""}
 
 【设定集里已有的卡片】
 ${cards.join("\n") || "（无）"}
@@ -87,7 +90,7 @@ ${cards.join("\n") || "（无）"}
 【已有的地点】
 ${places.join("\n") || "（无）"}
 
-【人物表里已有的人物（不要建卡，也不要再写进 people）】${people.join("、") || "（无）"}${state.dismissed?.length ? `\n\n【玩家删掉的，不要再建】${state.dismissed.join("、")}` : ""}${input.taboos ? `\n\n【这个时代不该出现的东西】${input.taboos}` : ""}
+【人物表里已有的人物（不要建卡，也不要再写进 people）】${people.join("、") || "（无）"}${state.dismissed?.length ? `\n\n【玩家删掉的，不要再建】${state.dismissed.join("、")}` : ""}${!free && input.taboos ? `\n\n【这个时代不该出现的东西】${input.taboos}` : ""}
 
 【最近的剧情】
 ${storyBlock(input.turns)}`,
@@ -110,7 +113,7 @@ export function upkeepPatch(raw: string, state: Pick<WorldState, "cards" | "plac
   if (!value || typeof value !== "object") return null;
   const dismissed = new Set(state.dismissed ?? []);
   const cardNames = state.cards.filter((c) => c.kind !== "时代").map((c) => ({ id: c.id, name: c.name, aliases: c.keys }));
-  const known = (name: string) => dismissed.has(name) || !!matchName(cardNames, name) || !!matchName(state.people, name) || !!matchName(state.places, name);
+  const known = (name: string) => dismissed.has(name) || !!matchName(cardNames, name) || !!matchName(state.people, name, { partial: false }) || !!matchName(state.places, name);
   const cards: CardPatch[] = [];
   const places: PlacePatch[] = [];
   const people: NonNullable<TurnRecord["people"]> = [];
@@ -166,7 +169,7 @@ export function upkeepPatch(raw: string, state: Pick<WorldState, "cards" | "plac
   }
   // Deaths the ledger missed: only people already listed and still alive.
   for (const name of Array.isArray(value.deaths) ? value.deaths.map((n) => text(n, 20)).filter(Boolean) : []) {
-    const person = matchName(state.people, name);
+    const person = matchName(state.people, name, { partial: false });
     if (person?.alive && !people.some((p) => p.id === person.id)) people.push({ id: person.id, name: person.name, alive: false });
   }
   // Statuses that are not (or no longer) the protagonist's condition.

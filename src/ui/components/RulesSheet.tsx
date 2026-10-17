@@ -66,9 +66,10 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
   };
 
   return (
-    <Sheet title="纪年与货币" onClose={onClose}>
+    <Sheet title={state.era.mode === "free" ? "世界货币" : "纪年与货币"} onClose={onClose}>
       <div className="stack" style={{ gap: 10 }}>
-        <p className="muted" style={{ margin: 0 }}>程序用这些规则推算日期、计算钱数。修改后可以撤销。</p>
+        <p className="muted" style={{ margin: 0 }}>{state.era.mode === "free" ? "时间按故事经过的天数显示；货币按你的世界设定换算。修改后可以撤销。" : "程序用这些规则推算日期、计算钱数。修改后可以撤销。"}</p>
+        {state.era.mode !== "free" && <>
         <span className="muted">历法</span>
         <div className="segmented">
           <button aria-pressed={lunar} onClick={() => setLunar(true)}>农历（中国）</button>
@@ -88,6 +89,7 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
         </label>
         {!dateOk && <p className="notice" style={{ margin: 0 }}>日期不完整：要有年号、年份，日子在 1～{dayLimit} 之间。</p>}
         {dateOk && events > 0 && summary.some((s) => s.startsWith("开局日期") || s.startsWith("历法")) && <p className="field-hint" style={{ margin: 0 }}>年表里的 {events} 件大事会按新的开局日期重新排时间。</p>}
+        </>}
         <span className="muted">货币（从大到小，换算以最小的单位计，最小的写 1）</span>
         {units.map((u, i) => (
           <div className="row" key={i}>

@@ -1,0 +1,198 @@
+/* Play modes (R14): 自由 / 剧本 / 挑战 / 旁观 — the new-story cards and editors,
+   the slim banner, the 剧本 and 挑战 sheets, the end cards and the 旁观 dock.
+   Only the design tokens of base.css (DESIGN_SPEC): no new colours or fonts. */
+
+/* ---------- 新的故事: four cards, one short line each ---------- */
+.play-styles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.play-style {
+  display: grid; justify-items: center; align-content: center; gap: 4px;
+  min-height: 74px; padding: 8px 2px; text-align: center; border-radius: 3px; background: var(--surface);
+}
+.play-style b { font-family: var(--serif); font-size: 16px; font-weight: 600; letter-spacing: 0.14em; padding-left: 0.14em; line-height: 1.2; }
+.play-style small { display: grid; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.play-style[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 -2px 0 var(--accent); }
+.play-style[aria-pressed="true"] b { color: var(--accent); }
+.play-style[aria-pressed="true"] small { color: color-mix(in srgb, var(--fg) 72%, var(--muted)); }
+
+/* The editor of the chosen mode: a paper card with the cinnabar edge, right under the cards. */
+.mode-panel {
+  display: grid; gap: 12px; padding: 12px 14px 14px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px;
+  background: var(--surface); animation: fade-up 0.2s ease-out both;
+}
+.mode-panel > .muted, .mode-hint { margin: 0; font-size: 14px; line-height: 1.6; color: var(--muted); }
+.mode-field { display: grid; gap: 6px; }
+.mode-field > span { font-size: 14px; color: var(--muted); }
+/* What the player types reads as text, not as the label's grey caption. */
+.mode-field :is(input, textarea), .setup-form label :is(input, textarea),
+.sheet:is([aria-label="故事设定与要点"], [aria-label="本局设置"]) label :is(input, textarea) { color: var(--fg); font-size: 16px; }
+.mode-field .optional { font-size: 12px; margin-left: 4px; }
+.mode-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.mode-actions .grow { flex: 1; }
+.mode-draft { font-family: var(--serif); letter-spacing: 0.06em; color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: transparent; }
+.mode-draft:disabled { opacity: 1; color: var(--muted); border-color: var(--line); }
+
+/* A beat of the outline: its number, its words, its own small tools. */
+.beat-list { display: grid; gap: 6px; }
+.beat-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) var(--tap); gap: 4px 6px; align-items: start; }
+.beat-num { font-family: var(--serif); color: var(--accent); font-size: 15px; line-height: var(--tap); text-align: center; }
+.beat-row textarea { min-height: var(--tap); padding: 10px 12px; field-sizing: content; max-height: 30vh; line-height: 1.55; }
+.beat-row .icon-btn { color: var(--muted); }
+.beat-row .icon-btn[aria-expanded="true"] { color: var(--accent); }
+.beat-tools { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 6px; animation: fade-up 0.16s ease-out both; }
+.beat-tools button { min-height: var(--tap); padding: 0 10px; font-size: 14px; }
+.beat-tools .danger-text { margin-left: auto; border-color: transparent; background: transparent; }
+.beat-add { justify-self: start; color: var(--accent); border-style: dashed; background: transparent; font-family: var(--serif); letter-spacing: 0.06em; }
+
+/* 主角交给 AI 演 and the other switches: the whole row is the button. */
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; min-height: 48px; padding: 6px 0; text-align: left;
+  border: none; border-radius: 0; background: transparent;
+}
+.switch-row > span:first-child { display: grid; gap: 2px; min-width: 0; }
+.switch-row b { font-weight: 400; font-size: 15px; color: var(--fg); }
+.switch-row small { font-size: 13px; color: var(--muted); line-height: 1.5; }
+.switch-track {
+  position: relative; flex-shrink: 0; width: 44px; height: 26px; border-radius: 4px;
+  background: var(--line); transition: background-color 0.15s;
+}
+.switch-track::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 2px;
+  background: var(--raised); box-shadow: 0 1px 2px var(--shadow); transition: transform 0.15s, background-color 0.15s;
+}
+/* On ink paper the light knob would vanish into the dark track. */
+:root[data-theme="night"] .switch-track::after { background: var(--muted); }
+.switch-row[aria-checked="true"] .switch-track { background: var(--accent); }
+.switch-row[aria-checked="true"] .switch-track::after, :root[data-theme="night"] .switch-row[aria-checked="true"] .switch-track::after { transform: translateX(18px); background: var(--on-accent); }
+.switch-row:disabled { opacity: 0.45; }
+
+/* Ready-made challenges: a row that scrolls sideways on a phone. */
+.challenge-row {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(196px, 74%); gap: 8px;
+  overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior-x: contain;
+  margin: 0 -14px; padding: 2px 14px 6px; scroll-padding: 0 14px; scrollbar-width: none;
+}
+.challenge-row::-webkit-scrollbar { display: none; }
+.challenge-card {
+  scroll-snap-align: start; display: grid; gap: 3px; align-content: start; min-height: 104px;
+  padding: 10px 12px; text-align: left; border-radius: 3px; background: var(--raised);
+}
+.challenge-card .head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.challenge-card b { font-family: var(--serif); font-size: 16px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap; }
+.challenge-card small { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.challenge-card .blurb {
+  margin-top: 4px; font-family: var(--serif); font-size: 14px; line-height: 1.55; color: var(--fg);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.challenge-card[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+@media (min-width: 600px) {
+  .challenge-row { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-columns: auto; overflow: visible; margin: 0; padding: 0; }
+}
+.limit-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.limit-picks button { min-height: 36px; padding: 2px 12px; font-size: 13px; background: transparent; }
+.limit-picks button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+/* ---------- 游玩: the slim banner under the top bar ---------- */
+.mode-banner {
+  position: relative; display: flex; align-items: stretch; flex-shrink: 0;
+  border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 82%, transparent);
+  animation: fade 0.2s ease-out both;
+}
+.mode-banner > button {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+  min-height: 40px; padding: 0 12px 0 14px; border: none; border-radius: 0; background: transparent; text-align: left;
+}
+.mode-banner > button + button { flex: 0 1 auto; border-left: 1px solid var(--line); padding-left: 12px; }
+.mode-banner .mark {
+  flex-shrink: 0; padding: 0 5px; border: 1px solid currentColor; border-radius: 2px;
+  font-family: var(--serif); font-size: 12px; line-height: 18px; color: var(--accent);
+}
+.mode-banner .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--serif); font-size: 14px; letter-spacing: 0.02em; }
+.mode-banner .text em { font-style: normal; color: var(--accent); margin-right: 6px; }
+.mode-banner .text.soon em { color: var(--warn); }
+.mode-banner .icon { color: var(--muted); }
+.mode-banner .meter { position: absolute; left: 0; bottom: -1px; height: 2px; background: var(--accent); opacity: 0.55; transition: width 0.4s ease-out; pointer-events: none; }
+
+/* ---------- 剧本 page ---------- */
+.script-sheet { display: grid; gap: 14px; }
+.script-progress { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: -4px; }
+.script-progress b { font-family: var(--serif); font-size: 15px; letter-spacing: 0.06em; }
+.script-progress .muted { font-size: 13px; }
+.script-beats { display: grid; }
+.script-beat { display: grid; grid-template-columns: 30px minmax(0, 1fr) var(--tap); gap: 2px 8px; align-items: start; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.script-beat:last-child { border-bottom: none; }
+.beat-stamp {
+  width: 26px; height: 26px; margin-top: 9px; display: grid; place-items: center; border-radius: 3px;
+  font-family: var(--serif); font-size: 13px; line-height: 1; color: var(--muted); border: 1px dashed var(--line);
+}
+.script-beat.done .beat-stamp { border: none; background: var(--accent); color: var(--on-accent); font-weight: 700; transform: rotate(-4deg); box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent); }
+.script-beat.current .beat-stamp { border: 1px solid var(--accent); color: var(--accent); font-weight: 600; }
+.script-beat.skipped .beat-stamp { opacity: 0.7; }
+.beat-body { display: grid; gap: 2px; min-width: 0; padding: 0; border: none; border-radius: 3px; background: transparent; text-align: left; min-height: var(--tap); align-content: center; }
+.beat-body p { margin: 0; font-family: var(--serif); font-size: 15px; line-height: 1.7; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.beat-body small { font-size: 12px; color: var(--muted); }
+.script-beat.current .beat-body small { color: var(--accent); }
+.script-beat.done .beat-body p { color: color-mix(in srgb, var(--fg) 62%, var(--muted)); }
+.script-beat.skipped .beat-body p { color: var(--muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted) 60%, transparent); }
+.script-beat.upcoming .beat-body p { color: color-mix(in srgb, var(--fg) 78%, var(--muted)); }
+.script-beat textarea { min-height: var(--tap); padding: 9px 11px; field-sizing: content; max-height: 34vh; font-family: var(--serif); font-size: 15px; line-height: 1.7; }
+.script-beat .icon-btn { color: var(--muted); }
+.script-beat .icon-btn[aria-expanded="true"] { color: var(--accent); }
+.script-beat .beat-tools { grid-column: 2 / 4; padding-bottom: 4px; }
+.sheet-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 2px; }
+.sheet-foot .primary { margin-left: auto; min-width: 112px; }
+
+/* ---------- 挑战 page ---------- */
+.challenge-sheet { display: grid; gap: 14px; }
+.challenge-state { display: flex; align-items: center; gap: 10px; margin-top: -4px; }
+.challenge-state .mark { padding: 0 6px; border: 1px solid currentColor; border-radius: 2px; font-family: var(--serif); font-size: 12px; line-height: 20px; color: var(--accent); }
+.challenge-state .mark.won { color: var(--gain); }
+.challenge-state .mark.lost, .challenge-state .mark.abandoned { color: var(--muted); }
+.challenge-goal { margin: 0; font-family: var(--serif); font-size: 18px; line-height: 1.7; letter-spacing: 0.02em; }
+.challenge-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 14px; margin: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 3px; background: var(--raised); }
+.challenge-facts dt { font-size: 13px; color: var(--muted); padding-top: 2px; white-space: nowrap; }
+.challenge-facts dd { margin: 0; font-size: 15px; line-height: 1.65; overflow-wrap: anywhere; }
+.challenge-facts dd .muted { font-size: 13px; }
+.time-meter { height: 3px; margin-top: 6px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.time-meter > i { display: block; height: 100%; background: var(--accent); }
+.time-meter.soon > i { background: var(--warn); }
+
+/* ---------- end cards: the same book page as the death card ---------- */
+.mode-end .ending-seal { transform: rotate(-4deg); }
+.mode-end.lost .ending-seal { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1.5px var(--muted); }
+.mode-end .ending-line { max-width: 30em; }
+.mode-end .ending-meta { margin: 0; font-size: 13px; color: var(--muted); letter-spacing: 0.02em; line-height: 1.7; }
+.mode-end .ending-meta span { display: inline-block; }
+
+/* ---------- 旁观: directions instead of choices, 连播 ---------- */
+.choices-head { margin: 0; font-family: var(--serif); font-size: 13px; color: var(--muted); letter-spacing: 0.08em; }
+/* A row over the input: 旁观's 连播 and its progress; for anyone typing, 润色 and the big box. */
+.dock-tools { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: var(--tap); margin: -4px 0 2px; }
+.dock-tools.end { justify-content: flex-end; }
+.dock-tools button { min-height: var(--tap); padding: 0 12px; font-size: 14px; }
+.dock-tools button.ghost { color: color-mix(in srgb, var(--fg) 72%, var(--muted)); }
+/* 连播: a 44px target drawn as a small outlined seal of a button. */
+.dock-tools .autoplay-btn { padding: 0 2px; border-color: transparent; background: transparent; }
+.autoplay-btn > span { display: inline-block; padding: 5px 16px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 3px; font-family: var(--serif); letter-spacing: 0.12em; color: var(--accent); line-height: 1.4; }
+.autoplay-btn:active:not(:disabled) > span { background: var(--accent-soft); }
+.autoplay-state { display: inline-flex; align-items: center; gap: 8px; font-family: var(--serif); font-size: 14px; color: var(--accent); letter-spacing: 0.06em; }
+.autoplay-dots { display: inline-flex; gap: 4px; }
+.autoplay-dots i { width: 6px; height: 6px; border-radius: 1px; background: var(--line); }
+.autoplay-dots i.done { background: var(--accent); }
+.autoplay-dots i.now { background: var(--accent); animation: autoplay-pulse 1.2s ease-in-out infinite; }
+@keyframes autoplay-pulse { 50% { opacity: 0.35; } }
+.autoplay-pick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.autoplay-pick button { min-height: 64px; display: grid; gap: 2px; place-content: center; font-family: var(--serif); }
+.autoplay-pick b { font-size: 22px; font-weight: 600; color: var(--accent); line-height: 1.1; }
+.autoplay-pick small { font-size: 13px; color: var(--muted); }
+
+/* ---------- 本局设置 → 玩法 ---------- */
+.mode-entries { display: grid; border: 1px solid var(--line); border-radius: 4px; background: var(--raised); overflow: hidden; }
+.mode-entries .settings-entry { min-height: 56px; }
+.mode-entries .settings-entry small { white-space: normal; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+.mode-entries .settings-entry > span:last-child { flex-shrink: 0; font-size: 14px; font-family: var(--serif); letter-spacing: 0.04em; }
+
+/* 新的故事 → first step: the two ways to start from nothing, as quiet links. */
+.pick-more { display: grid; justify-items: center; gap: 0; }
+.pick-more button { color: color-mix(in srgb, var(--fg) 78%, var(--muted)); }

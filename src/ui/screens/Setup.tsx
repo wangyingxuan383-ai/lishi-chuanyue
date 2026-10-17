@@ -213,8 +213,8 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
       <div className="screen-body stack">
         {first && (
           <div className="welcome">
-            <p><b>醒来时，你已在另一个时代。</b>你写下想做的事，AI 把结果写成故事；钱、伤病、人物、时间由程序替你记着。</p>
-            <p className="muted">故事由你自己的 AI 服务来写（按用量付费，一回合通常不到一分钱）。Key 只加密保存在这台设备上。</p>
+            <p><b>醒来时，你已在另一个时代，或你想象的世界。</b>你写下想做的事，AI 把故事接下去；钱物、人物、时间由程序替你记着。</p>
+            <p className="muted">故事由你选择的 AI 服务来写，费用按该服务和模型的用量计。相关故事内容会发送给它；原生应用的 Key 保存在设备的加密存储中。</p>
             {!noKeyHelp ? <button className="link" onClick={() => setNoKeyHelp(true)}>我还没有 Key，怎么办？</button> : (
               <ol className="steps">
                 <li>推荐 DeepSeek（便宜、中文好）或智谱（有免费模型）。在上面选好服务商，点“申请 Key”。</li>

@@ -9,20 +9,43 @@ import type { Card } from "../types";
 export interface TabooTerm { term: string; entry: string; instead: string | null }
 export interface TabooHit { term: string; instead: string | null }
 
+const TABOO_LINE = /^\s*不要出现\s*[：:]\s*(.*)$/;
+
+/** The entries of an era card's "不要出现：" line (a full- or half-width colon), or null when it has none. */
+export function tabooLine(content: string | null | undefined): string | null {
+  for (const line of (content ?? "").split("\n")) {
+    const m = TABOO_LINE.exec(line);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
+/** The card text with at most `max` entries on its "不要出现" line: a short reminder, not a rulebook. */
+export function shortTabooLine(content: string, max: number): string {
+  return content.split("\n").flatMap((line) => {
+    const m = TABOO_LINE.exec(line);
+    if (!m) return [line];
+    const items = m[1].split(/[；;]/).map((s) => s.trim()).filter(Boolean).slice(0, max);
+    return items.length ? [`不要出现：${items.join("；")}`] : [];
+  }).join("\n");
+}
+
 /** Words to look for, from the card's "不要出现：" line. */
 export function tabooTerms(eraCard: Card | null, pack: EraPack | null): TabooTerm[] {
-  const line = eraCard?.content.split("\n").find((l) => l.startsWith("不要出现："));
+  const line = tabooLine(eraCard?.content);
   if (!line) return [];
   const terms: TabooTerm[] = [];
-  for (const raw of line.slice(5).split(/[；;]/)) {
+  for (const raw of line.split(/[；;]/)) {
     const entry = raw.trim();
     if (!entry) continue;
     const m = entry.match(/^(.*?)[（(](.*)[）)]$/);
     const name = (m ? m[1] : entry).trim();
     const instead = m ? m[2].trim().replace(/^用/, "") : null;
     const fromPack = pack?.taboos.find((t) => t.name === name);
-    // A pack entry knows its literal words; a written one is split on 、 and short phrases are kept.
-    const words = fromPack ? fromPack.match ?? [fromPack.name] : name.split("、").map((w) => w.trim()).filter((w) => w.length >= 2 && w.length <= 6);
+    // A pack entry knows its literal words; a written one is split on 、 and short phrases are kept
+    // (a note in brackets after one of them, "算盘（用算筹）、银票", is not part of the word).
+    const words = fromPack ? fromPack.match ?? [fromPack.name]
+      : name.split("、").map((w) => w.replace(/[（(][^）)]*[）)]/g, "").trim()).filter((w) => w.length >= 2 && w.length <= 6);
     for (const term of words) terms.push({ term, entry: name, instead });
   }
   // A pack's extra watch words, for worlds that started from it.

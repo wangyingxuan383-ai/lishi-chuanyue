@@ -1,0 +1,68 @@
+/* Writing tools (R13-T103): 展开输入, AI 改写 and 润色, 我的要求组, and the
+   设定集 filters and batch bar. (The buttons over the input bar are the
+   play screen's .dock-tools, in modes.css.) */
+
+/* A row of buttons: the first on the left, the rest on the right. */
+.writing-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.writing-actions > :first-child { margin-right: auto; }
+.writing-assist > p { margin: 0; }
+.writing-original {
+  margin: 0; padding: 8px 12px; border-left: 2px solid var(--line); background: color-mix(in srgb, var(--fg) 4%, transparent);
+  font-family: var(--serif); font-size: 15px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30dvh; overflow-y: auto;
+}
+/* Which part to rewrite: the paragraphs themselves, one tap to choose. */
+.writing-pick { display: grid; gap: 6px; max-height: 36dvh; overflow-y: auto; }
+label.writing-option {
+  position: relative; display: block; padding: 8px 12px; border: 1px solid var(--line); border-radius: 3px;
+  background: var(--raised); color: var(--fg); font-family: var(--serif); font-size: 15px; line-height: 1.75; cursor: pointer;
+}
+.writing-option input { position: absolute; width: 1px; height: 1px; min-height: 0; opacity: 0; pointer-events: none; }
+.writing-option span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
+label.writing-option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.writing-option:has(input:checked) span { display: block; }
+.writing-option:has(input:focus-visible) { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
+.writing-option:has(input:disabled) { cursor: default; }
+.writing-option.all span { font-family: var(--sans); font-size: 14px; }
+/* The AI's version reads like the book. */
+.writing-assist textarea { font-family: var(--serif); font-size: 16px; line-height: 1.8; field-sizing: content; min-height: 5lh; max-height: 40dvh; }
+
+/* 展开输入: the whole sheet, the text box taking what is left. */
+.writing-desk { display: flex; flex-direction: column; gap: 12px; min-height: min(72dvh, 740px); }
+.writing-desk > textarea { flex: 1; min-height: 40dvh; resize: none; font-family: var(--serif); font-size: 17px; line-height: 1.8; }
+.sheet:has(.writing-desk) { height: calc(100dvh - env(safe-area-inset-top) - 8px); max-height: calc(100dvh - env(safe-area-inset-top) - 8px); display: flex; flex-direction: column; }
+.sheet:has(.writing-desk) .writing-desk { flex: 1; min-height: 0; }
+
+/* 常用行动 and 我的要求组: a short list, each line tappable, × to remove. */
+.writing-library { display: grid; padding: 4px 0 2px; max-height: 35dvh; overflow: auto; }
+.writing-library p { margin: 0; }
+.writing-library > .muted { padding: 4px 0 6px; }
+.writing-saved-row, .writing-preset { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); }
+.writing-saved-use { flex: 1; min-width: 0; display: grid; gap: 1px; padding: 8px 4px; border: none; border-radius: 0; background: transparent; text-align: left; }
+.writing-saved-use b, .writing-preset-text b { font-family: var(--serif); font-size: 15px; font-weight: 600; }
+.writing-saved-use small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.writing-remove { flex: none; width: var(--tap); padding: 0; color: var(--muted); }
+.writing-add { justify-self: start; padding: 0 6px; color: var(--accent); }
+.writing-preset { padding: 6px 0; }
+.writing-preset-text { flex: 1; min-width: 0; padding: 2px 0; }
+.writing-preset-text p { margin: 2px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.writing-preset > button:not(.writing-remove) { flex: none; padding: 0 14px; }
+.writing-applied { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0 0; }
+
+/* 设定集: search with the 批量删除 switch beside it, then the category filters. */
+.codex-tools { display: flex; align-items: center; gap: 4px; }
+.codex-tools > input { flex: 1; min-width: 0; }
+.codex-tools > .ghost { flex: none; padding: 0 10px; }
+.codex-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.codex-filters button { min-height: var(--tap); padding: 0 12px; }
+.codex-filters button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+label.codex-select { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); color: var(--fg); font-size: 15px; cursor: pointer; }
+.codex-select input { flex: 0 0 22px; width: 22px; height: 22px; min-height: 0; }
+.codex-select b { font-family: var(--serif); }
+.codex-select small { display: block; color: var(--muted); font-size: 13px; }
+/* The batch bar sits on the panel's bottom edge, full width, like the panel's own editing dock. */
+.panel-body:has(.codex-batch) { padding-bottom: 0; }
+.codex-batch {
+  position: sticky; bottom: 0; z-index: 1; display: flex; gap: 10px; margin: 0 -16px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 3px double var(--line);
+}
+.codex-batch button { flex: 1; }

@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
+import android.view.WindowManager
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -30,8 +31,32 @@ class SystemBarsArgs {
     var dark: Boolean = false
 }
 
+@InvokeArg
+class CompletionArgs { var completionId: String = "" }
+
+@InvokeArg
+class AwakeArgs { var enabled: Boolean = false }
+
 @TauriPlugin(permissions = [Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "notifications")])
 class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
+    @Command
+    fun story_committed(invoke: Invoke) {
+        val id = invoke.parseArgs(CompletionArgs::class.java).completionId
+        if (id.isBlank() || id.length > 256) { invoke.reject("invalid completion id"); return }
+        GenerationService.storyCommitted(activity, id)
+        invoke.resolve()
+    }
+
+    @Command
+    fun set_keep_awake(invoke: Invoke) {
+        val enabled = invoke.parseArgs(AwakeArgs::class.java).enabled
+        activity.runOnUiThread {
+            if (enabled) activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            invoke.resolve()
+        }
+    }
+
     @Command
     fun request_notification_permission(invoke: Invoke) {
         if (Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED) {

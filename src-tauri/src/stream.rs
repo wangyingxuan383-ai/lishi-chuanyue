@@ -409,7 +409,8 @@ fn proxy_error() -> PlatformError {
     )
 }
 
-fn client() -> std::result::Result<Client, StreamEvent> {
+/// Also used by the update download (`updates`), so it follows the same proxy choice.
+pub(crate) fn client() -> std::result::Result<Client, StreamEvent> {
     #[cfg(target_os = "android")]
     if !crate::android_tls::is_ready() {
         return Err(StreamEvent::error("network"));
@@ -628,8 +629,11 @@ pub async fn get(url: &str, timeout_ms: u64, key: SecretValue) -> Result<GetResp
 /// A public HTTPS GET without a key (the GitHub release check). Redirects
 /// are not followed; only https is allowed; the body is size-bounded.
 pub async fn get_public(url: &str, timeout_ms: u64) -> Result<GetResponse> {
-    if !url.starts_with("https://") {
-        return Err(PlatformError::new("llm_network", "只允许 https 地址"));
+    if !crate::link_policy::allowed(url, true) {
+        return Err(PlatformError::new(
+            "llm_network",
+            "只允许应用的更新检查地址",
+        ));
     }
     let run = async {
         let request: RequestBuilder = client()?

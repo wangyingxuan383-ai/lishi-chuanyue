@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
-import { PlatformError, type Platform, type StreamEvent } from "./types";
+import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent } from "./types";
+import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -16,6 +17,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 
 // Back handlers form a stack: the most recently opened layer closes first.
 const backHandlers: Array<() => boolean> = [];
+const setNativeKeepAwake = orderedKeepAwake((enabled) => call<void>("plugin:notifications|set_keep_awake", { enabled }));
 let backListening = false;
 let escapeListening = false;
 
@@ -76,7 +78,22 @@ export async function createTauriPlatform(): Promise<Platform> {
       exportText: (suggestedName, text) => call("file_export_text", { suggestedName, text }),
       importText: () => call("file_import_text"),
     },
+    update: {
+      download: (request, onEvent) => {
+        const channel = new Channel<UpdateEvent>();
+        channel.onmessage = onEvent;
+        return call("plugin:updates|download", { request, onEvent: channel });
+      },
+      cancel: () => call("plugin:updates|cancel"),
+      fetchText: (url) => call("plugin:updates|fetch_text", { url }),
+      install: async (request) => (await call<{ status: InstallStatus }>("plugin:updates|install", request)).status,
+      canInstall: () => call("plugin:updates|can_install"),
+      devSource: () => call("plugin:updates|dev_source"),
+      setDevSource: (url) => call("plugin:updates|set_dev_source", { url }),
+    },
     system: {
+      storyCommitted: (completionId) => call("plugin:notifications|story_committed", { completionId }),
+      setKeepAwake: (enabled) => name === "android" ? setNativeKeepAwake(enabled) : setBrowserKeepAwake(enabled),
       requestNotifications: () => call("plugin:notifications|request_notification_permission"),
       notificationStatus: () => call("plugin:notifications|notification_status"),
       openSystemSettings: (which) => call(which === "notifications" ? "plugin:notifications|open_notification_settings" : "plugin:notifications|open_app_settings"),

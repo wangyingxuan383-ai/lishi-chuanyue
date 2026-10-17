@@ -24,6 +24,13 @@ function world(): WorldState {
 const answer = (value: unknown) => `整理如下：\n${JSON.stringify(value)}`;
 
 describe("设定集 upkeep", () => {
+  it("does not confuse a successor with the existing ruler when filing people or deaths", () => {
+    const state = world();
+    state.people[0].name = "亚历山大";
+    const patch = upkeepPatch(answer({ people: [{ name: "亚历山大二世", role: "王子" }], deaths: ["亚历山大二世"] }), state)!;
+    expect(patch.people).toEqual([{ name: "亚历山大二世", role: "王子", note: "" }]);
+    expect(state.people[0].alive).toBe(true);
+  });
   it("names the protagonist, so their deeds are not filed under someone else", () => {
     const state = world();
     state.protagonist.name = "王延寿";

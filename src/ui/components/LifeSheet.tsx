@@ -26,6 +26,7 @@ export function LifeSheet({ world, state, headId, dead, onClose }: { world: Worl
       .then(([path, all, lines]) => setStats(playStats({ path, all, lines, gameMinutes: state.time.elapsedMinutes })));
   }, [game, world.id, headId, state]);
   const earned = new Set(stats ? earnedSeals({ turns: stats.turns, lines: stats.lines, state, currency: era.currency }).map((s) => s.id) : []);
+  const seals = state.era.mode === "free" ? SEALS.filter((s) => s.id !== "change") : SEALS;
 
   if (card) {
     return <CardSheet title="小传图片" onClose={() => setCard(false)} content={{
@@ -61,9 +62,9 @@ export function LifeSheet({ world, state, headId, dead, onClose }: { world: Worl
         ) : <p className="muted">正在统计…</p>}
         <p className="muted" style={{ margin: 0, fontSize: 13 }}>“大约玩了”按每回合之间的间隔估算，停下超过十分钟的只算十分钟。</p>
 
-        <h4 className="section-title">印谱 <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}>{earned.size} / {SEALS.length}</span></h4>
+        <h4 className="section-title">印谱 <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}>{seals.filter((s) => earned.has(s.id)).length} / {seals.length}</span></h4>
         <div className="seal-book">
-          {SEALS.map((s) => (
+          {seals.map((s) => (
             <div key={s.id} className={`seal-stamp${earned.has(s.id) ? " got" : ""}`} aria-label={`${s.name}：${earned.has(s.id) ? "已得" : `未得，${s.how}`}`}>
               <div className="stamp" aria-hidden="true">{[...s.name].map((c, i) => <span key={i}>{c}</span>)}</div>
               <small>{earned.has(s.id) ? s.name : s.how}</small>

@@ -200,9 +200,11 @@ def main():
             "Lio/timejump/chuanyue/RustSecretStoreBridge;": ["loadForRust"],
             "Lio/timejump/chuanyue/RustFileAccessBridge;": ["openFdForRust"],
             "Lio/timejump/chuanyue/GenerationService;": ["start", "stop", "onStartCommand", "onTimeout"],
-            "Lio/timejump/chuanyue/GenerationService$Companion;": ["start", "stop"],
+            "Lio/timejump/chuanyue/GenerationService$Companion;": ["start", "stop", "storyCommitted"],
+            "Lio/timejump/chuanyue/NotificationsPlugin;": ["story_committed", "set_keep_awake", "notification_status"],
             "Lio/timejump/chuanyue/SecretStorePlugin;": ["save", "delete", "status"],
             "Lio/timejump/chuanyue/DocumentPickerPlugin;": ["openDocument", "createDocument", "ensureIdle"],
+            "Lio/timejump/chuanyue/UpdatePlugin;": ["installPackage", "canInstallPackages"],
         }
         for owner, members in required.items():
             if owner not in defined or any((owner, member) not in methods for member in members):
@@ -222,6 +224,9 @@ def main():
     code, manifest = run([tools / "aapt.exe", "dump", "badging", args.apk])
     if code or "package: name='io.timejump.chuanyue'" not in manifest:
         raise ValueError("unexpected APK application ID")
+    # The in-app update needs it to open the system installer (UpdatePlugin).
+    if "uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'" not in manifest:
+        raise ValueError("REQUEST_INSTALL_PACKAGES permission missing")
     debuggable = "application-debuggable" in manifest
     if args.require_non_debuggable and debuggable:
         raise ValueError("release APK is debuggable")

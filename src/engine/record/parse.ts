@@ -178,6 +178,16 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
     const result = /半/.test(said) ? "半成" : /败|没成|未成|不成/.test(said) ? "败" : /成/.test(said) ? "成" : undefined;
     r.risk = { what, ...(result ? { result } : {}) };
   }
+  // Play modes (R14). scriptSet and challengeSet are panel-only and never read from a model.
+  if (v.beat === true || /^done$/i.test(String(v.beat ?? "").trim())) r.beat = "done";
+  const challenge = v.challenge && typeof v.challenge === "object" && !Array.isArray(v.challenge) ? (v.challenge as Record<string, unknown>) : { progress: v.challenge };
+  const outcome = str(challenge.result)?.toLowerCase();
+  const news: NonNullable<TurnRecord["challenge"]> = {
+    ...(str(challenge.progress) ? { progress: str(challenge.progress) } : {}),
+    ...(outcome === "won" || outcome === "lost" ? { result: outcome } : {}),
+    ...(str(challenge.why) ? { why: str(challenge.why) } : {}),
+  };
+  if (Object.keys(news).length) r.challenge = news;
   r.choices = arr(v.choices)
     .map((c) => str(c) ?? str((c as Record<string, unknown>)?.text))
     .filter((c): c is string => !!c)

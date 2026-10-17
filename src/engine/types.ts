@@ -100,6 +100,8 @@ export interface TimelineEvent {
   /** 固定 happens whatever the player does; 可变 is what the books say, and the story may change it. */
   kind: "固定" | "可变";
   source?: "卡组" | "AI" | "玩家";
+  /** The CE year the organizer gave, so a date in another reign can still be counted from the start. */
+  ceYear?: number;
 }
 
 /** A chapter summary (R04-T003); used only while its last node is on the current path. */
@@ -120,6 +122,8 @@ export interface Chapter {
 }
 
 export interface Protagonist {
+  /** Player-written facts, snapshot-scoped so branch/undo never leaks later abilities. */
+  panel?: string;
   name: string;
   aliases: string[];
   age: number | null;
@@ -149,6 +153,9 @@ export interface WorldState {
   goals: Goal[];
   /** packId is null for free-form worlds; currency may be set by the opening. */
   era: {
+    /** Display/context projection of the world's mode; absent in legacy history saves. */
+    mode?: "history" | "free";
+    clockStyle?: "era" | "elapsed";
     /** The built-in pack the world started from; a record only, the world's own copy rules. */
     packId: string | null;
     currency?: { units: { name: string; value: number }[]; aliases?: Record<string, string> };
@@ -160,11 +167,63 @@ export interface WorldState {
   dismissed?: string[];
   /** The world's great events (R05-T004); absent in old saves. */
   timeline?: TimelineEvent[];
+  /** 剧本 and 挑战 (R14); absent in ordinary worlds and old saves. */
+  script?: Script | null;
+  challenge?: Challenge | null;
+}
+
+/** Who plays the protagonist (R14): the player, or the AI while the player directs (旁观). */
+export type Pilot = "player" | "ai";
+
+export interface ScriptBeat {
+  id: string;
+  /** What happens in this beat, as the player wrote it. */
+  text: string;
+  status: "todo" | "done" | "skipped";
+  /** Game minute when it was played or skipped. */
+  endedMinute?: number;
+}
+
+/** 剧本 (R14): kept in each node's snapshot, so branches have their own. The current beat is the first one still todo. */
+export interface Script {
+  /** 主线, one sentence; may be empty. */
+  line: string;
+  beats: ScriptBeat[];
+  /** The ending the player wants; may be empty. */
+  ending: string;
+  /** gentle 顺其自然; firm 紧扣大纲 (a story that strays is brought back by plausible people and events). */
+  steer: "gentle" | "firm";
+}
+
+/** 挑战 (R14): kept in each node's snapshot. */
+export interface Challenge {
+  goal: string;
+  /** The limit as the player wrote it ("三个月"); empty for none. */
+  limit: string;
+  /** Game minute when the limit runs out, counted from minute 0; null without a limit (or one that gives no span). */
+  deadlineMinute: number | null;
+  /** What makes it fail; may be empty. */
+  failIf: string;
+  /** The latest progress, one sentence. */
+  progress: string;
+  status: "active" | "won" | "lost" | "abandoned";
+  startedMinute: number;
+  endedMinute?: number;
+  /** How it ended, one sentence: the narrator's reason, or “期限已到”. */
+  outcome?: string;
+  /** Turns played while it lasted, for the end card. */
+  turns?: number;
 }
 
 export type Perspective = "你" | "我" | "他";
 
 export interface WorldSettings {
+  /** Existing saves remain historical; new free worlds use their own premise. */
+  mode?: "history" | "free";
+  clockStyle?: "era" | "elapsed";
+  /** Player-written reference, never a calculated cultivation/level system. */
+  heroPanelEnabled?: boolean;
+  heroPanel?: string;
   /** The story premise the player wrote (or a template filled in); in every prompt. */
   premise: string;
   /** Facts the narrator must always keep in mind (Plot Essentials), one per line. */
@@ -186,6 +245,8 @@ export interface WorldSettings {
   fortune: FortuneMode;
   /** Remind the narrator of era words it should not have used (R07-T002); switchable since R11-T008. */
   tabooHints: boolean;
+  /** 旁观 (R14); absent means "player". A world setting that can change at any time. */
+  pilot?: Pilot;
 }
 
 export const DEFAULT_SETTINGS: WorldSettings = {

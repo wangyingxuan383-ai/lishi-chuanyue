@@ -85,6 +85,9 @@ input, textarea, select {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--raised);
+  /* Not the caption's 14px grey when the field sits inside its <label>. */
+  font-size: 1rem;
+  color: var(--fg);
 }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--accent); }
 textarea { resize: none; line-height: 1.6; }
@@ -158,19 +161,41 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .card.selected { border-color: var(--accent); background: var(--accent-soft); }
 .list { display: grid; gap: 10px; }
 .section-title { margin: 10px 0 0; font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.06em; color: var(--fg); }
+/* 书架: each story is a book — its cover on the left, the title and where it stands beside it.
+   Only the story to continue keeps the cinnabar edge, so the list below stays calm. */
 .world-card { position: relative; padding: 0; }
-.world-open { display: block; width: 100%; text-align: left; border: none; background: transparent; padding: 14px 52px 14px 16px; min-height: auto; }
-.world-open h3 { margin: 0 0 4px; font-size: 17px; font-family: var(--serif); letter-spacing: 0.04em; }
+.world-card:not(.featured) { border-left: 1px solid var(--line); }
+.world-open { display: flex; align-items: flex-start; gap: 14px; width: 100%; text-align: left; border: none; background: transparent; padding: 14px; min-height: auto; }
+.world-info { display: block; flex: 1; min-width: 0; }
+.world-open h3 { margin: 2px 0 2px; padding-right: 34px; font-size: 17px; font-family: var(--serif); letter-spacing: 0.04em; }
 .world-open p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.6; }
-.world-open .last-line { margin-top: 6px; font-family: var(--serif); color: var(--fg); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* The last line read, as it stands in the book: a hairline before it instead of quote marks of our own. */
+.world-open .last-line { margin-top: 8px; padding-left: 9px; border-left: 2px solid var(--line); font-family: var(--serif); color: var(--fg); line-height: 1.7; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .world-open .meta { margin-top: 6px; font-size: 12px; }
-.world-card .mark { position: absolute; top: 14px; right: 52px; width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--accent); border-radius: 3px; color: var(--accent); font-family: var(--serif); font-size: 14px; }
-.world-card .world-open h3 { padding-right: 34px; }
 .world-menu { position: absolute; top: 4px; right: 2px; }
 .world-card.featured { border-left-width: 5px; }
-.world-card.featured .world-open { padding-bottom: 16px; }
+.world-card.featured .world-open { padding: 16px 14px 16px 14px; gap: 16px; }
 .world-card.featured .world-open h3 { font-size: 20px; }
+.world-card.featured .book-art { width: 64px; height: 90px; }
 .continue-btn { display: inline-flex; align-items: center; justify-content: center; margin-top: 12px; min-height: var(--tap); padding: 0 28px; border-radius: var(--radius); background: var(--accent); color: var(--on-accent); font-family: var(--serif); letter-spacing: 0.2em; }
+/* 这一版新增 on the home screen: one quiet line with a small 新 seal, not an alert. */
+.whats-new { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); animation: fade-up 0.24s ease-out both; }
+.whats-new-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 8px 4px 8px 12px; border: none; background: transparent; text-align: left; }
+.whats-new-open > .icon { color: var(--accent); }
+.whats-new-mark {
+  flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 3px;
+  background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 15px; font-weight: 700; line-height: 1;
+  box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent);
+}
+.whats-new-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.whats-new-text b { font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.04em; }
+.whats-new-text small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.whats-new-close { color: var(--muted); }
+.whats-new-body > p.muted { margin: -6px 0 0; }
+.whats-new-list { margin: 0; display: grid; gap: 14px; }
+.whats-new-list dt { font-family: var(--serif); font-size: 16px; font-weight: 600; letter-spacing: 0.04em; }
+.whats-new-list dt::before { content: var(--divider); margin-right: 8px; color: var(--accent); font-size: 11px; vertical-align: 2px; }
+.whats-new-list dd { margin: 2px 0 0; padding-left: 19px; color: var(--muted); font-size: 14px; line-height: 1.7; }
 
 /* ---------- play ---------- */
 .play { height: 100%; display: flex; flex-direction: column; position: relative; isolation: isolate; }
@@ -189,13 +214,16 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .play-layout.wide > .play { min-width: 0; min-height: 0; }
 .play-side { border-left: 1px solid var(--line); min-height: 0; display: flex; }
 .panel.docked { position: static; inset: auto; z-index: auto; flex: 1; animation: none; min-width: 0; }
-.play-layout.wide .dock { padding-inline: max(10px, calc((100% - 680px) / 2)); }
+.play-layout.wide .dock { padding-inline: max(10px, calc((100% - 640px) / 2)); } /* lines up with the 640px reading column */
 @media (min-width: 1000px) {
   /* Sheets still rise from the bottom, at a readable width. */
   .sheet { max-width: 600px; margin: 0 auto; }
 }
 .story { flex: 1; overflow-y: auto; overflow-anchor: none; padding: 8px 18px 24px; -webkit-overflow-scrolling: touch; }
-.story-inner { max-width: min(640px, calc(var(--story-measure) * 1.05 * var(--story-size) / 16)); margin: 0 auto; }
+/* The reading column: --story-measure (in em) counted at the story's own size, at most 640px.
+   The size is set here only for that em; everything inside keeps its own (zero specificity). */
+.story-inner { font-size: var(--story-size); max-width: min(640px, calc(var(--story-measure) * 1.05)); margin: 0 auto; }
+:where(.story-inner > *) { font-size: 1rem; }
 .turn { padding: 10px 0 6px; border-radius: 3px; transition: background-color 0.15s; }
 .turn.pressed { background: var(--accent-soft); }
 /* Between turns: the divider mark between two short hairlines (AUDIT_V4 4.7), visible but quiet. */
@@ -304,6 +332,8 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .mode-option[aria-pressed="true"] b { color: var(--accent); }
 
 /* ---------- overlays ---------- */
+/* A sheet's layer on <body> (Sheet.tsx): above the screens and the character panel, below dialogs and toasts. */
+.sheet-layer { position: fixed; inset: 0; z-index: 21; }
 .backdrop { position: fixed; inset: 0; z-index: 20; background: rgba(20, 14, 8, 0.38); animation: fade 0.16s ease-out both; }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
@@ -370,13 +400,13 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .tag.own { margin-left: 6px; border-color: var(--warn); color: var(--warn); vertical-align: middle; }
 
 .toast {
-  position: fixed; left: 50%; top: calc(60px + env(safe-area-inset-top)); z-index: 40;
-  transform: translateX(-50%); max-width: 90vw; display: flex; align-items: center; gap: 12px;
+  position: fixed; left: 0; right: 0; top: calc(60px + env(safe-area-inset-top)); z-index: 40;
+  width: fit-content; max-width: min(90vw, 560px); margin: 0 auto; display: flex; align-items: center; gap: 12px;
   padding: 9px 16px; border-radius: 6px; background: rgba(42, 32, 25, 0.92); color: #f6eedc; font-size: 14px; text-align: center;
   box-shadow: 0 4px 16px var(--shadow); animation: toast 0.18s ease-out both;
 }
 :root[data-theme="night"] .toast { background: rgba(233, 220, 197, 0.95); color: #15171b; }
-@keyframes toast { from { opacity: 0; transform: translate(-50%, -6px); } }
+@keyframes toast { from { opacity: 0; transform: translateY(-6px); } }
 .toast-action { min-height: 32px; padding: 2px 10px; border: 1px solid currentColor; border-radius: 3px; background: transparent; color: inherit; font-size: 14px; white-space: nowrap; }
 .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
 .segmented button { min-height: var(--tap); padding: 6px 14px; }
@@ -428,6 +458,16 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 .status-card small { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .status-card .row { margin-top: 4px; flex-wrap: wrap; }
 .release-notes { white-space: pre-wrap; }
+/* 用量与花费: the month's estimate first, then the budget and the prices. */
+.spend-card { display: grid; gap: 6px; padding: 14px 16px; border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 3px; background: var(--surface); }
+.spend-card small { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.spend-total { margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.spend-total b { font-family: var(--serif); font-size: 24px; font-weight: 600; letter-spacing: 0.02em; }
+.spend-total span { color: var(--muted); font-size: 14px; white-space: nowrap; }
+.spend-card .bar { height: 4px; margin-top: 2px; }
+.spend-card.over .bar > i { background: var(--loss); }
+.price-row { align-items: flex-start; }
+.settings .field-line > input { padding-right: 40px; }
 .steps { margin: 0; padding-left: 22px; color: var(--fg); font-size: 14px; line-height: 1.8; }
 .theme-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .theme-card { display: grid; justify-items: center; gap: 6px; padding: 10px 4px; font-size: 14px; }
@@ -562,6 +602,10 @@ button.danger-text { color: var(--loss); }
 .bio-identity { margin: 0; font-family: var(--serif); font-size: 15px; line-height: 1.75; }
 .bio-line { margin: 0; font-size: 14px; line-height: 1.6; color: var(--fg); }
 .bio-line > span { display: inline-block; min-width: 4.5em; margin-right: 6px; color: var(--muted); font-size: 13px; }
+/* 主角面板: the player's own notes, on a leaf of paper under the 小传. */
+.hero-panel { display: grid; gap: 4px; padding: 12px 16px 14px; border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 3px; background: var(--raised); }
+.hero-panel .section-title { margin: 0 0 4px; font-size: 15px; color: var(--accent); }
+.hero-panel .bio-line { font-family: var(--serif); font-size: 15px; line-height: 1.75; }
 /* An input with a hint inside the same line: 钱 "120 文", 名字 "3/12". */
 .field-line { position: relative; display: flex; align-items: center; }
 .field-line > input { flex: 1; min-width: 0; padding-right: 96px; }

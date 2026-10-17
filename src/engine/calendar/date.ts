@@ -239,6 +239,8 @@ export function parseDateLabel(text: string | null | undefined, rules?: Calendar
   let era = m[1];
   const stripped = era.replace(DYNASTY, "");
   if (stripped.length >= 2) era = stripped;
+  // "1665年4月": a bare year in digits is a CE year (the organizer writes western dates this way).
+  if (!era && /^\d+$/.test(m[2])) era = "公元";
   const year = m[2] === "元" ? 1 : parseChineseNumber(m[2]);
   if (!era || era.length > 8 || /\d/.test(era) || !year || year < 1) return null;
   let rest = m[3].replace(/^[，,、]/, "");

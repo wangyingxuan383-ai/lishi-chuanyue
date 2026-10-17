@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TANG_748 } from "../../content/eras/tang-748";
 import { eraCardText } from "./card";
-import { findTaboos, tabooReminder, tabooTerms } from "./taboo";
+import { findTaboos, shortTabooLine, tabooLine, tabooReminder, tabooTerms } from "./taboo";
 import type { Card } from "../types";
 
 const card = (content: string): Card => ({ id: "e", kind: "时代", name: "时代", keys: [], content });
@@ -31,6 +31,16 @@ describe("era words check", () => {
     expect(terms.map((t) => [t.term, t.instead])).toEqual([["火枪", "弓弩"], ["银票", null], ["交子", null], ["动辄跪地磕头", null]]);
     expect(findTaboos("他掏出一张银票。", terms)).toEqual([{ term: "银票", instead: null }]);
     expect(tabooTerms(card("时局：没有这一行"), null)).toEqual([]);
+  });
+
+  it("reads the line however the organizer spaced or punctuated it, and keeps it short", () => {
+    // Half-width colon, leading spaces, a bracketed note inside a 、 list.
+    const loose = tabooTerms(card("货币：铜钱。\n  不要出现: 算盘（用算筹）、银票; 火柴（用火石、火镰）"), null);
+    expect(loose.map((t) => [t.term, t.instead])).toEqual([["算盘", null], ["银票", null], ["火柴", "火石、火镰"]]);
+    expect(tabooLine("时局：x\n不要出现：甲乙")).toBe("甲乙");
+    expect(tabooLine("时局：x")).toBeNull();
+    expect(shortTabooLine("时局：x\n不要出现：一一；二二；三三；四四", 2)).toBe("时局：x\n不要出现：一一；二二");
+    expect(shortTabooLine("时局：x\n不要出现：", 8)).toBe("时局：x");
   });
 
   it("reminds the next turn of what to say instead", () => {

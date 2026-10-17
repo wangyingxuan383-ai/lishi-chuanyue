@@ -18,7 +18,7 @@ export function spanText(minutes: number): string {
 
 /** The game date at a moment, without the hour: "天宝七载 冬月十七" or "中平元年秋 · 第 3 日". */
 export function dateText(clock: GameClock, minutes: number): string {
-  return nowOf(clock, minutes).text.replace(/\s·\s.时$/, "");
+  return nowOf(clock, minutes).text.replace(/\s·\s(?:.时|\d{2}:\d{2})$/, "");
 }
 
 const sentence = (text: string) => (/[。！？…」”]$/.test(text) ? text : `${text}。`);
@@ -58,6 +58,7 @@ export function lifeSeal(state: WorldState, dead: boolean): LifeSeal {
 /** A 列传-style summary of the protagonist's life so far. */
 export function lifeSummary({ state, clock, currency, eraTitle, dead }: LifeInput): LifeSummary {
   const me = state.protagonist;
+  const free = state.era.mode === "free";
   const name = me.name || "无名氏";
   const sections: LifeSection[] = [];
 
@@ -75,7 +76,7 @@ export function lifeSummary({ state, clock, currency, eraTitle, dead }: LifeInpu
   const end = dateText(clock, state.time.elapsedMinutes);
   const span = spanText(state.time.elapsedMinutes);
   const age = me.age != null ? (dead ? `，享年 ${me.age} 岁` : `，今年 ${me.age} 岁`) : "";
-  sections.push({ label: "生平", text: `${start}入世，${dead ? "卒于" : "至今"}${end}，历时${span}${age}。` });
+  sections.push({ label: free ? "经历" : "生平", text: free ? `故事从${start}开始，${dead ? "在" : "走到"}${end}${dead ? "告一段落" : ""}，历时${/^\d/.test(span) ? " " : ""}${span}${age}。` : `${start}入世，${dead ? "卒于" : "至今"}${end}，历时${/^\d/.test(span) ? " " : ""}${span}${age}。` });
 
   if (state.places.length) {
     const here = state.places.find((p) => p.id === state.placeId)?.name;
@@ -104,9 +105,9 @@ export function lifeSummary({ state, clock, currency, eraTitle, dead }: LifeInpu
     sections.push({ label: "事业", text: `${parts.join("；")}。` });
   }
 
-  if (state.deviations.length) {
+  if (!free && state.deviations.length) {
     sections.push({ label: "改史", text: `改变了 ${state.deviations.length} 件史事：${state.deviations.map((d) => d.replace(/[。；;]$/, "")).join("；")}。` });
-  } else {
+  } else if (!free) {
     sections.push({ label: "改史", text: "史事还是书上写的样子。" });
   }
 
@@ -205,7 +206,7 @@ export const SEALS: SealRule[] = [
 ];
 
 export function earnedSeals(facts: SealFacts): SealRule[] {
-  return SEALS.filter((s) => s.test(facts));
+  return SEALS.filter((s) => (facts.state.era.mode !== "free" || s.id !== "change") && s.test(facts));
 }
 
 /** Seals earned now that are not in `shown`; the toast text for them, or null. */

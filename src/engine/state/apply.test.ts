@@ -74,15 +74,20 @@ describe("applyRecord", () => {
     const r = apply(sampleState(100), { money: "-八贯", items: [{ name: "青骢马", delta: 1 }] });
     expect(r.state.protagonist.stats.money).toBe(100);
     expect(r.state.protagonist.items).toHaveLength(0);
-    expect(chipTexts(r)).toContain("钱不够，这笔没付成");
+    expect(chipTexts(r)).toContain("钱不够，这笔没付成，青骢马没到手");
     expect(r.notes[0]).toContain("没有成交");
+    expect(r.notes[0]).toContain("青骢马也没有记上");
+    // Without goods in the record, the chip and the note say only that the payment failed.
+    const bare = apply(sampleState(100), { money: "-八贯" });
+    expect(chipTexts(bare)).toContain("钱不够，这笔没付成");
+    expect(bare.notes[0]).toBe("上回合主角只有 100 文，付不起 8 贯，这笔交易没有成交；请在叙述中自然交代。");
   });
 
   it("cancels unaffordable purchases on hard difficulty too", () => {
     const r = apply(sampleState(5), { money: -30, items: [{ name: "斗笠", delta: 1 }] }, "残酷");
     expect(r.state.protagonist.stats).toMatchObject({ money: 5, debt: 0 });
     expect(r.state.protagonist.items).toHaveLength(0);
-    expect(chipTexts(r)).toContain("钱不够，这笔没付成");
+    expect(chipTexts(r)).toContain("钱不够，这笔没付成，斗笠没到手");
   });
 
   it("never moves time backwards", () => {
@@ -186,11 +191,15 @@ describe("applyRecord", () => {
     expect(before.protagonist.stats.health).toBe(80);
   });
 
-  it("counts money as money, not as items", () => {
+  it("counts money once when the record also lists the same coins as items (eval F)", () => {
     const r = apply(sampleState(), { money: 180, items: [{ name: "开元通宝", delta: 180 }, { name: "三百文", delta: 1 }, { name: "钱袋", delta: 1 }] });
-    expect(r.state.protagonist.items.map((i) => i.name)).toEqual(["钱袋"]);
+    // 180 coins are the 180 文 already counted; 三百文 is not in the money change, so it is kept rather than lost.
+    expect(r.state.protagonist.items.map((i) => i.name)).toEqual(["三百文", "钱袋"]);
     expect(r.state.protagonist.stats.money).toBe(480);
-    expect(r.log).toContain("“开元通宝”是钱，按钱记，不放进行囊");
+    expect(r.log).toEqual(["“开元通宝”的 180 已记入钱数，不重复放进行囊"]);
+    const amount = apply(sampleState(), { money: 300, items: [{ name: "三百文", delta: 1 }, { name: "铜钱", delta: 300 }] });
+    expect(amount.state.protagonist.items).toEqual([]);
+    expect(amount.state.protagonist.stats.money).toBe(600);
   });
 
   it("on 标准, running out of health leaves the protagonist dying; only a written death kills (D124)", () => {

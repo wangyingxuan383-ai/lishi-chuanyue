@@ -17,7 +17,8 @@ serde.workspace = true
 serde_json = "1"
 bytes = "1"
 tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
+# fs/io-util: the update download writes its file (tauri already enables both).
+tokio = { version = "1", features = ["time", "sync", "macros", "rt", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "socks", "system-proxy"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "backup", "hooks"] }
@@ -27,6 +28,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tauri-plugin-fs = "2.7.0"
 tauri-plugin-dialog = "2.8.2"
 tempfile = "3"
+# SHA-256 of the update package (already in the tree through wry).
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util"] }

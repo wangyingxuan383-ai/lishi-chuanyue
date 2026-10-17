@@ -12,6 +12,8 @@ import type { Card, WorldState } from "../types";
 import { eraCardText } from "./card";
 
 export interface EraContext {
+  /** Absent in older callers means history, never inferred from a pack id. */
+  mode?: "history" | "free";
   packId: string | null;
   title: string;
   /** Minute 0 of the world and the calendar rules for counting from it. */
@@ -22,7 +24,8 @@ export interface EraContext {
 }
 
 /** Used when neither an era pack nor the opening defined a currency. */
-export const GENERIC_CURRENCY: Currency = { units: [{ name: "", value: 1 }] };
+/** For worlds whose opening never named a currency: plain coins rather than a bare number. */
+export const GENERIC_CURRENCY: Currency = { units: [{ name: "枚", value: 1 }] };
 
 export function eraPack(id: string | null | undefined): EraPack | null {
   return ERAS.find((e) => e.id === id) ?? null;
@@ -30,6 +33,7 @@ export function eraPack(id: string | null | undefined): EraPack | null {
 
 /** The start date of a world; old saves only have the label. */
 export function startDate(state: WorldState, rules: CalendarRules): GameDate | null {
+  if ((state.era.clockStyle ?? (state.era.mode === "free" ? "elapsed" : "era")) === "elapsed") return null;
   return state.time.date !== undefined ? state.time.date : readDate(state.time.start, rules);
 }
 
@@ -41,18 +45,22 @@ function eraCard(state: WorldState | null | undefined, pack: EraPack | null): Ca
 }
 
 export function eraContext(eraId: string | null, state?: WorldState | null): EraContext {
-  const pack = eraPack(eraId);
-  const rules: CalendarRules = state?.era.calendar ?? pack?.calendar ?? {};
+  const mode = state?.era.mode ?? "history";
+  const clockStyle = state?.era.clockStyle ?? (mode === "free" ? "elapsed" : "era");
+  const pack = mode === "free" ? null : eraPack(eraId);
+  const rules: CalendarRules = state?.era.calendar ?? pack?.calendar ?? (mode === "free" ? { lunar: false } : {});
   const clock: GameClock = {
-    date: state ? startDate(state, rules) : pack?.start.date ?? null,
+    mode, clockStyle,
+    date: clockStyle === "elapsed" ? null : state ? startDate(state, rules) : pack?.start.date ?? null,
     hour: state?.time.startHour ?? pack?.start.hour ?? 8,
-    label: state ? state.time.start : pack ? formatDate(pack.start.date, rules) : "",
+    label: clockStyle === "elapsed" ? "" : state ? state.time.start : pack ? formatDate(pack.start.date, rules) : "",
     rules,
   };
   const stateCurrency = state?.era.currency?.units?.length ? (state.era.currency as Currency) : null;
   return {
+    mode,
     packId: pack?.id ?? null,
-    title: pack?.title ?? (state?.time.start || "自定时代"),
+    title: mode === "free" ? (state && eraCardOf(state)?.name) || "自定世界" : pack?.title ?? (state?.time.start || "自定时代"),
     clock,
     currency: stateCurrency ?? pack?.currency ?? GENERIC_CURRENCY,
     eraCard: eraCard(state, pack),

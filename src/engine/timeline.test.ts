@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TANG_748 } from "../content/eras/tang-748";
 import type { GameClock } from "./calendar/clock";
-import { eventsBetween, packTimeline, placeEvent, worldBlock } from "./timeline";
+import { eventsBetween, packTimeline, placeEvent, retime, worldBlock } from "./timeline";
 import type { TimelineEvent } from "./types";
 
 const tang: GameClock = { date: TANG_748.start.date, hour: 7, label: "天宝七载 冬月十七", rules: TANG_748.calendar };
@@ -29,10 +29,33 @@ describe("timeline", () => {
     expect(eventsBetween(timeline, 0, 30 * DAY).map((e) => e.id)).toEqual(["a"]);
     expect(eventsBetween(timeline, 10 * DAY, 30 * DAY)).toEqual([]);
     const block = worldBlock({ timeline, deviations: ["天宝七载腊月：救下了王忠嗣"], time: { start: "", elapsedMinutes: 20 * DAY } });
-    expect(block).toContain("甲：大雪封路\n乙将会：宰相病死（按史书，可能因剧情改变）");
-    expect(block).not.toContain("边镇起兵");
+    // By default only what has happened: the books' future is the player's, not the narrator's.
+    expect(block).toContain("【天下大事】\n甲：大雪封路");
+    expect(block).not.toMatch(/宰相病死|边镇起兵|将会/);
     expect(block).toContain("【历史偏离（这一世已经和史书不同的事）】\n- 天宝七载腊月：救下了王忠嗣");
     expect(worldBlock({ timeline, deviations: [], time: { start: "", elapsedMinutes: 20 * DAY } }, 365 * DAY)).toContain("丙将会：边镇起兵");
     expect(worldBlock({ deviations: [], time: { start: "", elapsedMinutes: 0 } })).toBe("");
+  });
+
+  it("places an event in a later reign by its CE year, also when the start moves", () => {
+    // A world organized without a pack has no reign table: 至德 cannot be counted from 天宝 by its label alone.
+    const clock: GameClock = { date: { era: "天宝", year: 14, month: 11, day: 9, ceYear: 755, lunar: true }, hour: 8, label: "天宝十四载 冬月初九", rules: {} };
+    expect(placeEvent(clock, { date: "至德元载七月", title: "太子即位于灵武" }).atMinute).toBeNull();
+    const placed = placeEvent(clock, { date: "至德元载七月", title: "太子即位于灵武", ceYear: 756, kind: "固定" });
+    expect(placed).toMatchObject({ date: "至德元年 七月", kind: "固定", ceYear: 756 });
+    expect(placed.atMinute! / DAY).toBeGreaterThan(200);
+    expect(placed.atMinute! / DAY).toBeLessThan(260);
+    // Nonsense years are ignored rather than trusted.
+    expect(placeEvent(clock, { date: "至德元载七月", title: "x", ceYear: 0 })).not.toHaveProperty("ceYear");
+    const earlier = retime([{ id: "e", source: "AI", ...placed }], { ...clock, date: { ...clock.date!, year: 13, ceYear: 754 } })[0];
+    expect(Math.round((earlier.atMinute! - placed.atMinute!) / DAY)).toBe(354);
+  });
+
+  it("places western dates written without 公元 (R14-T003: London's events were all left unplaced)", () => {
+    const london: GameClock = { date: { era: "公元", year: 1665, month: 4, day: 28, ceYear: 1665, lunar: false }, hour: 9, label: "公元1665年 4月28日", rules: { lunar: false } };
+    const fire = placeEvent(london, { date: "1666年9月", title: "伦敦大火", ceYear: 1666, kind: "固定" });
+    expect(fire).toMatchObject({ date: "公元1666年 9月", kind: "固定" });
+    expect(Math.round(fire.atMinute! / DAY)).toBe(491);
+    expect(placeEvent(london, { date: "1665年6月", title: "洛斯托夫特海战", kind: "固定" }).atMinute! / DAY).toBeGreaterThan(30);
   });
 });

@@ -11,6 +11,7 @@ import { matchName } from "../../engine/state/names";
 import type { Attitude, Person, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
+import { PersonAvatar } from "./BookArt";
 
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
 const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.trim()).filter(Boolean);
@@ -34,7 +35,7 @@ function Editor({ person, state, era, onClose, onSave }: {
   const [saving, setSaving] = useState(false);
   const clean = name.trim();
   // A new entry, or a new name, must not be someone the list already has under another wording (AUDIT_V4_FUNCTION F3).
-  const found = clean && clean !== person?.name ? matchName(state.people, clean) : undefined;
+  const found = clean && clean !== person?.name ? matchName(state.people, clean, { partial: false }) : undefined;
   const clash = found && found.id !== person?.id ? found : undefined;
 
   const run = async (patch: TurnRecord, summary: string) => {
@@ -54,7 +55,12 @@ function Editor({ person, state, era, onClose, onSave }: {
   return (
     <Sheet title={person ? person.name : "添加人物"} onClose={onClose}>
       <div className="stack" style={{ gap: 10 }}>
-        {person?.lastSeenMinute != null && <p className="muted" style={{ margin: 0 }}>最近相见：{agoText(era.clock, person.lastSeenMinute, state.time.elapsedMinutes)}</p>}
+        {person && (
+          <div className="person-head">
+            <PersonAvatar name={name || person.name} dead={!alive} />
+            <span className="muted">{person.lastSeenMinute != null && `最近相见：${agoText(era.clock, person.lastSeenMinute, state.time.elapsedMinutes)}`}</span>
+          </div>
+        )}
         <label>名字<input value={name} onChange={(e) => setName(e.target.value)} placeholder="名字或称呼" /></label>
         <label>别名（其他叫法，用顿号分开）<input value={aliases} onChange={(e) => setAliases(e.target.value)} placeholder="可不填" /></label>
         <label>身份<input value={role} onChange={(e) => setRole(e.target.value)} placeholder="如：万年县尉，主角的上司" /></label>
@@ -94,6 +100,7 @@ export function People({ state, era, busy, onSave }: {
       </div>
       {people.length ? people.map((p) => (
         <button key={p.id} className="item-row codex-item" disabled={busy} onClick={() => setEditing({ person: p })}>
+          <PersonAvatar name={p.name} dead={!p.alive} />
           <div className="grow">
             <b>{p.name}</b>{!p.alive && <span className="muted">（已故）</span>}
             <small>{[p.role, p.aliases.length ? `又称${p.aliases.join("、")}` : ""].filter(Boolean).join(" · ") || "身份不明"}</small>

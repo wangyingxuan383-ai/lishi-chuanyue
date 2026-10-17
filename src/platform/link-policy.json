@@ -1,0 +1,26 @@
+{
+  "browser": [
+    { "origin": "https://github.com", "path": "/wangyingxuan383-ai/lishi-chuanyue", "children": true },
+    { "origin": "https://platform.deepseek.com", "path": "/api_keys" },
+    { "origin": "https://api-docs.deepseek.com", "path": "/zh-cn/quick_start/pricing" },
+    { "origin": "https://cloud.siliconflow.cn", "path": "/account/ak" },
+    { "origin": "https://cloud.siliconflow.cn", "path": "/models" },
+    { "origin": "https://open.bigmodel.cn", "path": "/usercenter/proj-mgmt/apikeys" },
+    { "origin": "https://open.bigmodel.cn", "path": "/pricing" },
+    { "origin": "https://bailian.console.aliyun.com", "path": "/" },
+    { "origin": "https://help.aliyun.com", "path": "/zh/model-studio/model-pricing" },
+    { "origin": "https://platform.moonshot.cn", "path": "/console/api-keys" },
+    { "origin": "https://platform.moonshot.cn", "path": "/docs/pricing/chat" },
+    { "origin": "https://console.volcengine.com", "path": "/ark/region:ark+cn-beijing/apiKey" },
+    { "origin": "https://www.volcengine.com", "path": "/docs/82379/1544106" },
+    { "origin": "https://openrouter.ai", "path": "/settings/keys" },
+    { "origin": "https://openrouter.ai", "path": "/models" },
+    { "origin": "https://aistudio.google.com", "path": "/app/apikey" },
+    { "origin": "https://ai.google.dev", "path": "/pricing" }
+  ],
+  "publicGet": ["https://api.github.com/repos/wangyingxuan383-ai/lishi-chuanyue/releases?per_page=5"],
+  "download": {
+    "prefix": "https://github.com/wangyingxuan383-ai/lishi-chuanyue/releases/download/",
+    "redirectHosts": ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]
+  }
+}

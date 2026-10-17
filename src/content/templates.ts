@@ -10,6 +10,7 @@ import type { Arrival, EraPack } from "./eras/types";
 export type { Arrival } from "./eras/types";
 
 export interface OpeningTemplate {
+  mode?: "history" | "free";
   id: string;
   title: string;
   /** Short label shown on the card, e.g. "唐 · 天宝七载". */

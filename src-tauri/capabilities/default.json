@@ -15,8 +15,17 @@
     "notifications:allow-notification-status",
     "notifications:allow-open-notification-settings",
     "notifications:allow-open-app-settings",
+    "notifications:allow-story-committed",
+    "notifications:allow-set-keep-awake",
     "notifications:allow-open-url",
     "notifications:allow-set-system-bars",
-    "notifications:allow-haptic"
+    "notifications:allow-haptic",
+    "updates:allow-download",
+    "updates:allow-cancel",
+    "updates:allow-fetch-text",
+    "updates:allow-install",
+    "updates:allow-can-install",
+    "updates:allow-dev-source",
+    "updates:allow-set-dev-source"
   ]
 }

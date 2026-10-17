@@ -28,6 +28,17 @@ const node = (patch: Partial<StoryNode>): StoryNode => ({
 });
 
 describe("lifeSummary", () => {
+  it("summarizes a free world without adding history claims or a Chinese calendar", () => {
+    const state = rich();
+    state.era.mode = "free";
+    state.era.clockStyle = "elapsed";
+    const era = eraContext("tang-748", state);
+    const result = lifeSummary({ state, clock: era.clock, currency: era.currency, eraTitle: "群星港", dead: false });
+    expect(result.sections.some((s) => s.label === "改史")).toBe(false);
+    expect(result.prose).not.toMatch(/天宝|时辰|史书|史事|卒于/);
+    expect(result.prose).toContain("故事从第 1 天开始");
+    expect(result.prose).toContain("第 41 天");
+  });
   const era = eraContext("tang-748", rich());
   it("writes origin, life span, places, people, goals, history and money from state", () => {
     const life = lifeSummary({ state: rich(), clock: era.clock, currency: era.currency, eraTitle: "盛唐", dead: false });

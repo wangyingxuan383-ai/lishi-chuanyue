@@ -16,10 +16,40 @@ describe("organizing the 设定集", () => {
   it("asks for an era card and a few cards from the player's setup", () => {
     const [system, user] = codexMessages({ premise: "架空王朝大胤，太后垂帘。", protagonist: { name: "沈砚", gender: "男", age: 20, identity: "你是青衣卫的小旗。" }, arrival: "魂穿", known: ["西市"] });
     expect(system.content).toContain("只补故事设定里没写清楚的部分");
-    expect(system.content).toContain("不要出现");
+    expect(system.content).toContain("没把握的就不写");
+    // The era words are an optional short list, not a rulebook (D129); no style rules.
+    expect(system.content).toContain("可以加一行“不要出现：”");
+    expect(system.content).toContain("至多 8 条");
+    expect(system.content).not.toMatch(/十条以上|文风/);
+    // Real dynasties only: the great events after the start, for the player's 记事 page.
+    expect(system.content).toContain("故事设定是真实朝代时，另列故事开始之后几年里史书记载的大事，至多 8 件");
+    expect(system.content).toContain("架空或改编的世界不写");
+    expect(system.content).toContain('"timeline":[{"date":"崇祯二年十月","ceYear":1629');
     expect(user.content).toContain("架空王朝大胤");
     expect(user.content).toContain("你是青衣卫的小旗。");
     expect(user.content).toContain("【已有卡片，不要重复】西市");
+  });
+
+  it("keeps a short list of era words and the great events for a history world only", () => {
+    const words = Array.from({ length: 12 }, (_, i) => `词${"甲乙丙丁戊己庚辛壬癸子丑"[i]}`);
+    const raw = JSON.stringify({
+      era: { name: "明 · 崇祯元年", content: `时局：新帝登基。\n不要出现: ${words.join("；")}` },
+      timeline: [
+        ...Array.from({ length: 10 }, (_, i) => ({ date: `崇祯${i + 2}年十月`, ceYear: 1629 + i, title: `大事${i}`, kind: i % 2 ? "固定" : "随便" })),
+      ],
+    });
+    const patch = codexPatch(raw, sampleState())!;
+    const card = patch.cards![0].content!;
+    expect(card).toBe(`时局：新帝登基。\n不要出现：${words.slice(0, 8).join("；")}`);
+    expect(patch.timeline).toHaveLength(8);
+    expect(patch.timeline![0]).toEqual({ op: "add", date: "崇祯2年十月", title: "大事0", kind: "可变", source: "AI", ceYear: 1629 });
+    expect(patch.timeline![1].kind).toBe("固定");
+    // Free worlds: no list is trimmed into shape and no events are kept, whatever the reply says.
+    const free = sampleState();
+    free.era.mode = "free";
+    const freePatch = codexPatch(raw, free)!;
+    expect(freePatch.timeline).toBeUndefined();
+    expect(freePatch.cards![0].content).toContain(words[11]);
   });
 
   it("turns the answer into an AI-marked patch", () => {

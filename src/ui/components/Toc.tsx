@@ -131,7 +131,7 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
               )) : <p className="muted" style={{ margin: "6px 0 0" }}>长按一段选“记住这件事”，AI 会一直记着，这里也能找到。</p>}
             </section>
 
-            {state.deviations.length > 0 && (
+            {state.era.mode !== "free" && state.deviations.length > 0 && (
               <section className="stack" style={{ gap: 0 }}>
                 <p className="section-title">历史因你而变</p>
                 {state.deviations.map((d, i) => <Fragment key={i}><div className="item-row"><span className="grow toc-pin">{d}</span></div></Fragment>)}

@@ -1,0 +1,40 @@
+/* Covers and name seals (BookArt.tsx). The covers are physical objects —
+   cloth, paper, cinnabar — so they keep their colours in every theme; at
+   night only the paper is dimmed and the edges lit a little. */
+.book-art { display: block; flex: none; width: 50px; height: 70px; overflow: visible; filter: drop-shadow(0 1px 1.5px rgba(60, 40, 20, 0.28)); }
+.cover-0 { --cover: #34506b; } /* 靛青 */
+.cover-1 { --cover: #8a5a3c; } /* 赭石 */
+.cover-2 { --cover: #415e52; } /* 黛绿 */
+.cover-3 { --cover: #6e3b42; } /* 绛色 */
+.cover-4 { --cover: #55626b; } /* 苍色 */
+.cover-5 { --cover: #6b5036; } /* 栗色 */
+.cover-6 { --cover: #5b4f66; } /* 紫灰 */
+.cover-7 { --cover: #6f6a3e; } /* 秋香 */
+.cover-board { fill: var(--cover); stroke: color-mix(in srgb, var(--cover) 70%, #000); stroke-width: 1; }
+.cover-thread { fill: none; stroke: #efe5cf; stroke-width: 1.1; stroke-linecap: round; opacity: 0.72; }
+.cover-slip { fill: #f4ecda; }
+.cover-slip-frame { fill: none; stroke: #a8936c; stroke-width: 0.5; }
+.cover-title { fill: #2a2019; font-family: var(--serif); font-size: 9.4px; font-weight: 600; }
+.cover-title.tight { font-size: 8px; }
+.cover-seal { fill: #a83221; }
+.cover-seal-frame { fill: none; stroke: rgba(255, 255, 255, 0.7); stroke-width: 0.5; }
+.cover-seal-mark { fill: #ffffff; font-family: var(--serif); font-size: 7.6px; font-weight: 700; }
+:root[data-theme="night"] .book-art { filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55)); }
+:root[data-theme="night"] .cover-board { stroke: rgba(255, 255, 255, 0.14); }
+:root[data-theme="night"] .cover-slip { fill: #d9ceb5; }
+:root[data-theme="night"] .cover-thread { stroke: #d9ceb5; opacity: 0.6; }
+
+/* 朱文 name seal: red character in a double red frame, on a slip of paper. */
+.person-avatar {
+  flex: none; align-self: flex-start; display: grid; place-items: center; width: 40px; height: 40px;
+  border: 1.5px solid currentColor; border-radius: 3px; background: var(--raised); color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--raised), inset 0 0 0 2.8px currentColor;
+  font-family: var(--serif); font-size: 19px; font-weight: 600; line-height: 1;
+}
+.person-avatar.dead { color: var(--muted); opacity: 0.7; }
+@media (max-width: 360px) {
+  .book-art { width: 46px; height: 64px; }
+  .person-avatar { width: 36px; height: 36px; font-size: 17px; }
+}
+/* A person's sheet opens with their seal and when you last met. */
+.person-head { display: flex; align-items: center; gap: 12px; }

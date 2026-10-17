@@ -9,6 +9,7 @@
 //   fake-nostream ignores stream:true and returns one JSON body
 //   fake-plain    narrative only, no record (exercises the extraction fallback)
 // fake-normal/slow/stall reply in the game's record format (opening, turns).
+// Play modes have their own trigger words, listed in docs/DEVELOPMENT.md (本地模拟模型).
 // GET /debug/last-request returns the last chat request, so UI tests can see the prompt.
 import http from "node:http";
 
@@ -29,6 +30,25 @@ const TURNS = [
   { text: "你从囊中数出三十文，一枚一枚排在柜上。掌柜的脸色缓了些，把钱拢进抽屉。\n\n“还差六十文，后日落锁前补齐。”", record: { time: "一刻", money: -30, goals: [{ op: "progress", name: "三日内付清房钱九十文", detail: "已付三十文，还差六十文" }], log: "付了三十文房钱", risk: { what: "求掌柜宽限余款", result: "半成" }, choices: ["出门找活", "回房歇息", "向掌柜打听差事"] } },
   { text: "西市刚开市，鼓声未歇。货栈门口一个管事模样的人正吆喝着招短工，你挤上前去。\n\n“扛一日货，六十文，管一顿饭。”他上下打量你，“书生也来凑热闹？”", record: { time: "半个时辰", place: "西市货栈", people: [{ name: "货栈管事", role: "货栈管事", attitude: "冷淡", note: "招短工，一日六十文" }], log: "在货栈遇到招短工的管事", choices: ["应下这份活", "问问有没有记账的差事", "去别处看看"] } },
 ];
+// 旁观 (R14): the protagonist acts on his own and the choices are directions for the director.
+const AI_TURNS = [
+  { text: "你没有等掌柜开口，先拱手笑道：“王掌柜，房钱的事我记着，今日就去西市寻个活计。”说罢裹紧旧袍，踏着薄雪出了邸店。", record: { time: "一刻", place: "西市", log: "主角主动出门找活", choices: ["让他在西市撞见旧识", "下一场突如其来的大雪", "让掌柜派人暗中跟着"] } },
+  { text: "货栈前人声嘈杂。你挤到管事面前，自报读过书，愿意替货栈记账，工钱少些也无妨。管事眯着眼打量你半晌，才点了点头。", record: { time: "半个时辰", people: [{ name: "货栈管事", role: "货栈管事", attitude: "一般", note: "让主角试着记一天账" }], log: "主角在货栈谋得记账的活", choices: ["让账目里藏着蹊跷", "让管事起了疑心", "让他早早收工回去"] } },
+  { text: "账簿翻到第三页，你的笔停住了：同一批货记了两回。你抬眼看了看管事的背影，没有声张，只把那一行悄悄折了个角。", record: { time: "一个时辰", log: "主角发现账目有重复", choices: ["让管事察觉他看出了问题", "让一个陌生人来打听这批货", "让他把这事告诉掌柜"] } },
+];
+/** The mode fields of a turn (R14): a beat every second turn, challenge progress every turn, an outcome on trigger words. */
+function modeFields(messages, turn) {
+  const last = String(messages.at(-1)?.content ?? "");
+  const fields = {};
+  if (last.includes("【剧本】（玩家定的骨架）") && turn % 2 === 0) fields.beat = "done";
+  if (last.includes("\n【挑战】")) {
+    const action = last.slice(last.lastIndexOf("\n\n【"));
+    fields.challenge = action.includes("达成") ? { progress: "目标达成了", result: "won", why: "主角做成了这件事" }
+      : action.includes("放弃抵抗") ? { progress: "撑不下去了", result: "lost", why: "主角放弃了抵抗" }
+        : { progress: `第 ${turn} 段：离目标又近了一步` };
+  }
+  return fields;
+}
 function gameReply(request) {
   const prompt = JSON.stringify(request.messages ?? []);
   const record = (r) => `
@@ -37,9 +57,11 @@ function gameReply(request) {
 ${JSON.stringify(r)}
 </record>`;
   if (prompt.includes("只回复两个字")) return "你好";
-  if (prompt.includes("请写这部小说的开场")) return TEXT + record(OPENING_RECORD);
+  if (prompt.includes("拟剧本大纲")) return JSON.stringify({ line: "落第书生在长安闯出一条生路", beats: ["邸店掌柜催讨房钱", "西市货栈谋得差事", "账目里发现蹊跷", "夜探城隍庙", "真相大白，名动西市"], ending: "还清旧债，在长安站稳脚跟" });
+  if (prompt.includes("出一个开局挑战")) return JSON.stringify({ goal: "三个月内凑够三百两", limit: "三个月", failIf: "被债主告到官府" });
+  if (prompt.includes("请写这部小说的开场")) return TEXT + record(prompt.includes("【挑战】") ? { ...OPENING_RECORD, challenge: { progress: "还没有头绪" } } : OPENING_RECORD);
   if (prompt.includes("你帮玩家构思")) return JSON.stringify({ title: "汴京小吏", premise: "北宋宣和七年，汴京。金兵南下在即，朝野却仍歌舞升平。", name: "沈默", gender: "男", age: 26, identity: "你是开封府的一名小吏，掌管户籍文书。", arrival: "魂穿", origin: "历史系研究生", hint: "府衙里，上官让你连夜誊抄一份名册。", essentials: "主角知道靖康之变将至" });
-  if (prompt.includes("整理出一张时代卡")) return JSON.stringify({ era: { name: "AI 整理的时代", content: "时局：天下初定。\n不要出现：手机" }, cards: [{ kind: "势力", name: "漕帮", keys: ["帮里"], content: "运河上的帮会" }] });
+  if (prompt.includes("整理出一张时代卡")) return JSON.stringify({ era: { name: "AI 整理的时代", content: "时局：天下初定。\n不要出现：手机" }, cards: [{ kind: "势力", name: "漕帮", keys: ["帮里"], content: "运河上的帮会" }], ...(prompt.includes("史书记载的大事") ? { timeline: [{ date: "天宝八载六月", ceYear: 749, title: "哥舒翰攻克石堡城", kind: "固定" }] } : {}) });
   if (prompt.includes("【玩家选择过些日子】") && prompt.lastIndexOf("【玩家选择过些日子】") > prompt.lastIndexOf("【玩家行动】")) return "一个月过得很快。你白天在西市货栈扛活，夜里替人抄书，攒下了一些钱；王掌柜的脸色也好看了些。月末，一个陌生人找上门来。" + record({ time: "一个月", money: 400, report: { world: "听说陇右又打了胜仗", local: "米价涨到一斗二十二文", people: "货栈管事请你喝了一回酒" }, log: "过了一个月", choices: ["开门见客", "装作不在"] });
   if (prompt.includes("替玩家查资料")) return "【本局】王掌柜是西市旁邸店的掌柜，正催你付九十文房钱。\n\n【仅供参考】唐代天宝年间，一斗米大约二十文上下。";
   if (prompt.includes("出记忆测试题")) return JSON.stringify([{ q: "主角欠谁房钱？", a: "王掌柜" }, { q: "欠了多少？", a: "九十文" }]);
@@ -49,9 +71,11 @@ ${JSON.stringify(r)}
   if (prompt.includes("玩家亲手写了开场")) return JSON.stringify({ time: "0", date: "某年某月", hour: 20, money: 12, place: "破庙", people: [{ name: "老乞丐", role: "乞丐", attitude: "友善" }], goals: [{ op: "add", name: "熬过今夜" }], log: "开场", choices: ["生火取暖", "去庙外看看", "问老乞丐话"] });
   if (prompt.includes("互动小说的记录员")) return JSON.stringify({ time: "一刻", log: "补记", choices: ["继续"] });
   // Pick the scripted turn from the conversation length so runs are repeatable.
-  const assistants = (request.messages ?? []).filter((m) => m.role === "assistant").length;
-  const t = TURNS[Math.max(0, assistants - 1) % TURNS.length];
-  return t.text + record(t.record);
+  const messages = request.messages ?? [];
+  const assistants = messages.filter((m) => m.role === "assistant").length;
+  const pilotAi = String(messages[0]?.content ?? "").includes("主角由你来演");
+  const t = (pilotAi ? AI_TURNS : TURNS)[Math.max(0, assistants - 1) % TURNS.length];
+  return t.text + record({ ...t.record, ...modeFields(messages, assistants) });
 }
 
 const TEXT =

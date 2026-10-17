@@ -47,19 +47,6 @@ function applyReading(r: Reading) {
   root.style.setProperty("--story-measure", `${r.measure}em`);
 }
 
-/** Keeps the screen on while the setting asks for it (Screen Wake Lock, where the WebView has it). */
-function useKeepAwake(on: boolean) {
-  useEffect(() => {
-    const nav = navigator as Navigator & { wakeLock?: { request(type: "screen"): Promise<{ release(): Promise<void> }> } };
-    if (!on || !nav.wakeLock) return;
-    let lock: { release(): Promise<void> } | null = null;
-    const take = () => { if (document.visibilityState === "visible") void nav.wakeLock!.request("screen").then((l) => { lock = l; }).catch(() => {}); };
-    take();
-    document.addEventListener("visibilitychange", take);
-    return () => { document.removeEventListener("visibilitychange", take); void lock?.release().catch(() => {}); };
-  }, [on]);
-}
-
 /**
  * Drag a .lishi.json world file onto the window to import it (UX_APP_BASICS #59).
  * Tauri's own drop handling is off (dragDropEnabled: false), so the WebView
@@ -119,7 +106,6 @@ export default function App() {
   const [devMode, setDevModeState] = useState(false);
   const [stack, setStack] = useState<Route[]>([{ name: "home" }]);
   const [toastState, toast, clearToast] = useToast();
-  useKeepAwake(reading.keepAwake);
   // "Follow the system" follows it live, too.
   useEffect(() => {
     if (reading.theme !== "auto") return;

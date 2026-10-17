@@ -11,6 +11,8 @@ export function shichen(hour: number): string {
 
 /** Minute 0 of a world. */
 export interface GameClock {
+  mode?: "history" | "free";
+  clockStyle?: "era" | "elapsed";
   /** Date at minute 0; null when unknown, and then days are counted. */
   date: GameDate | null;
   /** Hour of day at minute 0. */
@@ -21,6 +23,7 @@ export interface GameClock {
 }
 
 export interface Now {
+  clockStyle?: "era" | "elapsed";
   /** Day of the story, from 1. */
   day: number;
   hour: number;
@@ -34,21 +37,36 @@ export interface Now {
 }
 
 export function nowOf(clock: GameClock, elapsedMinutes: number): Now {
+  const clockStyle = clock.clockStyle ?? (clock.mode === "free" ? "elapsed" : "era");
   const total = clock.hour * 60 + Math.max(0, elapsedMinutes);
   const days = Math.floor(total / 1440);
   const inDay = total % 1440;
   const hour = Math.floor(inDay / 60);
   const sc = shichen(hour);
-  const moved = clock.date ? addDays(clock.date, days, clock.rules) : null;
-  const text = moved
+  const moved = clockStyle !== "elapsed" && clock.date ? addDays(clock.date, days, clock.rules) : null;
+  const text = clockStyle === "elapsed"
+    ? `第 ${days + 1} 天 · ${String(hour).padStart(2, "0")}:${String(inDay % 60).padStart(2, "0")}`
+    : moved
     ? `${formatDate(moved.date, clock.rules)} · ${sc}时`
     : `${clock.label ? `${clock.label} · ` : ""}第 ${days + 1} 日 · ${sc}时`;
-  return { day: days + 1, hour, minute: inDay % 60, shichen: sc, date: moved?.date ?? null, newYears: moved?.newYears ?? 0, text };
+  return { clockStyle, day: days + 1, hour, minute: inDay % 60, shichen: sc, date: moved?.date ?? null, newYears: moved?.newYears ?? 0, text };
 }
 
-/** New Years crossed between two moments; each one adds a year to ages (虚岁). */
+const YEAR = 365 * 1440;
+
+/** Full 365-day years of play completed between two moments. */
+export function playYears(fromMinutes: number, toMinutes: number): number {
+  return toMinutes <= fromMinutes ? 0 : Math.floor(toMinutes / YEAR) - Math.floor(Math.max(0, fromMinutes) / YEAR);
+}
+
+/**
+ * Years that add to ages between two moments: on a dated history clock each New
+ * Year crossed (虚岁); without one (free worlds, stories with no usable date)
+ * each full year of play, so ages still follow the time that passed.
+ */
 export function newYearsBetween(clock: GameClock, fromMinutes: number, toMinutes: number): number {
-  if (!clock.date || toMinutes <= fromMinutes) return 0;
+  if (toMinutes <= fromMinutes) return 0;
+  if (clock.mode === "free" || clock.clockStyle === "elapsed" || !clock.date) return playYears(fromMinutes, toMinutes);
   return nowOf(clock, toMinutes).newYears - nowOf(clock, fromMinutes).newYears;
 }
 
@@ -56,6 +74,7 @@ const hhmm = (now: Now) => `${String(now.hour).padStart(2, "0")}:${String(now.mi
 
 /** "酉时（约 17:40）" */
 export function timeOfDay(now: Now): string {
+  if (now.clockStyle === "elapsed") return hhmm(now);
   return `${now.shichen}时（约 ${hhmm(now)}）`;
 }
 
@@ -72,6 +91,11 @@ export function agoText(clock: GameClock, thenMinutes: number, nowMinutes: numbe
 /** Rows for the time sheet: date, hour, CE year and 干支, season, time since the start. */
 export function timeRows(clock: GameClock, elapsedMinutes: number): { label: string; value: string }[] {
   const now = nowOf(clock, elapsedMinutes);
+  if (now.clockStyle === "elapsed") return [
+    { label: "日期", value: `第 ${now.day} 天` },
+    { label: "时间", value: timeOfDay(now) },
+    { label: "开局", value: now.day === 1 ? "今天开局" : `已过 ${now.day - 1} 天` },
+  ];
   const rows = [{ label: "时辰", value: timeOfDay(now) }];
   const passed = now.day === 1 ? "今天开局" : `已过 ${now.day - 1} 天`;
   if (!now.date || !clock.date) return [...rows, { label: "开局", value: `${clock.label || "开局日期未定"} · ${passed}` }];

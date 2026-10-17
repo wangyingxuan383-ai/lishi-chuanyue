@@ -6,7 +6,7 @@ import { rejectedReason } from "../../engine/game";
 import { formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
-import type { Item, WorldState } from "../../engine/types";
+import type { Item, WorldSettings, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
 import { Codex } from "./Codex";
 import { Goals } from "./Goals";
@@ -54,6 +54,23 @@ function Stat({ label, value, n }: { label: string; value: string; n?: number })
   );
 }
 
+/**
+ * 主角面板 (R13-T102): the player's own notes, shown as written. A line like
+ * “境界：化形初期” reads as a label and its value, like the 小传 above it.
+ */
+function HeroPanel({ text }: { text: string }) {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  return (
+    <section className="hero-panel" aria-label="主角面板">
+      <h3 className="section-title">主角面板</h3>
+      {lines.length ? lines.map((line, i) => {
+        const pair = line.match(/^([^：:]{1,8})[：:]\s*(.+)$/);
+        return pair ? <p key={i} className="bio-line"><span>{pair[1]}</span>{pair[2]}</p> : <p key={i} className="bio-line">{line}</p>;
+      }) : <p className="muted" style={{ margin: 0 }}>在“本局设置”里写下想随时看到的境界、本事或约定。</p>}
+    </section>
+  );
+}
+
 /** 人物小传: name, age, identity, who they were and their 金手指 (AUDIT_V4_FUNCTION F7). */
 function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () => void; onSave: Save }) {
   const me = state.protagonist;
@@ -66,7 +83,8 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
   const [problem, setProblem] = useState<string | null>(null);
   const clean = name.trim();
   const ageNumber = age === "" ? null : Number(age);
-  const ageBad = ageNumber !== null && (ageNumber < 1 || ageNumber > 120);
+  const ageLimit = state.era.mode === "free" ? 999999 : 120;
+  const ageBad = ageNumber !== null && (!Number.isSafeInteger(ageNumber) || ageNumber < 1 || ageNumber > ageLimit);
   const nameBad = !clean ? "名字不能空着" : [...clean].length > NAME_MAX ? `名字最多 ${NAME_MAX} 个字` : null;
 
   const save = async () => {
@@ -96,10 +114,10 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
             </span>
           </label>
           <label style={{ width: 92 }}>年龄
-            <input aria-label="年龄" inputMode="numeric" value={age} placeholder="不详" className={ageBad ? "wanted" : ""} onChange={(e) => setAge(e.target.value.replace(/\D/g, "").slice(0, 3))} />
+            <input aria-label="年龄" inputMode="numeric" value={age} placeholder="不详" className={ageBad ? "wanted" : ""} onChange={(e) => setAge(e.target.value.replace(/\D/g, "").slice(0, state.era.mode === "free" ? 6 : 3))} />
           </label>
         </div>
-        {(nameBad || ageBad) && <p className="field-hint warn">{nameBad ?? "年龄要在 1～120 岁之间"}</p>}
+        {(nameBad || ageBad) && <p className="field-hint warn">{nameBad ?? (state.era.mode === "free" ? "年龄填正整数，也可以留空" : "年龄要在 1～120 岁之间")}</p>}
         <label>身份与处境<textarea rows={3} value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder="你是谁、身处什么境地" /></label>
         <label>穿越前<input value={origin} onChange={(e) => setOrigin(e.target.value)} placeholder="穿越前你是谁；本来就是这个时代的人可不填" /></label>
         <label>金手指<input value={cheat} onChange={(e) => setCheat(e.target.value)} placeholder="带过来的本事或知识，如：熟读唐史、会做外科手术" /></label>
@@ -169,8 +187,9 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
   );
 }
 
-export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSave, onOpenStory, onOrganize, busy, docked = false }: {
+export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, busy, docked = false }: {
   worldId: string; headId: string; chapterEvery: number;
+  settings?: WorldSettings;
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
   state: WorldState; era: EraContext; onClose: () => void; onSave: Save;
@@ -240,7 +259,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
     <div className={`panel${docked ? " docked" : ""}`} role={docked ? "complementary" : "dialog"} aria-label="角色">
       <div className="topbar">
         {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}><Icon name="back" /></button>}
-        <div className="title"><h1>{tab === "我" ? "我" : me.name}</h1>{tab !== "我" && <div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div>}</div>
+        <div className="title"><h1>{tab === "我" ? "我" : me.name}</h1>{tab !== "我" && <div className="subtitle">{[me.gender, me.age ? `${me.age} 岁` : ""].filter(Boolean).join(" · ")}</div>}</div>
         {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => { setProblem(null); setBase(state); setDraft(structuredClone(state)); }}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
@@ -260,6 +279,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
               {me.cheat && <p className="bio-line"><span>金手指</span>{me.cheat}</p>}
               <p className="bio-line"><span>此时此地</span>{now.text}{place ? ` · ${place}` : ""}</p>
             </section>
+            {settings?.heroPanelEnabled && <HeroPanel text={me.panel ?? ""} />}
             {editing ? <div className="stack" style={{ gap: 12 }}>
               <label>钱
                 <span className="field-line">

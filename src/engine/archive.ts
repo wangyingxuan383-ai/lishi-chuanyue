@@ -5,9 +5,12 @@
 // world under fresh ids.
 import type { Json, Row, SqlStatement } from "../platform";
 import { newId, type Repo } from "./db/repo";
+import { checkChallenge, checkScript } from "./modes";
 
 export const ARCHIVE_FORMAT = "lishi-world";
-export const ARCHIVE_VERSION = 1;
+// v2 carries free-world mode and branch-scoped custom panels. Old readers
+// must reject it rather than silently interpreting those worlds as history.
+export const ARCHIVE_VERSION = 2;
 
 export interface WorldArchive {
   format: typeof ARCHIVE_FORMAT;
@@ -46,6 +49,7 @@ export function archiveProblems(raw: unknown): string[] {
   const a = raw as Partial<WorldArchive> | null;
   if (!a || typeof a !== "object" || a.format !== ARCHIVE_FORMAT) return ["这不是本游戏导出的世界文件"];
   if (typeof a.version !== "number" || a.version > ARCHIVE_VERSION) return ["这个文件来自更新的版本，请先更新游戏"];
+  if (!Number.isInteger(a.version) || a.version < 1) return ["存档格式版本无效"];
   if (!a.world || !Array.isArray(a.nodes) || !Array.isArray(a.states) || !Array.isArray(a.lines) || !Array.isArray(a.pins) || !Array.isArray(a.chapters)) return ["文件不完整"];
   const problems: string[] = [];
   const nodes = new Set(a.nodes.map((n) => n.id as string));
@@ -81,6 +85,31 @@ function remap(a: WorldArchive): WorldArchive {
   };
 }
 
+/**
+ * Play modes (R14) are optional: a script, challenge or pilot that is not in a
+ * shape this version understands is dropped, and the rest of the world kept.
+ */
+function cleanModes(a: WorldArchive): WorldArchive {
+  let settings: { pilot?: unknown } = {};
+  try { settings = JSON.parse(String(a.world.settings_json)); } catch { /* unreadable settings fall back to defaults, as before */ }
+  const world = settings?.pilot === undefined || settings.pilot === "player" || settings.pilot === "ai" ? a.world
+    : { ...a.world, settings_json: JSON.stringify({ ...settings, pilot: undefined }) };
+  const states = a.states.map((row) => {
+    const json = row.state_json as string;
+    if (!json.includes('"script"') && !json.includes('"challenge"')) return row;
+    const state = JSON.parse(json) as { script?: unknown; challenge?: unknown };
+    let changed = false;
+    for (const [key, check] of [["script", checkScript], ["challenge", checkChallenge]] as const) {
+      if (state[key] == null) continue;
+      const checked = check(state[key]);
+      state[key] = typeof checked === "string" ? undefined : checked;
+      changed = true;
+    }
+    return changed ? { ...row, state_json: JSON.stringify(state) } : row;
+  });
+  return { ...a, world, states };
+}
+
 const insert = (table: string, fields: string[], row: Row): SqlStatement => ({
   sql: `INSERT INTO ${table} (${fields.join(", ")}) VALUES (${fields.map(() => "?").join(", ")})`,
   params: fields.map((f) => (row[f] === undefined ? null : row[f]) as Json),
@@ -94,7 +123,7 @@ const insert = (table: string, fields: string[], row: Row): SqlStatement => ({
 export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "replace"): Promise<string> {
   const problems = archiveProblems(raw);
   if (problems.length) throw new Error(problems.join("；"));
-  const archive = mode === "new" ? remap(raw as WorldArchive) : (raw as WorldArchive);
+  const archive = cleanModes(mode === "new" ? remap(raw as WorldArchive) : (raw as WorldArchive));
   const worldId = archive.world.id as string;
   // Parents before children, so every foreign key holds as rows go in.
   const nodes = [...archive.nodes].sort((a, b) => (a.seq as number) - (b.seq as number));

@@ -30,7 +30,7 @@ export interface Named {
 }
 
 /** Finds the existing entry a model-supplied name refers to, or undefined. */
-export function matchName<T extends Named>(entries: T[], name: string): T | undefined {
+export function matchName<T extends Named>(entries: T[], name: string, opts?: { partial?: boolean }): T | undefined {
   const wanted = normalize(name);
   if (!wanted) return undefined;
   const all = (e: T) => [e.name, ...(e.aliases ?? [])];
@@ -42,10 +42,10 @@ export function matchName<T extends Named>(entries: T[], name: string): T | unde
       const b = split(name);
       return a.core !== "" && a.core === b.core && a.title === b.title;
     })) ??
-    // Containment only for names of 3+ characters, to avoid two-character collisions.
-    entries.find((e) => all(e).some((n) => {
+    // Useful for paraphrased goals, but not evidence that two people are the same person.
+    (opts?.partial === false ? undefined : entries.find((e) => all(e).some((n) => {
       const x = normalize(n);
       return Math.min(x.length, wanted.length) >= 3 && (x.includes(wanted) || wanted.includes(x));
-    }))
+    })))
   );
 }

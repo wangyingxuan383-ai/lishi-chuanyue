@@ -57,8 +57,47 @@ export interface StreamListing {
   active: boolean;
 }
 
+/** Progress of the in-app update download (R14). */
+export type UpdateEvent =
+  | { type: "progress"; received: number; total: number }
+  /** A dropped or failed connection; the next attempt resumes after `waitMs`. */
+  | { type: "retrying"; attempt: number; waitMs: number }
+  | { type: "verifying" };
+
+export interface UpdateRequest {
+  /** Release version without the "v"; the package is kept as `<version>.apk`. */
+  version: string;
+  /** The release asset's download URL (GitHub; a debug build also takes a local test server). */
+  url: string;
+  size: number;
+  /** The published SHA-256, 64 hex digits, that the finished file must have. */
+  sha256: string;
+}
+
+export type InstallStatus = "started" | "permission" | "unsupported";
+
 export interface Platform {
   readonly name: "android" | "windows" | "web-dev" | "other";
+  /**
+   * In-app update (R14). Android downloads, verifies and installs; Windows has
+   * it for the debug test source only (the sheet sends players to the browser);
+   * the browser dev harness simulates it. Absent elsewhere.
+   */
+  update?: {
+    /** Resolves once the package is complete and matches `sha256`; resumes an earlier part. Rejects with `update_cancelled` after `cancel()`. */
+    download(request: UpdateRequest, onEvent: (event: UpdateEvent) => void): Promise<void>;
+    /** Pauses the running download; the bytes so far are kept for the next try. */
+    cancel(): Promise<void>;
+    /** A small text asset of a release (SHA256SUMS.txt), from the same hosts. */
+    fetchText(url: string): Promise<string>;
+    /** Checks the package again and opens the system installer — or first this app's "安装未知应用" switch. */
+    install(request: { version: string; size: number; sha256: string }): Promise<InstallStatus>;
+    /** Whether the system lets this app install packages yet. */
+    canInstall(): Promise<boolean>;
+    /** Debug builds: a local test server (`http://127.0.0.1:<port>`) instead of GitHub for the update check. */
+    devSource(): Promise<{ available: boolean; url: string | null }>;
+    setDevSource(url: string | null): Promise<void>;
+  };
   sql: {
     query(sql: string, params?: Json[]): Promise<Row[]>;
     /** Runs all statements in one transaction. */
@@ -96,6 +135,10 @@ export interface Platform {
     importText(): Promise<string | null>;
   };
   system: {
+    /** Only after the chosen story node is durably committed. Never for streams, candidates, tests or cancellation. */
+    storyCommitted(completionId: string): Promise<void>;
+    /** Owned by the active play page; release when leaving it. */
+    setKeepAwake(enabled: boolean): Promise<void>;
     requestNotifications(): Promise<boolean>;
     /** Can notifications show (permission and the app's switch)? Always true off Android. */
     notificationStatus(): Promise<{ granted: boolean; enabled: boolean }>;

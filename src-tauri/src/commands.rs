@@ -160,7 +160,11 @@ pub async fn network_set(config: crate::stream::NetworkConfig) -> Result<()> {
 }
 
 /// A keyless HTTPS GET for public data (checking GitHub for a new release).
+/// A debug build with a test update source reads the release list from it instead.
 #[tauri::command]
 pub async fn http_get_public(url: String, timeout_ms: u64) -> Result<crate::stream::GetResponse> {
+    if let Some(local) = crate::updates::dev_release_url(&url) {
+        return crate::updates::dev_get(&local, timeout_ms).await;
+    }
     crate::stream::get_public(&url, timeout_ms).await
 }

@@ -87,12 +87,64 @@ async fn open_app_settings<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), S
     open_system(app, "open_app_settings").await
 }
 
+/// A business-level success signal, independent of request/service lifetime.
+#[tauri::command]
+async fn story_committed<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    completion_id: String,
+) -> Result<(), String> {
+    if completion_id.is_empty()
+        || completion_id.len() > 256
+        || completion_id.chars().any(char::is_control)
+    {
+        return Err("invalid completion id".into());
+    }
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>(
+                "story_committed",
+                serde_json::json!({ "completionId": completion_id }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn set_keep_awake<R: Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>(
+                "set_keep_awake",
+                serde_json::json!({ "enabled": enabled }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
 /// Opens an https page in the system browser: key consoles, price lists, the release page.
 /// (Kept in this plugin, which already owns the app's few system hand-offs.)
 #[tauri::command]
 async fn open_url<R: Runtime>(app: tauri::AppHandle<R>, url: String) -> Result<(), String> {
-    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c == '"') {
-        return Err("only https links".into());
+    if !crate::link_policy::allowed(&url, false) {
+        return Err("这个链接不在应用的可信链接列表中".into());
     }
     #[cfg(target_os = "android")]
     {
@@ -110,7 +162,7 @@ async fn open_url<R: Runtime>(app: tauri::AppHandle<R>, url: String) -> Result<(
     {
         let _ = app;
         // explorer.exe hands a URL to the default browser without a shell parsing it.
-        std::process::Command::new("explorer")
+        std::process::Command::new("explorer.exe")
             .arg(&url)
             .spawn()
             .map(|_| ())
@@ -189,6 +241,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             notification_status,
             open_notification_settings,
             open_app_settings,
+            story_committed,
+            set_keep_awake,
             open_url,
             set_system_bars,
             haptic

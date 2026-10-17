@@ -4,11 +4,13 @@ mod document_picker;
 mod error;
 mod files;
 mod keep_alive;
+mod link_policy;
 mod notifications;
 mod secret;
 mod secrets;
 mod sql;
 mod stream;
+mod updates;
 #[cfg(desktop)]
 mod window_state;
 
@@ -27,6 +29,7 @@ pub fn run() {
         .plugin(secret::init())
         .plugin(document_picker::init())
         .plugin(notifications::init())
+        .plugin(updates::init())
         .setup(|app| {
             #[cfg(target_os = "android")]
             android_tls::initialize(app)?;
@@ -34,6 +37,9 @@ pub fn run() {
             keep_alive::initialize(app);
             let data = app.path().app_data_dir()?;
             let cache = app.path().app_cache_dir()?;
+            let updates = updates::Updates::new(&cache, &data);
+            updates.housekeeping();
+            app.manage(updates);
             let secrets = Arc::clone(&app.state::<secret::PlatformSecrets>().0);
             let services = tauri::async_runtime::block_on(error::blocking(move || {
                 Ok((

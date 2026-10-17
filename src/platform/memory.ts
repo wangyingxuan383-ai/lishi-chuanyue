@@ -39,7 +39,7 @@ export async function createMemoryPlatform(llm?: Platform["llm"], options: { dat
       setNetwork: async () => {},
     },
     files: { exportText: unsupported, importText: unsupported },
-    system: { requestNotifications: async () => true, notificationStatus: async () => ({ granted: true, enabled: true }), openSystemSettings: async () => {}, openUrl: async () => {}, onBack: () => () => {}, setSystemBars: async () => {}, haptic: async () => false },
+    system: { storyCommitted: async () => {}, setKeepAwake: async () => {}, requestNotifications: async () => true, notificationStatus: async () => ({ granted: true, enabled: true }), openSystemSettings: async () => {}, openUrl: async () => {}, onBack: () => () => {}, setSystemBars: async () => {}, haptic: async () => false },
     exportDb: () => exportDatabase(db),
   };
 }

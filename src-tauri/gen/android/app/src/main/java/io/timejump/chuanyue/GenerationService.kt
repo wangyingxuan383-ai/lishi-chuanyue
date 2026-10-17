@@ -128,7 +128,16 @@ class GenerationService : Service() {
         private var requested = false
         private var current: GenerationService? = null
         private var pendingStop: Runnable? = null
-        private var appContext: Context? = null
+        private val committed = LinkedHashSet<String>()
+
+        /** Called only after the selected passage was saved, never by the stream timer. */
+        fun storyCommitted(context: Context, completionId: String) {
+            synchronized(lock) {
+                if (!committed.add(completionId)) return
+                if (committed.size > 256) committed.remove(committed.first())
+                if (inBackground()) notifyReady(context.applicationContext)
+            }
+        }
 
         /** True when the app is not on screen; then a finished passage is worth a notification. */
         private fun inBackground(): Boolean {
@@ -190,7 +199,6 @@ class GenerationService : Service() {
             synchronized(lock) {
                 pendingStop?.let { main.removeCallbacks(it) }
                 pendingStop = null
-                appContext = context.applicationContext
                 // Already up (a second request of the same turn): nothing to start.
                 if (requested && current != null) return
                 requested = true
@@ -215,7 +223,6 @@ class GenerationService : Service() {
         fun stop(context: Context) {
             synchronized(lock) {
                 pendingStop?.let { main.removeCallbacks(it) }
-                val app = context.applicationContext
                 val stop = Runnable {
                     synchronized(lock) {
                         pendingStop = null
@@ -227,7 +234,6 @@ class GenerationService : Service() {
                         } catch (error: Exception) {
                             warn("stop", error)
                         }
-                        if (inBackground()) notifyReady(app)
                     }
                 }
                 pendingStop = stop

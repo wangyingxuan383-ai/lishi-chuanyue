@@ -1,0 +1,26 @@
+/* In-app update sheet (R14): 宣纸书卷 tokens from base.css, 44px targets,
+   readable at 360px. Progress is a calm 6px bar; nothing flashes. */
+.update-sheet { display: grid; gap: 12px; align-content: start; }
+.update-meta { margin: -6px 0 0; color: var(--muted); font-size: 13px; }
+.update-notes {
+  max-height: 30vh; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--raised);
+  font-size: 14px; line-height: 1.7;
+}
+.update-panel {
+  display: grid; gap: 10px; padding: 14px;
+  border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 3px; background: var(--surface);
+}
+.update-panel.ok { border-left-color: var(--gain); }
+.update-panel.bad { border-left-color: var(--loss); }
+.update-status { margin: 0; font-family: var(--serif); font-size: 16px; line-height: 1.6; }
+.update-count { display: block; margin-top: 2px; font-family: var(--sans); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.update-hint { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.update-actions button { flex: 1 1 132px; }
+.update-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.update-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.25s ease-out; }
+.update-bar.busy > i { width: 30%; animation: update-slide 1.2s ease-in-out infinite; }
+@keyframes update-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .update-bar.busy > i { animation: none; width: 100%; opacity: 0.4; } }
+:root[data-motion="off"] .update-bar.busy > i { animation: none; width: 100%; opacity: 0.4; }

@@ -9,8 +9,8 @@ export interface ChatMessage {
 }
 
 export interface ChatUsage {
-  promptTokens: number;
-  completionTokens: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
 }
 
 export interface ChunkDelta {
@@ -32,10 +32,11 @@ export function parseChunk(data: string): ChunkDelta | null {
   const choice = Array.isArray(value.choices) ? value.choices[0] : undefined;
   const part = choice?.delta ?? choice?.message ?? {};
   const text = (v: unknown) => (typeof v === "string" ? v : "");
-  const usage = value.usage && typeof value.usage === "object"
+  const tokens = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+  const usage = value.usage && typeof value.usage === "object" && !Array.isArray(value.usage)
     ? {
-        promptTokens: Number(value.usage.prompt_tokens) || 0,
-        completionTokens: Number(value.usage.completion_tokens) || 0,
+        promptTokens: tokens(value.usage.prompt_tokens),
+        completionTokens: tokens(value.usage.completion_tokens),
       }
     : null;
   return {
@@ -132,7 +133,10 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
         callbacks.onText?.(chunk.content, text);
       }
       finishReason = chunk.finishReason ?? finishReason;
-      usage = chunk.usage ?? usage;
+      if (chunk.usage) usage = {
+        promptTokens: chunk.usage.promptTokens ?? usage?.promptTokens ?? null,
+        completionTokens: chunk.usage.completionTokens ?? usage?.completionTokens ?? null,
+      };
     } else if (event.type === "done") {
       if (!text) fail(new ChatError("empty", undefined, "", finishReason ?? undefined));
       else settle({ text, finishReason, usage, firstTokenMs, totalMs: performance.now() - started });

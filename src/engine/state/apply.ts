@@ -1,14 +1,15 @@
 // Applies a model's turn record to the world state, change by change
 // (D104, D113). Invalid changes are corrected or dropped, never fatal; the
 // player sees what actually happened as chips, and the next prompt gets notes.
-import { newYearsBetween, nowOf, type GameClock } from "../calendar/clock";
+import { newYearsBetween, nowOf, playYears, type GameClock } from "../calendar/clock";
 import { coerceDate, formatDate } from "../calendar/date";
 import { parseDurationMinutes } from "../calendar/duration";
 import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
 import type { Fortune } from "../fortune";
-import type { ActionMode, Attitude, Card, CardKind, Difficulty, Goal, Person, TimelineEvent, WorldState } from "../types";
+import type { ActionMode, Attitude, Card, CardKind, Challenge, Difficulty, Goal, Person, Script, TimelineEvent, WorldState } from "../types";
 import { eventsBetween, placeEvent, retime } from "../timeline";
+import { beatTitle, checkChallenge, checkScript } from "../modes";
 
 export type RiskResult = "成" | "败" | "半成";
 const RISK_TEXT: Record<RiskResult, string> = { 成: "成了", 败: "没成", 半成: "成了一半" };
@@ -25,8 +26,8 @@ export interface TurnRecord {
   died?: boolean | null;
   /** delta from the story; `set` from the 行囊 editor: the item's own fields, a new name, quantity 0 drops it (AUDIT_V4_FUNCTION F8). */
   items?: { name: string; delta?: number | string; place?: string | null; unit?: string; set?: ItemSet }[] | null;
-  /** Panel edits only: the protagonist's own record, 人物小传 (AUDIT_V4_FUNCTION F7). */
-  profile?: { name?: string; age?: number | null; identity?: string; origin?: string; cheat?: string } | null;
+  /** Panel edits only: 人物小传 and optional free-text panel, saved without interpreting its contents. */
+  profile?: { name?: string; age?: number | null; identity?: string; origin?: string; cheat?: string; panel?: string } | null;
   /** By name from the model; panel edits pass the id (and may rename, replace aliases or remove). */
   people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; origin?: string; alive?: boolean; aliases?: string[] }[] | null;
   status?: { op: string; name: string; detail?: string }[] | null;
@@ -35,7 +36,7 @@ export interface TurnRecord {
   /** The story changed what the history books say (R05-T004). */
   deviation?: string | null;
   /** Timeline edits from the 记事 page or the organizer: add by written date, remove by id. */
-  timeline?: { op: "add" | "remove"; id?: string; date?: string; title?: string; kind?: string; source?: TimelineEvent["source"] }[] | null;
+  timeline?: { op: "add" | "remove"; id?: string; date?: string; title?: string; kind?: string; source?: TimelineEvent["source"]; ceYear?: number }[] | null;
   /** "过些日子" only: what the protagonist heard while time passed (R05-T001). */
   report?: { world?: string; local?: string; people?: string } | null;
   /** The risky part of the action and how it went, when the fortune mattered (R05-T002). */
@@ -51,6 +52,14 @@ export interface TurnRecord {
   places?: PlacePatch[] | null;
   /** Panel edits: the world's rules (D121). date is the start date as {era, year, month, day, ceYear?}; null clears it. */
   rules?: { currency?: { name: string; value: number }[]; lunar?: boolean; date?: Record<string, unknown> | null } | null;
+  /** From the story (R14): the current beat's key event has happened in this passage. */
+  beat?: "done" | null;
+  /** From the story: the challenge's progress; won when the goal is truly reached, lost when the failure truly comes. The deadline is the program's. */
+  challenge?: { progress?: string; result?: "won" | "lost"; why?: string } | null;
+  /** Panel edits only (剧本页): replaces the whole script; null removes it. */
+  scriptSet?: Script | null;
+  /** Panel edits only (挑战页): replaces the whole challenge; null removes it. Giving up is status "abandoned". */
+  challengeSet?: Challenge | null;
 }
 
 /** One item as the 行囊 editor saves it; quantity 0 removes it. */
@@ -106,21 +115,34 @@ const DEFAULT_MINUTES: Record<ActionMode, number> = { do: 15, say: 5, write: 30,
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
 const STAT_SOFT_CAP = 40;
 
-function describeMinutes(minutes: number): string {
+function describeMinutes(minutes: number, free = false): string {
   if (minutes >= 525600 * 0.95) return `过了 ${Math.round(minutes / 525600)} 年`;
   if (minutes >= 43200 * 0.95) return `过了 ${Math.round(minutes / 43200)} 个月`;
   if (minutes >= 1440) return `过了 ${Math.round(minutes / 1440)} 天`;
+  if (free) return minutes >= 60 ? `过了 ${Math.floor(minutes / 60)} 小时${minutes % 60 ? ` ${minutes % 60} 分钟` : ""}` : `过了 ${minutes} 分钟`;
   if (minutes >= 120) return `过了 ${Math.round(minutes / 120)} 个时辰`;
   if (minutes === 60) return "过了半个时辰";
   if (minutes >= 15) return `过了 ${Math.round(minutes / 15)} 刻`;
   return "片刻";
 }
 
-/** Coins and units of money as an item name: "铜钱", "开元通宝", "三百文", "碎银". */
-function isCurrency(name: string, currency: Currency): boolean {
+/** Coins counted one by one, each worth the smallest unit: 铜钱, 铜板, 开元通宝, 乾元重宝 (not 通宝剑). */
+const COIN = /^(?:铜钱|铜板|铜子儿?|..[通重元]宝)$/;
+const NUMERAL = /^[\d零〇一二两俩三四五六七八九十百千万]+$/;
+
+/**
+ * Money the record also put in the bag (eval F: "开元通宝×180" next to 钱 +180):
+ * a unit ("贯"), an amount ("三百文") or a coin whose total is exactly the
+ * money change recorded in the same passage. Anything else stays an item.
+ */
+function duplicatesMoney(name: string, delta: number, money: number | null, currency: Currency): boolean {
+  if (!money || !delta) return false;
   const n = name.trim();
-  if (/通宝|^铜钱$|^钱$|^碎银|^银两$|^铜板$/.test(n)) return true;
-  return currency.units.some((u) => u.name && (n === u.name || new RegExp(`^[\\d零〇一二两三四五六七八九十百千万]+${u.name}$`).test(n)));
+  const unit = currency.units.find((u) => u.name && (u.name === n || currency.aliases?.[n] === u.name));
+  const units = [...currency.units.map((u) => u.name), ...Object.keys(currency.aliases ?? {})].filter(Boolean);
+  const amount = units.some((u) => n.endsWith(u) && NUMERAL.test(n.slice(0, -u.length))) ? parseMoney(n, currency) : null;
+  const each = unit?.value ?? amount ?? (COIN.test(n) ? 1 : null);
+  return each !== null && delta * each === money;
 }
 
 function attitudeOf(text: string | undefined): Attitude | null {
@@ -165,11 +187,13 @@ export function applyRecord(
   opts?: { advanceTime?: boolean },
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
+  const free = s.era.mode === "free";
   const chips: Chip[] = [];
   const notes: string[] = [];
   const log: string[] = [];
   const me = s.protagonist;
   const now = () => s.time.elapsedMinutes;
+  const playing = opts?.advanceTime !== false;
   const dismiss = (name: string) => { s.dismissed = [...new Set([...(s.dismissed ?? []), name])]; };
 
   // Edits keep the current time; turns fall back to the action's default.
@@ -178,30 +202,36 @@ export function applyRecord(
   if (parsed === null && record?.time != null) log.push(`时间“${record.time}”无法识别，按 ${stated} 分钟计`);
   const minutes = ctx.mode === "skip" ? endingAt(stated, record?.hour, s.time.elapsedMinutes, ctx.clock) : stated;
   s.time.elapsedMinutes += minutes;
-  if (stated >= 15) chips.push({ text: describeMinutes(stated), tone: "info" });
+  if (stated >= 15) chips.push({ text: describeMinutes(stated, free), tone: "info" });
   // A skip that stopped well short of what was asked says why, so it does not look like a failure.
   // Only when the passage said how long: a missing or unreadable time is not a stop.
   if (ctx.mode === "skip" && ctx.asked && opts?.advanceTime !== false && parsed !== null && stated < ctx.asked / 2) chips.push({ text: "快进停在这里：有事要你拿主意", tone: "warn" });
-  // Ages count the Chinese way (虚岁): everyone grows a year at New Year.
-  const newYears = ctx.clock ? newYearsBetween(ctx.clock, before.time.elapsedMinutes, s.time.elapsedMinutes) : 0;
+  // Ages count the Chinese way (虚岁) on a dated history clock; a free world (whatever clock is
+  // passed) or an undated story adds one for each full year of play.
+  const newYears = free ? playYears(before.time.elapsedMinutes, s.time.elapsedMinutes)
+    : ctx.clock ? newYearsBetween(ctx.clock, before.time.elapsedMinutes, s.time.elapsedMinutes) : 0;
   // Great events whose time has come (R05-T004): fixed ones happen; changeable ones are what the books say.
-  for (const e of eventsBetween(s.timeline, before.time.elapsedMinutes, s.time.elapsedMinutes)) {
+  for (const e of free ? [] : eventsBetween(s.timeline, before.time.elapsedMinutes, s.time.elapsedMinutes)) {
     chips.push({ text: e.kind === "固定" ? `📜 ${e.title}` : `📜 按史书，此时应有：${e.title}`, tone: "info" });
   }
   if (newYears > 0) {
     if (me.age != null) me.age += newYears;
-    chips.push({ text: `${newYears === 1 ? "过年了" : `过了 ${newYears} 个年`}${me.age != null ? `，${me.age} 岁` : ""}`, tone: "info" });
+    if (!free) chips.push({ text: `${newYears === 1 ? "过年了" : `过了 ${newYears} 个年`}${me.age != null ? `，${me.age} 岁` : ""}`, tone: "info" });
+    else if (me.age != null) chips.push({ text: `${me.age} 岁了`, tone: "info" });
   }
-  if (!record) return { state: s, chips, notes, log: [...log, "本回合没有记录"], minutes };
+  if (!record) {
+    applyModes(s, null, playing, chips, log);
+    return { state: s, chips, notes, log: [...log, "本回合没有记录"], minutes };
+  }
 
   // History changed by the story is kept, dated, for every later turn (R05-T004).
-  if (record.deviation?.trim()) {
+  if (!free && record.deviation?.trim()) {
     const when = ctx.clock?.date ? nowOf(ctx.clock, s.time.elapsedMinutes) : null;
     const text = record.deviation.trim();
     s.deviations = [...(s.deviations ?? []), `${when?.date ? `${formatDate(when.date, ctx.clock!.rules)}：` : ""}${text}`];
     chips.push({ text: `⚠ 历史偏离：${text}`, tone: "warn" });
   }
-  for (const raw of record.timeline ?? []) {
+  for (const raw of free ? [] : record.timeline ?? []) {
     if (raw.op === "remove") {
       const i = (s.timeline ?? []).findIndex((e) => e.id === raw.id);
       if (i >= 0) s.timeline!.splice(i, 1);
@@ -209,7 +239,7 @@ export function applyRecord(
     }
     if (!raw.date?.trim() || !raw.title?.trim()) { log.push(`大事缺少日期或内容：${JSON.stringify(raw)}`); continue; }
     if (!ctx.clock) { log.push("没有游戏日期，大事无法放进年表"); continue; }
-    const placed = placeEvent(ctx.clock, { date: raw.date, title: raw.title, kind: raw.kind });
+    const placed = placeEvent(ctx.clock, { date: raw.date, title: raw.title, kind: raw.kind, ceYear: raw.ceYear });
     if (placed.atMinute === null) log.push(`大事“${placed.title}”的日期无法换算，只记录不提醒`);
     if ((s.timeline ?? []).some((e) => e.title === placed.title)) { log.push(`年表里已经有“${placed.title}”了`); continue; }
     s.timeline = [...(s.timeline ?? []), { id: newId(), ...placed, source: raw.source ?? "玩家" }].sort((a, b) => (a.atMinute ?? Infinity) - (b.atMinute ?? Infinity));
@@ -234,8 +264,13 @@ export function applyRecord(
     }
   }
 
-  // Money first, so a failed purchase can also cancel the goods it would have bought.
-  let purchaseFailed = false;
+  // Money first (D113, 钱不够就买不成). A record is one passage and does not say which gains a
+  // payment was for, so when its payment fails, everything the same record gained is not booked.
+  // Nothing is guessed and nothing is lost silently: the chip names those things for the player,
+  // and the narrator is told, so a gift that had nothing to do with the money is recorded again.
+  let recordedMoney: number | null = null;
+  let unpaid: { had: number; cost: number; chip: Chip } | null = null;
+  const withheld: string[] = [];
   if (record.money != null) {
     const delta = parseMoney(record.money, ctx.currency);
     if (delta === null) log.push(`钱数“${record.money}”无法识别，已忽略`);
@@ -243,17 +278,18 @@ export function applyRecord(
       const next = me.stats.money + delta;
       if (next >= 0) {
         me.stats.money = next;
+        recordedMoney = delta;
         chips.push({ text: `钱 ${delta > 0 ? "+" : "−"}${formatMoney(Math.abs(delta), ctx.currency)}`, tone: delta > 0 ? "gain" : "loss" });
       } else if (ctx.difficulty === "宽松") {
         const owed = -next;
         me.stats.money = 0;
         me.stats.debt += owed;
+        recordedMoney = delta;
         chips.push({ text: `钱不够，赊欠 ${formatMoney(owed, ctx.currency)}`, tone: "warn" });
         notes.push(`上回合钱不够，主角赊欠了 ${formatMoney(owed, ctx.currency)}，现在身上没有钱。`);
       } else {
-        purchaseFailed = true;
-        chips.push({ text: "钱不够，这笔没付成", tone: "warn" });
-        notes.push(`上回合主角只有 ${formatMoney(me.stats.money, ctx.currency)}，付不起 ${formatMoney(-delta, ctx.currency)}，这笔交易没有成交；请在叙述中自然交代。`);
+        unpaid = { had: me.stats.money, cost: -delta, chip: { text: "钱不够，这笔没付成", tone: "warn" } };
+        chips.push(unpaid.chip);
         log.push(`钱 ${delta} 超出余额 ${me.stats.money}，交易取消`);
       }
     }
@@ -281,7 +317,6 @@ export function applyRecord(
   // smaller losses leave them hanging on (eval H: deaths the story never wrote). 残酷 kills at zero;
   // 宽松 never kills.
   const dying = me.statuses.some((x) => x.name === "垂危");
-  const playing = opts?.advanceTime !== false;
   const wroteDeath = playing && record.died === true;
   if (playing && (me.stats.health <= 0 || wroteDeath)) {
     if (ctx.difficulty === "宽松") {
@@ -319,7 +354,6 @@ export function applyRecord(
       const item = me.items.find((i) => i.name === raw.name);
       const name = set.name?.trim() || raw.name;
       const quantity = set.quantity === undefined || !Number.isFinite(set.quantity) ? undefined : Math.max(0, Math.round(set.quantity));
-      if (isCurrency(name, ctx.currency)) { log.push(`“${name}”是钱，按钱记，不放进行囊`); continue; }
       if (item) {
         item.name = name;
         if (quantity !== undefined) item.quantity = quantity;
@@ -333,10 +367,14 @@ export function applyRecord(
     }
     const delta = typeof raw?.delta === "number" ? raw.delta : Number(String(raw?.delta ?? "").replace(/[^\d+-]/g, ""));
     if (!raw?.name || !Number.isFinite(delta)) { log.push(`物品记录不完整：${JSON.stringify(raw)}`); continue; }
-    // Money is counted in money, not in the bag ("开元通宝×180" next to 钱 +180).
-    if (isCurrency(raw.name, ctx.currency)) { log.push(`“${raw.name}”是钱，按钱记，不放进行囊`); continue; }
-    if (delta > 0 && purchaseFailed) { log.push(`钱不够，未获得 ${raw.name}`); continue; }
+    if (delta > 0 && unpaid) { withheld.push(raw.name); log.push(`钱不够，未获得 ${raw.name}`); continue; }
     let item = matchName(me.items, raw.name);
+    // Preserve existing physical items, panel edits and ambiguous coin records. Deduplicate
+    // only a new currency entry whose amount is already explicitly recorded in money.
+    if (!item && opts?.advanceTime !== false && duplicatesMoney(raw.name, delta, recordedMoney, ctx.currency)) {
+      log.push(`“${raw.name}”的 ${delta} 已记入钱数，不重复放进行囊`);
+      continue;
+    }
     if (delta === 0 && item && raw.place !== undefined) {
       item.place = raw.place || null;
       continue;
@@ -357,6 +395,11 @@ export function applyRecord(
     }
   }
   me.items = me.items.filter((i) => i.quantity > 0);
+  if (unpaid) {
+    if (withheld.length) unpaid.chip.text += `，${withheld.join("、")}没到手`;
+    const without = withheld.length ? `，记录里同时得到的${withheld.join("、")}也没有记上` : "";
+    notes.push(`上回合主角只有 ${formatMoney(unpaid.had, ctx.currency)}，付不起 ${formatMoney(unpaid.cost, ctx.currency)}，这笔交易没有成交${without}；请在叙述中自然交代${withheld.length ? "，其中与这笔钱无关、确实到手的，本回合再记一次" : ""}。`);
+  }
 
   // The protagonist's own record, from the panel only; an old name stays an alias.
   const profile = opts?.advanceTime === false ? record.profile : null;
@@ -371,13 +414,14 @@ export function applyRecord(
     }
     if (profile.age !== undefined) {
       if (profile.age === null) me.age = null;
-      else if (Number.isInteger(profile.age) && profile.age >= 1 && profile.age <= 120) me.age = profile.age;
-      else log.push(`年龄 ${profile.age} 不在 1～120 之间，没有生效`);
+      else if (Number.isSafeInteger(profile.age) && profile.age >= 1 && (free || profile.age <= 120)) me.age = profile.age;
+      else log.push(free ? `年龄 ${profile.age} 不是有效的正整数，没有生效` : `年龄 ${profile.age} 不在 1～120 之间，没有生效`);
     }
     for (const key of ["identity", "origin", "cheat"] as const) {
       const value = profile[key];
       if (value !== undefined) me[key] = value.trim();
     }
+    if (typeof profile.panel === "string") Object.assign(me, { panel: profile.panel });
   }
 
   // People
@@ -408,8 +452,8 @@ export function applyRecord(
     if (!raw?.name) continue;
     // A person first met unnamed ("货栈管事") may later be named ("刘三郎"):
     // the model lists the old label in aliases, which finds the same entry.
-    const existing = matchName<Person>(s.people, raw.name)
-      ?? (raw.aliases ?? []).map((a) => matchName<Person>(s.people, a)).find(Boolean);
+    const existing = matchName<Person>(s.people, raw.name, { partial: false })
+      ?? (raw.aliases ?? []).map((a) => matchName<Person>(s.people, a, { partial: false })).find(Boolean);
     if (!existing) {
       const person: Person = {
         id: newId(), name: raw.name, aliases: raw.aliases ?? [], role: raw.role ?? "",
@@ -444,7 +488,7 @@ export function applyRecord(
       existing.alive = false;
       chips.push({ text: `${existing.name} 身故`, tone: "warn" });
     } else if (raw.alive === true && !existing.alive) {
-      if (opts?.advanceTime === false) existing.alive = true;
+      if (opts?.advanceTime === false || free) existing.alive = true;
       else {
         log.push(`${existing.name} 已死亡，不能复活`);
         notes.push(`${existing.name} 已经去世。`);
@@ -527,12 +571,13 @@ export function applyRecord(
       s.era.currency = { units, ...(Object.keys(aliases).length ? { aliases } : {}) };
     }
   }
-  if (rules?.lunar !== undefined) {
+  // Free worlds keep their saved calendar untouched, including when a record clears the date.
+  if (!free && rules?.lunar !== undefined) {
     s.era.calendar = { ...(s.era.calendar ?? {}), lunar: rules.lunar };
     if (s.time.date && rules.date === undefined) s.time.date = { ...s.time.date, lunar: rules.lunar };
   }
-  let startMoved = rules?.lunar !== undefined;
-  if (rules?.date !== undefined) {
+  let startMoved = !free && rules?.lunar !== undefined;
+  if (!free && rules?.date !== undefined) {
     const calendar = s.era.calendar ?? {};
     const date = rules.date ? coerceDate({ ...rules.date, lunar: calendar.lunar ?? rules.date.lunar }, calendar) : null;
     if (rules.date && !date) log.push("开局日期写得不完整，没有生效");
@@ -543,7 +588,7 @@ export function applyRecord(
     }
   }
   // Each great event was placed against the old start: place it again by its written date (AUDIT_V4_FUNCTION F2).
-  if (startMoved && s.timeline?.length) {
+  if (!free && startMoved && s.timeline?.length) {
     const calendar = s.era.calendar ?? ctx.clock?.rules ?? {};
     const start = s.time.date !== undefined ? s.time.date : ctx.clock?.date ?? null;
     s.timeline = retime(s.timeline, { date: start, hour: s.time.startHour ?? ctx.clock?.hour ?? 8, label: s.time.start, rules: calendar });
@@ -604,5 +649,76 @@ export function applyRecord(
     s.places.push({ id: newId(), name, aliases: cleanNames(raw.aliases, name), description: (raw.description ?? "").trim(), ...(raw.source ? { source: raw.source } : {}) });
   }
 
+  applyModes(s, record, playing, chips, log);
   return { state: s, chips, notes, log, minutes };
+}
+
+/** A chip's text from a sentence the narrator wrote. */
+const brief = (text: string) => (text.length > 20 ? `${text.slice(0, 20)}…` : text);
+
+/**
+ * Play modes (R14): the story marks the current beat played and moves the
+ * challenge on; whole replacements come from the script and challenge pages
+ * only. An ended challenge takes no more news, and after every turn the
+ * program, not the narrator, decides whether the deadline has passed.
+ */
+function applyModes(s: WorldState, record: TurnRecord | null, playing: boolean, chips: Chip[], log: string[]): void {
+  const now = s.time.elapsedMinutes;
+  if (record?.scriptSet !== undefined) {
+    const next = record.scriptSet === null ? null : checkScript(record.scriptSet);
+    if (playing) log.push("剧本只能在剧本页修改，记录里的修改已忽略");
+    else if (typeof next === "string") log.push(next);
+    else if (!next) delete s.script;
+    else {
+      for (const b of next.beats) if (b.status !== "todo") b.endedMinute ??= now;
+      s.script = next;
+    }
+  }
+  if (record?.challengeSet !== undefined) {
+    const next = record.challengeSet === null ? null : checkChallenge(record.challengeSet);
+    if (playing) log.push("挑战只能在挑战页修改，记录里的修改已忽略");
+    else if (typeof next === "string") log.push(next);
+    else if (!next) delete s.challenge;
+    else if (next.status === "active" && next.deadlineMinute !== null && next.deadlineMinute <= now) log.push("这个期限已经过了");
+    else {
+      if (next.status !== "active") next.endedMinute ??= now;
+      if (next.limit && next.deadlineMinute === null) log.push(`期限“${next.limit}”无法换算，按不限时处理`);
+      s.challenge = next;
+    }
+  }
+
+  if (record?.beat === "done") {
+    const beats = s.script?.beats ?? [];
+    const i = beats.findIndex((b) => b.status === "todo");
+    if (i < 0) log.push("没有正在演的一幕，beat 已忽略");
+    else {
+      beats[i].status = "done";
+      beats[i].endedMinute = now;
+      chips.push({ text: `📜 第 ${i + 1} 幕演完：${beatTitle(beats[i].text)}`, tone: "info" });
+    }
+  }
+
+  const c = s.challenge;
+  if (c?.status !== "active") {
+    if (record?.challenge) log.push("没有进行中的挑战，记录里的挑战进展已忽略");
+    return;
+  }
+  if (playing) c.turns = (c.turns ?? 0) + 1;
+  const news = record?.challenge;
+  const progress = news?.progress?.trim();
+  if (progress && progress !== c.progress) {
+    c.progress = progress;
+    if (!news?.result) chips.push({ text: `⚑ 挑战进展：${brief(progress)}`, tone: "info" });
+  }
+  if (news?.result) {
+    c.status = news.result;
+    c.endedMinute = now;
+    c.outcome = news.why?.trim() || c.progress || (news.result === "won" ? "达成了目标" : "没能完成");
+    chips.push(news.result === "won" ? { text: "⚑ 挑战成功", tone: "gain" } : { text: `⚑ 挑战失败：${brief(c.outcome)}`, tone: "loss" });
+  } else if (playing && c.deadlineMinute !== null && now >= c.deadlineMinute) {
+    c.status = "lost";
+    c.endedMinute = c.deadlineMinute;
+    c.outcome = "期限已到";
+    chips.push({ text: "⚑ 挑战失败：期限已到", tone: "loss" });
+  }
 }

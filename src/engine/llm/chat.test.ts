@@ -17,6 +17,15 @@ function fakePlatform(events: StreamEvent[]): Platform {
 const data = (value: unknown): StreamEvent => ({ type: "data", data: JSON.stringify(value) });
 
 describe("parseChunk", () => {
+  it("keeps missing and invalid token counts unknown while retaining an explicit zero", () => {
+    expect(parseChunk(JSON.stringify({ usage: { prompt_tokens: 100 } }))?.usage).toEqual({ promptTokens: 100, completionTokens: null });
+    expect(parseChunk(JSON.stringify({ usage: { prompt_tokens: 0, completion_tokens: 0 } }))?.usage).toEqual({ promptTokens: 0, completionTokens: 0 });
+    for (const value of [-1, 1.5, "100", true, Number.MAX_SAFE_INTEGER + 1, null]) {
+      expect(parseChunk(JSON.stringify({ usage: { prompt_tokens: value, completion_tokens: 5 } }))?.usage).toEqual({ promptTokens: null, completionTokens: 5 });
+    }
+    expect(parseChunk(JSON.stringify({ usage: { total_tokens: 50 } }))?.usage).toEqual({ promptTokens: null, completionTokens: null });
+    expect(parseChunk(JSON.stringify({ usage: [] }))?.usage).toBeNull();
+  });
   it("reads content, reasoning, finish reason and usage, ignoring unknown fields", () => {
     expect(parseChunk(JSON.stringify({
       id: "x", weird: { nested: true },
@@ -36,6 +45,16 @@ describe("parseChunk", () => {
 
 describe("streamChat", () => {
   const request = { slot: "main", url: "https://x/v1/chat/completions", model: "m", messages: [] };
+
+  it("combines separately reported token counts without inventing missing usage", async () => {
+    const result = await streamChat(fakePlatform([
+      data({ choices: [{ delta: { content: "正文" } }], usage: { prompt_tokens: 100 } }),
+      data({ choices: [], usage: { completion_tokens: 12 } }),
+      data({ choices: [], usage: {} }),
+      { type: "done" },
+    ]), request).result;
+    expect(result.usage).toEqual({ promptTokens: 100, completionTokens: 12 });
+  });
 
   it("concatenates deltas and reports thinking once", async () => {
     let thinking = 0;

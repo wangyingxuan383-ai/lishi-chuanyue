@@ -4,6 +4,9 @@ import initSqlJs from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
 import { exportDatabase, sqlJsSql } from "./sqljs";
 import { PlatformError, type Platform, type StreamEvent } from "./types";
+import { assertLink, getPublic } from "./linkPolicy";
+import { setBrowserKeepAwake } from "./screenAwake";
+import { simulatedUpdate } from "./webUpdate";
 
 const IDB_NAME = "chuanyue-dev";
 const IDB_STORE = "files";
@@ -93,6 +96,14 @@ export async function createWebPlatform(): Promise<Platform> {
     clearTimeout(persistTimer);
     if (!restored) void idbPut(DB_KEY, exportDatabase(db));
   });
+  // UI scripts save before reloading instead of waiting out the one-second debounce,
+  // which a busy machine sometimes missed (the recap check in game-flow).
+  if (import.meta.env.DEV) {
+    (window as unknown as { __lishiFlush?: () => Promise<void> }).__lishiFlush = async () => {
+      clearTimeout(persistTimer);
+      if (!restored) await idbPut(DB_KEY, exportDatabase(db));
+    };
+  }
 
   const listBackups = async () => {
     const backups: { name: string; at: string; size: number }[] = [];
@@ -224,9 +235,11 @@ export async function createWebPlatform(): Promise<Platform> {
       },
       get: (request) => bridge("llm/get", request),
       // The dev harness reads public pages straight from the browser (GitHub allows it).
-      getPublic: async (url) => { const r = await fetch(url, { headers: { accept: "application/vnd.github+json" } }); return { status: r.status, body: await r.text() }; },
+      getPublic,
       setNetwork: async () => {},
     },
+    // The update sheet's download, simulated (webUpdate.ts): nothing is fetched or installed.
+    update: simulatedUpdate(),
     files: {
       async exportText(suggestedName, text) {
         const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
@@ -245,10 +258,12 @@ export async function createWebPlatform(): Promise<Platform> {
       },
     },
     system: {
+      storyCommitted: async () => {},
+      setKeepAwake: setBrowserKeepAwake,
       requestNotifications: async () => true,
       notificationStatus: async () => ({ granted: true, enabled: true }),
       openSystemSettings: async () => {},
-      openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
+      openUrl: async (url) => { assertLink(url, "browser"); window.open(url, "_blank", "noopener"); },
       setSystemBars: async () => {},
       haptic: async () => navigator.vibrate?.(10) ?? false,
       onBack(handler) {

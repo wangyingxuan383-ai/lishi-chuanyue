@@ -8,9 +8,10 @@ import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
 import type { EraContext } from "../../engine/era";
-import { monthLabel } from "../../engine/calendar/date";
+import type { GameClock } from "../../engine/calendar/clock";
+import { monthLabel, readDate } from "../../engine/calendar/date";
 import { rejectedReason } from "../../engine/game";
-import { readEventDate } from "../../engine/timeline";
+import { placeEvent } from "../../engine/timeline";
 
 interface Row { chapter: Chapter; n: number; from: number; to: number; turns: StoryNode[] }
 
@@ -84,6 +85,19 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
 
 type Save = (patch: TurnRecord, summary: string) => Promise<void>;
 
+/**
+ * The CE year an edited event keeps. The AI organizer gives one for a date in
+ * another reign (至德元载 in a 天宝 world), which the written date alone cannot
+ * be counted from; it stays while the reign stays and moves with the year.
+ */
+export function keptCeYear(event: TimelineEvent | null, text: string, clock: GameClock): number | undefined {
+  if (event?.ceYear == null) return undefined;
+  const before = readDate(event.date, clock.rules);
+  const after = readDate(text.trim(), clock.rules);
+  if (!before || !after || after.ceYear != null || before.era !== after.era) return undefined;
+  return event.ceYear + (after.year - before.year);
+}
+
 function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEvent | null; others: TimelineEvent[]; era: EraContext; onClose: () => void; onSave: Save }) {
   const { toast } = useApp();
   const [editing, setEditing] = useState(!event);
@@ -96,13 +110,15 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
     try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
   // The date is checked while typing, so a date the game cannot count is never saved silently (AUDIT_V4_FUNCTION F9).
-  const placed = date.trim() ? readEventDate(era.clock, date) : null;
   const clean = title.trim();
+  const ceYear = keptCeYear(event, date, era.clock);
+  const placement = date.trim() ? placeEvent(era.clock, { date, title: clean, kind, ceYear }) : null;
+  const placed = placement && placement.atMinute !== null ? { label: placement.date, atMinute: placement.atMinute } : null;
   const taken = !!clean && others.some((e) => e.title === clean && e.id !== event?.id);
   const unchanged = !!event && placed?.label === event.date && clean === event.title && kind === event.kind;
   const save = () => {
     if (!placed || !clean) return;
-    const add = { op: "add" as const, date: date.trim(), title: clean, kind, ...(event?.source ? { source: event.source } : {}) };
+    const add = { op: "add" as const, date: date.trim(), title: clean, kind, ...(event?.source ? { source: event.source } : {}), ...(ceYear != null ? { ceYear } : {}) };
     if (!event) void run({ timeline: [add] }, `添加大事：${clean}`);
     else void run({ timeline: [{ op: "remove", id: event.id }, add] }, `修改大事：${clean}`);
   };
@@ -198,7 +214,7 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
         {pending.turns.map((t, i) => <small key={t.id} className="muted">{logLine(t, pending.from + i)}</small>)}
         <button className="ghost" style={{ alignSelf: "flex-start" }} disabled={busy || writing} onClick={() => void writeNow()}>{writing ? "正在写…" : `把第 ${pending.from}～${to} 回合写成一章`}</button>
       </section>}
-      <section className="stack" style={{ gap: 4 }}>
+      {state.era.mode !== "free" && <section className="stack" style={{ gap: 4 }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <b>天下大事</b>
           <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => setEvent({ event: null })}><Icon name="plus" size={18} />添加</button>
@@ -209,8 +225,8 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
             <span className="tag">{e.kind}</span>
           </button>
         )) : <p className="muted" style={{ margin: 0 }}>这个世界还没有年表。可以把史书上的大事加进来，时间到了会提醒。</p>}
-      </section>
-      {state.deviations.length > 0 && <section className="stack" style={{ gap: 4 }}>
+      </section>}
+      {state.era.mode !== "free" && state.deviations.length > 0 && <section className="stack" style={{ gap: 4 }}>
         <b>历史偏离</b>
         {state.deviations.map((d, i) => <small key={i} className="muted">{d}</small>)}
       </section>}

@@ -9,16 +9,20 @@ import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
 import type { Row } from "../../platform";
 import { useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
-import { REPO_URL, latestRelease, openLink, newer, type ReleaseInfo } from "../app/update";
+import { REPO_URL, latestRelease, openLink, newer, plainNotes, type ReleaseInfo } from "../app/update";
 import { exportWorld } from "../../engine/archive";
-import { PURPOSES, UsageSheet } from "../components/Usage";
+import { PURPOSES } from "../components/Usage";
 import { Seal } from "../components/Seal";
 import { BackupRestore } from "../components/BackupRestore";
 import { Icon } from "../components/Icon";
+import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget";
+import { WhatsNewSheet } from "../components/WhatsNew";
+import { UpdateButton, UpdateDevSource } from "../components/UpdateSheet";
 
-const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
-type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev";
+const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用", cancelled: "已取消" };
+type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev" | "budget";
 const TITLES: Record<Page, string> = {
+  budget: "用量与花费",
   home: "设置", services: "AI 服务", writing: "写作与叙事（新开一局的默认）", memory: "记忆与整理", play: "游玩默认",
   reading: "阅读与外观", notify: "通知与提醒", data: "存档与数据", network: "网络与代理", about: "关于与更新", dev: "开发者",
 };
@@ -32,8 +36,10 @@ export default function Settings() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [notify, setNotify] = useState<{ granted: boolean; enabled: boolean } | null>(null);
   const [network, setNetwork] = useState<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>({ proxy: "none" });
+  const [spend, setSpend] = useState("预算与单价");
   useEffect(() => {
     void loadPlayDefaults(game.repo).then(setDefaults);
+    void budgetState(game).then(setSpend).catch(() => setSpend("预算与单价"));
     void listProfiles(game.repo).then(setProfiles);
     void game.platform.system.notificationStatus().then(setNotify).catch(() => setNotify(null));
     void game.repo.getSetting("network", { proxy: "none" as const }).then(setNetwork);
@@ -56,7 +62,8 @@ export default function Settings() {
       { page: "notify", label: "通知与提醒", state: !android ? "电脑上不需要" : notify?.enabled ? "已打开" : "没打开", hidden: !android && !devMode },
     ] },
     { group: "应用", items: [
-      { page: "data", label: "存档与数据", state: "备份、导出、用量" },
+      { page: "data", label: "存档与数据", state: "备份与导出" },
+      { page: "budget", label: "用量与花费", state: spend },
       { page: "network", label: "网络与代理", state: network.proxy === "custom" ? "自定义代理" : network.proxy === "system" ? "跟随系统代理" : "直接连接" },
       { page: "about", label: "关于与更新", state: `版本 ${__APP_VERSION__}` },
       { page: "dev", label: "开发者", state: devMode ? "已打开" : "关", hidden: !devMode },
@@ -89,6 +96,7 @@ export default function Settings() {
         {page === "reading" && <ReadingPage />}
         {page === "notify" && <NotifyPage status={notify} onRefresh={() => void game.platform.system.notificationStatus().then(setNotify)} />}
         {page === "data" && <DataPage />}
+        {page === "budget" && <MonthlyBudgetSettings />}
         {page === "network" && <NetworkPage value={network} onChange={setNetwork} />}
         {page === "about" && <AboutPage />}
         {page === "dev" && <DevPage />}
@@ -234,7 +242,7 @@ function ReadingPage() {
       <h3 className="settings-sub">更多</h3>
       <Choice label="动画" note="弹层、标签出现时的轻微动画" value={reading.motion} options={[["system", "跟随系统"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />
       <Choice label="触感" note="长按时轻轻振一下" value={reading.haptics} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ haptics: v })} />
-      <Choice label="阅读时不锁屏" note="开着时，屏幕在游戏里不会自动熄灭" value={reading.keepAwake} options={[[false, "关"], [true, "开"]]} onChange={(v) => set({ keepAwake: v })} />
+      <Choice label="阅读时不锁屏" note="只在读故事时生效" value={reading.keepAwake} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ keepAwake: v })} />
     </>
   );
 }
@@ -272,12 +280,10 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
 function DataPage() {
   const { game, toast } = useApp();
   const [backups, setBackups] = useState<{ name: string; at: string; bytes?: number }[]>([]);
-  const [usage, setUsage] = useState<{ calls: number; worlds: number } | null>(null);
-  const [usageOpen, setUsageOpen] = useState(false);
+  const [worldCount, setWorldCount] = useState<number | null>(null);
   const load = () => {
     void game.platform.sql.listBackups().then((b) => setBackups([...b].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)))).catch(() => setBackups([]));
-    void game.platform.sql.query("SELECT (SELECT COUNT(*) FROM usage) AS calls, (SELECT COUNT(*) FROM worlds WHERE archived < 2) AS worlds")
-      .then((r) => setUsage({ calls: Number(r[0].calls), worlds: Number(r[0].worlds) }));
+    void game.platform.sql.query("SELECT COUNT(*) AS worlds FROM worlds WHERE archived < 2").then((r) => setWorldCount(Number(r[0].worlds)));
   };
   useEffect(load, []);
   const exportAll = async () => {
@@ -303,13 +309,9 @@ function DataPage() {
         <summary className="muted">从备份恢复（{backups.length} 份）</summary>
         <BackupRestore refresh={backups[0]?.name ?? ""} />
       </details>}
-      <h3 className="settings-sub">导出与导入</h3>
-      <Note>导出的文件可以在另一台手机或电脑上导入。单个世界在首页的“⋯”菜单里导出。</Note>
-      <button onClick={() => void exportAll()}>导出全部世界{usage ? `（${usage.worlds} 个）` : ""}</button>
-      <h3 className="settings-sub">用量</h3>
-      <Note>{usage ? `一共调用了 ${usage.calls} 次 AI 服务。` : ""}在明细里可以按世界、按天、按用途看，填上价格还能估算花费。</Note>
-      <button onClick={() => setUsageOpen(true)}>用量明细与费用估算</button>
-      {usageOpen && <UsageSheet onClose={() => setUsageOpen(false)} />}
+      <h3 className="settings-sub">导出</h3>
+      <Note>导出的文件，在另一台手机或电脑的首页用“从文件导入世界…”打开。只导出一个世界：点首页卡片上的“⋯”。</Note>
+      <button onClick={() => void exportAll()}>导出全部世界{worldCount !== null ? `（${worldCount} 个）` : ""}</button>
     </>
   );
 }
@@ -317,6 +319,7 @@ function DataPage() {
 function NetworkPage({ value, onChange }: { value: { proxy: "none" | "system" | "custom"; proxyUrl?: string | null }; onChange: (v: { proxy: "none" | "system" | "custom"; proxyUrl?: string | null }) => void }) {
   const { game, toast } = useApp();
   const [url, setUrl] = useState(value.proxyUrl ?? "");
+  const [mode, setMode] = useState(value.proxy);
   const apply = async (next: { proxy: "none" | "system" | "custom"; proxyUrl?: string | null }) => {
     try {
       await game.platform.llm.setNetwork(next);
@@ -330,15 +333,16 @@ function NetworkPage({ value, onChange }: { value: { proxy: "none" | "system" | 
   return (
     <>
       <Note>连不上海外服务（比如 OpenRouter、Gemini）时才需要改。国内的服务一般直接连接就好。</Note>
-      <Choice label="连接方式" value={value.proxy} options={[["none", "直接连接"], ["system", "跟随系统代理"], ["custom", "自定义代理"]]}
-        onChange={(v) => void apply(v === "custom" ? { proxy: "custom", proxyUrl: url || null } : { proxy: v })} />
-      {value.proxy === "system" && <Note>电脑上会用系统设置里的代理。手机上的应用请求不一定能读到系统代理【还没在手机上验证】，连不上时改用自定义代理。</Note>}
-      {value.proxy === "custom" && <label className="setting">
+      <Choice label="连接方式" value={mode} options={[["none", "直接连接"], ["system", "跟随系统代理"], ["custom", "自定义代理"]]}
+        onChange={(v) => { setMode(v); if (v !== "custom") void apply({ proxy: v }); }} />
+      {mode === "system" && <Note>电脑上会用系统设置里的代理。手机上的应用请求不一定能读到系统代理【还没在手机上验证】，连不上时改用自定义代理。</Note>}
+      {mode === "custom" && <label className="setting">
         <div className="setting-head"><b>代理地址</b><small>如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080</small></div>
         <div className="row">
           <input className="grow" value={url} onChange={(e) => setUrl(e.target.value.trim())} placeholder="http://主机:端口" inputMode="url" autoCapitalize="off" aria-label="代理地址" />
           <button className="primary" disabled={!url} onClick={() => void apply({ proxy: "custom", proxyUrl: url })}>保存</button>
         </div>
+        <small className="field-hint">地址会原样存在本机和备份里，别把账号密码写进去；需要认证的代理，请用本机的代理工具转接。</small>
       </label>}
     </>
   );
@@ -349,6 +353,7 @@ function AboutPage() {
   const [checking, setChecking] = useState(false);
   const [latest, setLatest] = useState<ReleaseInfo | null | "error">(null);
   const [autoCheck, setAutoCheck] = useState(true);
+  const [whatsNew, setWhatsNew] = useState(false);
   useEffect(() => { void game.repo.getSetting("autoUpdateCheck", true).then(setAutoCheck); }, []);
   const check = async () => {
     setChecking(true);
@@ -363,21 +368,25 @@ function AboutPage() {
       </div>
       <div className="status-card">
         <b>{checking ? "正在检查…" : latest === "error" ? "没连上 GitHub" : hasNew ? `有新版本：${latest!.version}` : latest ? "已经是最新版本" : "检查更新"}</b>
-        {latest && latest !== "error" && hasNew && <small className="release-notes">{latest.notes.split("\n").filter((l) => l.trim()).slice(0, 8).join("\n")}</small>}
+        {latest && latest !== "error" && hasNew && <small className="release-notes">{plainNotes(latest.notes, 4, 160)}</small>}
         {latest === "error" && <small>可能是网络问题，或者 GitHub 暂时访问不了；需要的话可以在“网络与代理”里设置代理。</small>}
         <div className="row">
-          <button className={hasNew ? "primary" : ""} disabled={checking} onClick={() => (hasNew ? void openLink(game.platform, toast, (latest as ReleaseInfo).url) : void check())}>{hasNew ? "去下载" : "检查更新"}</button>
+          {hasNew ? <UpdateButton release={latest as ReleaseInfo} /> : <button disabled={checking} onClick={() => void check()}>检查更新</button>}
           <button className="ghost" onClick={() => void openLink(game.platform, toast, `${REPO_URL}/releases`)}>全部版本</button>
         </div>
         <small>安卓更新时下载新的安装包直接覆盖安装，不要先卸载（卸载会删掉所有世界）。</small>
       </div>
       <Choice label="打开时自动检查更新" note="每天最多查一次，只看有没有新版本，不会自动下载" value={autoCheck} options={[[true, "开"], [false, "关"]]}
         onChange={(v) => { setAutoCheck(v); void game.repo.setSetting("autoUpdateCheck", v); }} />
+      <button onClick={() => setWhatsNew(true)}>这一版新增</button>
+      {whatsNew && <WhatsNewSheet onClose={() => setWhatsNew(false)} />}
       <h3 className="settings-sub">说明</h3>
       <dl className="facts">
-        <dt>数据</dt><dd>所有世界都存在这台设备上，不上传。</dd>
+        <dt>存档</dt><dd>世界与存档保存在这台设备上。</dd>
+        <dt>AI 调用</dt><dd>生成故事或整理记录时，会将相关设定、正文和人物等上下文发给你配置的 AI 服务，由该服务处理。</dd>
+        <dt>导出与分享</dt><dd>只有你主动导出或分享时，才会生成相应文件；交给其他应用或他人后的使用，由你选择的分享方式决定。</dd>
         <dt>Key</dt><dd>加密保存在系统的安全存储里，只发给你自己填的服务。</dd>
-        <dt>网络</dt><dd>只连你的 AI 服务；检查更新时连一次 GitHub。</dd>
+        <dt>网络</dt><dd>只连你的 AI 服务；检查和下载更新时连 GitHub。</dd>
         <dt>源代码</dt><dd><button className="link" onClick={() => void openLink(game.platform, toast, REPO_URL)}>GitHub 仓库</button></dd>
         <dt>反馈</dt><dd><button className="link" onClick={() => void openLink(game.platform, toast, `${REPO_URL}/issues`)}>提交问题</button></dd>
       </dl>
@@ -409,6 +418,7 @@ function DevPage() {
         <input type="checkbox" checked={devMode} onChange={(e) => setDevMode(e.target.checked)} style={{ width: 20, minHeight: 20 }} />
         开发者模式（长按段落可查看原始输出）
       </label>
+      <UpdateDevSource />
       <p className="muted">调用记录</p>
       {calls.map((c) => <div className="item-row" key={String(c.id)}><div className="grow">
         <b>{new Date(String(c.at)).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).replaceAll("/", "-")} · {PURPOSES[String(c.purpose)] ?? String(c.purpose)}</b>

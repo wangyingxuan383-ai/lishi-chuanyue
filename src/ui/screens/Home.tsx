@@ -9,8 +9,12 @@ import { MenuSheet } from "../components/Sheet";
 import { useLongPress } from "../components/useLongPress";
 import { fromSetup } from "./openingDraft";
 import { Seal } from "../components/Seal";
-import { latestRelease, openLink, newer, type ReleaseInfo } from "../app/update";
+import { latestRelease, newer, type ReleaseInfo } from "../app/update";
+import { UpdateButton } from "../components/UpdateSheet";
 import { Icon } from "../components/Icon";
+import { BookCover } from "../components/BookArt";
+import { BudgetReminder } from "../components/MonthlyBudget";
+import { WhatsNewNotice } from "../components/WhatsNew";
 
 interface WorldCard {
   world: World;
@@ -18,6 +22,8 @@ interface WorldCard {
   lastLine: string;
   clock: string;
   turns: number;
+  /** The dynasty for the cover's seal; none for a free world or an unknown era. */
+  seal?: string;
 }
 
 function relative(iso: string): string {
@@ -28,11 +34,38 @@ function relative(iso: string): string {
   return `${Math.round(minutes / 1440)} 天前`;
 }
 
+const QUOTE_PAIRS: Record<string, string> = { "“": "”", "「": "」", "『": "』", "‘": "’" };
+const CLOSING_QUOTES = new Set(Object.values(QUOTE_PAIRS));
+
+/** Quote marks in pairs: a closing mark whose opening was cut off goes, an open one is closed. */
+function balanceQuotes(text: string): string {
+  const open: string[] = [];
+  let out = "";
+  for (const ch of text) {
+    if (QUOTE_PAIRS[ch]) {
+      open.push(QUOTE_PAIRS[ch]);
+      out += ch;
+    } else if (CLOSING_QUOTES.has(ch)) {
+      if (open[open.length - 1] === ch) {
+        open.pop();
+        out += ch;
+      }
+    } else out += ch;
+  }
+  return out + open.reverse().join("");
+}
+
+/**
+ * The last sentence of a passage, for the card: at most 40 characters, cut at
+ * the front. The card shows it as it is — no quote marks of its own around it
+ * (a line of dialogue already has them: …不讲情面！” must not become ””).
+ */
 export function lastSentence(text: string): string {
   // A closing quote stays with its sentence: “……？”
   const sentences = text.replace(/\s+/g, "").match(/[^。！？]+[。！？]*[”」』]*/g) ?? [];
   const last = sentences[sentences.length - 1] ?? "";
-  return last.length > 40 ? `…${last.slice(-40)}` : last;
+  // Cut in the middle: no comma right after the ellipsis.
+  return last.length > 40 ? `…${balanceQuotes(last.slice(-40)).replace(/^[，、；：,;:]+/, "")}` : balanceQuotes(last);
 }
 
 /** Reign names the templates and packs use, and their dynasty. */
@@ -42,12 +75,15 @@ const REIGNS: [RegExp, string][] = [
   [/至正|至元|大德/, "元"], [/崇祯|万历|永乐|洪武|嘉靖|天启|正德|成化|弘治|隆庆/, "明"],
   [/康熙|乾隆|雍正|光绪|道光|咸丰|同治|嘉庆|宣统/, "清"],
 ];
-/** The dynasty for the card's little seal: 唐, 宋, 明…, from the dynasty or reign named in the date. */
-function dynastyMark(clock: string): string {
+/**
+ * The dynasty for the cover's seal: 唐, 宋, 明…, from the dynasty or reign
+ * named in the date. Nothing when neither is known — a wrong seal (or the
+ * first character of “第 4 天”) is worse than none.
+ */
+function dynastyMark(clock: string): string | undefined {
   const named = clock.match(/^(秦|汉|唐|宋|元|明|清|晋|隋|周)/)?.[1];
   if (named) return named;
-  const reign = REIGNS.find(([re]) => re.test(clock));
-  return reign ? reign[1] : clock.replace(/\s/g, "").slice(0, 1) || "世";
+  return REIGNS.find(([re]) => re.test(clock))?.[1];
 }
 
 function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen: () => void; onMenu: () => void; featured?: boolean }) {
@@ -55,12 +91,14 @@ function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen
   return (
     <div className={`card world-card${featured ? " featured" : ""}`}>
       <button className="world-open" {...press} aria-label={`继续“${card.world.title}”`}>
-        <span className="mark" aria-hidden="true">{dynastyMark(card.clock)}</span>
-        <h3>{card.world.title}</h3>
-        <p>{card.protagonist} · {card.clock}</p>
-        {card.lastLine && <p className="last-line">“{card.lastLine}”</p>}
-        <p className="meta">{card.turns ? `${card.turns} 回合` : "刚开局"} · {relative(card.world.playedAt)}</p>
-        {featured && <span className="primary continue-btn">继续</span>}
+        <BookCover seed={card.world.id} title={card.world.title} seal={card.seal} />
+        <span className="world-info">
+          <h3>{card.world.title}</h3>
+          <p>{card.protagonist} · {card.clock}</p>
+          {card.lastLine && <p className="last-line">{card.lastLine}</p>}
+          <p className="meta">{card.turns ? `${card.turns} 回合` : "刚开局"} · {relative(card.world.playedAt)}</p>
+          {featured && <span className="primary continue-btn">继续</span>}
+        </span>
       </button>
       <button className="icon-btn world-menu" aria-label={`“${card.world.title}”的更多操作`} onClick={onMenu}><Icon name="more" /></button>
     </div>
@@ -111,9 +149,11 @@ export default function Home() {
       const state = await game.repo.getState(line.nodeId);
       const summary = await game.repo.homeSummary(line.nodeId);
       const era = eraContext(world.eraId, state);
+      const clock = nowOf(era.clock, state.time.elapsedMinutes).text;
+      const free = world.settings.mode === "free" || state.era.mode === "free";
       out.push({
         world, protagonist: state.protagonist.name, lastLine: lastSentence(summary.last),
-        clock: nowOf(era.clock, state.time.elapsedMinutes).text, turns: summary.turns,
+        clock, turns: summary.turns, seal: free ? undefined : dynastyMark(clock),
       });
     }
     setCards(out);
@@ -152,11 +192,13 @@ export default function Home() {
         <button className="icon-btn" aria-label="设置" onClick={() => push({ name: "settings" })}><Icon name="settings" /></button>
       </div>
       <div className="screen-body stack">
+        <BudgetReminder />
+        <WhatsNewNotice />
         {update && (
           <div className="notice">
             有新版本 {update.version}，覆盖安装即可，不要先卸载。
             <div className="row">
-              <button className="primary" onClick={() => void openLink(game.platform, toast, update.url)}>去下载</button>
+              <UpdateButton release={update} />
               <button className="ghost" onClick={() => { void game.repo.setSetting("updateSkipped", update.version); setUpdate(null); }}>这版不提醒</button>
             </div>
           </div>

@@ -89,7 +89,7 @@ describe("Game", () => {
     expect(state.people[0]).toMatchObject({ notes: "", alive: true });
   });
 
-  it("only carries the first edit immediately after the regenerated turn", async () => {
+  it("carries all player edits after the regenerated turn in their original order", async () => {
     const { game, worldId } = await setup([
       { text: "版本一。" + RECORD({}) }, { text: "版本二。" + RECORD({}) },
     ]);
@@ -98,9 +98,12 @@ describe("Game", () => {
     await game.editState(worldId, { setStats: { money: 800 } }, "钱 500 → 800");
     await game.regenerate(worldId, null, () => {}).done;
     const c = await tree.cursor(game.repo, worldId);
-    expect(c.head.actionText).toBe("钱 300 → 500（已沿用）");
-    expect((await game.repo.getState(c.head.id)).protagonist.stats.money).toBe(500);
-    expect((await game.repo.getNode(c.head.parentId!))!.kind).toBe("turn");
+    expect(c.head.actionText).toBe("钱 500 → 800（已沿用）");
+    expect((await game.repo.getState(c.head.id)).protagonist.stats.money).toBe(800);
+    const firstEdit = (await game.repo.getNode(c.head.parentId!))!;
+    expect(firstEdit.actionText).toBe("钱 300 → 500（已沿用）");
+    expect((await game.repo.getState(firstEdit.id)).protagonist.stats.money).toBe(500);
+    expect((await game.repo.getNode(firstEdit.parentId!))!.kind).toBe("turn");
   });
 
   it("creates a world from the opening record without spending time or money", async () => {
@@ -782,7 +785,7 @@ describe("过些日子", () => {
 });
 
 describe("the world's timeline", () => {
-  it("copies a pack's events at the start and marks those a year of 过些日子 crosses", async () => {
+  it("copies a pack's events at the start, never tells the narrator what comes next, and marks what a year of 过些日子 crosses", async () => {
     const { game, worldId, llm } = await setup([
       { text: "一年过去了。" + RECORD({ time: "一年", deviation: "王忠嗣没有被贬" }) },
     ]);
@@ -791,8 +794,10 @@ describe("the world's timeline", () => {
     expect(start.timeline!.filter((e) => e.atMinute! < 0).map((e) => e.title)).toContain("杨贵妃的三位姐姐分封韩国、虢国、秦国夫人");
     const events = await play(game, worldId, "过一年；这段时间读书", "skip");
     const done = events.find((e) => e.type === "done") as Extract<TurnEvent, { type: "done" }>;
-    // The year ahead was in the request, and the turn marks what it crossed.
-    expect(JSON.stringify(llm.calls[1].body)).toContain("天宝八载 六月将会：哥舒翰攻克石堡城，唐军死伤数万（一定发生）");
+    // The year ahead is on the player's 记事 page only (D129): the request has the recent past, not the future.
+    const body = JSON.stringify(llm.calls[1].body);
+    expect(body).toContain("杨贵妃的三位姐姐分封韩国、虢国、秦国夫人");
+    expect(body).not.toMatch(/哥舒翰攻克石堡城|将会|一定发生/);
     expect(done.chips.map((c) => c.text)).toContain("📜 哥舒翰攻克石堡城，唐军死伤数万");
     expect(done.chips.map((c) => c.text)).toContain("⚠ 历史偏离：王忠嗣没有被贬");
     expect((await game.repo.getState(done.node.id)).deviations[0]).toMatch(/^天宝八载 \S+：王忠嗣没有被贬$/);

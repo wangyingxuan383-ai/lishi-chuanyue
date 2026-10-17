@@ -27,7 +27,11 @@ describe("game clock", () => {
     expect(newYearsBetween(eve, 0, 240)).toBe(1);
     expect(newYearsBetween(eve, 240, 300)).toBe(0);
     expect(newYearsBetween(eve, 0, 400 * 1440)).toBe(2);
-    expect(newYearsBetween(vague, 0, 400 * 1440)).toBe(0);
+    // Without a usable date there is no New Year to cross: a full year of play still adds one.
+    expect(newYearsBetween(vague, 0, 364 * 1440)).toBe(0);
+    expect(newYearsBetween(vague, 0, 400 * 1440)).toBe(1);
+    expect(newYearsBetween(vague, 400 * 1440, 800 * 1440)).toBe(1);
+    expect(newYearsBetween({ ...vague, mode: "free", clockStyle: "elapsed" }, 0, 3 * 365 * 1440)).toBe(3);
   });
 
   it("lists the details for the time sheet", () => {

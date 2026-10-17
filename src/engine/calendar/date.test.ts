@@ -127,6 +127,9 @@ describe("parseDateLabel", () => {
     ["中平元年秋", { era: "中平", year: 1, month: 7, day: 1 }, "season"],
     ["始皇三十七年七月", { era: "始皇", year: 37, month: 7 }, "month"],
     ["公元前44年3月14日", { era: "公元前", year: 44, month: 3, day: 14, ceYear: -44, lunar: false }, "day"],
+    // R14-T003: the organizer wrote London's events as "1665年4月", without 公元.
+    ["1665年4月", { era: "公元", year: 1665, month: 4, day: 1, ceYear: 1665, lunar: false }, "month"],
+    ["1666年9月2日", { era: "公元", year: 1666, month: 9, day: 2, ceYear: 1666 }, "day"],
   ] as const)("%s", (text, expected, precision) => {
     const parsed = parseDateLabel(text, TANG.eras!.some((e) => text.includes(e.name)) ? TANG : undefined);
     expect(parsed?.date).toMatchObject(expected);
