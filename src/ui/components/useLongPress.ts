@@ -3,7 +3,8 @@ import { useRef } from "react";
 /**
  * Long press (≈450 ms) without moving; a scroll gesture cancels it. A press
  * that starts on a button inside belongs to that button (AUDIT 4.4: a long
- * press on 重说 also opened the passage's menu).
+ * press on 重说 also opened the passage's menu). With a mouse, a right click
+ * does what a long press does (UX_APP_BASICS #57); touch keeps the long press.
  */
 export function useLongPress(onLongPress: () => void, onTap?: () => void) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -15,6 +16,8 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
   };
   return {
     onPointerDown(e: React.PointerEvent) {
+      // Only the main mouse button presses and holds; a right click is handled below.
+      if (e.pointerType === "mouse" && e.button !== 0) return;
       const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");
       if (inner && inner !== e.currentTarget) return;
       fired.current = false;
@@ -37,6 +40,15 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
     onPointerLeave: cancel,
     onContextMenu(e: React.MouseEvent) {
       e.preventDefault();
+      const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");
+      if (inner && inner !== e.currentTarget) return;
+      // Touch screens also send a context menu on a long press; the timer above already handles that.
+      const type = (e.nativeEvent as PointerEvent).pointerType;
+      const mouse = type ? type === "mouse" : matchMedia("(hover: hover) and (pointer: fine)").matches;
+      if (!mouse) return;
+      e.stopPropagation();
+      cancel();
+      onLongPress();
     },
   };
 }
