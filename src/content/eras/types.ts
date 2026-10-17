@@ -84,6 +84,12 @@ export interface EraPack {
   /** Everyday details; `months` limits seasonal ones (冬至 in 冬月). */
   daily: { text: string; months?: number[] }[];
   taboos: Taboo[];
+  /**
+   * More words the narrative is checked for after each turn (R07-T002), kept
+   * out of the era card so it stays within its length: the style line names
+   * the worst of them, the check catches the rest (eval H).
+   */
+  watch?: { words: string[]; instead: string }[];
   /** How narration and dialogue should sound. */
   style: string;
   names: { surnames: string[]; given: { 男: string[]; 女: string[] } };

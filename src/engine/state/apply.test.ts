@@ -193,7 +193,7 @@ describe("applyRecord", () => {
     expect(r.log).toContain("“开元通宝”是钱，按钱记，不放进行囊");
   });
 
-  it("on 标准, running out of health first leaves the protagonist dying; another blow kills", () => {
+  it("on 标准, running out of health leaves the protagonist dying; only a written death kills (D124)", () => {
     const s = sampleState();
     s.protagonist.stats.health = 10;
     const first = apply(s, { stats: { health: -20 } });
@@ -201,10 +201,38 @@ describe("applyRecord", () => {
     expect(first.state.protagonist.statuses.map((x) => x.name)).toContain("垂危");
     expect(first.chips.map((c) => c.text)).toContain("垂危");
     expect(first.notes.join()).toContain("命悬一线");
-    expect(apply(first.state, { stats: { health: -5 } }).chips.map((c) => c.text)).toContain("你死了");
+    // A smaller loss while dying: still hanging on, and the narrator is reminded.
+    const hanging = apply(first.state, { stats: { health: -5 } });
+    expect(hanging.state.protagonist.stats.health).toBe(1);
+    expect(hanging.chips.map((c) => c.text)).not.toContain("你死了");
+    expect(hanging.notes.join()).toContain("仍然垂危");
+    // A passage that writes the death kills.
+    const dead = apply(first.state, { stats: { health: -10 }, died: true });
+    expect(dead.state.protagonist.stats.health).toBe(0);
+    expect(dead.chips.map((c) => c.text)).toContain("你死了");
+    // A death written before the protagonist was dying leaves them dying, and the narrator is told.
+    const early = apply(s, { died: true });
+    expect(early.state.protagonist.statuses.map((x) => x.name)).toContain("垂危");
+    expect(early.notes.join()).toContain("没有死");
+    expect(apply(s, { died: true }, "宽松").state.protagonist.statuses.map((x) => x.name)).toContain("昏迷");
+    expect(apply(s, { died: true }, "残酷").chips.map((c) => c.text)).toContain("你死了");
     const healed = apply(first.state, { stats: { health: 35 } });
     expect(healed.state.protagonist.statuses.map((x) => x.name)).not.toContain("垂危");
     expect(apply(s, { stats: { health: -20 } }, "残酷").chips.map((c) => c.text)).toContain("你死了");
+  });
+
+  it("ends 过些日子 at the hour its passage ends", () => {
+    const clock: GameClock = { date: null, hour: 7, label: "", rules: {} };
+    const s = sampleState();
+    s.time.elapsedMinutes = 330; // 12:30 on the first day
+    const r = applyRecord(s, { time: "一个月", hour: 6 }, { mode: "skip", difficulty: "标准", currency: TANG_CURRENCY, clock });
+    const end = 7 * 60 + r.state.time.elapsedMinutes;
+    expect(end % 1440).toBe(6 * 60);
+    expect(Math.floor(end / 1440)).toBe(30);
+    expect(r.chips.map((c) => c.text)).toContain("过了 1 个月");
+    // Without an hour, or for an ordinary turn, the span is taken as it is.
+    expect(applyRecord(s, { time: "一个月" }, { mode: "skip", difficulty: "标准", currency: TANG_CURRENCY, clock }).state.time.elapsedMinutes).toBe(330 + 43200);
+    expect(applyRecord(s, { time: "一天", hour: 6 }, { mode: "do", difficulty: "标准", currency: TANG_CURRENCY, clock }).state.time.elapsedMinutes).toBe(330 + 1440);
   });
 
   it("says long spans in months and years", () => {

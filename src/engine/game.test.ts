@@ -505,7 +505,7 @@ describe("设定集 upkeep during play", () => {
     expect(aux.calls[0].body.model).toBe("aux");
     expect(JSON.stringify(aux.calls[0].body)).toContain("走第6步");
     const c = await tree.cursor(game.repo, worldId);
-    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：漕帮、西市旁邸店", meta: { by: "AI", promptVersion: "upkeep-2" } });
+    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：漕帮、西市旁邸店", meta: { by: "AI", promptVersion: "upkeep-3" } });
     expect((await game.repo.getNode(c.head.parentId!))!.meta.upkeep).toBe(true);
     const state = await game.repo.getState(c.head.id);
     expect(state.cards.find((x) => x.name === "漕帮")).toMatchObject({ kind: "势力", source: "AI" });
@@ -679,14 +679,16 @@ describe("fortune", () => {
     expect(JSON.stringify(llm.calls[3].body)).toContain("【本回合运势（玩家看不到）】大顺");
   });
 
-  it("leaves luck out of what the player writes or directs", async () => {
+  it("leaves luck out of what the player writes or directs, and out of 过些日子", async () => {
     const { game, worldId, llm } = await setup([
       { text: "杨钊被赐死。" + RECORD({}) },
       { text: "王掌柜来了。" + RECORD({}) },
+      { text: "一个月过去了。" + RECORD({ time: "一个月" }) },
     ]);
     game.random = () => 0.99;
     await play(game, worldId, "数月后，杨钊被赐死于狱中。", "write");
     await play(game, worldId, "让王掌柜突然来访", "direct");
+    await play(game, worldId, "过一个月", "skip");
     for (const call of llm.calls.slice(1)) expect(JSON.stringify(call.body)).not.toContain("本回合运势");
   });
 });

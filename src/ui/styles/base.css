@@ -160,6 +160,7 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 
 .dock { position: relative; border-top: 1px solid var(--line); background: var(--surface); padding: 8px 10px 10px; }
 .choices { display: grid; gap: 6px; margin-bottom: 8px; max-height: 34vh; overflow-y: auto; }
+.dying-note { margin: 0 0 8px; padding: 7px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--loss); font-size: 14px; }
 .choice {
   text-align: left; font-size: 15px; line-height: 1.5; padding: 9px 14px; min-height: 42px;
   background: var(--bg); border-color: var(--line);

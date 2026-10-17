@@ -21,6 +21,8 @@ export interface TurnRecord {
   money?: number | string | null;
   stats?: { health?: number; energy?: number; fame?: number } | null;
   setStats?: { money?: number; health?: number; energy?: number; fame?: number };
+  /** The protagonist died in this passage; counts only while 垂危 (or on 残酷), D124. */
+  died?: boolean | null;
   items?: { name: string; delta: number | string; place?: string | null; unit?: string }[] | null;
   /** By name from the model; panel edits pass the id (and may rename, replace aliases or remove). */
   people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; origin?: string; alive?: boolean; aliases?: string[] }[] | null;
@@ -116,6 +118,19 @@ function attitudeOf(text: string | undefined): Attitude | null {
 
 const clamp = (n: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
 
+/**
+ * 过些日子 ends at the hour its passage ends (eval H: the clock kept the
+ * starting hour while the story ended at dawn): the stated span picks the
+ * day, `hour` the time on it.
+ */
+function endingAt(minutes: number, hour: number | null | undefined, elapsed: number, clock?: GameClock): number {
+  if (typeof hour !== "number" || !clock || minutes < 1440) return minutes;
+  const startOfDay = clock.hour * 60;
+  const end = startOfDay + elapsed + minutes;
+  const adjusted = Math.floor(end / 1440) * 1440 + hour * 60 - startOfDay - elapsed;
+  return adjusted > 0 ? adjusted : minutes;
+}
+
 /** New notes from the story; the first notes this person had stay as their 来历. */
 function renote(person: Person, note: string): void {
   const next = note.trim();
@@ -141,10 +156,11 @@ export function applyRecord(
 
   // Edits keep the current time; turns fall back to the action's default.
   const parsed = parseDurationMinutes(record?.time ?? null);
-  const minutes = opts?.advanceTime === false ? 0 : parsed ?? DEFAULT_MINUTES[ctx.mode];
-  if (parsed === null && record?.time != null) log.push(`时间“${record.time}”无法识别，按 ${minutes} 分钟计`);
+  const stated = opts?.advanceTime === false ? 0 : parsed ?? DEFAULT_MINUTES[ctx.mode];
+  if (parsed === null && record?.time != null) log.push(`时间“${record.time}”无法识别，按 ${stated} 分钟计`);
+  const minutes = ctx.mode === "skip" ? endingAt(stated, record?.hour, s.time.elapsedMinutes, ctx.clock) : stated;
   s.time.elapsedMinutes += minutes;
-  if (minutes >= 15) chips.push({ text: describeMinutes(minutes), tone: "info" });
+  if (stated >= 15) chips.push({ text: describeMinutes(stated), tone: "info" });
   // Ages count the Chinese way (虚岁): everyone grows a year at New Year.
   const newYears = ctx.clock ? newYearsBetween(ctx.clock, before.time.elapsedMinutes, s.time.elapsedMinutes) : 0;
   // Great events whose time has come (R05-T004): fixed ones happen; changeable ones are what the books say.
@@ -239,21 +255,32 @@ export function applyRecord(
       if (value !== undefined) me.stats[key] = clamp(value, 0, key === "money" ? Infinity : 100);
     }
   }
-  // Death follows the story (D123): on 标准 the first time health runs out the protagonist is 垂危,
-  // the narrator is told, and only another blow kills; 残酷 kills at once; 宽松 never kills.
+  // Death follows the story (D123, D124): on 标准 the first time health runs out the protagonist is
+  // 垂危 and the narrator is told; after that they die only when a passage writes it (died), and
+  // smaller losses leave them hanging on (eval H: deaths the story never wrote). 残酷 kills at zero;
+  // 宽松 never kills.
   const dying = me.statuses.some((x) => x.name === "垂危");
-  if (me.stats.health <= 0 && opts?.advanceTime !== false) {
+  const playing = opts?.advanceTime !== false;
+  const wroteDeath = playing && record.died === true;
+  if (playing && (me.stats.health <= 0 || wroteDeath)) {
     if (ctx.difficulty === "宽松") {
-      me.stats.health = 1;
+      me.stats.health = Math.max(1, me.stats.health);
       if (!me.statuses.some((x) => x.name === "昏迷")) me.statuses.push({ name: "昏迷", detail: "伤重昏迷", sinceMinute: now() });
       chips.push({ text: "昏迷", tone: "warn" });
-    } else if (ctx.difficulty !== "残酷" && !dying) {
+      if (wroteDeath) notes.push("主角没有死，只是伤重昏了过去：下一段从他醒来写起。");
+    } else if (ctx.difficulty === "残酷" || (dying && wroteDeath)) {
+      me.stats.health = 0;
+      chips.push({ text: "你死了", tone: "warn" });
+    } else if (!dying) {
       me.stats.health = 1;
       me.statuses.push({ name: "垂危", detail: "伤重濒死，再受重伤就会死", sinceMinute: now() });
       chips.push({ text: "垂危", tone: "warn" });
-      notes.push("主角伤重濒死、命悬一线：叙述里要写出来；在伤势好转之前再受重伤，就会死去。");
+      notes.push(wroteDeath
+        ? "主角没有死，只是伤重垂危、还剩一口气：下一段从这里写起；在伤势好转之前再受重伤，就会死去。"
+        : "主角伤重濒死、命悬一线：叙述里要写出来；在伤势好转之前再受重伤，就会死去。");
     } else {
-      chips.push({ text: "你死了", tone: "warn" });
+      me.stats.health = 1;
+      notes.push("主角仍然垂危：再受重伤就会死去；真写到他死了，记录里写 died: true。");
     }
   } else if (dying && me.stats.health > 30) {
     me.statuses = me.statuses.filter((x) => x.name !== "垂危");

@@ -466,9 +466,10 @@ export class Game {
       const action: PlayerAction = actionIn ?? { mode: c.head.actionMode ?? "continue", text: c.head.actionText ?? "", directorNote: c.head.directorNote };
       const state = await this.repo.getState(base.id);
       const era = eraContext(world.eraId, state);
-      // What the player writes (写) or directs (幕后) happens as written: no luck in it (G5: a 大不顺 roll had the narrator jail the protagonist in a scene the player wrote).
-      const authored = action.mode === "write" || action.mode === "direct";
-      const fortune = authored ? undefined : await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果");
+      // What the player writes (写) or directs (幕后) happens as written: no luck in it (G5: a 大不顺 roll had the narrator jail
+      // the protagonist in a scene the player wrote). Nor in 过些日子, which is no risky act (eval H: a roll jailed him for a month).
+      const noLuck = action.mode === "write" || action.mode === "direct" || action.mode === "skip";
+      const fortune = noLuck ? undefined : await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果");
       const { messages, chars } = buildTurnContext(await this.turnInput(worldId, base, {
         mode: action.mode, text: action.text, directorNote: action.directorNote, rewriteHint: hint, fortune,
       }));

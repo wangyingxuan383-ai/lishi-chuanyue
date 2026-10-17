@@ -154,6 +154,7 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
   else if (v.date && typeof v.date === "object" && !Array.isArray(v.date)) r.date = v.date as Record<string, unknown>;
   const hour = Number(v.hour);
   if (v.hour !== undefined && Number.isInteger(hour) && hour >= 0 && hour < 24) r.hour = hour;
+  if (v.died === true || v.died === "true") r.died = true;
   const units = arr(v.currency).flatMap((u) => {
     const o = u as Record<string, unknown>;
     const name = str(o?.name);

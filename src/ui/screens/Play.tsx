@@ -400,6 +400,7 @@ export default function Play({ worldId }: { worldId: string }) {
       </div>
 
       <div className="dock">
+        {!dead && state.protagonist.statuses.some((x) => x.name === "垂危") && <p className="dying-note">你伤重垂危：再受重伤就会死去，先设法疗伤。</p>}
         {!gen && !dead && !typing && !!turn?.choices.length && turn.status !== "interrupted" && (
           <div className="choices">
             {turn.choices.map((choice) => <ChoiceButton key={choice} text={choice} onTap={() => send({ mode: "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}

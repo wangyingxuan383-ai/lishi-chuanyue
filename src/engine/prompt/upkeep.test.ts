@@ -24,6 +24,28 @@ function world(): WorldState {
 const answer = (value: unknown) => `整理如下：\n${JSON.stringify(value)}`;
 
 describe("设定集 upkeep", () => {
+  it("names the protagonist, so their deeds are not filed under someone else", () => {
+    const state = world();
+    state.protagonist.name = "王延寿";
+    state.protagonist.identity = "万年县不良帅";
+    state.protagonist.statuses = [{ name: "左臂刀伤", detail: "", sinceMinute: 0 }, { name: "窥得重器", detail: "", sinceMinute: 0 }];
+    const text = upkeepMessages({ premise: "", state, turns: [{ actionText: "去西市", narrative: "你到了西市。" }] }).map((m) => m.content).join("\n");
+    expect(text).toContain("【主角】王延寿（万年县不良帅）；剧情里的“你”就是他");
+    expect(text).toContain("【主角的状况】左臂刀伤、窥得重器");
+  });
+
+  it("clears statuses that are not the protagonist's condition and marks deaths the ledger missed", () => {
+    const state = world();
+    state.protagonist.statuses = [
+      { name: "左臂刀伤", detail: "", sinceMinute: 0 }, { name: "窥得重器", detail: "", sinceMinute: 0 }, { name: "垂危", detail: "", sinceMinute: 0 },
+    ];
+    const patch = upkeepPatch(answer({ statusRemove: ["窥得重器", "窥得重器", "没有这个", "垂危"], deaths: ["赵四", "无名氏"] }), state)!;
+    expect(patch.status).toEqual([{ op: "remove", name: "窥得重器" }]);
+    expect(patch.people).toEqual([{ id: "z4", name: "赵四", alive: false }]);
+    state.people[0].alive = false;
+    expect(upkeepPatch(answer({ deaths: ["赵四"] }), state)).toBeNull();
+  });
+
   it("adds new cards only for names nobody has used, at most three", () => {
     const patch = upkeepPatch(answer({
       cards: [

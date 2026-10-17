@@ -593,6 +593,21 @@ await page.getByText("已删除").waitFor();
 await page.waitForTimeout(300);
 check("a world with 要点 can be deleted", (await page.locator(".card").count()) === worldsBefore && (await page.evaluate(async () => (await window.__lishi.game.platform.sql.query("SELECT COUNT(*) AS n FROM pins WHERE world_id NOT IN (SELECT id FROM worlds)"))[0].n)) === 0);
 
+// D124: while 垂危 the play screen keeps a warning above the input.
+const dyingWorld = await page.evaluate(async () => {
+  const { game } = window.__lishi;
+  const world = (await game.repo.listWorlds())[0];
+  await game.editState(world.id, { status: [{ op: "add", name: "垂危", detail: "伤重濒死，再受重伤就会死" }] }, "测试：垂危");
+  return world.title;
+});
+await page.waitForTimeout(1200);
+await page.reload();
+await page.locator(".card", { hasText: dyingWorld }).first().click();
+await page.locator(".turn").last().waitFor();
+check("a dying protagonist sees a standing warning", await page.getByText("你伤重垂危").isVisible());
+await shot("15-dying");
+await page.getByRole("button", { name: "返回", exact: true }).click();
+
 // No horizontal overflow, no page errors.
 check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
 check("no page errors", errors.length === 0, errors.join(" | "));

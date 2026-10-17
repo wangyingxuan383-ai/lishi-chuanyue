@@ -25,6 +25,10 @@ export function tabooTerms(eraCard: Card | null, pack: EraPack | null): TabooTer
     const words = fromPack ? fromPack.match ?? [fromPack.name] : name.split("、").map((w) => w.trim()).filter((w) => w.length >= 2 && w.length <= 6);
     for (const term of words) terms.push({ term, entry: name, instead });
   }
+  // A pack's extra watch words, for worlds that started from it.
+  for (const w of pack?.watch ?? []) {
+    for (const term of w.words) if (!terms.some((t) => t.term === term)) terms.push({ term, entry: w.words.join("、"), instead: w.instead });
+  }
   return terms;
 }
 

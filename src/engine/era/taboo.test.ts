@@ -12,6 +12,9 @@ describe("era words check", () => {
     expect(terms.find((t) => t.term === "银两")).toMatchObject({ entry: "碎银子付账", instead: "铜钱、绢帛" });
     expect(findTaboos("他小时候在西市长大，掏出两银子付账。", terms).map((h) => h.term)).toEqual(["两银子"]);
     expect(findTaboos("街鼓响了一刻钟。", terms)).toEqual([]);
+    // A pack's watch words are checked too, though the card does not print them.
+    const watched = findTaboos("小的这就去请差爷。", terms).map((h) => h.term);
+    expect(watched).toEqual(expect.arrayContaining(["小的", "差爷"]));
     const memorial = [{ term: "折子", entry: "折子", instead: "表、状" }];
     expect(findTaboos("他吹亮火折子。", memorial)).toEqual([]);
     expect(findTaboos("他吹亮火折子，又递上折子。", memorial)).toEqual([{ term: "折子", instead: "表、状" }]);
