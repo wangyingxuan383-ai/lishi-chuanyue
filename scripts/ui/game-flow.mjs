@@ -572,6 +572,17 @@ await page.locator(".card h3", { hasText: `${exportedTitle}（导入）` }).wait
 check("the same world imports again as a new one", (await page.locator(".card").count()) === worldsBefore + 1);
 await page.waitForTimeout(400);
 await shot("14-imported");
+// Deleting a world takes everything under it, 要点 included (they point at turns).
+const importedBox = await page.locator(".card", { hasText: `${exportedTitle}（导入）` }).boundingBox();
+await page.mouse.move(importedBox.x + 30, importedBox.y + 20);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+page.once("dialog", (dialog) => void dialog.accept());
+await page.getByRole("button", { name: "删除这个世界" }).click();
+await page.getByText("已删除").waitFor();
+await page.waitForTimeout(300);
+check("a world with 要点 can be deleted", (await page.locator(".card").count()) === worldsBefore && (await page.evaluate(async () => (await window.__lishi.game.platform.sql.query("SELECT COUNT(*) AS n FROM pins WHERE world_id NOT IN (SELECT id FROM worlds)"))[0].n)) === 0);
 
 // No horizontal overflow, no page errors.
 check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));

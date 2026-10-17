@@ -23,7 +23,8 @@ async function time<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 async function main() {
-  const game = await Game.open(await createMemoryPlatform());
+  const platform = await createMemoryPlatform();
+  const game = await Game.open(platform);
   const state = sampleState();
   state.people = Array.from({ length: 40 }, (_, i) => ({ id: `p${i}`, name: `人物${i}`, aliases: [], role: "坊里的人", attitude: "一般" as const, alive: true, notes: "一句备注".repeat(5), lastSeenMinute: i }));
   state.cards = Array.from({ length: 30 }, (_, i) => ({ id: `c${i}`, kind: "势力" as const, name: `势力${i}`, keys: [], content: "资料".repeat(40) }));
@@ -55,6 +56,9 @@ async function main() {
     });
   });
   await time("回合树：取全部节点", async () => game.repo.allNodes(world.id));
+  // The browser harness (and a future static web version on sql.js) saves by exporting the whole database.
+  const bytes = await time("网页版存一次盘：导出整个数据库", async () => platform.exportDb());
+  console.log(`数据库大小：${(bytes.length / 1024 / 1024).toFixed(1)} MB`);
 }
 
 void main();

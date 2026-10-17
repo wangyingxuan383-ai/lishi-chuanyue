@@ -115,4 +115,26 @@ describe("Repo", () => {
     expect(await repo.listWorlds()).toHaveLength(0);
     expect((await platform.sql.query("SELECT COUNT(*) AS n FROM states"))[0].n).toBe(0);
   });
+
+  it("deletes a world that has pins (they point at nodes without a cascade)", async () => {
+    const { world, node } = await repo.createWorld({
+      title: "长安", eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "开场", state: sampleState() },
+    });
+    await repo.addPin(world.id, node.id, "王掌柜是舅舅");
+    await repo.deleteWorld(world.id);
+    expect((await platform.sql.query("SELECT COUNT(*) AS n FROM pins"))[0].n).toBe(0);
+    expect((await platform.sql.query("SELECT COUNT(*) AS n FROM nodes"))[0].n).toBe(0);
+  });
+
+  it("keeps foreign keys on after a backup (sql.js reopens the database to export it)", async () => {
+    const { world } = await repo.createWorld({
+      title: "长安", eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "开场", state: sampleState() },
+    });
+    await platform.sql.backup("auto");
+    expect((await platform.sql.query("PRAGMA foreign_keys"))[0].foreign_keys).toBe(1);
+    await repo.deleteWorld(world.id);
+    expect((await platform.sql.query("SELECT COUNT(*) AS n FROM states"))[0].n).toBe(0);
+  });
 });

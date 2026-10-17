@@ -147,8 +147,12 @@ export default function Home() {
               label: "删除这个世界", danger: true,
               onSelect: async () => {
                 if (!confirm(`删除“${menuFor.world.title}”？删除后无法恢复。`)) return;
-                await game.repo.deleteWorld(menuFor.world.id);
-                toast("已删除");
+                try {
+                  await game.repo.deleteWorld(menuFor.world.id);
+                  toast("已删除");
+                } catch {
+                  toast("没删掉，请再试一次");
+                }
                 void load();
               },
             },

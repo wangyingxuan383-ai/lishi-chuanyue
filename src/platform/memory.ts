@@ -1,7 +1,7 @@
 // In-memory platform for unit tests and eval scripts (Node). The llm part is
 // supplied by the caller, e.g. a scripted fake or the Node relay.
 import initSqlJs from "sql.js";
-import { sqlJsSql } from "./sqljs";
+import { exportDatabase, sqlJsSql } from "./sqljs";
 import type { Platform } from "./types";
 
 /** `data` opens a saved database; `exportDb` saves one (eval scripts keep games for later probes). */
@@ -38,6 +38,6 @@ export async function createMemoryPlatform(llm?: Platform["llm"], options: { dat
     },
     files: { exportText: unsupported, importText: unsupported },
     system: { requestNotifications: async () => true, onBack: () => () => {} },
-    exportDb: () => db.export(),
+    exportDb: () => exportDatabase(db),
   };
 }

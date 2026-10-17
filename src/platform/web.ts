@@ -2,7 +2,7 @@
 // requests through the local dev server (devserver/bridge.ts). Dev only.
 import initSqlJs from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import { sqlJsSql } from "./sqljs";
+import { exportDatabase, sqlJsSql } from "./sqljs";
 import { PlatformError, type Platform, type StreamEvent } from "./types";
 
 const IDB_NAME = "chuanyue-dev";
@@ -59,11 +59,11 @@ export async function createWebPlatform(): Promise<Platform> {
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
   const persist = () => {
     clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => void idbPut(DB_KEY, db.export()), 1000);
+    persistTimer = setTimeout(() => void idbPut(DB_KEY, exportDatabase(db)), 1000);
   };
   window.addEventListener("pagehide", () => {
     clearTimeout(persistTimer);
-    void idbPut(DB_KEY, db.export());
+    void idbPut(DB_KEY, exportDatabase(db));
   });
 
   // Stream events are kept in memory so resume() behaves like the native cache.
@@ -80,7 +80,7 @@ export async function createWebPlatform(): Promise<Platform> {
       persist,
       async backup(label) {
         const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
-        await idbPut(`backup/${name}`, db.export());
+        await idbPut(`backup/${name}`, exportDatabase(db));
         return name;
       },
     }),

@@ -5,6 +5,13 @@ import { PlatformError, type Json, type Platform, type Row } from "./types";
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
+/** sql.js exports by closing and reopening the database, which turns foreign keys (and cascades) off again. */
+export function exportDatabase(db: Database): Uint8Array {
+  const bytes = db.export();
+  db.exec("PRAGMA foreign_keys = ON;");
+  return bytes;
+}
+
 function toSql(value: Json): SqlValue {
   if (value === null || typeof value === "string") return value;
   if (typeof value === "boolean") return value ? 1 : 0;
@@ -69,7 +76,7 @@ export function sqlJsSql(
     },
     async backup(label) {
       const name = hooks.backup ? await hooks.backup(label) : `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
-      backups.unshift({ name, at: new Date().toISOString(), size: db.export().length });
+      backups.unshift({ name, at: new Date().toISOString(), size: exportDatabase(db).length });
       return name;
     },
     async listBackups() {

@@ -137,8 +137,9 @@ export class Repo {
   }
 
   async deleteWorld(worldId: string): Promise<void> {
-    // states/pins/lines/chapters cascade from nodes and worlds.
+    // Pins point at their node without a cascade, so they go first; states and chapters cascade.
     await this.platform.sql.batch([
+      { sql: "DELETE FROM pins WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM lines WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM nodes WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM worlds WHERE id = ?", params: [worldId] },
