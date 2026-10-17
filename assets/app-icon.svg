@@ -1,6 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="100" fill="#234f43" />
-  <circle cx="256" cy="256" r="164" fill="none" stroke="#f7eed5" stroke-width="28" />
-  <path d="M256 144V256L338 307" fill="none" stroke="#f7eed5" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />
-  <circle cx="256" cy="256" r="18" fill="#e0b565" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- 历史穿越 app icon (R09-T003): a cinnabar seal with 穿越 in white on paper, inside
+       the circle Android launchers keep visible (66% of the canvas).
+       The PNG used for the app icons is rendered from this with Noto Serif SC 700
+       (SIL OFL) by scripts/ui/icon.mjs, so it does not depend on installed fonts. -->
+  <rect width="1024" height="1024" fill="#efe5cf"/>
+  <rect x="292" y="274" width="440" height="476" rx="44" fill="#a83221"/>
+  <rect x="318" y="300" width="388" height="424" rx="26" fill="none" stroke="#fbf4e6" stroke-width="10" stroke-opacity="0.85"/>
+  <g fill="#fbf4e6" font-family="'Noto Serif SC', 'Noto Serif CJK SC', 'Source Han Serif SC', 'Songti SC', serif" font-weight="700" font-size="166" text-anchor="middle">
+    <text x="512" y="484">穿</text>
+    <text x="512" y="666">越</text>
+  </g>
 </svg>

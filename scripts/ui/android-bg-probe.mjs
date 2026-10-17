@@ -1,9 +1,11 @@
 // Diagnoses what happens to a stream while the app is in the background.
 //   node scripts/ui/android-bg-probe.mjs <adb-serial> [seconds-in-background] [model]
 import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { chromium } from "playwright-core";
 
-const ADB = "C:/Users/Windows11/AppData/Local/Android/Sdk/platform-tools/adb.exe";
+const SDK = process.env.ANDROID_HOME || path.join(process.env.LOCALAPPDATA ?? "", "Android", "Sdk");
+const ADB = path.join(SDK, "platform-tools", "adb.exe");
 const [serial, secondsArg = "30", model = "fake-slow"] = process.argv.slice(2);
 const PKG = "io.timejump.chuanyue";
 const adb = (...args) => execFileSync(ADB, ["-s", serial, ...args], { encoding: "utf8" }).trim();

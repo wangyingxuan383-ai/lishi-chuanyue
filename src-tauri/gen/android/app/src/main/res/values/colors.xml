@@ -7,4 +7,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- R09: paper and ink, the app's day and night grounds -->
+    <color name="paper">#FFEFE5CF</color>
+    <color name="ink">#FF131518</color>
 </resources>

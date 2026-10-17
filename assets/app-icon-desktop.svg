@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Desktop variant of app-icon.svg: the seal fills the canvas, so it stays
+       legible at taskbar sizes. Rendered by scripts/ui/icon.mjs. -->
+  <rect x="48" y="48" width="928" height="928" rx="120" fill="#a83221"/>
+  <rect x="104" y="104" width="816" height="816" rx="70" fill="none" stroke="#fbf4e6" stroke-width="22" stroke-opacity="0.85"/>
+  <g fill="#fbf4e6" font-family="'Noto Serif SC', 'Noto Serif CJK SC', 'Source Han Serif SC', 'Songti SC', serif" font-weight="700" font-size="340" text-anchor="middle">
+    <text x="512" y="478">穿</text>
+    <text x="512" y="846">越</text>
+  </g>
+</svg>

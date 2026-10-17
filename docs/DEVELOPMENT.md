@@ -10,8 +10,8 @@
 | pnpm | 11.25.0，经 corepack 使用（bash 中写 `corepack pnpm ...`；PowerShell 执行 Enter-Dev 后可直接用 `pnpm`） |
 | Rust / Cargo | 1.99.0；`rust-toolchain.toml` 固定版本与 Android target |
 | Windows C++ | VS 2022 BuildTools 17.14，`C:\DevTools\LishiBuildTools` |
-| JDK | Temurin 17.0.20.1+1，`C:\Users\Windows11\AppData\Local\Programs\LishiToolchain\jdk-17.0.20.1+1` |
-| Android SDK | `C:\Users\Windows11\AppData\Local\Android\Sdk`；API 36、Build Tools 36.0.0、NDK 28.2.13676358 |
+| JDK | Temurin 17.0.20.1+1，`%LOCALAPPDATA%\Programs\LishiToolchain\jdk-17.0.20.1+1` |
+| Android SDK | `%LOCALAPPDATA%\Android\Sdk`（手机脚本从 `ANDROID_HOME` 读取，没设置时用这里）；API 36、Build Tools 36.0.0、NDK 28.2.13676358 |
 | Gradle / AGP | wrapper 9.6.1 / AGP 9.3.3 |
 | 前端 | React 19.3、TypeScript 7.0.2、Vite 8.3.4、`@tauri-apps/api` 2.12.3、sql.js、vitest、playwright-core、tsx |
 
@@ -47,6 +47,8 @@ node scripts/check-docs.mjs                # 文档检查
 
 - 手机尺寸完整流程：`node scripts/ui/game-flow.mjs`（R02 起替代了旧的 `devcheck.mjs`）。
 - 桌面宽屏：`node scripts/ui/desktop.mjs`（双栏布局、回车发送、窄窗口退回手机布局）。
+- 全部主要界面在三套主题下的截图与拼图：`node scripts/ui/screens.mjs [--out docs/images]`。
+- 应用图标（这一条不需要模拟模型和开发服务器，但要联网下载字体）：改了 `assets/app-icon.svg` 或 `app-icon-desktop.svg` 后，`node scripts/ui/icon.mjs` 用开源字体渲染成 PNG；再 `pnpm tauri icon assets/app-icon.png --ios-color "#efe5cf"` 生成安卓图标（这个颜色参数同时决定安卓自适应图标的纸色背景，写进 `res/values/ic_launcher_background.xml`；不要在别的文件里再定义同名颜色，否则安卓打包报重复资源），然后用 `pnpm tauri icon assets/app-icon-desktop.png --output .cache/icons-desktop` 生成桌面图标，把其中除 `android/`、`ios/` 以外的文件复制到 `src-tauri/icons/`。
 - 千回合世界的打开与滚动：`node scripts/ui/long-world.mjs`；引擎侧计时 `node_modules/.bin/tsx scripts/bench/long-world.ts`。
 - Windows 原生：`native-devcheck.mjs` 是 R01 时针对调试页写的，界面已经换掉，需要按现在的界面改写后才能再用；它还会改写原生版的服务设置，本机原生版里有用户数据时不要运行。
 

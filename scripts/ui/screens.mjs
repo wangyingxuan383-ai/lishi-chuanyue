@@ -1,26 +1,23 @@
-// R09-T001: screenshots of the three visual directions (src/ui/styles/looks.css)
-// on the same sample worlds, at phone size, plus one board per direction and an
-// overview, for the user to choose from. Web fonts stand in for the phone's
-// own (Noto Serif/Sans SC, 霞鹜文楷); they are loaded only here.
-//   node scripts/fake-llm.mjs & pnpm dev &  node scripts/ui/looks.mjs [--out docs/design]
+// R09: every main screen at phone size in the three reading themes (纸张,
+// 白天, 夜间), plus the boot screen, the service setup, a new game and the
+// empty home, then one board per theme for review (and the README).
+// Web fonts stand in for the phone's own serif (Noto Serif SC, OFL).
+//   node scripts/fake-llm.mjs & pnpm dev &  node scripts/ui/screens.mjs [--out docs/images]
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
 
-const out = path.resolve(process.argv.includes("--out") ? process.argv[process.argv.indexOf("--out") + 1] : ".cache/ui/looks");
-const shots = path.resolve(".cache/ui/looks");
+const out = path.resolve(process.argv.includes("--out") ? process.argv[process.argv.indexOf("--out") + 1] : ".cache/ui/screens");
+const shots = path.resolve(".cache/ui/screens");
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(shots, { recursive: true });
 
-const LOOKS = [
-  { id: "scroll", name: "甲 · 宣纸书卷", line: "像在读一本线装书：纸色底子、宋体正文、朱砂色的印记与编号，选项写成“一、二、三”。历史味最浓。" },
-  { id: "modern", name: "乙 · 简洁现代", line: "像现在的读书和聊天应用：无衬线字、大留白、柔和的白卡片，你的行动像一条发出去的消息。最清爽，历史味交给文字本身。" },
-  { id: "candle", name: "丙 · 夜读", line: "深色底、烛光一样的暖色字，正文用楷体，金色点缀。适合夜里躺着读，长时间看不刺眼。" },
+const THEMES = [
+  { id: "paper", label: "纸张", name: "纸张（默认）" },
+  { id: "day", label: "白天", name: "白天" },
+  { id: "night", label: "夜间", name: "夜间" },
 ];
-const FONTS = [
-  "https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=block",
-  "https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.7.0/style.css",
-];
+const FONTS = ["https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&display=block"];
 
 const browser = await chromium.launch({ channel: "msedge" });
 const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
@@ -32,10 +29,22 @@ await context.addInitScript((urls) => {
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
+const settle = async () => {
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(700);
+};
+
+// The boot screen, held for a moment by delaying the database engine.
+await page.route("**/*.wasm", async (route) => { await new Promise((r) => setTimeout(r, 12000)); await route.continue(); });
+await page.goto("http://127.0.0.1:1420/");
+await page.locator(".boot").waitFor();
+await settle();
+await page.screenshot({ path: `${shots}/once-0-boot.png` });
 
 // A fresh profile starts at the service setup; connect the fake model.
-await page.goto("http://127.0.0.1:1420/");
 await page.getByText("连接 AI 服务").waitFor();
+await settle();
+await page.screenshot({ path: `${shots}/once-1-setup.png` });
 await page.getByRole("button", { name: "自定义" }).click();
 await page.getByLabel("服务地址").fill("http://127.0.0.1:18800/v1");
 await page.getByText(/这是 HTTP 地址/).click();
@@ -47,6 +56,15 @@ await page.getByRole("button", { name: "测试连接" }).click();
 await page.getByText(/连接成功/).waitFor();
 await page.getByRole("button", { name: "保存，开始穿越" }).click();
 await page.waitForFunction(() => !!window.__lishi);
+await page.getByRole("button", { name: /开始/ }).first().waitFor();
+await page.locator(".toast").waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
+await settle();
+await page.screenshot({ path: `${shots}/once-2-newgame.png` });
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".hero").waitFor();
+await page.locator(".toast").waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
+await settle();
+await page.screenshot({ path: `${shots}/once-3-empty-home.png` });
 
 await page.evaluate(async () => {
   const repo = window.__lishi.game.repo;
@@ -132,48 +150,59 @@ await page.evaluate(async () => {
 });
 await page.waitForTimeout(1500); // the harness saves one second after the last write
 
-const settle = async () => {
-  await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(900);
-};
-for (const look of LOOKS) {
-  await page.goto(`http://127.0.0.1:1420/?look=${look.id}`);
+const capture = async (theme, name) => page.screenshot({ path: `${shots}/${theme.id}-${name}.png` });
+for (const theme of THEMES) {
+  // Set the reading theme in 设置, as a player would.
+  await page.goto("http://127.0.0.1:1420/");
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: theme.label, exact: true }).click();
+  await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.locator(".card", { hasText: "长安雪夜" }).waitFor();
   await settle();
-  await page.screenshot({ path: `${shots}/${look.id}-1-home.png` });
+  await capture(theme, "1-home");
   await page.locator(".card", { hasText: "长安雪夜" }).click();
   await page.locator(".turn").last().waitFor();
   // The last turn from its action down: shows how the player's own line looks.
   await page.evaluate(() => { const s = document.querySelector(".story"); const turns = s.querySelectorAll(".turn"); s.scrollTop = turns[turns.length - 1].offsetTop - 10; });
   await settle();
-  await page.screenshot({ path: `${shots}/${look.id}-2-play.png` });
+  await capture(theme, "2-play");
+  await page.getByRole("button", { name: "更多" }).click();
+  await settle();
+  await capture(theme, "3-menu");
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "角色" }).click();
   await settle();
-  await page.screenshot({ path: `${shots}/${look.id}-3-me.png` });
-  await page.getByRole("tab", { name: /人物/ }).click();
+  await capture(theme, "4-me");
+  for (const [tab, name] of [["人物", "5-people"], ["目标", "6-goals"], ["记事", "7-journal"], ["设定", "8-codex"]]) {
+    await page.getByRole("tab", { name: new RegExp(tab) }).click();
+    await settle();
+    await capture(theme, name);
+  }
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "返回", exact: true }).click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
   await settle();
-  await page.screenshot({ path: `${shots}/${look.id}-4-people.png` });
+  await capture(theme, "9-settings");
 }
 
-// One board per direction, and an overview of the play screen in all three.
-const board = await browser.newPage({ viewport: { width: 1320, height: 900 }, deviceScaleFactor: 1.5 });
+// One board per theme, and the first screens.
+const board = await browser.newPage({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
 const img = (file) => `data:image/png;base64,${fs.readFileSync(file).toString("base64")}`;
 const style = `<style>
-  body { margin: 0; padding: 28px 32px; font-family: "Microsoft YaHei", sans-serif; background: #e9e7e2; color: #222; }
-  h1 { font-size: 26px; margin: 0 0 6px; } p { margin: 0 0 18px; font-size: 15px; color: #555; max-width: 1150px; line-height: 1.6; }
-  .row { display: flex; gap: 18px; } figure { margin: 0; } figure img { width: 300px; border-radius: 22px; box-shadow: 0 6px 24px rgba(0,0,0,.18); display: block; }
-  figcaption { text-align: center; font-size: 14px; color: #666; margin-top: 8px; }
+  body { margin: 0; padding: 24px 28px; font-family: "Microsoft YaHei", sans-serif; background: #e9e7e2; color: #222; }
+  h1 { font-size: 24px; margin: 0 0 14px; } .grid { display: grid; grid-template-columns: repeat(5, 290px); gap: 16px; }
+  figure { margin: 0; } figure img { width: 290px; border-radius: 18px; box-shadow: 0 4px 18px rgba(0,0,0,.16); display: block; }
+  figcaption { text-align: center; font-size: 13px; color: #666; margin-top: 6px; }
 </style>`;
-const captions = ["首页", "游玩", "角色 · 我", "角色 · 人物"];
-for (const look of LOOKS) {
-  const figures = ["1-home", "2-play", "3-me", "4-people"].map((k, i) => `<figure><img src="${img(`${shots}/${look.id}-${k}.png`)}"><figcaption>${captions[i]}</figcaption></figure>`).join("");
-  await board.setContent(`${style}<h1>${look.name}</h1><p>${look.line}</p><div class="row">${figures}</div>`);
-  await board.screenshot({ path: `${out}/look-${look.id}.jpg`, type: "jpeg", quality: 86, fullPage: true });
+const names = [["1-home", "首页"], ["2-play", "游玩"], ["3-menu", "菜单"], ["4-me", "角色 · 我"], ["5-people", "人物"], ["6-goals", "目标"], ["7-journal", "记事"], ["8-codex", "设定集"], ["9-settings", "设置"]];
+for (const theme of THEMES) {
+  const figures = names.map(([k, label]) => `<figure><img src="${img(`${shots}/${theme.id}-${k}.png`)}"><figcaption>${label}</figcaption></figure>`).join("");
+  await board.setContent(`${style}<h1>${theme.name}</h1><div class="grid">${figures}</div>`);
+  await board.screenshot({ path: `${out}/screens-${theme.id}.jpg`, type: "jpeg", quality: 84, fullPage: true });
 }
-const overview = LOOKS.map((look) => `<figure><img src="${img(`${shots}/${look.id}-2-play.png`)}"><figcaption>${look.name}</figcaption></figure>`).join("");
-await board.setViewportSize({ width: 1040, height: 900 });
-await board.setContent(`${style}<h1>三个视觉方向 · 同一段游玩</h1><p>同一个存档、同一段剧情，分别用三个方向显示。字体用网页字体模拟手机效果。</p><div class="row">${overview}</div>`);
-await board.screenshot({ path: `${out}/looks-overview.jpg`, type: "jpeg", quality: 86, fullPage: true });
+const firsts = [["once-0-boot", "启动"], ["once-1-setup", "连接 AI 服务"], ["once-2-newgame", "开局"], ["once-3-empty-home", "第一次打开的首页"]];
+await board.setContent(`${style}<h1>第一次打开</h1><div class="grid">${firsts.map(([k, label]) => `<figure><img src="${img(`${shots}/${k}.png`)}"><figcaption>${label}</figcaption></figure>`).join("")}</div>`);
+await board.screenshot({ path: `${out}/screens-first.jpg`, type: "jpeg", quality: 84, fullPage: true });
 
 console.log(errors.length ? `页面错误：${errors.slice(0, 3).join(" | ")}` : "没有页面错误");
 console.log(`截图：${shots}；拼图：${out}`);

@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [
-      { "title": "历史穿越模拟器", "width": 1100, "height": 800, "minWidth": 360 }
+      { "title": "历史穿越", "width": 1100, "height": 800, "minWidth": 360, "backgroundColor": "#efe5cf" }
     ],
     "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'" }
   },

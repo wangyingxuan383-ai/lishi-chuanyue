@@ -16,7 +16,9 @@ export interface Reading {
   theme: "paper" | "day" | "night";
   serif: boolean;
 }
-export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: false };
+export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: true };
+/** The theme is remembered outside the database too, so the first frame already has it. */
+export const THEME_KEY = "lishi.theme";
 
 export interface AppValue {
   platform: Platform;

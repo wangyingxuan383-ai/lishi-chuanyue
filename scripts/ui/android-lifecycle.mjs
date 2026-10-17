@@ -2,9 +2,11 @@
 //   node scripts/ui/android-lifecycle.mjs <adb-serial>
 // Needs scripts/fake-llm.mjs on :18800 and the key saved by native-devcheck "first".
 import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { chromium } from "playwright-core";
 
-const ADB = "C:/Users/Windows11/AppData/Local/Android/Sdk/platform-tools/adb.exe";
+const SDK = process.env.ANDROID_HOME || path.join(process.env.LOCALAPPDATA ?? "", "Android", "Sdk");
+const ADB = path.join(SDK, "platform-tools", "adb.exe");
 const serial = process.argv[2];
 const PKG = "io.timejump.chuanyue";
 const adb = (...args) => execFileSync(ADB, ["-s", serial, ...args], { encoding: "utf8" }).trim();

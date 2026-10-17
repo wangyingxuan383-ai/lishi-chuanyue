@@ -111,6 +111,7 @@ export default function Home() {
       <div className="screen-body stack">
         {cards && cards.length === 0 && (
           <div className="hero">
+            <div className="seal" aria-hidden="true">穿越</div>
             <h1>历史穿越</h1>
             <p className="muted">醒来时，你已在另一个时代。</p>
           </div>

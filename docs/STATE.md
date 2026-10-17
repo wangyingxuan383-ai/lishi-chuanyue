@@ -26,6 +26,6 @@
 - 真实模型评测花用户的钱：运行前在验证文档里登记调用上限，并确认登记已经写进文件。长局评测保存整局（`--save-db`），之后改记忆方案只需用 `probe.ts` 重新提问。
 - 后台任务被停止（或到两小时上限）时只会结束外层 shell，里面的评测 node 进程会继续跑、继续花钱、继续写日志；真要停评测，要结束对应的 node 进程（PowerShell：`Get-CimInstance Win32_Process -Filter "Name = 'node.exe'"` 查命令行，再 `Stop-Process`）。反过来，150 回合的长局跑超过两小时也不会被打断。
 - 手机：小米 24117RK2CC，无线 ADB（断开后需重新扫码配对，见 DEVELOPMENT）。安装只用 `adb -s <serial> install -r <apk>` 保留数据。**不要运行会清空数据的 `scripts/ui/phone-flow.mjs`**，不要卸载旧版 Lishi Probe。
-- 界面调试：模拟模型 `node scripts/fake-llm.mjs`（18800）放在测试命令里一起起停，不要长期挂在后台（后台任务两小时会被停掉）；`corepack pnpm dev`（1420）；`node scripts/ui/game-flow.mjs`（手机尺寸）/ `desktop.mjs`（宽屏）/ `looks.mjs`（视觉方向截图）。浏览器开发台写库后 1 秒才存盘，刷新页面前要等一下。
+- 界面调试：模拟模型 `node scripts/fake-llm.mjs`（18800）放在测试命令里一起起停，不要长期挂在后台（后台任务两小时会被停掉）；`corepack pnpm dev`（1420）；`node scripts/ui/game-flow.mjs`（手机尺寸）/ `desktop.mjs`（宽屏）/ `screens.mjs`（三套主题的全部主要界面截图）。浏览器开发台写库后 1 秒才存盘，刷新页面前要等一下。
 - 用 Python 改文件时以 `write_bytes(s.encode("utf-8"))` 写回；含反斜杠的 Python 脚本用 Write 工具写成文件，不要用 bash heredoc（反斜杠会被吞掉）。
 - PowerShell 先 `. .\scripts\Enter-Dev.ps1`（cargo 等只在其中可用）；Git 提交用 `git -c user.name=Claude -c user.email=noreply@anthropic.com commit ...`。

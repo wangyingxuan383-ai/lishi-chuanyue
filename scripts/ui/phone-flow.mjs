@@ -2,9 +2,11 @@
 // `adb reverse tcp:18800 tcp:18800`. Cleans up the test profile and world.
 //   node scripts/ui/phone-flow.mjs <adb-serial>
 import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { chromium } from "playwright-core";
 
-const ADB = "C:/Users/Windows11/AppData/Local/Android/Sdk/platform-tools/adb.exe";
+const SDK = process.env.ANDROID_HOME || path.join(process.env.LOCALAPPDATA ?? "", "Android", "Sdk");
+const ADB = path.join(SDK, "platform-tools", "adb.exe");
 const serial = process.argv[2];
 const adb = (...a) => execFileSync(ADB, ["-s", serial, ...a], { encoding: "utf8" }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

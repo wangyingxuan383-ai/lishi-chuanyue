@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getPlatform, type Platform } from "../platform";
 import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
-import { AppProvider, DEFAULT_READING, useToast, type AppValue, type Reading, type Route } from "./app/context";
+import { AppProvider, DEFAULT_READING, THEME_KEY, useToast, type AppValue, type Reading, type Route } from "./app/context";
 import Home from "./screens/Home";
 import Setup from "./screens/Setup";
 import NewGame from "./screens/NewGame";
@@ -25,6 +25,7 @@ function applyReading(r: Reading) {
   const root = document.documentElement;
   root.dataset.theme = r.theme;
   root.dataset.font = r.serif ? "serif" : "sans";
+  try { localStorage.setItem(THEME_KEY, r.theme); } catch { /* storage may be unavailable */ }
   root.style.setProperty("--story-size", `${r.size}px`);
 }
 
@@ -111,7 +112,15 @@ export default function App() {
   }, [boot, profile, reading, devMode, stack, push, replace, pop, toast]);
 
   if (error) return <div className="screen-body"><p>启动失败：{error}</p></div>;
-  if (!value) return <div className="screen-body"><p className="muted">正在打开…</p></div>;
+  if (!value) {
+    return (
+      <div className="boot" role="status" aria-label="正在打开">
+        <div className="seal" aria-hidden="true">穿越</div>
+        <p className="boot-name">历史穿越</p>
+        <p className="muted">正在打开…</p>
+      </div>
+    );
+  }
   const route = value.route;
   return (
     <AppProvider value={value}>
