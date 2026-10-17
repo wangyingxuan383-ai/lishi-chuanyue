@@ -6,6 +6,7 @@ import * as tree from "../../engine/tree";
 import type { Line } from "../../engine/types";
 import { useApp } from "../app/context";
 import { MenuSheet, Sheet } from "./Sheet";
+import { TreeView } from "./TreeView";
 
 interface Row { line: Line; turns: number; last: string }
 
@@ -26,6 +27,7 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
   const [rows, setRows] = useState<Row[] | null>(null);
   const [menu, setMenu] = useState<Row | null>(null);
   const [renaming, setRenaming] = useState<Row | null>(null);
+  const [showTree, setShowTree] = useState(false);
 
   const load = async () => {
     await game.repo.purgeTrash(worldId);
@@ -72,7 +74,9 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
         <summary className="muted">回收站 {trash.length}（30 天后自动清除）</summary>
         <div className="list">{trash.map((r) => card(r, () => setMenu(r)))}</div>
       </details>}
+      <button className="ghost" style={{ alignSelf: "flex-start" }} onClick={() => setShowTree(true)}>看回合树 ›</button>
       <p className="muted">长按任意一段，可以“回到这里”开出新路线，或者“加书签”。</p>
+      {showTree && <TreeView worldId={worldId} onClose={() => setShowTree(false)} onJumped={(message) => { setShowTree(false); onClose(); onChanged(message); }} />}
       {menu && <MenuSheet
         title={menu.line.name}
         onClose={() => setMenu(null)}

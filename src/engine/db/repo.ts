@@ -287,6 +287,11 @@ export class Repo {
     return rows.map(toNode);
   }
 
+  /** Every node of a world, oldest first, for the turn tree. */
+  async allNodes(worldId: string): Promise<StoryNode[]> {
+    return (await this.q(`SELECT ${NODE_COLUMNS} FROM nodes WHERE world_id = ? ORDER BY seq`, [worldId])).map(toNode);
+  }
+
   async children(nodeId: string): Promise<StoryNode[]> {
     return (await this.q(`SELECT ${NODE_COLUMNS} FROM nodes WHERE parent_id = ? ORDER BY seq`, [nodeId])).map(toNode);
   }

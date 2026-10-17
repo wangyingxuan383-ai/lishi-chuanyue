@@ -324,6 +324,16 @@ await page.getByText(/已加书签/).waitFor();
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "世界线" }).click();
 check("the bookmark is listed", (await page.locator(".line-row", { hasText: "刚穿越来时" }).count()) === 1);
+// R06-T002: the turn tree shows both routes with their marks.
+await page.getByRole("button", { name: "看回合树 ›" }).click();
+await page.locator(".tree-row").first().waitFor();
+await page.locator(".tree-row").first().click();
+await page.waitForTimeout(400);
+await shot("07d-tree");
+const treeText = await page.textContent(".tree");
+check("the turn tree shows forks, routes and bookmarks", (await page.locator(".tree-row").count()) >= 3 && treeText.includes("书签：刚穿越来时") && treeText.includes("当铺那条路") && (await page.getByRole("button", { name: "从这里继续" }).count()) >= 1);
+check("the turn tree fits the phone width", !(await page.evaluate(() => document.querySelector(".tree").scrollWidth > innerWidth)));
+await page.keyboard.press("Escape");
 await page.keyboard.press("Escape");
 
 // Every six turns the AI files new cards in the background (R04-T001).

@@ -103,6 +103,13 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .turn-action.direct::before { content: "幕后："; }
 .turn-action.continue::before { content: ""; }
 .turn-action.skip::before { content: "过些日子："; }
+.tree { display: flex; flex-direction: column; gap: 6px; }
+.tree-seg { display: flex; flex-direction: column; gap: 6px; }
+.tree-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; width: 100%; padding: 8px 10px; border-left: 3px solid var(--line); border-radius: 8px; font-size: 14px; }
+.tree-row.on-path { border-left-color: var(--accent); }
+.tree-marks { font-size: 12px; color: var(--accent); }
+.tree-turns { display: flex; flex-direction: column; gap: 2px; padding: 0 0 4px 10px; }
+.tree-turns .ghost { min-height: 32px; padding: 2px 8px; font-size: 13px; }
 .line-row { align-items: stretch; gap: 4px; }
 .line-row > .ghost { min-width: 40px; padding: 0 6px; }
 .report-card { margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 14px; }
