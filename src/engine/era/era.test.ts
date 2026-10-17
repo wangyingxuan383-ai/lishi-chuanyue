@@ -77,7 +77,8 @@ describe("validatePack", () => {
 
   it("checks sources", () => {
     const sources = [...TANG_748.sources, { title: "某书", covers: "某事", url: "zh.wikipedia.org", accessed: "2026/10/17" }];
-    expect(broken({ sources })).toEqual(["sources[5].url: 网址要以 http:// 或 https:// 开头", "sources[5].accessed: 查阅日期写成 YYYY-MM-DD"]);
+    const last = sources.length - 1;
+    expect(broken({ sources })).toEqual([`sources[${last}].url: 网址要以 http:// 或 https:// 开头`, `sources[${last}].accessed: 查阅日期写成 YYYY-MM-DD`]);
   });
 
   it("flags an excerpt that cannot fit", () => {
