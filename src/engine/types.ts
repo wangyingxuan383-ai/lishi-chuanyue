@@ -1,5 +1,6 @@
 // Core game types. See docs/PLAN_V3.md §6.
 import type { CalendarRules, GameDate } from "./calendar/date";
+import type { FortuneMode } from "./fortune";
 
 /**
  * do/say: the protagonist acts; write: the player writes narrative directly; direct: instruction to the narrator;
@@ -181,6 +182,10 @@ export interface WorldSettings {
   autoUpkeep: boolean;
   /** Turns per chapter summary; 0 turns automatic summaries off (R04-T003). */
   chapterEvery: number;
+  /** How much the hidden roll counts: 有影响 / 只作参考 / 关 (R11-T008); old worlds without it behave as "hint". */
+  fortune: FortuneMode;
+  /** Remind the narrator of era words it should not have used (R07-T002); switchable since R11-T008. */
+  tabooHints: boolean;
 }
 
 export const DEFAULT_SETTINGS: WorldSettings = {
@@ -196,6 +201,8 @@ export const DEFAULT_SETTINGS: WorldSettings = {
   directive: "",
   autoUpkeep: true,
   chapterEvery: 12,
+  fortune: "hint",
+  tabooHints: true,
 };
 
 export interface World {

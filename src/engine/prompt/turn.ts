@@ -8,13 +8,13 @@ import { ERA_CARD_LIMIT, activeCardLines } from "../memory/cards";
 import { formatMoney } from "../money";
 import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 import { RECAP_BUDGET, recapBlock } from "./chapter";
-import { FORTUNE_TEXT, type Fortune } from "../fortune";
+import { fortuneMode, fortuneNote, type Fortune } from "../fortune";
 import { skipSpanMinutes } from "../calendar/duration";
 import { worldBlock } from "../timeline";
 import { tabooReminder, type TabooHit } from "../era/taboo";
 import { RECALL_BUDGET, recallBlock } from "../memory/recall";
 
-export const PROMPT_VERSION = "turn-14";
+export const PROMPT_VERSION = "turn-15";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -82,7 +82,7 @@ function systemParts(ctx: StoryContext): SystemParts {
 【写作要求】
 - ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}。先写画面、声音、气味和动作，少用总结句；对话简短、口吻符合人物身份。叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，人物对白带时代口吻。每回合${LENGTH[settings.length]}。
 - 只写到玩家需要做决定为止。主角只做玩家写下的事：玩家只说了大意，就照大意写，不替主角添新的计划、约定、许诺、威胁或贿赂，不替主角说出或藏起玩家没提的秘密、证据和底牌，不擅自把玩家没说要做完的事做完。玩家说“先试一下”“先问问”，就只写试一下、问一下的结果。拿不准主角会怎么做，就写到那里停下，让玩家决定。
-- 玩家的行动可能失败。行动有难度或风险时，按情理决定成败，失败也要写出后果。
+- 玩家的行动可能失败。行动有难度或风险时，按情理决定成败：局面悬殊的照情理写，胜负难料的才看运气；失败也要写出后果。
 - 其他人物有自己的目的、脾气和处境，不围着主角转；态度变化要有缘由。
 - 【心愿】是玩家自己想做的事：不要替主角去做，但可以在合适的时候让相关的人和机会自然出现。
 - 涉及钱和物品时，只能使用【当前】中列出的数量，正文写清具体数目；钱不够就买不成、付不起。
@@ -265,7 +265,11 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   // Great events of the world's timeline: lately, and coming soon (over the whole span for 过些日子).
   const world = worldBlock(input.state, input.mode === "skip" ? skipSpanMinutes(input.text) ?? 90 * 1440 : undefined);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
-  const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${tabooReminder(input.taboos ?? [])}${input.fortune ? `\n【本回合运势（玩家看不到）】${FORTUNE_TEXT[input.fortune]}没有风险的日常行动不受运势影响，也不要在正文里提运势。` : ""}`;
+  // Luck as the world has it (R11-T008): 有影响, 只作参考 (the default) or 关; era-word reminders can be turned off too.
+  const luckMode = fortuneMode(input.settings.fortune);
+  const luck = fortuneNote(input.fortune, luckMode);
+  const taboo = input.settings.tabooHints === false ? "" : tabooReminder(input.taboos ?? []);
+  const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${taboo}${luck}`;
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
   const action = `\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
@@ -332,7 +336,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
     },
     { key: "recall", label: "相关旧事", content: recall, note: recall ? "原文窗口以外、提到眼下这些人和物的句子（最早一次和最近一次）" : recallDropped ? "超出上限，这回合没放" : "眼下提到的人和物在更早的剧情里没出现过，或都还在原文里" },
     { key: "directive", label: "叙事方针", content: directive, note: directive ? "玩家写的，每回合都有" : "没写" },
-    { key: "notes", label: "程序提示", content: notes, note: notes ? `${input.notes?.length ? "上回合程序修正过的变化；" : ""}${input.fortune ? `本回合运势：${input.fortune}` : ""}` : "没有" },
+    { key: "notes", label: "程序提示", content: notes, note: notes ? `${input.notes?.length ? "上回合程序修正过的变化；" : ""}${luck ? `本回合运势：${input.fortune}（${luckMode === "on" ? "有影响" : "只作参考"}）` : ""}` : "没有" },
     { key: "action", label: "玩家行动", content: action, note: "本回合的行动与幕后要求" },
     { key: "spec", label: "输出格式", content: parts.spec, note: "每回合都有，不裁剪" },
   ] as Omit<ContextLayer, "chars">[]).map((l) => ({ ...l, chars: l.content.length }));

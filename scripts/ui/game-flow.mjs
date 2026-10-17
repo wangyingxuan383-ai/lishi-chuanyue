@@ -446,6 +446,13 @@ check("the month crosses the great event", (await page.locator(".chip", { hasTex
 // Stop mid-generation keeps partial text as interrupted.
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "本局设置" }).click();
+await page.locator(".sheet .segmented").first().waitFor();
+check("本局设置 has a 玩法 group with 运势 and 用词提醒", (await page.locator(".sheet .settings-sub", { hasText: "玩法" }).count()) === 1 && (await page.locator(".sheet").textContent()).includes("用词提醒"));
+await page.locator(".sheet .segmented", { has: page.getByRole("button", { name: "只作参考" }) }).getByRole("button", { name: "关", exact: true }).click();
+await page.waitForTimeout(300);
+await shot("07d-world-settings-fortune");
+check("运势 can be turned off for this world and shows 本局", (await page.evaluate(async () => { const w = (await window.__lishi.game.repo.listWorlds())[0]; return w.settings.fortune; })) === "off" && (await page.locator(".sheet span.muted", { hasText: "运势" }).locator(".tag.own").count()) === 1);
+await page.locator(".sheet .segmented", { has: page.getByRole("button", { name: "只作参考" }) }).getByRole("button", { name: "只作参考" }).click();
 await page.keyboard.press("Escape");
 
 // Reload persists everything. The browser harness saves the database one second
@@ -590,6 +597,15 @@ await page.locator(".settings-entry", { hasText: "游玩默认" }).click();
 await page.getByRole("button", { name: "残酷" }).click();
 check("the difficulty default can be set (it had no way in before)", (await page.getByRole("button", { name: "残酷" }).getAttribute("aria-pressed")) === "true");
 await page.getByRole("button", { name: "标准" }).click();
+// 运势 (R11-T008): 只作参考 by default, can be turned off.
+check("运势 defaults to 只作参考", (await page.getByRole("button", { name: "只作参考" }).getAttribute("aria-pressed")) === "true");
+await page.locator(".setting", { hasText: "运势" }).getByRole("button", { name: "关", exact: true }).click();
+await page.waitForTimeout(300);
+await shot("12f-play-defaults-fortune");
+check("运势 can be set to 关 and is saved", (await page.locator(".setting", { hasText: "运势" }).getByRole("button", { name: "关", exact: true }).getAttribute("aria-pressed")) === "true"
+  && (await page.textContent("body")).includes("不抽签，成败全按情理")
+  && (await page.evaluate(async () => (await window.__lishi.game.repo.getSetting("playDefaults", {})).fortune)) === "off");
+await page.getByRole("button", { name: "只作参考" }).click();
 await page.getByRole("button", { name: "返回", exact: true }).click();
 await page.locator(".settings-entry", { hasText: "网络与代理" }).click();
 await page.getByRole("button", { name: "自定义代理" }).click();

@@ -24,7 +24,7 @@ import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
 import { skipSpanMinutes } from "./calendar/duration";
-import { isFortune, rollFortune, type Fortune } from "./fortune";
+import { fortuneMode, isFortune, rollFortune, type Fortune } from "./fortune";
 import { packTimeline } from "./timeline";
 import { newId } from "./db/repo";
 import { parseMoney } from "./money";
@@ -528,7 +528,8 @@ export class Game {
       const era = eraContext(world.eraId, state);
       // What the player writes (写) or directs (幕后) happens as written: no luck in it (G5: a 大不顺 roll had the narrator jail
       // the protagonist in a scene the player wrote). Nor in 过些日子, which is no risky act (eval H: a roll jailed him for a month).
-      const noLuck = action.mode === "write" || action.mode === "direct" || action.mode === "skip";
+      // A world with luck off (R11-T008) rolls nothing at all, so no 签 chip either.
+      const noLuck = action.mode === "write" || action.mode === "direct" || action.mode === "skip" || fortuneMode(world.settings.fortune) === "off";
       const fortune = noLuck ? undefined : await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果");
       const { messages, chars } = buildTurnContext(await this.turnInput(worldId, base, {
         mode: action.mode, text: action.text, directorNote: action.directorNote, rewriteHint: hint, fortune,
