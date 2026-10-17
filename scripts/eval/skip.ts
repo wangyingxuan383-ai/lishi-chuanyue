@@ -1,12 +1,15 @@
 // R05-T001 check: "过些日子" for a month and for a year, five versions each from
-// the same turn, recording elapsed time, money, age, chips and the report.
-//   node_modules/.bin/tsx scripts/eval/skip.ts --model <model> [--slot main] [--max-calls 24] [--out <dir>]
+// the same turn, recording elapsed time, money, age, chips, the report, the
+// closing hour the record gives and the statuses before and after.
+//   node_modules/.bin/tsx scripts/eval/skip.ts --model <model> [--slot main] [--max-calls 24] [--versions 5] [--base <first action>] [--out <dir>]
 import fs from "node:fs";
 import path from "node:path";
 import { Game } from "../../src/engine/game.ts";
 import { chatCompletionsUrl, parseChunk, type ChatUsage } from "../../src/engine/llm/chat.ts";
 import { PROMPT_VERSION } from "../../src/engine/prompt/turn.ts";
 import { cursor, goBackTo } from "../../src/engine/tree.ts";
+import { eraContext } from "../../src/engine/era/index.ts";
+import { nowOf } from "../../src/engine/calendar/clock.ts";
 import { TEMPLATES, templateName } from "../../src/content/templates.ts";
 import { createMemoryPlatform } from "../../src/platform/memory.ts";
 import type { Platform, StreamEvent } from "../../src/platform/types.ts";
@@ -17,7 +20,8 @@ const arg = (name: string, fallback?: string) => {
   return i < 0 ? fallback : process.argv[i + 1];
 };
 const SPANS = ["过一个月；这段时间照常过日子", "过一年；这段时间读书"];
-const VERSIONS = 5;
+const VERSIONS = Number(arg("versions", "5"));
+const BASE = arg("base", "先把房钱的事稳住，再出门找活计")!;
 
 async function main() {
   const model = arg("model");
@@ -50,7 +54,7 @@ async function main() {
     arrival: "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: t.openingHint },
   }, () => {});
   if (!worldId) throw new Error("开局失败");
-  await game.play(worldId, { mode: "do", text: "先把房钱的事稳住，再出门找活计" }, () => {}).done;
+  await game.play(worldId, { mode: "do", text: BASE }, () => {}).done;
   const base = (await cursor(game.repo, worldId)).head;
   const before = await game.repo.getState(base.id);
   const versions = [];
@@ -61,12 +65,15 @@ async function main() {
       await handle.done;
       const head = (await cursor(game.repo, worldId)).head;
       const after = await game.repo.getState(head.id);
-      const record = (head.record ?? {}) as { time?: unknown; report?: unknown };
+      const record = (head.record ?? {}) as { time?: unknown; report?: unknown; hour?: unknown };
+      const world = (await game.repo.getWorld(worldId))!;
       versions.push({
         span, version: v + 1, status: head.status, narrative: head.narrative,
         time: record.time ?? null, elapsedDays: Math.round((after.time.elapsedMinutes - before.time.elapsedMinutes) / 1440),
         money: after.protagonist.stats.money - before.protagonist.stats.money, ageBefore: before.protagonist.age, ageAfter: after.protagonist.age,
         chips: ((head.meta.chips as { text: string }[]) ?? []).map((c) => c.text), report: record.report ?? null,
+        hour: typeof record.hour === "number" ? record.hour : null, clockAfter: nowOf(eraContext(world.eraId, after).clock, after.time.elapsedMinutes).text,
+        statusesBefore: before.protagonist.statuses.map((x) => x.name), statusesAfter: after.protagonist.statuses.map((x) => x.name),
       });
       console.log(`${span} 第 ${v + 1} 版：${head.status}，过了 ${versions.at(-1)!.elapsedDays} 天，调用 ${calls.length}/${maxCalls}`);
     }
@@ -80,7 +87,7 @@ async function main() {
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
   fs.writeFileSync(path.join(out, "transcript.md"), `# 过些日子评测\n\n模型：${model}；开局：${before.time.start}；起点年龄 ${before.protagonist.age}\n\n${versions.map((v) =>
-    `## ${v.span} · 第 ${v.version} 版\n\n记录的时间：${JSON.stringify(v.time)}；程序算出过了 ${v.elapsedDays} 天；钱 ${v.money >= 0 ? "+" : ""}${v.money}；年龄 ${v.ageBefore} → ${v.ageAfter}\n\n标签：${v.chips.join(" | ") || "（无）"}\n\n见闻：${JSON.stringify(v.report)}\n\n${v.narrative}\n`).join("\n")}`, "utf8");
+    `## ${v.span} · 第 ${v.version} 版\n\n记录的时间：${JSON.stringify(v.time)}；结尾时辰 ${v.hour ?? "（没写）"}，时钟停在 ${v.clockAfter}；程序算出过了 ${v.elapsedDays} 天；钱 ${v.money >= 0 ? "+" : ""}${v.money}；年龄 ${v.ageBefore} → ${v.ageAfter}；状况 ${v.statusesBefore.join("、") || "无"} → ${v.statusesAfter.join("、") || "无"}\n\n标签：${v.chips.join(" | ") || "（无）"}\n\n见闻：${JSON.stringify(v.report)}\n\n${v.narrative}\n`).join("\n")}`, "utf8");
   console.log(JSON.stringify({ calls: summary.calls, tokens: summary.tokens }, null, 2));
   console.log(`结果：${path.relative(ROOT, out)}`);
 }
