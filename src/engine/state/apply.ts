@@ -117,6 +117,8 @@ function attitudeOf(text: string | undefined): Attitude | null {
 }
 
 const clamp = (n: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
+/** Most statuses the protagonist carries after a turn. */
+const MAX_STATUSES = 12;
 
 /**
  * 过些日子 ends at the hour its passage ends (eval H: the clock kept the
@@ -410,6 +412,14 @@ export function applyRecord(
       me.statuses.push({ name: raw.name, detail: raw.detail ?? "", sinceMinute: now() });
       chips.push({ text: raw.name, tone: "warn" });
     }
+  }
+  // Long games pile up passing states the narrator never removes (eval I: 24 on the Tang side).
+  // Past the cap the oldest go first; 垂危 and 昏迷 stay. The player's own edits are left alone.
+  if (opts?.advanceTime !== false && me.statuses.length > MAX_STATUSES) {
+    const keep = (x: { name: string }) => x.name === "垂危" || x.name === "昏迷";
+    const oldest = me.statuses.filter((x) => !keep(x)).sort((a, b) => a.sinceMinute - b.sinceMinute).slice(0, me.statuses.length - MAX_STATUSES);
+    me.statuses = me.statuses.filter((x) => !oldest.includes(x));
+    log.push(`状况超过 ${MAX_STATUSES} 项，去掉了最早的：${oldest.map((x) => x.name).join("、")}`);
   }
 
   // Goals: only "add" may create; other ops must match an existing goal (or its id, from the goals page).

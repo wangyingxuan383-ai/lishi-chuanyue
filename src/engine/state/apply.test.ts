@@ -235,6 +235,22 @@ describe("applyRecord", () => {
     expect(applyRecord(s, { time: "一天", hour: 6 }, { mode: "do", difficulty: "标准", currency: TANG_CURRENCY, clock }).state.time.elapsedMinutes).toBe(330 + 1440);
   });
 
+  it("keeps at most twelve statuses after a turn, dropping the oldest but never 垂危", () => {
+    const s = sampleState();
+    s.protagonist.statuses = Array.from({ length: 12 }, (_, i) => ({ name: `旧状况${i}`, detail: "", sinceMinute: i }));
+    s.protagonist.statuses[0] = { name: "垂危", detail: "", sinceMinute: 0 };
+    s.protagonist.stats.health = 1; // still dying, so 垂危 is not lifted
+    const r = apply(s, { status: [{ op: "add", name: "新伤甲" }, { op: "add", name: "新伤乙" }] });
+    const names = r.state.protagonist.statuses.map((x) => x.name);
+    expect(names).toHaveLength(12);
+    expect(names).toEqual(expect.arrayContaining(["垂危", "新伤甲", "新伤乙"]));
+    expect(names).not.toContain("旧状况1");
+    expect(names).not.toContain("旧状况2");
+    expect(r.log.join()).toContain("去掉了最早的：旧状况1、旧状况2");
+    // The player's own edits are not trimmed.
+    expect(applyRecord(s, { status: [{ op: "add", name: "新伤甲" }] }, ctx(), { advanceTime: false }).state.protagonist.statuses).toHaveLength(13);
+  });
+
   it("tells the player when 过些日子 stopped well short of what was asked", () => {
     const ctx = { mode: "skip" as const, difficulty: "标准" as const, currency: TANG_CURRENCY, asked: 43200 };
     expect(applyRecord(sampleState(), { time: "半个时辰" }, ctx).chips.map((c) => c.text)).toContain("快进停在这里：有事要你拿主意");

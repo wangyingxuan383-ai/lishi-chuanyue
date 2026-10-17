@@ -31,6 +31,10 @@ describe("organizing the 设定集", () => {
     ]);
     expect(patch.places).toEqual([{ op: "add", name: "云京", aliases: [], description: "大胤京城，分内外两城", source: "AI" }]);
     expect(codexSummary(patch)).toBe("AI 整理了设定集：时代卡、青衣卫、天机阁等");
+    // Upkeep passes that only clear statuses or mark deaths still say what they did.
+    expect(codexSummary({ status: [{ op: "remove", name: "窥得重器" }, { op: "remove", name: "热食充饥" }] })).toBe("AI 整理了设定集：去掉了 2 项过去的状况");
+    expect(codexSummary({ cards: [{ op: "add", kind: "势力", name: "右金吾卫", content: "禁军" }], people: [{ id: "p", name: "周管事", alive: false }] }))
+      .toBe("AI 整理了设定集：右金吾卫；记下周管事已去世");
   });
 
   it("keeps what the player wrote", () => {

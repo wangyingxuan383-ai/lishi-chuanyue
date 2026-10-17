@@ -95,11 +95,18 @@ export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "place
   return { ...(cards.length ? { cards } : {}), ...(places.length ? { places } : {}), ...(timeline.length ? { timeline } : {}) };
 }
 
-/** "时代卡、天地会、西市等" for the edit line. */
+/** "时代卡、天地会、西市等；记下周管事已去世；去掉了 2 项过去的状况" for the edit line. */
 export function codexSummary(patch: TurnRecord): string {
+  const deaths = (patch.people ?? []).filter((p) => p.alive === false).map((p) => p.name);
   const names = [
     ...(patch.cards ?? []).map((c) => (c.kind === "时代" ? "时代卡" : c.name ?? "")), ...(patch.places ?? []).map((p) => p.name ?? ""),
-    ...(patch.people ?? []).map((p) => p.name),
+    ...(patch.people ?? []).filter((p) => p.alive !== false).map((p) => p.name),
   ].filter(Boolean);
-  return `AI 整理了设定集：${names.slice(0, 3).join("、")}${names.length > 3 ? "等" : ""}`;
+  const cleared = (patch.status ?? []).filter((x) => x.op === "remove").length;
+  const parts = [
+    names.length ? `${names.slice(0, 3).join("、")}${names.length > 3 ? "等" : ""}` : "",
+    deaths.length ? `记下${deaths.join("、")}已去世` : "",
+    cleared ? `去掉了 ${cleared} 项过去的状况` : "",
+  ].filter(Boolean);
+  return `AI 整理了设定集：${parts.join("；")}`;
 }
