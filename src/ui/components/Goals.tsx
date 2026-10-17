@@ -47,8 +47,9 @@ function GoalSheet({ goal, era, onClose, onSave }: { goal: Goal; era: EraContext
   );
 }
 
-function WishSheet({ onClose, onSave }: { onClose: () => void; onSave: Save }) {
+function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => void; onSave: Save }) {
   const [name, setName] = useState("");
+  const taken = goals.some((g) => g.name === name.trim());
   const [how, setHow] = useState("");
   const [saving, setSaving] = useState(false);
   const save = async () => {
@@ -64,7 +65,8 @@ function WishSheet({ onClose, onSave }: { onClose: () => void; onSave: Save }) {
         <p className="muted" style={{ margin: 0 }}>写下你想让主角做成的事。AI 不会替你去做，但会让相关的人和机会自然出现。</p>
         <label>心愿<input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：攒钱在长安买一处宅子" /></label>
         <label>打算怎么做（可不填）<input value={how} onChange={(e) => setHow(e.target.value)} placeholder="如：先替人抄书攒钱" /></label>
-        <button className="primary" disabled={saving || !name.trim()} onClick={() => void save()}>记下</button>
+        {taken && <p className="field-hint warn">已经有这个目标了，换个说法，或者在目标里补进展。</p>}
+        <button className="primary" disabled={saving || !name.trim() || taken} onClick={() => void save()}>记下</button>
       </div>
     </Sheet>
   );
@@ -97,7 +99,7 @@ export function Goals({ state, era, busy, onSave }: { state: WorldState; era: Er
         ))}
       </details>}
       {open && <GoalSheet goal={open} era={era} onClose={() => setOpen(null)} onSave={onSave} />}
-      {wish && <WishSheet onClose={() => setWish(false)} onSave={onSave} />}
+      {wish && <WishSheet goals={state.goals} onClose={() => setWish(false)} onSave={onSave} />}
     </div>
   );
 }

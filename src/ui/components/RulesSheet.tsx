@@ -30,7 +30,7 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
   const unitProblems = currencyChanged ? currencyIssues(parsedUnits) : [];
   const dayLimit = monthDays({ lunar, month });
   const dateFilled = eraName.trim() !== "" || year !== "";
-  const dateOk = !dateFilled || (eraName.trim().length <= 12 && Number(year) >= 1 && Number(day) >= 1 && Number(day) <= dayLimit);
+  const dateOk = !dateFilled || (eraName.trim() !== "" && eraName.trim().length <= 12 && Number(year) >= 1 && Number(day) >= 1 && Number(day) <= dayLimit);
   const newDate = dateFilled ? { era: eraName.trim(), year: Number(year), month, day: Number(day), lunar, ...(ceYear ? { ceYear: Number(ceYear) } : {}) } : null;
 
   const changes = (): { patch: TurnRecord; summary: string[] } => {

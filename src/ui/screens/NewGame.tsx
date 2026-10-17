@@ -83,7 +83,16 @@ export default function NewGame() {
       return value;
     });
   };
-  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => {
+    const next = { ...d, [key]: value };
+    // A Tang template's calendar must not survive a premise rewritten to Song (AUDIT_V4_FUNCTION D2).
+    if (key === "premise" && d.eraId) {
+      const pack = ERAS.find((e) => e.id === d.eraId);
+      const words = pack ? [pack.title.split(" · ")[0], ...pack.title.split(/[ ·]+/)].filter((w) => w.length >= 1) : [];
+      if (pack && String(value).trim().length >= 6 && !words.some((w) => String(value).includes(w))) { next.eraId = null; next.organize = true; }
+    }
+    return next;
+  });
   const setS = <K extends keyof Draft["settings"]>(key: K, value: Draft["settings"][K]) => setDraft((d) => ({ ...d, settings: { ...d.settings, [key]: value } }));
 
   useBack(() => phase !== "form", phase !== "form");

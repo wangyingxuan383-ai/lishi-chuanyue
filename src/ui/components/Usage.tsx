@@ -39,6 +39,15 @@ export function UsageSheet({ onClose }: { onClose: () => void }) {
     ).then(setRows);
   }, [by]);
   const savePrices = (next: Prices) => { setPrices(next); void game.repo.setSetting("prices", next); };
+  // The boxes keep the text as typed, so "0." on the way to "0.5" survives (AUDIT_V4_FUNCTION B1).
+  const [typed, setTyped] = useState<{ input: string; output: string } | null>(null);
+  const shown = typed ?? { input: prices.input ? String(prices.input) : "", output: prices.output ? String(prices.output) : "" };
+  const typePrice = (key: "input" | "output", text: string) => {
+    const clean = text.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1");
+    setTyped({ ...shown, [key]: clean });
+    const value = Number.parseFloat(clean);
+    savePrices({ ...prices, [key]: Number.isFinite(value) ? value : 0 });
+  };
   const cost = (r: Row) => (Number(r.input) * prices.input + Number(r.output) * prices.output) / 1_000_000;
   const priced = prices.input > 0 || prices.output > 0;
   const total = rows.reduce<{ calls: number; input: number; output: number; unknown: number }>((t, r) => ({ calls: t.calls + Number(r.calls), input: t.input + Number(r.input), output: t.output + Number(r.output), unknown: t.unknown + Number(r.unknown) }), { calls: 0, input: 0, output: 0, unknown: 0 });
@@ -64,8 +73,8 @@ export function UsageSheet({ onClose }: { onClose: () => void }) {
         ))}
         <p className="muted" style={{ margin: "8px 0 0" }}>填上你的服务每百万 token 的价格，就能估算花费（只在这里显示，游玩时不会提示）。</p>
         <div className="row">
-          <label className="grow">输入价格（元/百万）<input aria-label="输入价格" inputMode="decimal" value={prices.input || ""} onChange={(e) => savePrices({ ...prices, input: Number(e.target.value) || 0 })} placeholder="如 1" /></label>
-          <label className="grow">输出价格（元/百万）<input aria-label="输出价格" inputMode="decimal" value={prices.output || ""} onChange={(e) => savePrices({ ...prices, output: Number(e.target.value) || 0 })} placeholder="如 4" /></label>
+          <label className="grow">输入价格（元/百万）<input aria-label="输入价格" inputMode="decimal" value={shown.input} onChange={(e) => typePrice("input", e.target.value)} placeholder="如 1" /></label>
+          <label className="grow">输出价格（元/百万）<input aria-label="输出价格" inputMode="decimal" value={shown.output} onChange={(e) => typePrice("output", e.target.value)} placeholder="如 4" /></label>
         </div>
       </div>
     </Sheet>

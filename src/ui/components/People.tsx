@@ -27,8 +27,9 @@ function Editor({ person, state, era, onClose, onSave }: {
   const [alive, setAlive] = useState(person?.alive ?? true);
   const [saving, setSaving] = useState(false);
   const clean = name.trim();
-  // A new entry must not be someone the list already has under another wording.
-  const clash = !person && clean ? matchName(state.people, clean) : undefined;
+  // A new entry, or a new name, must not be someone the list already has under another wording (AUDIT_V4_FUNCTION F3).
+  const found = clean && clean !== person?.name ? matchName(state.people, clean) : undefined;
+  const clash = found && found.id !== person?.id ? found : undefined;
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);

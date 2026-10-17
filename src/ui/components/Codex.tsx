@@ -36,6 +36,9 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
   const [saving, setSaving] = useState(false);
   const label = editing.type === "place" ? "地点" : isEra ? "时代卡" : `${editing.kind}卡`;
   const isHere = editing.type === "place" && !!editing.place && editing.place.id === state.placeId;
+  // A name another entry already has would update that entry instead (AUDIT_V4_FUNCTION F4).
+  const pool = editing.type === "place" ? state.places.map((p) => ({ id: p.id, name: p.name })) : state.cards.filter((c) => c.kind !== "时代").map((c) => ({ id: c.id, name: c.name }));
+  const taken = !isEra && name.trim() && pool.find((x) => x.name === name.trim() && x.id !== original?.id);
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
@@ -43,7 +46,7 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
   };
   const save = () => {
     const clean = name.trim();
-    if (!clean) return;
+    if (!clean || taken) return;
     if (editing.type === "place") {
       const fields = { name: clean, aliases: splitNames(aliases), description: text, source: "玩家" as const };
       void run({ places: [stored ? { op: "update", id: original!.id, ...fields } : { op: "add", ...fields }] }, stored ? `修改地点：${clean}` : `新建地点：${clean}`);
@@ -67,9 +70,10 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
             placeholder={isEra ? "时局、货币与物价、称谓、日常与节令、文风、不要出现的东西……" : "写给 AI 看的资料"} />
         </label>
         {isEra && <p className="muted" style={{ margin: 0 }}>{text.length} / {ERA_CARD_LIMIT} 字{text.length > ERA_CARD_LIMIT ? "，超出的部分不会交给 AI" : "。时代卡每回合都会交给 AI。"}</p>}
+        {taken && <p className="field-hint warn">已经有叫“{name.trim()}”的了，换个名字，或者去改那一张。</p>}
         <div className="row">
           {stored && <button className="danger-text" disabled={saving || isHere} onClick={remove}>{isHere ? "当前所在地不能删" : "删除"}</button>}
-          <button className="primary grow" disabled={saving || !name.trim()} onClick={save}>保存</button>
+          <button className="primary grow" disabled={saving || !name.trim() || !!taken} onClick={save}>保存</button>
         </div>
       </div>
     </Sheet>
