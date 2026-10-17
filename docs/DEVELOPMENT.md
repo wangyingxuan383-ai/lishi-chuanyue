@@ -29,6 +29,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                     # Rust 平台服务测试（只连本机测试服务）
 pnpm tauri build --debug --no-bundle       # Windows：target\debug\lishi-app.exe
 pnpm tauri android build --debug --target aarch64 --apk --ci   # Android debug APK
+pnpm tauri android build --target aarch64 --apk --ci          # Android 发行包（未签名），签名与检查见 RELEASE.md
 .\scripts\Verify-AndroidPackage.ps1 -Profile debug -ApkPath src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk
 node scripts/check-docs.mjs                # 文档检查
 ```

@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory=$true)][string]$ReferenceApk,
     [Parameter(Mandatory=$true)][string]$KeystorePath,
     [Parameter(Mandatory=$true)][string]$OutputPath,
-    [string]$KeyAlias='androiddebugkey'
+    [string]$KeyAlias='androiddebugkey',
+    # v2 shrank release builds with R8; v3 keeps Tauri's default (no R8) until it is tested on a phone.
+    [switch]$RequireR8
 )
 $ErrorActionPreference='Stop'
 $previewRoot=[IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
@@ -32,7 +34,7 @@ try {
     if ($env:LISHI_SIGNING_KEY_PASSWORD) { $previewToolArguments+=@('--key-pass','env:LISHI_SIGNING_KEY_PASSWORD') }
     & $previewSigner @previewToolArguments ([IO.Path]::GetFullPath($UnsignedApk))
     if ($LASTEXITCODE -ne 0) { throw 'Preview signing failed. No application/device was modified.' }
-    & (Join-Path $PSScriptRoot 'Verify-AndroidPackage.ps1') -ApkPath $previewStageApk -Profile release -ReferenceApk $ReferenceApk -RequireR8 -OutputPath $previewStageReport
+    & (Join-Path $PSScriptRoot 'Verify-AndroidPackage.ps1') -ApkPath $previewStageApk -Profile release -ReferenceApk $ReferenceApk -RequireR8:$RequireR8 -OutputPath $previewStageReport
     $previewChecked=Get-Content -LiteralPath $previewStageReport -Raw | ConvertFrom-Json
     $previewChecked.apk=$previewOutput
     [IO.File]::WriteAllText($previewStageReport,($previewChecked | ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))

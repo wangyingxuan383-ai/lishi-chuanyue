@@ -21,6 +21,8 @@
 | [决策记录](docs/DECISIONS.md) | 重要取舍与理由 |
 | [变更记录](CHANGELOG.md) | 实际发生的重要变化 |
 | [开发说明](docs/DEVELOPMENT.md) | 工具、命令、手机连接 |
+| [私人发行包](docs/RELEASE.md) | 版本号、构建签名、给手机安装 |
+| [视觉方向](docs/design/VISUAL_DIRECTIONS.md) | R09 待选的三个视觉方向 |
 | [海外产品调研](docs/research/COMPETITORS_INTL.md) | AI Dungeon、SillyTavern、Voyage 等 |
 | [中文产品与题材调研](docs/research/COMPETITORS_CN.md) | 《崇祯》、太吾、星野、穿越题材、时代细节 |
 | [试玩问卷模板](docs/validation/PLAYTEST_TEMPLATE.md) | 每阶段用户试玩验收 |
