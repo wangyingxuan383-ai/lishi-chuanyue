@@ -42,8 +42,12 @@ node scripts/check-docs.mjs                # 文档检查
 
 自动化检查：
 
-- 手机尺寸：`node scripts/ui/devcheck.mjs`（需先启动模拟模型和 `pnpm dev`；截图在 `.cache/ui/`）。
-- Windows 原生：先以 `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9224'` 启动 `target\debug\lishi-app.exe`，再运行 `node scripts/ui/native-devcheck.mjs first|after-restart|cleanup`。
+以下脚本都需要先启动模拟模型和 `pnpm dev`，截图在 `.cache/ui/`：
+
+- 手机尺寸完整流程：`node scripts/ui/game-flow.mjs`（R02 起替代了旧的 `devcheck.mjs`）。
+- 桌面宽屏：`node scripts/ui/desktop.mjs`（双栏布局、回车发送、窄窗口退回手机布局）。
+- 千回合世界的打开与滚动：`node scripts/ui/long-world.mjs`；引擎侧计时 `node_modules/.bin/tsx scripts/bench/long-world.ts`。
+- Windows 原生：`native-devcheck.mjs` 是 R01 时针对调试页写的，界面已经换掉，需要按现在的界面改写后才能再用；它还会改写原生版的服务设置，本机原生版里有用户数据时不要运行。
 
 ## 评测
 

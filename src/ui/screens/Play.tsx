@@ -16,6 +16,7 @@ import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
 import { useLongPress } from "../components/useLongPress";
+import { useMouse, useWide } from "../components/useMedia";
 
 const PAGE = 30;
 const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
@@ -97,6 +98,11 @@ export default function Play({ worldId }: { worldId: string }) {
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
   const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | null>(null);
   const [panel, setPanel] = useState(false);
+  const wide = useWide();
+  const mouse = useMouse();
+  const inputBox = useRef<HTMLTextAreaElement>(null);
+  // The box grows with what is typed; shrink it back once the action is sent.
+  useEffect(() => { if (!input && inputBox.current) inputBox.current.style.height = ""; }, [input]);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
   const [notificationStart, setNotificationStart] = useState<(() => void) | null>(null);
@@ -320,7 +326,21 @@ export default function Play({ worldId }: { worldId: string }) {
   const sendLabel = gen ? "停止" : input.trim() ? "发送" : "继续";
   const statusText = gen && { starting: "", thinking: "构思中…", writing: "", organizing: "整理中…" }[gen.phase];
 
+  const panelProps = {
+    worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, busy: !!gen,
+    onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
+    onOrganize: async (replaceOwnEra: boolean) => {
+      const c = await game.organize(worldId, { replaceOwnEra });
+      if (!c) { toast("这次没整理出来，稍后再试"); return false; }
+      await refresh();
+      toast("已整理设定集，可以接着修改");
+      return true;
+    },
+    onSave: async (patch: TurnRecord, summary: string) => { await game.editState(worldId, patch, summary); await refresh(); },
+  };
+
   return (
+    <div className={`play-layout${wide ? " wide" : ""}`}>
     <div className="play">
       <div className="topbar">
         <button className="icon-btn" aria-label="返回" onClick={() => (gen ? toast("正在写，先停止或等写完") : pop())}>‹</button>
@@ -328,7 +348,7 @@ export default function Play({ worldId }: { worldId: string }) {
           <h1 style={{ fontSize: 15 }}>{place}</h1>
           <div className="subtitle">{now.text}</div>
         </button>
-        <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>
+        {!wide && <button className="icon-btn" aria-label="角色" onClick={() => setPanel(true)} style={{ fontSize: 15 }}>我</button>}
         <button className="icon-btn" aria-label="更多" onClick={() => setSheet("more")}>⋯</button>
       </div>
 
@@ -391,12 +411,17 @@ export default function Play({ worldId }: { worldId: string }) {
         <div className="inputbar">
           <button className="mode-btn" onClick={() => setModeIndex((modeIndex + 1) % MODES.length)} disabled={!!gen}>{mode.label}</button>
           <textarea
+            ref={inputBox}
             rows={1}
             value={input}
             disabled={dead}
             onFocus={() => setTyping(true)}
             onBlur={() => setTyping(false)}
             placeholder={dead ? "" : mode.placeholder}
+            onKeyDown={(e) => {
+              // On a desktop keyboard Enter sends and Shift+Enter starts a new line.
+              if (mouse && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!gen) send(); }
+            }}
             onChange={(e) => {
               const v = e.target.value;
               setInput(v);
@@ -523,19 +548,13 @@ export default function Play({ worldId }: { worldId: string }) {
       }} />}
       {sheet === "story" && <StorySheet world={world} headId={head.id} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
-      {panel && <Panel worldId={worldId} headId={head.id} chapterEvery={world.settings.chapterEvery} state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }}
-        onOrganize={async (replaceOwnEra) => {
-          const c = await game.organize(worldId, { replaceOwnEra });
-          if (!c) { toast("这次没整理出来，稍后再试"); return false; }
-          await refresh();
-          toast("已整理设定集，可以接着修改");
-          return true;
-        }}
-        onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
+      {panel && !wide && <Panel {...panelProps} />}
       {notificationStart && <Sheet title="允许通知吗？" onClose={() => void answerNotifications(false)}>
         <p>切到后台时，故事会继续写完。允许通知后，写作期间通知栏会显示“正在写下一段…”。</p>
         <div className="row"><button className="primary" onClick={() => void answerNotifications(true)}>允许</button><button onClick={() => void answerNotifications(false)}>不用了</button></div>
       </Sheet>}
+    </div>
+    {wide && <div className="play-side"><Panel {...panelProps} docked /></div>}
     </div>
   );
 }

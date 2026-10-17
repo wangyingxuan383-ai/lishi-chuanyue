@@ -30,8 +30,10 @@ function Stat({ label, value, n }: { label: string; value: string; n?: number })
   );
 }
 
-export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSave, onOpenStory, onOrganize, busy }: {
+export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSave, onOpenStory, onOrganize, busy, docked = false }: {
   worldId: string; headId: string; chapterEvery: number;
+  /** Shown beside the story on wide windows instead of over it (R10-T001). */
+  docked?: boolean;
   state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
   onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean) => Promise<boolean>; busy: boolean;
 }) {
@@ -40,7 +42,13 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
   const [saving, setSaving] = useState(false);
   const editing = draft !== null;
   const change = (fn: (s: WorldState) => void) => setDraft((s) => { const next = structuredClone(s!); fn(next); return next; });
-  useBack(() => { if (saving) return true; if (editing) setDraft(null); else onClose(); return true; });
+  useBack(() => {
+    if (saving) return true;
+    if (editing) { setDraft(null); return true; }
+    if (docked) return false;
+    onClose();
+    return true;
+  });
   const shown = draft ?? state;
   const me = shown.protagonist;
   const now = nowOf(era.clock, state.time.elapsedMinutes);
@@ -86,9 +94,9 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
   };
 
   return (
-    <div className="panel" role="dialog" aria-label="角色">
+    <div className={`panel${docked ? " docked" : ""}`} role={docked ? "complementary" : "dialog"} aria-label="角色">
       <div className="topbar">
-        <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>
+        {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>}
         <div className="title"><h1>{me.name}</h1><div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div></div>
         {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
       </div>

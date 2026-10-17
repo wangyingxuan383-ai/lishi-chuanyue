@@ -76,6 +76,8 @@ export default function App() {
         pop();
         return true;
       }
+      // Only Android's back button can leave the app; Escape on a desktop stops here.
+      if (boot.platform.name !== "android") return false;
       if (exitArmed.current) return false;
       exitArmed.current = true;
       toast("再按一次退出");

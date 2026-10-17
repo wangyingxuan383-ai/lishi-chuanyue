@@ -17,8 +17,17 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 // Back handlers form a stack: the most recently opened layer closes first.
 const backHandlers: Array<() => boolean> = [];
 let backListening = false;
+let escapeListening = false;
 
 function listenBack() {
+  if (!escapeListening) {
+    escapeListening = true;
+    // On Windows, Escape closes the newest layer like Android's back button, but never quits.
+    window.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      for (let i = backHandlers.length - 1; i >= 0; i--) if (backHandlers[i]()) return;
+    });
+  }
   if (backListening) return;
   backListening = true;
   void onBackButtonPress(() => {

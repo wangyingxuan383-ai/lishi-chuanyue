@@ -93,6 +93,17 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 
 /* ---------- play ---------- */
 .play { height: 100%; display: flex; flex-direction: column; }
+.play-layout { height: 100%; }
+/* Wide windows (R10-T001): story on the left, the character panel always open on the right. */
+.play-layout.wide { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.play-layout.wide > .play { min-width: 0; min-height: 0; }
+.play-side { border-left: 1px solid var(--line); min-height: 0; display: flex; }
+.panel.docked { position: static; inset: auto; z-index: auto; flex: 1; animation: none; min-width: 0; }
+.play-layout.wide .dock { padding-inline: max(10px, calc((100% - 680px) / 2)); }
+@media (min-width: 1000px) {
+  /* Sheets still rise from the bottom, at a readable width. */
+  .sheet { max-width: 600px; margin: 0 auto; }
+}
 .story { flex: 1; overflow-y: auto; overflow-anchor: none; padding: 8px 18px 24px; -webkit-overflow-scrolling: touch; }
 .story-inner { max-width: 640px; margin: 0 auto; }
 .turn { padding: 10px 0 6px; }
