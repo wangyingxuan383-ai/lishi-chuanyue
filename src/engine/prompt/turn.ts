@@ -4,6 +4,7 @@ import type { ChatMessage } from "../llm/chat";
 import { nowOf, timeOfDay } from "../calendar/clock";
 import { formatDate } from "../calendar/date";
 import type { EraContext } from "../era";
+import { ERA_CARD_LIMIT, activeCardLines } from "../memory/cards";
 import { formatMoney } from "../money";
 import type { ActionMode, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 
@@ -61,7 +62,9 @@ function systemPrompt(ctx: StoryContext): string {
   const i = settings.intensity;
   const premise = settings.premise.trim();
   const rules = settings.rules.trim();
-  const eraBlock = era.excerpt ?? "【时代】以【故事设定】为准。称谓、货币、器物、制度要符合那个时代；拿不准的细节写得模糊些，不编造确切数字、人名和官职。";
+  const eraBlock = era.eraCard
+    ? `【时代】${era.eraCard.name}（与【故事设定】冲突时以故事设定为准；拿不准的细节写得模糊些）\n${era.eraCard.content.slice(0, ERA_CARD_LIMIT)}`
+    : "【时代】以【故事设定】为准。称谓、货币、器物、制度要符合那个时代；拿不准的细节写得模糊些，不编造确切数字、人名和官职。";
   return `你是一部历史互动小说的作者兼叙事者。玩家扮演主角，你负责写出世界、其他人物和剧情。
 【写作要求】
 - ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}。先写画面、声音、气味和动作，少用总结句；对话简短、口吻符合人物身份。叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，人物对白带时代口吻。每回合${LENGTH[settings.length]}。
@@ -148,6 +151,13 @@ function essentialsBlock(settings: WorldSettings): string {
   return lines.length ? `\n【要点，必须记住】\n- ${lines.join("\n- ")}` : "";
 }
 
+/** Places and cards mentioned in the last three turns or this action (D121). */
+function cardsBlock(input: TurnPromptInput): string {
+  const recent = [...input.history.filter((n) => n.kind !== "edit").slice(-3).flatMap((n) => [n.actionText ?? "", n.narrative]), input.text, input.directorNote ?? ""].join("\n");
+  const lines = activeCardLines(input.state, recent);
+  return lines.length ? `\n【相关设定】\n${lines.join("\n")}` : "";
+}
+
 export function turnMessages(input: TurnPromptInput): ChatMessage[] {
   const system = systemPrompt(input);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
@@ -160,7 +170,7 @@ export function turnMessages(input: TurnPromptInput): ChatMessage[] {
     ...historyMessages(input.history, budget),
     {
       role: "user",
-      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
+      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings)}${cardsBlock(input)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
     },
   ];
 }

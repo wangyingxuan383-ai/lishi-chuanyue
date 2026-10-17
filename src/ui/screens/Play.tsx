@@ -458,7 +458,7 @@ export default function Play({ worldId }: { worldId: string }) {
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
       {sheet === "story" && <StorySheet world={world} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onClose={() => setSheet(null)} />}
-      {panel && <Panel state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
+      {panel && <Panel state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
       {notificationStart && <Sheet title="允许通知吗？" onClose={() => void answerNotifications(false)}>
         <p>切到后台时，故事会继续写完。允许通知后，写作期间通知栏会显示“正在写下一段…”。</p>
         <div className="row"><button className="primary" onClick={() => void answerNotifications(true)}>允许</button><button onClick={() => void answerNotifications(false)}>不用了</button></div>

@@ -5,7 +5,7 @@ import { newYearsBetween, type GameClock } from "../calendar/clock";
 import { parseDurationMinutes } from "../calendar/duration";
 import { formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
-import type { ActionMode, Attitude, Difficulty, Person, WorldState } from "../types";
+import type { ActionMode, Attitude, Card, CardKind, Difficulty, Person, WorldState } from "../types";
 import { matchName } from "./names";
 
 /** The normalised record every output format is converted into. */
@@ -26,7 +26,34 @@ export interface TurnRecord {
   date?: string | Record<string, unknown> | null;
   hour?: number | null;
   currency?: { name: string; value: number }[] | null;
+  /** Panel edits and the setup assistant: cards of the 设定集 (D121). */
+  cards?: CardPatch[] | null;
+  /** Panel edits: place cards. */
+  places?: PlacePatch[] | null;
 }
+
+/** update and remove find the card by id, or by kind and name. */
+export interface CardPatch {
+  op: "add" | "update" | "remove";
+  id?: string;
+  kind?: CardKind;
+  name?: string;
+  keys?: string[];
+  content?: string;
+  source?: Card["source"];
+}
+
+export interface PlacePatch {
+  op: "add" | "update" | "remove";
+  id?: string;
+  name?: string;
+  aliases?: string[];
+  description?: string;
+}
+
+const KINDS: CardKind[] = ["时代", "势力", "物品", "设定"];
+/** Trimmed, unique, without the name itself. */
+const cleanNames = (names: string[] | undefined, name: string) => [...new Set((names ?? []).map((n) => n.trim()).filter((n) => n && n !== name))];
 
 export type ChipTone = "gain" | "loss" | "info" | "warn";
 export interface Chip {
@@ -264,6 +291,50 @@ export function applyRecord(
     else if (op === "fail") { goal.status = "失败"; chips.push({ text: `失败：${goal.name}`, tone: "loss" }); }
     else if (op === "abandon") { goal.status = "放弃"; chips.push({ text: `放弃：${goal.name}`, tone: "info" }); }
     else if (raw.detail) goal.progress = raw.detail;
+  }
+
+  // 设定集: a world has one era card; other cards are found by kind and name.
+  for (const raw of record.cards ?? []) {
+    const kind = KINDS.includes(raw.kind as CardKind) ? raw.kind! : undefined;
+    const name = raw.name?.trim();
+    const card = raw.id ? s.cards.find((c) => c.id === raw.id)
+      : kind === "时代" ? s.cards.find((c) => c.kind === "时代")
+      : name ? (() => {
+        const found = matchName(s.cards.filter((c) => c.kind !== "时代" && (!kind || c.kind === kind)).map((c) => ({ id: c.id, name: c.name, aliases: c.keys })), name);
+        return found && s.cards.find((c) => c.id === found.id);
+      })() : undefined;
+    if (raw.op === "remove") {
+      if (card) s.cards.splice(s.cards.indexOf(card), 1);
+      else log.push(`卡片“${name ?? raw.id}”不存在，删除已忽略`);
+      continue;
+    }
+    if (card) {
+      if (name) card.name = name;
+      if (raw.keys) card.keys = cleanNames(raw.keys, card.name);
+      if (raw.content !== undefined) card.content = raw.content.trim();
+      if (raw.source) card.source = raw.source;
+      continue;
+    }
+    if (!kind || !name) { log.push(`卡片缺少种类或名称：${JSON.stringify(raw)}`); continue; }
+    s.cards.push({ id: newId(), kind, name, keys: cleanNames(raw.keys, name), content: (raw.content ?? "").trim(), source: raw.source ?? "玩家" });
+  }
+  for (const raw of record.places ?? []) {
+    const name = raw.name?.trim();
+    const place = raw.id ? s.places.find((p) => p.id === raw.id) : name ? matchName(s.places, name) : undefined;
+    if (raw.op === "remove") {
+      if (!place) log.push(`地点“${name ?? raw.id}”不存在，删除已忽略`);
+      else if (place.id === s.placeId) log.push(`“${place.name}”是当前所在地，不能删除`);
+      else s.places.splice(s.places.indexOf(place), 1);
+      continue;
+    }
+    if (place) {
+      if (name) place.name = name;
+      if (raw.aliases) place.aliases = cleanNames(raw.aliases, place.name);
+      if (raw.description !== undefined) place.description = raw.description.trim();
+      continue;
+    }
+    if (!name) { log.push(`地点缺少名称：${JSON.stringify(raw)}`); continue; }
+    s.places.push({ id: newId(), name, aliases: cleanNames(raw.aliases, name), description: (raw.description ?? "").trim() });
   }
 
   return { state: s, chips, notes, log, minutes };

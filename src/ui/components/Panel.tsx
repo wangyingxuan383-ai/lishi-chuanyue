@@ -1,4 +1,4 @@
-// Character & world panel (PLAN_V3 §4.5).
+// Character & world panel (PLAN_V3 §4.5); the 设定 tab is the 设定集 (§4.14).
 import { useState } from "react";
 import type { EraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
@@ -6,8 +6,9 @@ import { formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
 import { useBack } from "../app/context";
+import { Codex } from "./Codex";
 
-const TABS = ["我", "行囊", "人物", "目标"] as const;
+const TABS = ["我", "行囊", "人物", "目标", "设定"] as const;
 type Tab = (typeof TABS)[number];
 
 function level(n: number, words: string[]): string {
@@ -24,7 +25,9 @@ function Stat({ label, value, n }: { label: string; value: string; n?: number })
   );
 }
 
-export function Panel({ state, era, onClose, onSave, busy }: { state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>; busy: boolean }) {
+export function Panel({ state, era, onClose, onSave, onOpenStory, busy }: {
+  state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>; onOpenStory: () => void; busy: boolean;
+}) {
   const [tab, setTab] = useState<Tab>("我");
   const [draft, setDraft] = useState<WorldState | null>(null);
   const [saving, setSaving] = useState(false);
@@ -95,10 +98,10 @@ export function Panel({ state, era, onClose, onSave, busy }: { state: WorldState
       <div className="topbar">
         <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>
         <div className="title"><h1>{me.name}</h1><div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div></div>
-        {!editing && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
+        {!editing && tab !== "设定" && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
-        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
+        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && t === "设定"} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
       </div>
       <div className="panel-body" style={saving ? { pointerEvents: "none" } : undefined}>
         {tab === "我" && (
@@ -164,6 +167,7 @@ export function Panel({ state, era, onClose, onSave, busy }: { state: WorldState
             {!editing && <span className="tag">{p.attitude}</span>}
           </div>
         )) : <p className="muted">还没有结识什么人。</p>)}
+        {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} />}
         {tab === "目标" && (
           <div className="stack">
             {active.length ? active.map((g) => (

@@ -127,6 +127,40 @@ describe("Game", () => {
     });
   });
 
+  it("sends the era card every turn and other cards when mentioned", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "你出门去打听。" + RECORD({ time: "一刻", choices: ["甲"] }) },
+      { text: "夜深了。" + RECORD({ time: "一刻", choices: ["乙"] }) },
+    ]);
+    const opening = await tree.cursor(game.repo, worldId);
+    const start = await game.repo.getState(opening.head.id);
+    expect(start.version).toBe(2);
+    expect(start.cards).toEqual([expect.objectContaining({ kind: "时代", name: "唐 · 天宝七载 · 长安", source: "卡组" })]);
+    expect(start.places.map((p) => p.name)).toEqual(expect.arrayContaining(["西市", "平康坊", "西市旁邸店"]));
+    expect(start.era).toMatchObject({ packId: "tang-748", calendar: { lunar: true }, currency: { units: [{ name: "贯", value: 1000 }, { name: "文", value: 1 }] } });
+
+    const edited = await game.editState(worldId, {
+      cards: [
+        { op: "add", kind: "势力", name: "天地会", keys: ["会党"], content: "一伙江湖人" },
+        { op: "add", kind: "物品", name: "玉玺", content: "传国之宝" },
+      ],
+    }, "新建卡片：天地会等");
+    expect((await game.repo.getState(edited.head.id)).cards.map((c) => c.name)).toEqual(["唐 · 天宝七载 · 长安", "天地会", "玉玺"]);
+    await play(game, worldId, "去找会党的人");
+    const first = JSON.stringify(llm.calls[1].body);
+    expect(first).toContain("【时代】唐 · 天宝七载 · 长安");
+    expect(first).toContain("不要出现：算盘（用算筹）");
+    expect(first).toContain("【势力】天地会（又称会党）：一伙江湖人");
+    expect(first).not.toContain("【物品】玉玺");
+    await play(game, worldId, "回邸店睡觉");
+    expect(JSON.stringify(llm.calls[2].body)).toContain("【势力】天地会");
+
+    // Cards live in the state snapshots: going back before the edit leaves them out.
+    const back = await tree.undo(game.repo, await tree.undo(game.repo, await tree.undo(game.repo, await tree.cursor(game.repo, worldId))));
+    expect(back.head.id).toBe(opening.head.id);
+    expect((await game.repo.getState(back.head.id)).cards.map((c) => c.name)).toEqual(["唐 · 天宝七载 · 长安"]);
+  });
+
   it("uses the opening's purse, date and hour", async () => {
     const llm = fakeLlm([{ text: "你醒在汴京。" + RECORD({ money: "二百两", date: "宣和四年春二月", hour: 9, currency: [{ name: "文", value: 1 }, { name: "两", value: 1000 }], goals: [{ op: "add", name: "活下去" }] }) }]);
     const game = await Game.open(await createMemoryPlatform(llm), LLM);

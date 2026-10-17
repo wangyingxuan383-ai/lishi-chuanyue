@@ -158,9 +158,34 @@ check("panel lists people", panelText.includes("货栈管事"));
 await page.getByRole("tab", { name: /行囊/ }).click();
 check("panel lists items", (await page.textContent(".panel")).includes("旧书"));
 await shot("06-panel");
+
+// 设定集: a new card is listed, recorded as an edit, and sent when its alias comes up.
+await page.getByRole("tab", { name: "设定" }).click();
+await shot("06a-codex-top");
+await page.getByRole("button", { name: "新建势力" }).click();
+await page.getByLabel("名称").fill("天地会");
+await page.getByLabel(/别名/).fill("会党");
+await page.getByLabel("内容").fill("一伙行走江湖的人，暗中贩私盐。");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".codex-item", { hasText: "天地会" }).waitFor();
+check("new card listed in the 设定集", true);
+await page.locator(".codex-era button").first().click();
+await page.getByLabel("名称").fill("测试时代");
+await page.getByLabel("内容").fill("时局：天下太平。\n不要出现：手机");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".codex-era", { hasText: "时局：天下太平" }).waitFor();
+check("era card editable", true);
+await shot("06b-codex");
 await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 check("back closes panel", true);
+await page.locator(".edit-line", { hasText: "新建势力卡：天地会" }).waitFor();
+await page.locator(".inputbar textarea").fill("去打听会党的消息");
+await page.locator(".send-btn").click();
+await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+const sent = JSON.stringify(await (await fetch("http://127.0.0.1:18800/debug/last-request")).json());
+check("mentioned card sent to the AI", sent.includes("【势力】天地会（又称会党）：一伙行走江湖的人"));
+check("era card sent with the turn", sent.includes("【时代】测试时代") && sent.includes("时局：天下太平"));
 
 // Long-press menu → go back to opening.
 const firstTurn = page.locator(".turn").first();

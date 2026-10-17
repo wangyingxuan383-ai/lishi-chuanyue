@@ -3,6 +3,7 @@
 // to this class only; it never touches SQL or the network directly.
 import { formatDate, readDate } from "./calendar/date";
 import { eraContext, eraPack, type EraContext } from "./era";
+import { packCards } from "./era/card";
 import type { Platform, SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
@@ -176,8 +177,10 @@ export class Game {
     const pack = eraPack(input.eraId);
     const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
     const p = input.protagonist;
+    // A built-in pack is only a preset: its era card, places, calendar and currency are copied in (D121).
+    const preset = pack ? packCards(pack) : { cards: [], places: [] };
     const initial: WorldState = {
-      version: 1,
+      version: 2,
       time: { start: pack ? formatDate(pack.start.date, pack.calendar) : "", date: pack?.start.date ?? null, startHour: pack?.start.hour, elapsedMinutes: 0 },
       placeId: null,
       protagonist: {
@@ -185,7 +188,8 @@ export class Game {
         origin: input.arrival === "不穿越" ? "" : input.origin, cheat: "",
         stats: { money: 0, debt: 0, health: 80, energy: 70, fame: 10 }, statuses: [], items: [],
       },
-      people: [], places: [], cards: [], goals: [], era: { packId: pack?.id ?? null }, deviations: [],
+      people: [], places: preset.places, cards: preset.cards, goals: [], deviations: [],
+      era: { packId: pack?.id ?? null, ...(pack ? { calendar: structuredClone(pack.calendar), currency: structuredClone(pack.currency) } : {}) },
     };
     const era = eraContext(pack?.id ?? null, initial);
     const opening = { era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "" };

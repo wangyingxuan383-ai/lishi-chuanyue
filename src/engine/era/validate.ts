@@ -1,10 +1,11 @@
 // Checks an era pack before it ships (R03-T001): required fields, the era-name
 // table, currency conversion, minimum counts, the start date and the length of
-// the prompt excerpt. Works on raw JSON as well as typed packs.
+// the era card it turns into. Works on raw JSON as well as typed packs.
 // Field guide: docs/contracts/ERA_PACK.md.
 import type { EraPack } from "../../content/eras/types";
 import { ceYearOf, eraAt, monthDays, monthIndex } from "../calendar/date";
-import { EXCERPT_LIMIT, eraExcerpt } from "./excerpt";
+import { ERA_CARD_LIMIT } from "../memory/cards";
+import { eraCardText } from "./card";
 
 export interface PackIssue {
   /** Where the problem is, e.g. "currency.units[1]". */
@@ -206,16 +207,10 @@ export function validatePack(raw: unknown): PackIssue[] {
   const confidence = isObj(p.confidence) ? p.confidence : null;
   if (!confidence || !["高", "中", "低"].includes(confidence.level as string) || !isText(confidence.note)) add("confidence", "要写明可信度（高 / 中 / 低）和说明");
 
-  // The excerpt must fit in every month once optional lines are trimmed.
+  // The era card must fit once optional lines are trimmed.
   if (!issues.length) {
-    const pack = raw as unknown as EraPack;
-    for (let month = 1; month <= 12; month++) {
-      const length = eraExcerpt(pack, { ...pack.start.date, month, day: 1 }).length;
-      if (length > EXCERPT_LIMIT) {
-        add("excerpt", `${month} 月的时代资料摘录删到最少仍有 ${length} 字，超过 ${EXCERPT_LIMIT} 字，请精简文字`);
-        break;
-      }
-    }
+    const length = eraCardText(raw as unknown as EraPack).length;
+    if (length > ERA_CARD_LIMIT) add("eraCard", `时代卡删到最少仍有 ${length} 字，超过 ${ERA_CARD_LIMIT} 字，请精简文字`);
   }
   return issues;
 }

@@ -9,7 +9,10 @@
 //   fake-nostream ignores stream:true and returns one JSON body
 //   fake-plain    narrative only, no record (exercises the extraction fallback)
 // fake-normal/slow/stall reply in the game's record format (opening, turns).
+// GET /debug/last-request returns the last chat request, so UI tests can see the prompt.
 import http from "node:http";
+
+let lastRequest = null;
 
 const portArg = process.argv.indexOf("--port");
 const port = portArg > 0 ? Number(process.argv[portArg + 1]) : 18800;
@@ -58,6 +61,10 @@ function chunks(text, size = 6) {
 const server = http.createServer(async (req, res) => {
   let body = "";
   for await (const part of req) body += part;
+  if (req.method === "GET" && req.url === "/debug/last-request") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(lastRequest));
+  }
   if (req.method === "GET" && req.url?.endsWith("/models")) {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ data: ["fake-normal", "fake-slow", "fake-http500", "fake-stall", "fake-nostream", "fake-plain"].map((id) => ({ id })) }));
@@ -67,6 +74,7 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
   const request = JSON.parse(body || "{}");
+  lastRequest = request;
   const model = request.model ?? "fake-normal";
   if (model === "fake-http500") {
     res.writeHead(500, { "Content-Type": "application/json" });

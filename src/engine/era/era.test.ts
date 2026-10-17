@@ -5,7 +5,8 @@ import { TEMPLATES } from "../../content/templates";
 import { nowOf } from "../calendar/clock";
 import { sampleState } from "../testing/fixtures";
 import { eraContext } from ".";
-import { EXCERPT_LIMIT, eraExcerpt, recentEvents } from "./excerpt";
+import { ERA_CARD_LIMIT } from "../memory/cards";
+import { eraCardText, packCards, recentEvents } from "./card";
 import { genderedWords, validatePack } from "./validate";
 
 describe("era packs", () => {
@@ -81,28 +82,32 @@ describe("validatePack", () => {
     expect(broken({ sources })).toEqual([`sources[${last}].url: 网址要以 http:// 或 https:// 开头`, `sources[${last}].accessed: 查阅日期写成 YYYY-MM-DD`]);
   });
 
-  it("flags an excerpt that cannot fit", () => {
-    expect(broken({ situation: "长".repeat(1200) }).some((m) => m.startsWith("excerpt:"))).toBe(true);
+  it("flags an era card that cannot fit", () => {
+    expect(broken({ situation: "长".repeat(1200) }).some((m) => m.startsWith("eraCard:"))).toBe(true);
   });
 });
 
-describe("eraExcerpt", () => {
-  it("fits the budget in every month and keeps every taboo", () => {
-    for (let month = 1; month <= 12; month++) {
-      const text = eraExcerpt(TANG_748, { ...TANG_748.start.date, month });
-      expect(text.length).toBeLessThanOrEqual(EXCERPT_LIMIT);
-      for (const taboo of TANG_748.taboos) expect(text).toContain(taboo.name);
-    }
+describe("era card from a pack", () => {
+  it("fits the limit, keeps every taboo and ends with the 不要出现 line", () => {
+    const text = eraCardText(TANG_748);
+    expect(text.length).toBeLessThanOrEqual(ERA_CARD_LIMIT);
+    for (const taboo of TANG_748.taboos) expect(text).toContain(taboo.name);
+    expect(text.split("\n").at(-1)).toMatch(/^不要出现：/);
   });
 
-  it("follows the month", () => {
-    expect(eraExcerpt(TANG_748, TANG_748.start.date)).toContain("冬至是大节");
-    expect(eraExcerpt(TANG_748, { ...TANG_748.start.date, month: 1 })).not.toContain("冬至是大节");
+  it("lists seasonal details from the opening month on", () => {
+    expect(eraCardText(TANG_748).split("\n").find((l) => l.startsWith("节令："))).toMatch(/^节令：冬月：冬至是大节/);
   });
 
   it("mentions the past year's events, newest first", () => {
-    expect(recentEvents(TANG_748, TANG_748.start.date).map((e) => `${e.ceYear}/${e.month}`)).toEqual(["748/11", "747/12"]);
-    expect(eraExcerpt(TANG_748, TANG_748.start.date)).toContain("天宝六载腊月，高仙芝");
+    expect(recentEvents(TANG_748).map((e) => `${e.ceYear}/${e.month}`)).toEqual(["748/11", "747/12"]);
+    expect(eraCardText(TANG_748)).toContain("天宝六载腊月，高仙芝");
+  });
+
+  it("gives a new world an era card and a card per place", () => {
+    const { cards, places } = packCards(TANG_748);
+    expect(cards).toEqual([expect.objectContaining({ kind: "时代", name: TANG_748.title, source: "卡组", content: eraCardText(TANG_748) })]);
+    expect(places.map((p) => p.name)).toEqual(TANG_748.places.map((p) => p.name));
   });
 });
 
@@ -117,12 +122,22 @@ describe("eraContext", () => {
   it("counts days for free worlds without a usable date", () => {
     const free = { ...sampleState(), time: { start: "建安年间", date: null, startHour: 9, elapsedMinutes: 1440 }, era: { packId: null } };
     const era = eraContext("free", free);
-    expect(era).toMatchObject({ packId: null, title: "建安年间", excerpt: null, taboos: [] });
+    expect(era).toMatchObject({ packId: null, title: "建安年间", eraCard: null });
     expect(nowOf(era.clock, free.time.elapsedMinutes).text).toBe("建安年间 · 第 2 日 · 巳时");
   });
 
-  it("gives the excerpt for the current month", () => {
-    const state = { ...sampleState(), time: { start: "", date: TANG_748.start.date, startHour: 7, elapsedMinutes: 60 * 1440 } };
-    expect(eraContext("tang-748", state).excerpt).toContain("元日朝贺");
+  it("gives old saves their pack's era card and new worlds their own", () => {
+    const old = sampleState();
+    expect(eraContext("tang-748", old).eraCard).toMatchObject({ kind: "时代", content: eraCardText(TANG_748) });
+    const own = { ...sampleState(), version: 2 as const, cards: [{ id: "c1", kind: "时代" as const, name: "我的唐朝", keys: [], content: "全是我写的" }] };
+    expect(eraContext("tang-748", own).eraCard?.content).toBe("全是我写的");
+    expect(eraContext("tang-748", { ...own, cards: [] }).eraCard).toBeNull();
+  });
+
+  it("prefers the world's own calendar and currency", () => {
+    const state = { ...sampleState(), version: 2 as const, era: { packId: "tang-748", currency: { units: [{ name: "两", value: 1000 }, { name: "文", value: 1 }] }, calendar: { lunar: true, eras: [] } } };
+    const era = eraContext("tang-748", state);
+    expect(era.currency.units[0].name).toBe("两");
+    expect(era.clock.rules).toEqual({ lunar: true, eras: [] });
   });
 });

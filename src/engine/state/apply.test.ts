@@ -178,3 +178,28 @@ describe("applyRecord", () => {
     expect(applyRecord(sampleState(), { time: "两天" }, ctx()).state.protagonist.age).toBe(22);
   });
 });
+
+describe("设定集 edits", () => {
+  it("adds, updates and removes cards; a world keeps one era card", () => {
+    let s = apply(sampleState(), { cards: [{ op: "add", kind: "势力", name: "天地会", keys: ["会党", "天地会", " "], content: " 反清 " }] }).state;
+    expect(s.cards).toEqual([expect.objectContaining({ kind: "势力", name: "天地会", keys: ["会党"], content: "反清", source: "玩家" })]);
+    s = apply(s, { cards: [{ op: "update", kind: "势力", name: "会党", content: "秘密结社" }] }).state;
+    expect(s.cards[0].content).toBe("秘密结社");
+    s = apply(s, { cards: [{ op: "add", kind: "时代", name: "唐", content: "一" }, { op: "add", kind: "时代", name: "唐朝", content: "二" }] }).state;
+    expect(s.cards.filter((c) => c.kind === "时代")).toEqual([expect.objectContaining({ name: "唐朝", content: "二" })]);
+    const r = apply(s, { cards: [{ op: "remove", id: s.cards[0].id }, { op: "remove", kind: "物品", name: "玉玺" }] });
+    expect(r.state.cards.map((c) => c.name)).toEqual(["唐朝"]);
+    expect(r.log).toContain("卡片“玉玺”不存在，删除已忽略");
+  });
+
+  it("edits place cards but keeps the current place", () => {
+    const s = apply(sampleState(), { place: "西市" }).state;
+    const r = apply(s, { places: [{ op: "update", name: "西市", aliases: ["西市场"], description: "胡商云集" }, { op: "add", name: "曲江池", description: "游赏" }, { op: "remove", id: s.placeId! }] });
+    expect(r.state.places).toEqual([
+      expect.objectContaining({ name: "西市", aliases: ["西市场"], description: "胡商云集" }),
+      expect.objectContaining({ name: "曲江池", description: "游赏" }),
+    ]);
+    expect(r.log).toContain("“西市”是当前所在地，不能删除");
+    expect(apply(r.state, { place: "西市场" }).state.placeId).toBe(s.placeId);
+  });
+});

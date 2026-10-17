@@ -201,3 +201,9 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; backgro
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 10px 16px; margin: 0 0 12px; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; }
+
+/* ---------- 设定集 ---------- */
+.codex-era { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.codex-text { margin: 0; white-space: pre-wrap; line-height: 1.7; font-size: 14px; }
+button.codex-item { width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; min-height: auto; padding: 10px 0; }
+button.danger-text { color: var(--loss); }

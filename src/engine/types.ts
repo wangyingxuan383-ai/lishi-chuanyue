@@ -1,5 +1,5 @@
 // Core game types. See docs/PLAN_V3.md §6.
-import type { GameDate } from "./calendar/date";
+import type { CalendarRules, GameDate } from "./calendar/date";
 
 /** do/say: the protagonist acts; write: the player writes narrative directly; direct: instruction to the narrator. */
 export type ActionMode = "do" | "say" | "write" | "direct" | "continue";
@@ -35,9 +35,12 @@ export interface Person {
   lastSeenMinute: number | null;
 }
 
+/** A place card of the 设定集 (D121); the ledger creates one whenever the protagonist arrives somewhere new. */
 export interface Place {
   id: string;
   name: string;
+  /** Other names that bring the card into context. */
+  aliases?: string[];
   description: string;
 }
 
@@ -49,12 +52,22 @@ export interface Goal {
   status: GoalStatus;
 }
 
+export type CardKind = "时代" | "势力" | "物品" | "设定";
+
+/**
+ * A card of the 设定集 (PLAN §4.14, D121). People and places are cards too but
+ * keep their own lists. A world has at most one 时代 card, always in context;
+ * the others come in when their name or a key appears in recent text.
+ */
 export interface Card {
   id: string;
-  kind: "势力" | "物品" | "设定";
+  kind: CardKind;
   name: string;
+  /** Other names that bring the card into context. */
   keys: string[];
   content: string;
+  /** 卡组: copied from a built-in pack; AI: drafted by the model; 玩家: written by the player. */
+  source?: "卡组" | "AI" | "玩家";
 }
 
 export interface Protagonist {
@@ -71,7 +84,8 @@ export interface Protagonist {
 }
 
 export interface WorldState {
-  version: 1;
+  /** 2 from D121: the era card lives in `cards`; version 1 saves get it from their pack. */
+  version: 1 | 2;
   /**
    * date: the date at minute 0 (D119), null when the opening gave none, absent in old saves;
    * start: how that date reads ("天宝七载 冬月十七", or the opening's own words such as "中平元年秋");
@@ -85,7 +99,13 @@ export interface WorldState {
   cards: Card[];
   goals: Goal[];
   /** packId is null for free-form worlds; currency may be set by the opening. */
-  era: { packId: string | null; currency?: { units: { name: string; value: number }[] } };
+  era: {
+    /** The built-in pack the world started from; a record only, the world's own copy rules. */
+    packId: string | null;
+    currency?: { units: { name: string; value: number }[]; aliases?: Record<string, string> };
+    /** Era names and calendar style; absent in old saves, which fall back to the pack. */
+    calendar?: CalendarRules;
+  };
   deviations: string[];
 }
 
