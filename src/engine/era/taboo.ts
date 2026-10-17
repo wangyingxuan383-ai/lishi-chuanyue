@@ -35,13 +35,16 @@ export function tabooTerms(eraCard: Card | null, pack: EraPack | null): TabooTer
 /** Longer words that contain a term but mean something else (a 火折子 is not a memorial). */
 const OTHER_WORDS: Record<string, string[]> = { 折子: ["火折子"], 马灯: ["走马灯"] };
 
+/** Words that count only where a sentence or a line of speech starts: “小的这就去” is a servant, 最小的儿子 is not. */
+const AT_START: Record<string, RegExp> = { 小的: /(^|[“”「」『』"'‘’，。！？；：、…—\s])小的/ };
+
 /** The taboo words in a passage, each once. */
 export function findTaboos(text: string, terms: TabooTerm[]): TabooHit[] {
   const hits = new Map<string, TabooHit>();
   for (const t of terms) {
     if (hits.has(t.term)) continue;
     const plain = (OTHER_WORDS[t.term] ?? []).reduce((s, w) => s.split(w).join("　"), text);
-    if (plain.includes(t.term)) hits.set(t.term, { term: t.term, instead: t.instead });
+    if (AT_START[t.term] ? AT_START[t.term].test(plain) : plain.includes(t.term)) hits.set(t.term, { term: t.term, instead: t.instead });
   }
   return [...hits.values()];
 }

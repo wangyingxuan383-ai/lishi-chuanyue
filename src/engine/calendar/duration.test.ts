@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseChineseNumber, parseDurationMinutes } from "./duration";
+import { parseChineseNumber, parseDurationMinutes, skipSpanMinutes } from "./duration";
 
 describe("parseChineseNumber", () => {
   it.each([["十", 10], ["十五", 15], ["二十", 20], ["一百二十", 120], ["两", 2], ["90", 90]])("%s", (text, value) => {
@@ -35,6 +35,15 @@ describe("parseDurationMinutes", () => {
     ["须臾之间", 5],
     ["转眼", 1],
     ["一会儿", 10],
+    ["转眼三个月", 129600],
+    ["转眼一年", 525600],
+    ["须臾两日", 2880],
+    ["一个多月", 43200],
+    ["三个多月", 129600],
+    ["十多天", 14400],
+    ["二十余日", 28800],
+    ["月余", 43200],
+    ["一年多", 525600],
   ])("%s → %i", (text, minutes) => {
     expect(parseDurationMinutes(text)).toBe(minutes);
   });
@@ -42,6 +51,11 @@ describe("parseDurationMinutes", () => {
   it("accepts plain minute numbers", () => {
     expect(parseDurationMinutes(45)).toBe(45);
     expect(parseDurationMinutes("45")).toBe(45);
+  });
+
+  it("reads only the span of a 过些日子, not the plan after it", () => {
+    expect(skipSpanMinutes("过一个月；这段时间读完十年的账册")).toBe(43200);
+    expect(skipSpanMinutes("过三天")).toBe(4320);
   });
 
   it("returns null when nothing is recognisable", () => {

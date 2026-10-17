@@ -17,6 +17,10 @@ describe("era words check", () => {
     expect(watched).toEqual(expect.arrayContaining(["小的", "差爷"]));
     expect(findTaboos("案上一张神臂弩，檐下挂着马灯。", terms).map((h) => h.term)).toEqual(["神臂弩", "马灯"]);
     expect(findTaboos("西市的走马灯转个不停。", terms)).toEqual([]);
+    // 小的 is a servant speaking, not something small; three shifts are not 三班衙役.
+    expect(findTaboos("“小的这就去。”", terms).map((h) => h.term)).toEqual(["小的"]);
+    expect(findTaboos("大人，小的不敢。", terms).map((h) => h.term)).toEqual(["小的"]);
+    expect(findTaboos("他最小的儿子捧着小小的布包，大大小小的箱笼分作三班看守。", terms)).toEqual([]);
     const memorial = [{ term: "折子", entry: "折子", instead: "表、状" }];
     expect(findTaboos("他吹亮火折子。", memorial)).toEqual([]);
     expect(findTaboos("他吹亮火折子，又递上折子。", memorial)).toEqual([{ term: "折子", instead: "表、状" }]);

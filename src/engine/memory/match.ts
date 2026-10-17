@@ -42,14 +42,21 @@ const FUNCTION = /^[的了是在着和与把被也都就还又这那之其而以
  * the story is.
  */
 export function pairWeights(query: string, docs: string[]): Map<string, number> {
+  return pairIndex(query, docs).weights;
+}
+
+/** pairWeights, and which of the pairs each doc holds (so callers need not search the docs again). */
+export function pairIndex(query: string, docs: string[]): { weights: Map<string, number>; held: Set<string>[] } {
   const pairs = pairsOf(query).filter((p) => !QUESTION.test(p) && !FUNCTION.test(p));
+  const held = docs.map(() => new Set<string>());
+  if (!docs.length) return { weights: new Map(), held };
   const rarest = Math.log((docs.length + 1) / 1.5);
-  if (!docs.length) return new Map();
-  return new Map(pairs.map((pair) => {
+  const weights = new Map(pairs.map((pair) => {
     let df = 0;
-    for (const d of docs) if (d.includes(pair)) df++;
-    return [pair, Math.log((docs.length + 1) / (df + 0.5)) / rarest];
+    docs.forEach((d, i) => { if (d.includes(pair)) { df++; held[i].add(pair); } });
+    return [pair, Math.log((docs.length + 1) / (df + 0.5)) / rarest] as const;
   }));
+  return { weights, held };
 }
 
 export interface Passage {
@@ -65,10 +72,11 @@ export interface Passage {
  * less (as in BM25). Each pick makes the pairs it covered count for less, so
  * the next one adds something new.
  */
-export function bestMatches(query: string, passages: Passage[], weights: Map<string, number>, limit: number, minScore = 1.5): Passage[] {
+export function bestMatches(query: string, passages: Passage[], weights: Map<string, number>, limit: number, minScore = 1.5, avgLength?: number): Passage[] {
   const pairs = pairsOf(query).filter((p) => weights.has(p));
   if (pairs.length < 2 || !passages.length) return [];
-  const avg = passages.reduce((n, p) => n + p.text.length, 0) / passages.length;
+  // A caller scoring only part of a pool passes the whole pool's average, so the scores stay the same.
+  const avg = avgLength ?? passages.reduce((n, p) => n + p.text.length, 0) / passages.length;
   const candidates = passages
     .map((p) => ({ p, h: pairs.filter((pair) => p.text.includes(pair)), norm: 2.2 / (1 + 1.2 * (0.7 + (0.3 * p.text.length) / avg)) }))
     .filter(({ h }) => h.length >= 2 && h.reduce((sum, pair) => sum + weights.get(pair)!, 0) >= minScore);

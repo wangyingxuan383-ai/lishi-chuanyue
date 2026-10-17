@@ -75,6 +75,34 @@ check("Enter sends the action", (await page.locator(".turn").count()) > turns &&
 check("the input box shrinks back after sending", ((await box.boundingBox())?.height ?? 99) < 50);
 await page.locator(".send-btn.primary").waitFor({ timeout: 30000 });
 await page.screenshot({ path: ".cache/ui/desktop-after-turn.png" });
+// The box keeps focus after Enter; the next choices still show while it is empty (review of 0.8.0).
+check("the next choices show after Enter, with the box still focused", await box.evaluate((el) => el === document.activeElement) && (await page.locator(".choices button").count()) > 0);
+await box.pressSequentially("想");
+check("typing hides the choices", (await page.locator(".choices").count()) === 0);
+await box.fill("");
+
+// Editing beside the story while a turn is played: saving keeps what the turn did (review of 0.8.0).
+const headState = () => page.evaluate(async () => {
+  const { game } = window.__lishi;
+  const world = (await game.repo.listWorlds()).find((w) => w.title === "宽屏");
+  const line = await game.repo.getLine(world.currentLineId);
+  return (await game.repo.getState(line.nodeId)).protagonist.stats;
+});
+const moneyBefore = (await headState()).money;
+await side.getByRole("tab", { name: "我" }).click();
+await side.getByRole("button", { name: "修改" }).click();
+await side.getByLabel("精力").fill("50");
+const turnsBeforeEdit = await page.locator(".turn").count();
+await box.click();
+await box.pressSequentially("先付三十文");
+await box.press("Enter");
+await page.waitForFunction((n) => document.querySelectorAll(".turn").length > n, turnsBeforeEdit, { timeout: 30000 }).catch(() => {});
+await page.locator(".send-btn.primary").waitFor({ timeout: 30000 });
+const paid = (await headState()).money;
+await side.getByRole("button", { name: "保存修改" }).click();
+await side.getByRole("button", { name: "修改" }).waitFor({ timeout: 5000 }).catch(() => {});
+const after = await headState();
+check("a turn played while editing pays, and saving the edit keeps it", paid === moneyBefore - 30 && after.money === paid && after.energy === 50);
 await page.getByRole("button", { name: "更多" }).click();
 const sheet = await page.locator(".sheet").boundingBox();
 check("sheets keep a readable width and stay centred", !!sheet && sheet.width <= 600 && Math.abs(sheet.x + sheet.width / 2 - 640) < 2);

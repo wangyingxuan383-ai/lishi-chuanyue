@@ -30,29 +30,39 @@ const UNIT_MINUTES: Record<string, number> = {
   旬: 14400, 月: 43200, 季: 129600, 年: 525600, 载: 525600,
 };
 
-// amount? 个? 半? unit 半?   e.g. 一个半时辰 / 半个时辰 / 一个时辰半 / 两刻钟 / 90分钟
+// amount? 多/余? 个? 多? 半? 个? unit 半/多/余?
+//   e.g. 一个半时辰 / 半个时辰 / 一个时辰半 / 两刻钟 / 90分钟 / 一个多月 / 二十余日 / 月余
 const PATTERN = new RegExp(
-  `(\\d+(?:\\.\\d+)?|[零〇一二两俩三四五六七八九十百千几数]+)?个?(半)?个?(${Object.keys(UNIT_MINUTES).join("|")})(半)?`,
+  `(\\d+(?:\\.\\d+)?|[零〇一二两俩三四五六七八九十百千几数]+)?(?:多|余)?个?多?(半)?个?(${Object.keys(UNIT_MINUTES).join("|")})(半|多|余)?`,
   "g",
 );
 
-/** Words for a short while, with no number: a passage that stops at once says these. */
-const MOMENTS: [RegExp, number][] = [[/^(?:转眼|眨眼|弹指|顷刻|霎时|一瞬)/, 1], [/^(?:片刻|须臾|少顷|稍顷)/, 5], [/^(?:一会儿?|一阵子?)/, 10]];
+/** Words for a short while, when no span is written: a passage that stops at once says these. */
+const MOMENTS: [RegExp, number][] = [[/转眼|眨眼|弹指|顷刻|霎时|一瞬/, 1], [/片刻|须臾|少顷|稍顷/, 5], [/一会儿?|一阵子?/, 10]];
 
 export function parseDurationMinutes(input: string | number | null | undefined): number | null {
   if (typeof input === "number") return Number.isFinite(input) && input >= 0 ? Math.round(input) : null;
   if (!input) return null;
   const text = input.replace(/\s+/g, "").replace(/约莫|大约|约|左右|许/g, "");
   if (/^\d+$/.test(text)) return Number(text);
-  for (const [word, value] of MOMENTS) if (word.test(text)) return value;
   let minutes = 0;
   let matched = false;
-  for (const [, amountText, halfBefore, unit, halfAfter] of text.matchAll(PATTERN)) {
+  for (const [, amountText, halfBefore, unit, after] of text.matchAll(PATTERN)) {
     const amount = amountText ? parseChineseNumber(amountText) : null;
-    if (amount === null && !halfBefore) continue; // a bare unit such as "日" in "日头" is not a duration
-    const count = (amount ?? 0) + (halfBefore || halfAfter ? 0.5 : 0);
+    const more = after === "多" || after === "余";
+    // A bare unit such as "日" in "日头" is not a duration; "月余" is about a month.
+    if (amount === null && !halfBefore && !more) continue;
+    const count = (amount ?? (halfBefore ? 0 : 1)) + (halfBefore || after === "半" ? 0.5 : 0);
     minutes += count * UNIT_MINUTES[unit];
     matched = true;
   }
-  return matched ? Math.round(minutes) : null;
+  if (matched) return Math.round(minutes);
+  // "转眼三个月" is three months; a moment word alone is a moment.
+  for (const [word, value] of MOMENTS) if (word.test(text)) return value;
+  return null;
+}
+
+/** The span a 过些日子 asks for: in "过一个月；这段时间……" only the part before "；" (the player's plan may name spans too). */
+export function skipSpanMinutes(text: string): number | null {
+  return parseDurationMinutes(text.split(/[；;]/)[0]);
 }

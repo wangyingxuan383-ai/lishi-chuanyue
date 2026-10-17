@@ -9,7 +9,7 @@ import { formatMoney } from "../money";
 import type { ActionMode, Chapter, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 import { RECAP_BUDGET, recapBlock } from "./chapter";
 import { FORTUNE_TEXT, type Fortune } from "../fortune";
-import { parseDurationMinutes } from "../calendar/duration";
+import { skipSpanMinutes } from "../calendar/duration";
 import { worldBlock } from "../timeline";
 import { tabooReminder, type TabooHit } from "../era/taboo";
 import { RECALL_BUDGET, recallBlock } from "../memory/recall";
@@ -263,7 +263,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const state = renderState(input.state, input.era, present);
   const essentials = essentialsBlock(input.settings, input.pins);
   // Great events of the world's timeline: lately, and coming soon (over the whole span for 过些日子).
-  const world = worldBlock(input.state, input.mode === "skip" ? parseDurationMinutes(input.text) ?? 90 * 1440 : undefined);
+  const world = worldBlock(input.state, input.mode === "skip" ? skipSpanMinutes(input.text) ?? 90 * 1440 : undefined);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
   const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${tabooReminder(input.taboos ?? [])}${input.fortune ? `\n【本回合运势（玩家看不到）】${FORTUNE_TEXT[input.fortune]}没有风险的日常行动不受运势影响，也不要在正文里提运势。` : ""}`;
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";

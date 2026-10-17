@@ -5,13 +5,16 @@
 // against those turns too, so a thing described rather than named ("皮甲里那两
 // 封信") still finds where it happened. No model call.
 import type { StoryNode, WorldState } from "../types";
-import { bestMatches, clausesOf, excerpt, pairWeights, pairsOf, type Passage } from "./match";
+import { bestMatches, clausesOf, excerpt, pairIndex, pairsOf, type Passage } from "./match";
 
 export const RECALL_BUDGET = 1200;
 /** Of the budget, what the sentences matching the player's words may take; the names in play get the rest. */
 const QUERY_SHARE = 0.7;
 /** Sentences matching what the player wrote, at most, shared among its parts (two each at least). */
 const QUERY_LINES = 6;
+/** Of a long 写 passage, the beginning and this many parts are matched (a bound on the work in very long games). */
+const QUERY_CHARS = 240;
+const QUERY_CLAUSES = 8;
 /** Snippets per name: where it first appeared and where it last did. */
 const PER_NAME = 2;
 const SENTENCE = /[^。！？\n]*[。！？]?[”」』]?/g;
@@ -39,16 +42,28 @@ const sentencesOf = (text: string) => (text.replace(/\s+/g, "").match(SENTENCE) 
  * (the first match of every part, then the second), oldest turns allowed.
  */
 function querySentences(query: string, older: { node: StoryNode; turn: number }[]): { turn: number; source: string; text: string }[] {
-  const clauses = clausesOf(query);
+  const clauses = clausesOf(query.slice(0, QUERY_CHARS)).slice(0, QUERY_CLAUSES);
   if (!clauses.length) return [];
-  const weights = pairWeights(clauses.join("\n"), older.map(({ node }) => node.narrative));
-  const wanted = [...weights.keys()];
+  const { weights, held } = pairIndex(clauses.join("\n"), older.map(({ node }) => node.narrative));
   // Only turns sharing at least two of the query's pairs are split into sentences.
   const passages: Passage[] = older
-    .filter(({ node }) => wanted.filter((p) => node.narrative.includes(p)).length >= 2)
+    .filter((_, i) => held[i].size >= 2)
     .flatMap(({ node, turn }) => sentencesOf(node.narrative).map((text) => ({ text, at: turn })));
+  if (!passages.length) return [];
+  const avg = passages.reduce((n, p) => n + p.text.length, 0) / passages.length;
+  // A sentence matches a part only if its turn holds two of that part's pairs with enough weight, so only
+  // those turns are scored (review of 0.8.0: a long 写 at turn 1000 took 0.6 s).
   const each = Math.max(2, Math.ceil(QUERY_LINES / clauses.length));
-  const lists = clauses.map((clause) => bestMatches(clause, passages, weights, each).map((p) => ({ turn: p.at, source: p.text, text: excerpt(p.text, clause, 70) })));
+  const lists = clauses.map((clause) => {
+    const own = pairsOf(clause).filter((p) => weights.has(p));
+    const turns = new Set<number>();
+    older.forEach(({ turn }, i) => {
+      const hit = own.filter((p) => held[i].has(p));
+      if (hit.length >= 2 && hit.reduce((n, p) => n + weights.get(p)!, 0) >= 1.5) turns.add(turn);
+    });
+    return bestMatches(clause, passages.filter((p) => turns.has(p.at)), weights, each, 1.5, avg)
+      .map((p) => ({ turn: p.at, source: p.text, text: excerpt(p.text, clause, 70) }));
+  });
   const out: { turn: number; source: string; text: string }[] = [];
   for (let i = 0; i < each; i++) for (const list of lists) if (list[i] && !out.some((o) => o.source === list[i].source)) out.push(list[i]);
   return out;

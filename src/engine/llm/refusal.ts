@@ -3,9 +3,14 @@
 
 const SOFT_PHRASES = ["抱歉，我无法", "抱歉，我不能", "我无法继续", "我不能继续", "作为AI", "作为一个AI", "作为人工智能", "I can't", "I cannot", "I'm sorry"];
 
+/** The response says itself that it was refused. */
+export function refusedFinish(finishReason: string | null): boolean {
+  const reason = (finishReason ?? "").toLowerCase();
+  return reason === "content_filter" || reason === "safety" || reason === "prohibited_content" || reason === "recitation";
+}
+
 export function isRefusal(input: { finishReason: string | null; narrative: string; hasRecord: boolean; httpMessage?: string }): boolean {
-  const reason = (input.finishReason ?? "").toLowerCase();
-  if (reason === "content_filter" || reason === "safety" || reason === "prohibited_content" || reason === "recitation") return true;
+  if (refusedFinish(input.finishReason)) return true;
   if (input.httpMessage && /safety|content[_ ]?filter|policy|敏感|违规|安全/i.test(input.httpMessage)) return true;
   if (!input.hasRecord && isNotice(input.narrative)) return true;
   const text = input.narrative.replace(/\s/g, "");
@@ -17,6 +22,8 @@ export function isRefusal(input: { finishReason: string | null; narrative: strin
  * provider's notice sent as text (eval I: "The prompt could not be submitted.
  * The prompt contains sensitive words…" was saved as a turn).
  */
+export const hasChinese = (text: string) => /[\u3400-\u9fff]/.test(text);
+
 export function isNotice(text: string): boolean {
   const chinese = text.match(/[\u3400-\u9fff]/g)?.length ?? 0;
   const latin = text.match(/[A-Za-z]/g)?.length ?? 0;

@@ -9,7 +9,7 @@ import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
 import { ChatError, parseChunk, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "./llm/chat";
 import { explainFailure } from "./llm/providers";
-import { isNotice, isRefusal } from "./llm/refusal";
+import { hasChinese, isNotice, isRefusal, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
   turnMessages, type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
@@ -23,7 +23,7 @@ import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
-import { parseDurationMinutes } from "./calendar/duration";
+import { skipSpanMinutes } from "./calendar/duration";
 import { isFortune, rollFortune, type Fortune } from "./fortune";
 import { packTimeline } from "./timeline";
 import { newId } from "./db/repo";
@@ -313,13 +313,18 @@ export class Game {
     } else {
       const splitter = new RecordSplitter();
       let shown = "";
+      let sent = 0;
       try {
         result = await this.call(openingMessages(opening), {
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
             startCodex();
             const visible = splitter.push(delta);
-            if (visible) { shown += visible; onEvent({ type: "text", delta: visible, full: shown }); }
+            if (!visible) return;
+            shown += visible;
+            if (!hasChinese(shown)) return;
+            onEvent({ type: "text", delta: shown.slice(sent), full: shown });
+            sent = shown.length;
           },
         });
       } catch (error) {
@@ -482,13 +487,19 @@ export class Game {
 
       const splitter = new RecordSplitter();
       let shown = "";
+      let sent = 0;
       let result: ChatResult & { attempts: number };
       try {
         result = await this.call(messages, {
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
             const visible = splitter.push(delta);
-            if (visible) { shown += visible; onEvent({ type: "text", delta: visible, full: shown }); }
+            if (!visible) return;
+            shown += visible;
+            // Held back until there is Chinese in it, so a provider's notice in English never shows as story.
+            if (!hasChinese(shown)) return;
+            onEvent({ type: "text", delta: shown.slice(sent), full: shown });
+            sent = shown.length;
           },
           onHandle: (h) => {
             handle = h;
@@ -554,7 +565,7 @@ export class Game {
       extractResult = extracted.result;
       if (extracted.record) record = record ? { ...extracted.record, ...record, choices: extracted.record.choices } : extracted.record;
     }
-    const asked = action.mode === "skip" ? parseDurationMinutes(action.text) ?? undefined : undefined;
+    const asked = action.mode === "skip" ? skipSpanMinutes(action.text) ?? undefined : undefined;
     const applied = applyRecord(state, record, { mode: action.mode, difficulty: settings.difficulty, currency: era.currency, clock: era.clock, fortune, asked });
     const model = this.llm!.model;
     // Words the era card says must not appear (R07-T002): shown in developer mode, reminded next turn.
@@ -689,8 +700,9 @@ export class Game {
     let result: ChatResult | null = null;
     let refused = false;
     try {
-      result = await this.call(messages, { aux: true, timeouts: CODEX_TIMEOUT, onText: (_d, full) => onText(full) });
-      refused = isRefusal({ finishReason: result.finishReason, narrative: result.text, hasRecord: false }) || isNotice(result.text);
+      result = await this.call(messages, { aux: true, timeouts: CODEX_TIMEOUT, onText: (_d, full) => { if (hasChinese(full)) onText(full); } });
+      // An honest "抱歉，我无法确定……" is an answer; only the response's own signal or a notice is a refusal.
+      refused = refusedFinish(result.finishReason) || isNotice(result.text);
       return refused ? explainFailure("refused") : result.text.trim();
     } finally {
       await this.platform.sql.batch([this.usage(worldId, head.id, "ask", result, !result ? "failed" : refused ? "refused" : "ok", this.llm!.auxModel || this.llm!.model)]);

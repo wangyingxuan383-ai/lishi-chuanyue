@@ -240,6 +240,11 @@ describe("applyRecord", () => {
     expect(stopped.state.time.elapsedMinutes).toBe(331);
     expect(stopped.chips.map((c) => c.text)).toEqual(["快进停在这里：有事要你拿主意"]);
     expect(stopped.log.join()).not.toContain("无法识别");
+    // "一个多月" is a month; a missing time is not a stop either (review of 0.8.0).
+    const month = applyRecord(s, { time: "一个多月" }, { mode: "skip", difficulty: "标准", currency: TANG_CURRENCY, clock, asked: 43200 });
+    expect(month.chips.map((c) => c.text)).toEqual(["过了 1 个月"]);
+    const untold = applyRecord(s, {}, { mode: "skip", difficulty: "标准", currency: TANG_CURRENCY, clock, asked: 43200 });
+    expect(untold.chips.map((c) => c.text)).not.toContain("快进停在这里：有事要你拿主意");
   });
 
   it("keeps at most twelve statuses after a turn, dropping the oldest but never 垂危", () => {
@@ -250,6 +255,7 @@ describe("applyRecord", () => {
     const r = apply(s, { status: [{ op: "add", name: "新伤甲" }, { op: "add", name: "新伤乙" }] });
     const names = r.state.protagonist.statuses.map((x) => x.name);
     expect(names).toHaveLength(12);
+    expect(r.chips.map((c) => c.text)).toContain("去掉 2 项旧状况");
     expect(names).toEqual(expect.arrayContaining(["垂危", "新伤甲", "新伤乙"]));
     expect(names).not.toContain("旧状况1");
     expect(names).not.toContain("旧状况2");

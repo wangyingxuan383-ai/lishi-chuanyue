@@ -213,7 +213,7 @@ export const TANG_748: EraPack = {
     { words: ["小的"], instead: "某、小人" },
     { words: ["咱们"], instead: "我等、某等" },
     { words: ["差爷", "官爷", "军爷"], instead: "官人、郎君" },
-    { words: ["差役", "三班"], instead: "胥吏、不良人" },
+    { words: ["差役", "三班衙役"], instead: "胥吏、不良人" },
     { words: ["捕头"], instead: "不良帅" },
     { words: ["相爷"], instead: "相公" },
     { words: ["三法司"], instead: "三司" },

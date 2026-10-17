@@ -39,6 +39,8 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
 }) {
   const [tab, setTab] = useState<Tab>("我");
   const [draft, setDraft] = useState<WorldState | null>(null);
+  // What the draft started from: beside a docked panel a turn can be played while editing, and saving keeps what it did.
+  const [base, setBase] = useState<WorldState | null>(null);
   const [saving, setSaving] = useState(false);
   const editing = draft !== null;
   const change = (fn: (s: WorldState) => void) => setDraft((s) => { const next = structuredClone(s!); fn(next); return next; });
@@ -59,15 +61,17 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
     if (!draft) return;
     const patch: TurnRecord = {};
     const summary: string[] = [];
-    const before = state.protagonist;
+    // Only what the player changed since the draft began; the values shown are today's.
+    const before = (base ?? state).protagonist;
+    const current = state.protagonist;
     for (const [key, label] of [["money", "钱"], ["health", "健康"], ["energy", "精力"], ["fame", "名望"]] as const) {
       const value = Math.max(0, Math.min(key === "money" ? Infinity : 100, me.stats[key]));
       if (value === before.stats[key]) continue;
       (patch.setStats ??= {})[key] = value;
-      summary.push(`${label} ${before.stats[key]} → ${value}`);
+      summary.push(`${label} ${current.stats[key]} → ${value}`);
     }
     for (const s of before.statuses) {
-      if (me.statuses.some((x) => x.name === s.name)) continue;
+      if (me.statuses.some((x) => x.name === s.name) || !current.statuses.some((x) => x.name === s.name)) continue;
       (patch.status ??= []).push({ op: "remove", name: s.name });
       summary.push(`去掉状况 ${s.name}`);
     }
@@ -80,10 +84,11 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
     for (const i of me.items.filter((x) => x.name.trim())) quantities.set(i.name.trim(), (quantities.get(i.name.trim()) ?? 0) + i.quantity);
     for (const name of new Set([...before.items.map((i) => i.name), ...quantities.keys()])) {
       const old = before.items.find((i) => i.name === name)?.quantity ?? 0;
-      const quantity = quantities.get(name) ?? 0;
-      if (old === quantity) continue;
-      (patch.items ??= []).push({ name, delta: quantity - old });
-      summary.push(old === 0 ? `添加物品 ${name}` : `${name} ${old} → ${quantity}`);
+      const delta = (quantities.get(name) ?? 0) - old;
+      if (!delta) continue;
+      const now = current.items.find((i) => i.name === name)?.quantity ?? 0;
+      (patch.items ??= []).push({ name, delta });
+      summary.push(now === 0 ? `添加物品 ${name}` : `${name} ${now} → ${Math.max(0, now + delta)}`);
     }
     if (!summary.length) { setDraft(null); return; }
     setSaving(true);
@@ -98,7 +103,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
       <div className="topbar">
         {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>}
         <div className="title"><h1>{me.name}</h1><div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div></div>
-        {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
+        {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => { setBase(state); setDraft(structuredClone(state)); }}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
         {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && OWN_EDITOR.includes(t)} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
@@ -158,7 +163,7 @@ export function Panel({ worldId, headId, chapterEvery, state, era, onClose, onSa
       </div>
       {editing && <div className="dock row" style={{ justifyContent: "space-between" }}>
         <button disabled={saving} onClick={() => setDraft(null)}>取消</button>
-        <button className="primary" disabled={saving} onClick={() => void save()}>保存修改</button>
+        <button className="primary" disabled={saving || busy} onClick={() => void save()}>{busy ? "等这段写完" : "保存修改"}</button>
       </div>}
     </div>
   );
