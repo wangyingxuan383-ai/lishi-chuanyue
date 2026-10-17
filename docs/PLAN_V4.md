@@ -164,9 +164,12 @@
 | --- | --- | --- |
 | [海外 AI 故事产品的界面与功能](research/UX_INTL.md) | A～D、G | 已完成 |
 | [国内 AI 故事、阅读与国风游戏的界面与功能](research/UX_CN.md) | A～D、F、G | 已完成 |
-| 当前版本按手机尺寸的逐屏体验审查 `docs/validation/AUDIT_V4.md` | 全部页面 | 进行中 |
-| AI 客户端的服务与模型管理 `docs/research/UX_PROVIDERS.md` | J | 进行中 |
-| 成熟 App 的基础功能与逐屏完整性清单 `docs/research/UX_APP_BASICS.md` | K、L、E | 进行中 |
+| [当前版本按手机尺寸的逐屏体验审查](validation/AUDIT_V4.md) | 全部页面 | 已完成 |
+| [逐项与功能正确性审查](validation/AUDIT_V4_FUNCTION.md) | 全部页面 | 已完成 |
+| [AI 客户端的服务与模型管理](research/UX_PROVIDERS.md) | J | 已完成 |
+| [成熟 App 的基础功能与逐屏完整性清单](research/UX_APP_BASICS.md) | K、L、E | 已完成 |
+| [AI 自定义与设置页信息架构](research/UX_SETTINGS_AI.md) | J、K | 已完成 |
+| [安卓兼容与通知诊断](research/ANDROID_COMPAT.md) | H、L | 已完成 |
 
 全部出来后先写第一档的小计划。
 
