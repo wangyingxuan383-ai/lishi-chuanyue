@@ -203,3 +203,26 @@ describe("设定集 edits", () => {
     expect(apply(r.state, { place: "西市场" }).state.placeId).toBe(s.placeId);
   });
 });
+
+describe("rules edits", () => {
+  it("changes currency units, keeping aliases that still fit", () => {
+    const s = sampleState();
+    s.era.currency = { units: [{ name: "贯", value: 1000 }, { name: "文", value: 1 }], aliases: { 缗: "贯", 钱: "文" } };
+    const r = apply(s, { rules: { currency: [{ name: "两", value: 1000 }, { name: "文", value: 1 }] } });
+    expect(r.state.era.currency).toEqual({ units: [{ name: "两", value: 1000 }, { name: "文", value: 1 }], aliases: { 钱: "文" } });
+    const bad = apply(s, { rules: { currency: [{ name: "两", value: 1000 }, { name: "钱", value: 300 }, { name: "文", value: 1 }] } });
+    expect(bad.state.era.currency).toEqual(s.era.currency);
+    expect(bad.log).toContain("货币设置没有生效：“两”不是“钱”的整数倍");
+  });
+
+  it("sets the start date and calendar style", () => {
+    const s = apply(sampleState(), { rules: { date: { era: "景和", year: 3, month: 3, day: 5 } } }).state;
+    expect(s.time).toMatchObject({ start: "景和三年 三月初五", date: { era: "景和", year: 3, month: 3, day: 5, ceYear: null, lunar: true } });
+    const western = apply(s, { rules: { lunar: false } }).state;
+    expect(western.era.calendar).toEqual({ lunar: false });
+    expect(western.time.date?.lunar).toBe(false);
+    const r = apply(s, { rules: { date: { era: "景和", year: 0, month: 3 } } });
+    expect(r.state.time.date).toEqual(s.time.date);
+    expect(r.log).toContain("开局日期写得不完整，没有生效");
+  });
+});

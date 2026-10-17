@@ -199,6 +199,25 @@ await page.keyboard.press("Escape");
 await page.locator(".panel").waitFor({ state: "detached" });
 await page.locator(".edit-line", { hasText: "AI 整理了设定集" }).waitFor();
 
+// Rules: change the start date and currency from the time sheet, then undo.
+const clockBeforeRules = await page.locator(".topbar .subtitle").textContent();
+await page.getByRole("button", { name: "此时此地" }).click();
+await page.getByRole("button", { name: "修改纪年与货币" }).click();
+await page.getByLabel("年号").fill("景和");
+await page.getByLabel("年", { exact: true }).fill("3");
+await page.getByLabel("月", { exact: true }).selectOption("3");
+await page.getByLabel("日", { exact: true }).fill("5");
+await page.getByLabel("第 1 个单位名称").fill("吊");
+await page.waitForTimeout(400);
+await shot("06c-rules");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".edit-line", { hasText: "开局日期改为景和三年 三月初五" }).waitFor();
+check("rules edit changes the date", (await page.locator(".topbar .subtitle").textContent()).startsWith("景和三年 三月"));
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "撤销", exact: true }).click();
+await page.locator(".edit-line", { hasText: "开局日期改为" }).waitFor({ state: "detached" });
+check("rules edit can be undone", (await page.locator(".topbar .subtitle").textContent()) === clockBeforeRules);
+
 // Long-press menu → go back to opening.
 const firstTurn = page.locator(".turn").first();
 await firstTurn.scrollIntoViewIfNeeded();

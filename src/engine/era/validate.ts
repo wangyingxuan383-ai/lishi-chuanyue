@@ -4,6 +4,7 @@
 // Field guide: docs/contracts/ERA_PACK.md.
 import type { EraPack } from "../../content/eras/types";
 import { ceYearOf, eraAt, monthDays, monthIndex } from "../calendar/date";
+import { currencyIssues } from "../money";
 import { ERA_CARD_LIMIT } from "../memory/cards";
 import { eraCardText } from "./card";
 
@@ -96,21 +97,8 @@ export function validatePack(raw: unknown): PackIssue[] {
   // Currency: largest first, the smallest worth 1, each a whole multiple of the next.
   const currency = isObj(p.currency) ? p.currency : null;
   const units = list(currency?.units);
-  if (!units.length) add("currency.units", "缺少货币单位");
-  const unitNames = new Set<string>();
-  units.forEach((u, i) => {
-    const path = `currency.units[${i}]`;
-    if (!isObj(u) || !isText(u.name)) return add(path, "货币单位缺少名字");
-    if (unitNames.has(u.name)) add(path, `单位“${u.name}”重复`);
-    unitNames.add(u.name);
-    if (!isInt(u.value) || u.value < 1) return add(path, `“${u.name}”缺少换算（value 要是正整数，以最小单位计）`);
-    const next = units[i + 1];
-    if (isObj(next) && isInt(next.value) && next.value >= 1) {
-      if (next.value >= u.value) add(path, "单位要从大到小排列");
-      else if (u.value % next.value !== 0) add(path, `“${u.name}”不是“${String(next.name)}”的整数倍`);
-    }
-    if (i === units.length - 1 && u.value !== 1) add(path, "最小单位的 value 要是 1");
-  });
+  for (const issue of currencyIssues(units)) add(issue.index === null ? "currency.units" : `currency.units[${issue.index}]`, issue.message);
+  const unitNames = new Set(units.filter(isObj).map((u) => String(u.name)));
   if (isObj(currency?.aliases)) {
     for (const [alias, target] of Object.entries(currency.aliases)) {
       if (!unitNames.has(String(target))) add(`currency.aliases.${alias}`, `指向不存在的单位“${String(target)}”`);

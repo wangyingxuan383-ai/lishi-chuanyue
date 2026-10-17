@@ -10,6 +10,7 @@ import * as tree from "../../engine/tree";
 import type { ActionMode, Intensity, StoryNode, World, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
 import { Panel } from "../components/Panel";
+import { RulesSheet } from "../components/RulesSheet";
 import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
@@ -73,7 +74,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
   const [typing, setTyping] = useState(false);
@@ -452,12 +453,13 @@ export default function Play({ worldId }: { worldId: string }) {
             {timeRows(era.clock, state.time.elapsedMinutes).map((r) => <Fragment key={r.label}><dt>{r.label}</dt><dd>{r.value}</dd></Fragment>)}
             {state.protagonist.age != null && <><dt>年龄</dt><dd>{state.protagonist.age} 岁{now.date?.lunar ? "（虚岁，过年长一岁）" : ""}</dd></>}
           </dl>
-          {era.packId && <p className="muted">时代资料：{era.title}</p>}
+          <button disabled={!!gen} onClick={() => setSheet("rules")}>修改纪年与货币</button>
         </Sheet>
       )}
+      {sheet === "rules" && <RulesSheet state={state} era={era} busy={!!gen} onClose={() => setSheet(null)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
       {sheet === "story" && <StorySheet world={world} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
-      {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onClose={() => setSheet(null)} />}
+      {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
       {panel && <Panel state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }}
         onOrganize={async (replaceOwnEra) => {
           const c = await game.organize(worldId, { replaceOwnEra });
@@ -543,7 +545,7 @@ function StorySheet({ world, onSave, onClose }: { world: World; onSave: (p: Part
   );
 }
 
-function WorldSettingsSheet({ world, onChange, onClose }: { world: World; onChange: (p: Partial<World["settings"]>) => void; onClose: () => void }) {
+function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: World; onChange: (p: Partial<World["settings"]>) => void; onRules: () => void; onClose: () => void }) {
   const s = world.settings;
   const levels: Intensity[] = ["含蓄", "写实", "浓烈"];
   const intensity = (key: keyof typeof s.intensity, label: string) => (
@@ -577,6 +579,7 @@ function WorldSettingsSheet({ world, onChange, onClose }: { world: World; onChan
         {intensity("romance", "感情与亲密")}
         {intensity("darkness", "黑暗与压抑")}
         <p className="muted">修改从下一段开始生效。“浓烈”仍受所用 AI 服务的规则限制。</p>
+        <button className="ghost" style={{ textAlign: "left" }} onClick={onRules}>纪年与货币 ›</button>
       </div>
     </Sheet>
   );

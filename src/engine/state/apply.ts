@@ -2,8 +2,9 @@
 // (D104, D113). Invalid changes are corrected or dropped, never fatal; the
 // player sees what actually happened as chips, and the next prompt gets notes.
 import { newYearsBetween, type GameClock } from "../calendar/clock";
+import { coerceDate, formatDate } from "../calendar/date";
 import { parseDurationMinutes } from "../calendar/duration";
-import { formatMoney, parseMoney, type Currency } from "../money";
+import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
 import { newId } from "../db/repo";
 import type { ActionMode, Attitude, Card, CardKind, Difficulty, Person, WorldState } from "../types";
 import { matchName } from "./names";
@@ -30,6 +31,8 @@ export interface TurnRecord {
   cards?: CardPatch[] | null;
   /** Panel edits: place cards. */
   places?: PlacePatch[] | null;
+  /** Panel edits: the world's rules (D121). date is the start date as {era, year, month, day, ceYear?}; null clears it. */
+  rules?: { currency?: { name: string; value: number }[]; lunar?: boolean; date?: Record<string, unknown> | null } | null;
 }
 
 /** update and remove find the card by id, or by kind and name. */
@@ -291,6 +294,32 @@ export function applyRecord(
     else if (op === "fail") { goal.status = "失败"; chips.push({ text: `失败：${goal.name}`, tone: "loss" }); }
     else if (op === "abandon") { goal.status = "放弃"; chips.push({ text: `放弃：${goal.name}`, tone: "info" }); }
     else if (raw.detail) goal.progress = raw.detail;
+  }
+
+  // Rules: currency units, calendar style and the start date every later date is counted from.
+  const rules = record.rules;
+  if (rules?.currency) {
+    const problems = currencyIssues(rules.currency);
+    if (problems.length) log.push(`货币设置没有生效：${problems[0].message}`);
+    else {
+      const units = rules.currency.map((u) => ({ name: u.name.trim(), value: u.value }));
+      const names = new Set(units.map((u) => u.name));
+      const aliases = Object.fromEntries(Object.entries(s.era.currency?.aliases ?? {}).filter(([alias, target]) => names.has(target) && !names.has(alias)));
+      s.era.currency = { units, ...(Object.keys(aliases).length ? { aliases } : {}) };
+    }
+  }
+  if (rules?.lunar !== undefined) {
+    s.era.calendar = { ...(s.era.calendar ?? {}), lunar: rules.lunar };
+    if (s.time.date && rules.date === undefined) s.time.date = { ...s.time.date, lunar: rules.lunar };
+  }
+  if (rules?.date !== undefined) {
+    const calendar = s.era.calendar ?? {};
+    const date = rules.date ? coerceDate({ ...rules.date, lunar: calendar.lunar ?? rules.date.lunar }, calendar) : null;
+    if (rules.date && !date) log.push("开局日期写得不完整，没有生效");
+    else {
+      s.time.date = date;
+      if (date) s.time.start = formatDate(date, calendar);
+    }
   }
 
   // 设定集: a world has one era card; other cards are found by kind and name.
