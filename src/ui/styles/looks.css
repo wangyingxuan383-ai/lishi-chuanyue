@@ -1,0 +1,146 @@
+/* R09-T001: three visual directions to choose from, as prototypes over the
+   current screens. Dev builds only (?look=scroll|modern|candle, see main.tsx).
+   The chosen one becomes the base styles in R09-T002; the rest go. */
+
+/* ============ 宣纸书卷：纸色、宋体正文、朱砂印 ============ */
+:root[data-look="scroll"] {
+  --bg: #efe5cf;
+  --surface: #f6eedc;
+  --fg: #2a2019;
+  --muted: #87735c;
+  --line: #d9c8a7;
+  --accent: #a83221;
+  --accent-soft: #ecd6c3;
+  --gain: #3e6b47;
+  --loss: #a83221;
+  --warn: #8f630f;
+  --radius: 5px;
+  --story-leading: 2.05;
+  --serif: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+  --paper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .32 0 0 0 0 .18 0 0 0 .075 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  font-family: "Noto Sans SC", system-ui, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+}
+:root[data-look="scroll"] body,
+:root[data-look="scroll"] .panel { background: var(--paper), radial-gradient(140% 80% at 50% 0%, #f4ebd7, var(--bg) 70%); background-color: var(--bg); }
+:root[data-look="scroll"] .topbar { background: color-mix(in srgb, var(--bg) 90%, transparent); border-bottom: 3px double var(--line); }
+:root[data-look="scroll"] .topbar h1,
+:root[data-look="scroll"] .topbar .title > div:first-child { font-family: var(--serif); letter-spacing: 1px; }
+:root[data-look="scroll"] .hero h1 { font-family: var(--serif); letter-spacing: 8px; }
+:root[data-look="scroll"] .story-text { font-family: var(--serif); letter-spacing: 0.03em; }
+:root[data-look="scroll"] .story-text p { text-indent: 2em; margin-bottom: 0.55em; }
+:root[data-look="scroll"] .story-text p[style] { text-indent: 0; font-size: 15px; letter-spacing: 4px !important; }
+:root[data-look="scroll"] .turn + .turn { border-top: none; }
+:root[data-look="scroll"] .turn + .turn::before { content: "◇"; display: block; text-align: center; color: var(--accent); opacity: 0.5; font-size: 10px; margin: 2px 0 12px; }
+:root[data-look="scroll"] .turn-action { font-family: var(--serif); border-left: 2px solid var(--accent); padding: 1px 0 1px 10px; }
+:root[data-look="scroll"] .chip { background: transparent; border: 1px solid currentColor; border-radius: 3px; color: #7b5a3a; font-family: var(--serif); padding: 2px 7px; }
+:root[data-look="scroll"] .chip.gain { color: var(--gain); }
+:root[data-look="scroll"] .chip.loss { color: var(--loss); }
+:root[data-look="scroll"] .dock { background: var(--paper), var(--surface); border-top: 3px double var(--line); }
+:root[data-look="scroll"] .choices { counter-reset: choice; gap: 0; }
+:root[data-look="scroll"] .choice { counter-increment: choice; background: transparent; border: none; border-bottom: 1px dashed var(--line); border-radius: 0; font-family: var(--serif); padding: 9px 4px; }
+:root[data-look="scroll"] .choice::before { content: counter(choice, cjk-decimal) "、"; color: var(--accent); }
+:root[data-look="scroll"] input,
+:root[data-look="scroll"] textarea,
+:root[data-look="scroll"] select { background: #fbf6ea; border-radius: 4px; }
+:root[data-look="scroll"] button { border-radius: 4px; }
+:root[data-look="scroll"] button.primary { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2); font-family: var(--serif); letter-spacing: 2px; }
+:root[data-look="scroll"] .card { background: var(--surface); border-left: 4px solid var(--accent); border-radius: 3px; box-shadow: 0 1px 0 rgba(90, 60, 30, 0.08); }
+:root[data-look="scroll"] .card h3 { font-family: var(--serif); font-size: 17px; letter-spacing: 1px; }
+:root[data-look="scroll"] .tabs button { border-radius: 0; font-family: var(--serif); }
+:root[data-look="scroll"] .tabs button[aria-selected="true"] { background: transparent; box-shadow: inset 0 -2px 0 var(--accent); }
+:root[data-look="scroll"] .stat { background: var(--surface); border-radius: 3px; }
+:root[data-look="scroll"] .stat .value { font-family: var(--serif); }
+:root[data-look="scroll"] .bar { height: 3px; }
+:root[data-look="scroll"] .tag { background: transparent; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; font-family: var(--serif); }
+:root[data-look="scroll"] .sheet { background: var(--paper), var(--surface); border-radius: 8px 8px 0 0; border-top: 3px double var(--line); }
+:root[data-look="scroll"] .sheet h2 { font-family: var(--serif); letter-spacing: 1px; }
+:root[data-look="scroll"] .report-card { background: transparent; border: 1px solid var(--line); border-radius: 3px; font-family: var(--serif); }
+
+/* ============ 简洁现代：无衬线、留白、柔和卡片 ============ */
+:root[data-look="modern"] {
+  --bg: #f5f5f3;
+  --surface: #ffffff;
+  --fg: #1d2125;
+  --muted: #8a9096;
+  --line: #e7e7e4;
+  --accent: #2e6a5c;
+  --accent-soft: #e1eeea;
+  --gain: #2f8a57;
+  --loss: #c2410c;
+  --warn: #b7791f;
+  --radius: 14px;
+  --story-leading: 1.85;
+  font-family: "Noto Sans SC", "MiSans", system-ui, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+:root[data-look="modern"] .topbar { background: rgba(245, 245, 243, 0.86); border-bottom: none; box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04); }
+:root[data-look="modern"] .story-text { color: #24282c; letter-spacing: 0.01em; }
+:root[data-look="modern"] .turn { padding: 14px 0 8px; }
+:root[data-look="modern"] .turn + .turn { border-top: none; }
+:root[data-look="modern"] .turn-action { display: table; margin: 2px 0 12px auto; max-width: 86%; background: var(--accent); color: #fff; padding: 7px 13px; border-radius: 16px 16px 4px 16px; font-size: 14px; }
+:root[data-look="modern"] .turn-action::before { opacity: 0.75; }
+:root[data-look="modern"] .turn-action.continue { background: transparent; color: var(--muted); margin: 0 auto 8px; }
+:root[data-look="modern"] .chip { background: #eef0f1; color: #4a5056; border-radius: 999px; padding: 3px 10px; }
+:root[data-look="modern"] .chip.gain { background: #e6f4ec; }
+:root[data-look="modern"] .chip.loss { background: #fbece3; }
+:root[data-look="modern"] .chip.warn { background: #fcf2df; }
+:root[data-look="modern"] .dock { background: rgba(255, 255, 255, 0.94); border-top: none; box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.05); }
+:root[data-look="modern"] .choice { position: relative; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding-right: 30px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03); }
+:root[data-look="modern"] .choice::after { content: "›"; position: absolute; right: 12px; top: 50%; transform: translateY(-52%); color: var(--muted); font-size: 18px; }
+:root[data-look="modern"] .inputbar textarea { background: #f2f3f1; border: none; border-radius: 22px; padding: 11px 16px; }
+:root[data-look="modern"] .mode-btn,
+:root[data-look="modern"] .send-btn { border-radius: 22px; }
+:root[data-look="modern"] .mode-btn { background: #f2f3f1; border: none; }
+:root[data-look="modern"] .big-btn { border-radius: 999px; }
+:root[data-look="modern"] .card { border: none; border-radius: 18px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 20px rgba(0, 0, 0, 0.05); }
+:root[data-look="modern"] .card h3 { font-weight: 600; font-size: 17px; }
+:root[data-look="modern"] .stat { border: none; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 14px rgba(0, 0, 0, 0.04); }
+:root[data-look="modern"] .bar { height: 6px; border-radius: 3px; background: #eceeec; }
+:root[data-look="modern"] .bar > i { border-radius: 3px; }
+:root[data-look="modern"] .sheet { border-radius: 22px 22px 0 0; }
+:root[data-look="modern"] .report-card { border: none; border-radius: 14px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 14px rgba(0, 0, 0, 0.04); }
+
+/* ============ 夜读：深色、烛光暖字、楷体正文 ============ */
+:root[data-look="candle"] {
+  color-scheme: dark;
+  --bg: #131518;
+  --surface: #1b1e22;
+  --fg: #e9dcc5;
+  --muted: #8f877b;
+  --line: #2b2f35;
+  --accent: #d4a04c;
+  --accent-soft: #33291b;
+  --gain: #9fcf95;
+  --loss: #e7896b;
+  --warn: #e6b450;
+  --radius: 10px;
+  --story-leading: 2;
+  --kai: "LXGW WenKai Screen", "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", serif;
+  font-family: "Noto Sans SC", system-ui, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+:root[data-look="candle"] body,
+:root[data-look="candle"] .panel { background: radial-gradient(130% 55% at 50% -10%, rgba(212, 160, 76, 0.13), transparent 62%), var(--bg); }
+:root[data-look="candle"] .topbar { background: rgba(19, 21, 24, 0.85); }
+:root[data-look="candle"] .topbar h1,
+:root[data-look="candle"] .hero h1 { font-family: var(--kai); letter-spacing: 3px; }
+:root[data-look="candle"] .story-text { font-family: var(--kai); color: #e6d6ba; font-size: calc(var(--story-size) + 1px); letter-spacing: 0.02em; }
+:root[data-look="candle"] .turn + .turn { border-top: none; }
+:root[data-look="candle"] .turn + .turn::before { content: "✦"; display: block; text-align: center; color: var(--accent); opacity: 0.4; font-size: 10px; margin: 2px 0 12px; }
+:root[data-look="candle"] .turn-action { color: var(--accent); font-family: var(--kai); }
+:root[data-look="candle"] .chip { background: transparent; border: 1px solid rgba(212, 160, 76, 0.32); color: #d8c6a4; }
+:root[data-look="candle"] .chip.gain { color: var(--gain); border-color: rgba(159, 207, 149, 0.35); }
+:root[data-look="candle"] .chip.loss { color: var(--loss); border-color: rgba(231, 137, 107, 0.35); }
+:root[data-look="candle"] .dock { background: #16181c; }
+:root[data-look="candle"] .choice { background: #1a1d21; border: 1px solid var(--line); border-left: 2px solid var(--accent); border-radius: 8px; font-family: var(--kai); font-size: 16px; }
+:root[data-look="candle"] input,
+:root[data-look="candle"] textarea,
+:root[data-look="candle"] select { background: #1f2226; border-color: #30353b; }
+:root[data-look="candle"] .mode-btn { background: #1f2226; border-color: #30353b; }
+:root[data-look="candle"] .turn-tools button { background: transparent; border-color: transparent; }
+:root[data-look="candle"] button.primary { background: var(--accent); border-color: var(--accent); color: #1c1508; font-weight: 600; }
+:root[data-look="candle"] .card { background: #1a1d21; border-color: var(--line); }
+:root[data-look="candle"] .card h3 { font-family: var(--kai); font-size: 18px; color: #f0e2c6; }
+:root[data-look="candle"] .stat { background: #1a1d21; }
+:root[data-look="candle"] .stat .value { font-family: var(--kai); font-size: 18px; }
+:root[data-look="candle"] .sheet { background: #1b1e22; }
+:root[data-look="candle"] .report-card { background: #1a1d21; font-family: var(--kai); }
+:root[data-look="candle"] .toast { background: rgba(236, 224, 200, 0.94); color: #15171b; }
