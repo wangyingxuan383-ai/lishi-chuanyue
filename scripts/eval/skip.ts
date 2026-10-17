@@ -54,7 +54,9 @@ async function main() {
     arrival: "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: t.openingHint },
   }, () => {});
   if (!worldId) throw new Error("开局失败");
-  await game.play(worldId, { mode: "do", text: BASE }, () => {}).done;
+  // A base starting with （写） is written by the player (author mode) instead of done.
+  const written = BASE.startsWith("（写）");
+  await game.play(worldId, { mode: written ? "write" : "do", text: written ? BASE.slice(3) : BASE }, () => {}).done;
   const base = (await cursor(game.repo, worldId)).head;
   const before = await game.repo.getState(base.id);
   const versions = [];
