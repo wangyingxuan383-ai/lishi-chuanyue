@@ -19,6 +19,8 @@ import { StoryText } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
 import { useLongPress } from "../components/useLongPress";
 import { useMouse, useWide } from "../components/useMedia";
+import { EndingCard, LifeSheet, useSealToast } from "../components/LifeSheet";
+import { PassageCardSheet } from "../components/ShareCard";
 import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 
 const PAGE = 30;
@@ -111,7 +113,8 @@ export default function Play({ worldId }: { worldId: string }) {
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | "toc" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | "toc" | "life" | null>(null);
+  const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
   const wide = useWide();
   const mouse = useMouse();
@@ -139,6 +142,8 @@ export default function Play({ worldId }: { worldId: string }) {
     setFollowing(true);
     requestAnimationFrame(() => { const el = scroller.current; if (el) el.scrollTop = el.scrollHeight; });
   }, [recap]);
+  // 印谱: "得一枚印：…" the first time a seal is earned (PLAN_V4 direction G).
+  useSealToast(world, state, nodes.filter((n) => n.kind === "turn" || n.kind === "fastforward").length);
 
   const refresh = useCallback(async (keepLimit = limit) => {
     const w = await game.repo.getWorld(worldId);
@@ -520,6 +525,7 @@ export default function Play({ worldId }: { worldId: string }) {
               </div>
             )}
             {dead && <EndingCard state={state} world={world} now={now.text} turns={nodes.filter((n) => n.kind === "turn").length}
+              onLife={() => setSheet("life")}
               onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
               onLines={() => setSheet("lines")}
               onAgain={async () => { const setup = await game.setupOf(worldId); if (!setup) return; await game.repo.setSetting("newgameDraft", fromSetup(setup)); replace({ name: "newgame" }); }} />}
@@ -580,6 +586,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "回到这里", hidden: menuNode.id === head.id || !!gen, onSelect: () => void goBack(menuNode) },
             { label: "加书签", hidden: menuNode.kind === "edit", onSelect: () => setBookmark({ node: menuNode, name: menuNode.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
             { label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
+            { label: "做成书摘卡", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => setCardNode(menuNode) },
             { label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuNode) },
           ]}
         />
@@ -644,6 +651,8 @@ export default function Play({ worldId }: { worldId: string }) {
           </div>
         </Sheet>
       )}
+      {sheet === "life" && <LifeSheet world={world} state={state} headId={head.id} dead={dead} onClose={() => setSheet(null)} />}
+      {cardNode && <PassageCardSheet world={world} node={cardNode} onClose={() => setCardNode(null)} />}
       {sheet === "ask" && <AskSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
@@ -667,6 +676,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
+            { label: "这一世小传", onSelect: () => setSheet("life") },
             { label: "游玩指南", onSelect: () => push({ name: "guide" }) },
             { label: "查看上下文（开发者）", hidden: !devMode || !!gen, onSelect: async () => setContext(await game.previewContext(worldId)) },
             { label: "用同样设定再开一局", hidden: !!gen, onSelect: async () => {
@@ -708,34 +718,6 @@ export default function Play({ worldId }: { worldId: string }) {
       </Sheet>}
     </div>
     {wide && <div className="play-side"><Panel {...panelProps} docked /></div>}
-    </div>
-  );
-}
-
-/**
- * The end of a life (AUDIT_V4 5.6): a card in the book's style, with where
- * and when it ended, what the protagonist had, and the ways on — back a few
- * turns, another route, or the same setup again. Nothing is lost.
- */
-function EndingCard({ state, world, now, turns, onBack, onLines, onAgain }: {
-  state: WorldState; world: World; now: string; turns: number; onBack: (steps: number) => void; onLines: () => void; onAgain: () => void;
-}) {
-  const me = state.protagonist;
-  const known = state.people.filter((p) => p.alive !== false).length;
-  const done = state.goals.filter((g) => g.status === "完成").length;
-  return (
-    <div className="ending-card" role="status">
-      <div className="ending-seal" aria-hidden="true"><span>终</span></div>
-      <h2>{me.name}{me.age ? `，年${me.age}` : ""}</h2>
-      <p className="ending-line">卒于{now}。{turns ? `历 ${turns} 回合，` : ""}结识 {known} 人{done ? `，了却 ${done} 桩心愿` : ""}。</p>
-      <p className="muted">这一世到此为止。走过的路都还在，可以回到之前的某一刻重来。</p>
-      <div className="ending-actions">
-        <button className="primary" onClick={() => onBack(1)}>回到上一回合</button>
-        <button onClick={() => onBack(3)}>回到三回合前</button>
-        <button onClick={onLines}>看看别的路线</button>
-        <button className="ghost" onClick={onAgain}>同样设定再开一局</button>
-      </div>
-      <p className="muted" style={{ margin: 0, fontSize: 13 }}>{world.settings.difficulty === "残酷" ? "残酷难度下，重伤可能直接丧命。" : "长按任意一段，也可以回到那时。"}</p>
     </div>
   );
 }

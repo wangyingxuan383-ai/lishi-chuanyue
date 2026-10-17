@@ -483,3 +483,30 @@ button.danger-text { color: var(--loss); }
 .recap-head button { min-height: var(--tap); padding: 0 8px; font-size: 14px; color: var(--muted); font-family: var(--sans); }
 .recap-card p { margin: 4px 0 0; }
 .recap-label { display: inline-block; margin-right: 8px; font-size: 13px; color: var(--muted); font-family: var(--sans); }
+/* ---------- 完整感 (PLAN_V4 direction G): 书摘卡, 这一世小传, 行状, 印谱 ---------- */
+.ending-seal { display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 20px; line-height: 1.05; }
+.ending-seal span { display: block; }
+.ending-life { min-height: var(--tap); padding: 0 18px; font-family: var(--serif); letter-spacing: 0.08em; border-color: var(--accent); color: var(--accent); background: transparent; }
+.share-preview { display: grid; place-items: center; min-height: 240px; max-height: 52vh; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.share-preview img { display: block; max-width: 100%; max-height: calc(52vh - 20px); height: auto; box-shadow: 0 2px 10px var(--shadow); }
+.share-preview.scroll { place-items: center start; }
+.share-preview.scroll img { max-width: none; height: calc(52vh - 20px); max-height: none; }
+.life { display: grid; gap: 12px; }
+.life-head { display: flex; gap: 14px; align-items: center; }
+.life-head h3 { margin: 0; font-family: var(--serif); font-size: 21px; letter-spacing: 0.12em; }
+.life-head .muted { margin: 2px 0 0; font-size: 13px; }
+.life-seal { width: 52px; height: 52px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 4px; background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-weight: 700; font-size: 19px; line-height: 1.05; box-shadow: inset 0 0 0 3px var(--accent), inset 0 0 0 4px color-mix(in srgb, var(--on-accent) 55%, transparent); transform: rotate(-4deg); }
+.life-bio { padding: 12px 14px; border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 3px; background: var(--raised); font-family: var(--serif); font-size: 15px; line-height: 1.9; }
+.life-bio p { margin: 0 0 6px; }
+.life-bio p:last-child { margin: 0; }
+.life-bio b { display: inline-block; margin-right: 8px; padding: 0 4px; font-size: 12px; font-weight: 400; color: var(--accent); border: 1px solid var(--accent); border-radius: 2px; line-height: 1.6; vertical-align: 2px; }
+.life .section-title { margin: 6px 0 0; }
+.life-stats .value { font-size: 15px; }
+.seal-book { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 8px; }
+.seal-stamp { display: grid; justify-items: center; gap: 4px; text-align: center; }
+.seal-stamp .stamp { width: 48px; height: 48px; display: grid; grid-template-columns: 1fr 1fr; grid-auto-flow: column; grid-template-rows: 1fr 1fr; direction: rtl; place-items: center; padding: 4px; border-radius: 3px; border: 1px dashed var(--line); color: var(--muted); font-family: var(--serif); font-size: 15px; line-height: 1; opacity: 0.7; }
+.seal-stamp.got .stamp { border: none; background: var(--accent); color: var(--on-accent); font-weight: 700; opacity: 1; box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent); }
+.seal-stamp:nth-child(odd).got .stamp { transform: rotate(-3deg); }
+.seal-stamp:nth-child(even).got .stamp { transform: rotate(2deg); }
+.seal-stamp small { font-size: 12px; line-height: 1.4; color: var(--muted); }
+.seal-stamp.got small { color: var(--fg); font-family: var(--serif); }

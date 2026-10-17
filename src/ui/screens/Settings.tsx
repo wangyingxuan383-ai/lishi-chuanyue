@@ -12,6 +12,7 @@ import { REPO_URL, latestRelease, newer, type ReleaseInfo } from "../app/update"
 import { exportWorld } from "../../engine/archive";
 import { PURPOSES, UsageSheet } from "../components/Usage";
 import { Seal } from "../components/Seal";
+import { BackupRestore } from "../components/BackupRestore";
 
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
 type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev";
@@ -292,11 +293,8 @@ function DataPage() {
         </div>
       </div>
       {backups.length > 0 && <details>
-        <summary className="muted">最近的备份（{backups.length} 份）</summary>
-        <div className="stack" style={{ gap: 4, marginTop: 8 }}>
-          {backups.slice(0, 20).map((b) => <div key={b.name} className="item-row"><span>{fmt(b.at)}</span><small>{b.name.includes("-auto.") ? "自动" : "手动"}</small></div>)}
-        </div>
-        <Note>从备份恢复需要用电脑操作，后续版本会加到这里。</Note>
+        <summary className="muted">从备份恢复（{backups.length} 份）</summary>
+        <BackupRestore refresh={backups.length} />
       </details>}
       <h3 className="settings-sub">导出与导入</h3>
       <Note>导出的文件可以在另一台手机或电脑上导入。单个世界在首页的“⋯”菜单里导出。</Note>
