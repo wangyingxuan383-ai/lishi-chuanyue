@@ -1,5 +1,7 @@
 // Automatic player eval, using only the selected dev-secret slot.
 // node_modules/.bin/tsx scripts/eval/autoplay.ts --model fake-normal --slot fake --turns 8
+// Memory probes (R04-T005): --probe-at 60,100,150 asks, out of band and with the
+// next turn's own context, questions written from turns --probe-from 3-20.
 import fs from "node:fs";
 import path from "node:path";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
@@ -29,7 +31,7 @@ const positive = (name: string, fallback: string) => {
 };
 
 type Failure = { reason: string; status?: number };
-type Purpose = "opening" | "player" | "turn" | "extract" | "upkeep";
+type Purpose = "opening" | "player" | "turn" | "extract" | "upkeep" | "probe";
 type Call = {
   turn: number; purpose: Purpose; usage: ChatUsage | null;
   firstTokenMs: number | null; totalMs: number; failure: Failure | null;
@@ -166,6 +168,39 @@ async function main() {
   const game = await Game.open(platform, { slot, url, model, includeUsage: true });
   const entries: Entry[] = [];
   let stopReason = "turns";
+  const probeAt = (arg("probe-at", "") ?? "").split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const [probeFrom, probeTo] = (arg("probe-from", "3-20") ?? "3-20").split("-").map(Number);
+  const probes: { questions: { q: string; a: string }[]; rounds: { turn: number; answers: string[]; promptTokens: number | null }[] } = { questions: [], rounds: [] };
+
+  /** Six fact questions about turns probeFrom..probeTo, with answers taken from the text. */
+  async function writeQuestions(): Promise<void> {
+    const path = (await game.repo.path((await cursor(game.repo, worldId!)).head.id)).filter((n) => n.kind === "turn");
+    const text = path.slice(probeFrom - 1, probeTo).map((n, i) => `第 ${probeFrom + i} 回合\n【玩家】${n.actionText || "（继续）"}\n${n.narrative}`).join("\n\n");
+    begin("probe");
+    const result = await streamChat(platform, {
+      slot, url, model, includeUsage: true, maxTokens: 1500,
+      messages: [
+        { role: "system", content: "你替一部互动小说出记忆测试题。出 6 道事实题，检查读者以后是否还记得这些事：每题只问一件具体、之后不会被剧情改写的事实（人物的名字或身份、钱数、地点、约定或承诺、受的伤、得到或交出的东西），答案能在原文里找到、一两句话说清，不要问感受或推测。只输出 JSON 数组：[{\"q\":\"问题\",\"a\":\"答案\"}]" },
+        { role: "user", content: text },
+      ],
+    }).result;
+    const list = JSON.parse(result.text.slice(result.text.indexOf("["), result.text.lastIndexOf("]") + 1)) as { q?: unknown; a?: unknown }[];
+    probes.questions = list.filter((x) => typeof x.q === "string" && typeof x.a === "string").slice(0, 6).map((x) => ({ q: x.q as string, a: x.a as string }));
+  }
+
+  /** Asks the questions with exactly the context the next turn would get; nothing is saved to the story. */
+  async function askQuestions(): Promise<void> {
+    if (!probes.questions.length) return;
+    const { messages } = await game.previewContext(worldId!);
+    const last = messages[messages.length - 1];
+    const ask = `\n\n【这不是剧情，是一次记忆测试】请只根据上面的前文、前情提要和设定回答下列问题，每题一行，格式“编号. 答案”；不记得就写“不知道”，不要编。\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}`).join("\n")}`;
+    const content = last.content.slice(0, last.content.indexOf("\n\n【玩家行动】")) + ask;
+    begin("probe");
+    const callStart = calls.length;
+    const result = await streamChat(platform, { slot, url, model, includeUsage: true, maxTokens: 800, messages: [...messages.slice(0, -1), { role: "user", content }] }).result;
+    const answers = probes.questions.map((_, i) => result.text.split("\n").map((l) => l.trim()).find((l) => l.startsWith(`${i + 1}.`) || l.startsWith(`${i + 1}、`))?.replace(/^\d+[.、]\s*/, "") ?? "（没有回答）");
+    probes.rounds.push({ turn, answers, promptTokens: calls[callStart]?.usage?.promptTokens ?? null });
+  }
 
   async function capture(mode: ActionMode, action: string, run: (onEvent: (e: TurnEvent) => void) => Promise<unknown>): Promise<Entry> {
     const start = performance.now();
@@ -265,6 +300,11 @@ async function main() {
     consecutiveFailures = entry.failures.length ? consecutiveFailures + 1 : 0;
     if (calls.length >= maxCalls) { stopReason = "max_calls"; break; }
     if (consecutiveFailures >= 3) { stopReason = "three_failures"; break; }
+    if (probeAt.length && turn === probeTo) await writeQuestions().catch(() => console.log("记忆探针出题失败"));
+    if (probeAt.includes(turn)) {
+      await game.settled();
+      await askQuestions().catch(() => console.log(`第 ${turn} 回合记忆探针失败`));
+    }
   }
 
   await game.settled();
@@ -327,9 +367,11 @@ async function main() {
     anachronisms: pack ? { eraId: pack.id, ...frequency(tabooKeywords) } : null,
     clock: { start: opening.clock?.text ?? null, end: entries.at(-1)?.clock?.text ?? null, elapsedMinutes: entries.at(-1)?.clock?.elapsedMinutes ?? null },
     timeMismatches, upkeep,
+    probes: probeAt.length ? { from: `${probeFrom}-${probeTo}`, ...probes } : null,
+    tokenCurve: entries.filter((e) => e.turn % 10 === 0).map((e) => ({ turn: e.turn, promptTokens: e.usage?.promptTokens ?? null })),
     latencyMs: { firstToken: latency(entries.map((e) => e.firstTokenMs)), total: latency(entries.filter((e) => e.calls.some((c) => c.purpose === "turn")).map((e) => e.totalMs)) },
     calls: { total: calls.length, byPurpose: counts(calls.map((c) => c.purpose)), failuresByReason: counts(calls.filter((c) => c.failure).map((c) => c.failure!.status ? `${c.failure!.reason}:${c.failure!.status}` : c.failure!.reason)) },
-    tokens: { ...tokens(calls), byPurpose: Object.fromEntries((["opening", "player", "turn", "extract", "upkeep"] as Purpose[]).map((p) => [p, tokens(calls.filter((c) => c.purpose === p))])) },
+    tokens: { ...tokens(calls), byPurpose: Object.fromEntries((["opening", "player", "turn", "extract", "upkeep", "probe"] as Purpose[]).map((p) => [p, tokens(calls.filter((c) => c.purpose === p))])) },
     notes: [
       "回合指标不含开场；调用和 token 合计含开场、玩家、主模型和补记。缺失 usage 不估算。",
       "首字为 game.play 到首个正文事件；总耗时含补记，不含玩家生成；p90 用最近秩，字数为不含空白的 Unicode 字符数。",
@@ -345,7 +387,7 @@ async function main() {
   const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
-  fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n`, "utf8");
+  fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n${probes.questions.length ? `\n## 记忆探针（第 ${probeFrom}～${probeTo} 回合出题）\n\n${probes.questions.map((x, i) => `${i + 1}. ${x.q}\n   标准答案：${x.a}${probes.rounds.map((r) => `\n   第 ${r.turn} 回合：${r.answers[i]}`).join("")}`).join("\n")}\n` : ""}`, "utf8");
   const { opening: _opening, entries: _entries, ...totals } = summary;
   console.log(JSON.stringify(totals, null, 2));
   console.log(`结果：${path.relative(ROOT, out)}`);

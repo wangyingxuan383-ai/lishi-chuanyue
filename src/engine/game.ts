@@ -38,6 +38,7 @@ export interface LlmConfig {
 
 /** The next turn's request as the context viewer shows it (R04-T004). */
 export interface ContextPreview {
+  messages: ChatMessage[];
   layers: ContextLayer[];
   chars: number;
   budgetChars: number;
@@ -623,8 +624,8 @@ export class Game {
   async previewContext(worldId: string): Promise<ContextPreview> {
     const head = (await tree.cursor(this.repo, worldId)).head;
     const ratio = await this.tokenRatio();
-    const { layers, chars, budgetChars } = buildTurnContext(await this.turnInput(worldId, head, { mode: "do", text: "（下一回合的行动）" }));
-    return { layers, chars, budgetChars, ratio: ratio.value, calibrated: ratio.calibrated };
+    const { messages, layers, chars, budgetChars } = buildTurnContext(await this.turnInput(worldId, head, { mode: "do", text: "（下一回合的行动）" }));
+    return { messages, layers, chars, budgetChars, ratio: ratio.value, calibrated: ratio.calibrated };
   }
 
   /**
