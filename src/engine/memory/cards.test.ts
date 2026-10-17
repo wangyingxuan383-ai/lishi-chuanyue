@@ -31,6 +31,13 @@ describe("cards in context", () => {
     expect(activeCardLines(world(), "风很大")).toEqual([]);
   });
 
+  it("brings in a card the action describes without its exact name, after the named ones", () => {
+    const s = world();
+    s.cards.push({ id: "c4", kind: "物品", name: "乌木包银鹰牌", keys: [], content: "恶少年头目的信物" });
+    expect(activeCardLines(s, "他拿出玉玺", undefined, "那块刻着鹰隼的乌木包银腰牌是谁的")).toEqual(["【物品】玉玺：传国玉玺", "【物品】乌木包银鹰牌：恶少年头目的信物"]);
+    expect(activeCardLines(s, "风很大", undefined, "")).toEqual([]);
+  });
+
   it("puts the current place first and skips places without a description", () => {
     const s = world();
     s.placeId = "p1";

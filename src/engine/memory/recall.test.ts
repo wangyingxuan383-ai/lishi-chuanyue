@@ -33,4 +33,22 @@ describe("相关旧事", () => {
     expect(recallBlock(world(), "去找赵四", [])).toBe("");
     expect(recallBlock(world(), "去找赵四", older, 10)).toBe("");
   });
+
+  it("brings back what the player describes without naming it, before the names in play", () => {
+    const older = [
+      { node: node("a", "你醒在破庙。"), turn: 0 },
+      { node: node("b", "趁赵四不注意，你把两封私信塞进贴身皮甲的夹层里。马车走远了。"), turn: 18 },
+      { node: node("c", "赵四在西市喝酒。"), turn: 30 },
+    ];
+    const block = recallBlock(world(), "把皮甲夹层里的东西给赵四看", older, 900, "把皮甲夹层里的东西给赵四看");
+    const lines = block.split("\n").filter((l) => l.startsWith("- "));
+    expect(lines[0]).toBe("- 第 18 回合：趁赵四不注意，你把两封私信塞进贴身皮甲的夹层里。");
+    expect(lines.filter((l) => l.includes("塞进贴身皮甲"))).toHaveLength(1);
+    expect(recallBlock(world(), "", older, 900, "")).not.toContain("皮甲");
+  });
+
+  it("never brings back context the model once copied into a passage", () => {
+    const older = [{ node: node("a", "赵四守在门口。\n\n【当前】天宝七载 冬月 · 赵四在门口"), turn: 3 }];
+    expect(recallBlock(world(), "去找赵四", older, 900, "去找赵四守门")).not.toContain("【当前】");
+  });
 });

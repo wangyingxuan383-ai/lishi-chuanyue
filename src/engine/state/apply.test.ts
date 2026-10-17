@@ -306,6 +306,20 @@ describe("people edits", () => {
     expect(apply(r.state, { people: [{ name: "刘管事", attitude: "亲近" }] }).state.people).toHaveLength(1);
   });
 
+  it("keeps a person's first notes as 来历 when the story replaces them", () => {
+    const s = apply(sampleState(), { people: [{ name: "葛敬之", role: "生药铺掌柜", note: "早年受主角相救，知恩图报" }] }).state;
+    expect(s.people[0].origin).toBeUndefined();
+    const later = apply(s, { people: [{ name: "葛敬之", note: "暗中送药送粮" }] }).state;
+    expect(later.people[0]).toMatchObject({ origin: "早年受主角相救，知恩图报", notes: "暗中送药送粮" });
+    const again = apply(later, { people: [{ name: "葛敬之", note: "代传密信" }] }).state;
+    expect(again.people[0]).toMatchObject({ origin: "早年受主角相救，知恩图报", notes: "代传密信" });
+    // The player edits both, or clears the 来历.
+    const id = again.people[0].id;
+    expect(edit(again, { people: [{ id, name: "葛敬之", origin: "主角的表兄", note: "在药铺" }] }).state.people[0]).toMatchObject({ origin: "主角的表兄", notes: "在药铺" });
+    expect(edit(again, { people: [{ id, name: "葛敬之", origin: "" }] }).state.people[0].origin).toBeUndefined();
+    expect(apply(sampleState(), { people: [{ name: "周氏", note: "发妻", origin: "同乡" }] }).state.people[0].origin).toBe("同乡");
+  });
+
   it("removes a person by id and remembers the name", () => {
     const s = met();
     const r = edit(s, { people: [{ id: s.people[0].id, op: "remove", name: "货栈管事" }, { id: "nobody", name: "无名氏" }] });

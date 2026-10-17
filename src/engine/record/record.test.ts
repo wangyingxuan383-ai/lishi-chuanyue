@@ -53,6 +53,23 @@ describe("RecordSplitter", () => {
     expect(r.recordText).toBeNull();
   });
 
+  it.each([1, 3, 1000])("cuts context the model copied after the story, chunk size %i", (size) => {
+    const echo = "\n\n【当前】天宝七载 冬月十七 · 西市\n可用的钱：300 文";
+    const r = stream(`${NARRATIVE}${echo}\n${RECORD}`, size);
+    expect(r.shown.trim()).toBe(NARRATIVE);
+    expect(r.narrative).toBe(NARRATIVE);
+    expect(parseRecord(r.recordText).record?.money).toBe(-2);
+    const bare = stream(`${NARRATIVE}${echo}`, size);
+    expect(bare.narrative).toBe(NARRATIVE);
+    expect(bare.shown.trim()).toBe(NARRATIVE);
+  });
+
+  it("keeps a bracket in the story that is not one of the request's sections", () => {
+    const r = stream("门上贴着告示：\n【告示】宵禁之后不得出坊。", 2);
+    expect(r.narrative).toContain("【告示】宵禁之后不得出坊。");
+    expect(r.shown).toContain("【告示】");
+  });
+
   it("reports a missing record", () => {
     const r = stream(NARRATIVE, 4);
     expect(parseRecord(r.recordText)).toEqual({ record: null, issues: ["没有记录块"] });

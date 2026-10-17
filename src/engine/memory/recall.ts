@@ -1,10 +1,17 @@
 // 【相关旧事】 (R04 follow-up to eval F): when a person, card, place or item that
 // is in play right now was talked about in turns that have left the raw-text
 // window, the sentences that mention it come back — its first appearance and
-// its latest one. Plain substring matching on names and aliases; no model call.
+// its latest one. After eval H, what the player wrote this turn is matched
+// against those turns too, so a thing described rather than named ("皮甲里那两
+// 封信") still finds where it happened. No model call.
 import type { StoryNode, WorldState } from "../types";
+import { bestMatches, clausesOf, excerpt, pairWeights, pairsOf, type Passage } from "./match";
 
-export const RECALL_BUDGET = 900;
+export const RECALL_BUDGET = 1200;
+/** Of the budget, what the sentences matching the player's words may take; the names in play get the rest. */
+const QUERY_SHARE = 0.7;
+/** Sentences matching what the player wrote, at most, shared among its parts (two each at least). */
+const QUERY_LINES = 6;
 /** Snippets per name: where it first appeared and where it last did. */
 const PER_NAME = 2;
 const SENTENCE = /[^。！？\n]*[。！？]?[”」』]?/g;
@@ -24,6 +31,29 @@ export function namesInPlay(state: WorldState, recent: string): { name: string; 
     .map(({ name, alias }) => ({ name, alias }));
 }
 
+// Sentences with 【…】 are context the model once copied into a passage, not story.
+const sentencesOf = (text: string) => (text.replace(/\s+/g, "").match(SENTENCE) ?? []).filter((s) => s.length >= 6 && !s.includes("【"));
+
+/**
+ * Old sentences that match each part of what the player wrote, taken in turn
+ * (the first match of every part, then the second), oldest turns allowed.
+ */
+function querySentences(query: string, older: { node: StoryNode; turn: number }[]): { turn: number; source: string; text: string }[] {
+  const clauses = clausesOf(query);
+  if (!clauses.length) return [];
+  const weights = pairWeights(clauses.join("\n"), older.map(({ node }) => node.narrative));
+  const wanted = [...weights.keys()];
+  // Only turns sharing at least two of the query's pairs are split into sentences.
+  const passages: Passage[] = older
+    .filter(({ node }) => wanted.filter((p) => node.narrative.includes(p)).length >= 2)
+    .flatMap(({ node, turn }) => sentencesOf(node.narrative).map((text) => ({ text, at: turn })));
+  const each = Math.max(2, Math.ceil(QUERY_LINES / clauses.length));
+  const lists = clauses.map((clause) => bestMatches(clause, passages, weights, each).map((p) => ({ turn: p.at, source: p.text, text: excerpt(p.text, clause, 70) })));
+  const out: { turn: number; source: string; text: string }[] = [];
+  for (let i = 0; i < each; i++) for (const list of lists) if (list[i] && !out.some((o) => o.source === list[i].source)) out.push(list[i]);
+  return out;
+}
+
 /** The sentence around a word, trimmed to a readable length. */
 function sentenceWith(text: string, word: string): string | null {
   for (const s of text.replace(/\s+/g, "").match(SENTENCE) ?? []) {
@@ -33,15 +63,26 @@ function sentenceWith(text: string, word: string): string | null {
 }
 
 /**
- * Old sentences about the names in play, from turns outside the window
- * (`older`, oldest first, each with its turn number). Budgeted; the names the
- * recent text mentions most recently come first.
+ * Old sentences from turns outside the window (`older`, oldest first, each
+ * with its turn number): first those matching what the player wrote this turn
+ * (`query`), then those about the names in play, the most recently mentioned
+ * first. Budgeted.
  */
-export function recallBlock(state: WorldState, recent: string, older: { node: StoryNode; turn: number }[], budget = RECALL_BUDGET): string {
+export function recallBlock(state: WorldState, recent: string, older: { node: StoryNode; turn: number }[], budget = RECALL_BUDGET, query = ""): string {
   if (!older.length) return "";
   const lines: string[] = [];
   const seen = new Set<string>();
   let used = 0;
+  const label = (turn: number) => (turn === 0 ? "开场" : `第 ${turn} 回合`);
+  if (pairsOf(query).length >= 2) {
+    for (const { turn, source, text } of querySentences(query, older)) {
+      const line = `- ${label(turn)}：${text}`;
+      if (used + line.length > budget * QUERY_SHARE) break;
+      seen.add(source);
+      lines.push(line);
+      used += line.length;
+    }
+  }
   for (const { name, alias } of namesInPlay(state, recent)) {
     const words = [name, ...alias].filter((w) => w.length >= 2);
     const hits = older.filter(({ node }) => words.some((w) => node.narrative.includes(w)));
@@ -49,8 +90,8 @@ export function recallBlock(state: WorldState, recent: string, older: { node: St
     for (const { node, turn } of picks) {
       const word = words.find((w) => node.narrative.includes(w))!;
       const sentence = sentenceWith(node.narrative, word);
-      if (!sentence || seen.has(sentence)) continue;
-      const line = `- ${turn === 0 ? "开场" : `第 ${turn} 回合`}（${name}）：${sentence}`;
+      if (!sentence || sentence.includes("【") || seen.has(sentence) || [...seen].some((s) => s.startsWith(sentence.replace(/…$/, "")))) continue;
+      const line = `- ${label(turn)}（${name}）：${sentence}`;
       if (used + line.length > budget) return lines.length ? `\n【相关旧事】（早先的剧情里和眼下有关的句子）\n${lines.join("\n")}` : "";
       seen.add(sentence);
       lines.push(line);

@@ -34,7 +34,14 @@ export interface Person {
   role: string;
   attitude: Attitude;
   alive: boolean;
+  /** The latest news of this person (近况); each turn's record replaces it. */
   notes: string;
+  /**
+   * 来历: who they are to the protagonist, kept when later notes replace the
+   * first one (eval H: a backstory like “早年受主角相救” was overwritten by
+   * “暗中送药送粮” and forgotten). Absent until the notes first change.
+   */
+  origin?: string;
   lastSeenMinute: number | null;
 }
 

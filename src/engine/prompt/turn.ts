@@ -14,7 +14,7 @@ import { worldBlock } from "../timeline";
 import { tabooReminder, type TabooHit } from "../era/taboo";
 import { RECALL_BUDGET, recallBlock } from "../memory/recall";
 
-export const PROMPT_VERSION = "turn-12";
+export const PROMPT_VERSION = "turn-13";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -110,6 +110,13 @@ const level = (n: number, words: string[]) => words[Math.min(words.length - 1, M
 /** People listed with their role and attitude; beyond this, names only. */
 const PEOPLE_LINES = 30;
 
+/** 来历 and 近况 of someone in play. */
+function personNotes(p: WorldState["people"][number]): string {
+  const origin = p.origin && p.origin !== p.notes ? `；来历：${p.origin}` : "";
+  const notes = p.notes ? `；${origin ? "近况：" : ""}${p.notes}` : "";
+  return origin + notes;
+}
+
 /**
  * The 【当前】 block. `present` (person ids mentioned in the recent text) puts
  * those people first with their notes (R04-T001); without it everyone's notes
@@ -127,7 +134,7 @@ export function renderState(state: WorldState, era: EraContext, present?: Set<st
     : state.people;
   const rest = ordered.slice(PEOPLE_LINES);
   const people = [
-    ...ordered.slice(0, PEOPLE_LINES).map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${p.notes && here(p.id) ? `；${p.notes}` : ""}`),
+    ...ordered.slice(0, PEOPLE_LINES).map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${here(p.id) ? personNotes(p) : ""}`),
     ...(rest.length ? [`另有：${rest.map((p) => `${p.name}${p.alive ? "" : "（已死）"}`).join("、")}`] : []),
   ].join("\n") || "无";
   const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `【${g.kind}】${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
@@ -261,7 +268,9 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const target = input.budgetChars ?? DEFAULT_BUDGET_CHARS;
   const hardCap = Math.round((target * 7) / 6);
   const chapters = input.chapters ?? [];
-  const allCards = activeCardLines(input.state, recent);
+  // What the player wrote this turn also finds cards and old sentences it describes without the exact name.
+  const query = input.mode === "continue" || input.mode === "skip" ? "" : [input.text, input.directorNote ?? ""].join("\n");
+  const allCards = activeCardLines(input.state, recent, undefined, query);
   let cardLines = allCards;
   const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + notes.length + action.length;
   // Turns that left the window, numbered from the opening (0), for 【相关旧事】.
@@ -271,11 +280,11 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const reserve = (chapters.length ? RECAP_BUDGET : 0) + (story.length > 3 ? RECALL_BUDGET : 0);
   let window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - reserve);
   let recap = recapBlock(chapters, (id) => window.ids.has(id));
-  let recall = recallBlock(input.state, recent, older(window.ids));
+  let recall = recallBlock(input.state, recent, older(window.ids), RECALL_BUDGET, query);
   if (reserve) {
     window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - recap.length - recall.length);
     recap = recapBlock(chapters, (id) => window.ids.has(id));
-    recall = recallBlock(input.state, recent, older(window.ids));
+    recall = recallBlock(input.state, recent, older(window.ids), RECALL_BUDGET, query);
   }
   const historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
   const total = () => fixed + cardsBlock(cardLines).length + recap.length + recall.length + historyChars;

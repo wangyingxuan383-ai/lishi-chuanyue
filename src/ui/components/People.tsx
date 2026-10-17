@@ -21,6 +21,7 @@ function Editor({ person, state, era, onClose, onSave }: {
   const [role, setRole] = useState(person?.role ?? "");
   const [attitude, setAttitude] = useState<Attitude>(person?.attitude ?? "一般");
   const [notes, setNotes] = useState(person?.notes ?? "");
+  const [origin, setOrigin] = useState(person?.origin ?? "");
   const [alive, setAlive] = useState(person?.alive ?? true);
   const [saving, setSaving] = useState(false);
   const clean = name.trim();
@@ -33,7 +34,7 @@ function Editor({ person, state, era, onClose, onSave }: {
   };
   const save = () => {
     if (!clean || clash) return;
-    const fields = { name: clean, aliases: splitNames(aliases), role: role.trim(), attitude, note: notes.trim(), alive };
+    const fields = { name: clean, aliases: splitNames(aliases), role: role.trim(), attitude, note: notes.trim(), origin: origin.trim(), alive };
     void run({ people: [person ? { id: person.id, ...fields } : fields] }, person ? `修改人物：${clean}` : `添加人物：${clean}`);
   };
   const remove = () => {
@@ -51,9 +52,13 @@ function Editor({ person, state, era, onClose, onSave }: {
         <label>对你的态度
           <select value={attitude} onChange={(e) => setAttitude(e.target.value as Attitude)}>{ATTITUDES.map((a) => <option key={a}>{a}</option>)}</select>
         </label>
-        <label>备注（这个人出场或被提到时 AI 会看到）
-          <textarea rows={4} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="来历、和你的过节、答应过的事……" />
+        <label>来历（和你的渊源，一直保留）
+          <textarea rows={2} value={origin} onChange={(e) => setOrigin(e.target.value)} placeholder="如：早年受你相救，知恩图报" />
         </label>
+        <label>近况（随剧情更新）
+          <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="和你的过节、答应过的事……" />
+        </label>
+        <p className="muted" style={{ margin: 0 }}>这个人出场或被提到时，AI 会看到来历和近况。</p>
         <label className="row"><input type="checkbox" style={{ width: 20, minHeight: 20 }} checked={!alive} onChange={(e) => setAlive(!e.target.checked)} />已故</label>
         {clash && <p className="notice" style={{ margin: 0 }}>人物表里已经有“{clash.name}”了，点开它修改即可。</p>}
         <div className="row">

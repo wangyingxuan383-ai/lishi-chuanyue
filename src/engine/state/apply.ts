@@ -23,7 +23,7 @@ export interface TurnRecord {
   setStats?: { money?: number; health?: number; energy?: number; fame?: number };
   items?: { name: string; delta: number | string; place?: string | null; unit?: string }[] | null;
   /** By name from the model; panel edits pass the id (and may rename, replace aliases or remove). */
-  people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; alive?: boolean; aliases?: string[] }[] | null;
+  people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; origin?: string; alive?: boolean; aliases?: string[] }[] | null;
   status?: { op: string; name: string; detail?: string }[] | null;
   goals?: { op: string; name: string; detail?: string; kind?: string; id?: string }[] | null;
   log?: string | null;
@@ -115,6 +115,15 @@ function attitudeOf(text: string | undefined): Attitude | null {
 }
 
 const clamp = (n: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, n));
+
+/** New notes from the story; the first notes this person had stay as their 来历. */
+function renote(person: Person, note: string): void {
+  const next = note.trim();
+  if (next === person.notes) return;
+  // An empty note clears the latest news; the 来历 stays.
+  if (next && !person.origin && person.notes.trim()) person.origin = person.notes.trim();
+  person.notes = next;
+}
 
 export function applyRecord(
   before: WorldState,
@@ -296,6 +305,10 @@ export function applyRecord(
       person.aliases = cleanNames(aliases, person.name);
       if (raw.role !== undefined) person.role = raw.role.trim();
       if (raw.note !== undefined) person.notes = raw.note.trim();
+      if (raw.origin !== undefined) {
+        if (raw.origin.trim()) person.origin = raw.origin.trim();
+        else delete person.origin;
+      }
       const attitude = attitudeOf(raw.attitude);
       if (attitude) person.attitude = attitude;
       if (raw.alive !== undefined) person.alive = raw.alive;
@@ -310,6 +323,7 @@ export function applyRecord(
       const person: Person = {
         id: newId(), name: raw.name, aliases: raw.aliases ?? [], role: raw.role ?? "",
         attitude: attitudeOf(raw.attitude) ?? "一般", alive: raw.alive !== false, notes: raw.note ?? "", lastSeenMinute: now(),
+        ...(raw.origin?.trim() ? { origin: raw.origin.trim() } : {}),
       };
       s.people.push(person);
       chips.push({ text: `结识 ${person.name}`, tone: "info" });
@@ -326,7 +340,7 @@ export function applyRecord(
       } else if (!existing.aliases.includes(raw.name)) existing.aliases.push(raw.name);
     }
     if (raw.role) existing.role = raw.role;
-    if (raw.note !== undefined) existing.notes = raw.note;
+    if (raw.note !== undefined) renote(existing, raw.note);
     // Panel edits do not count as meeting someone.
     if (opts?.advanceTime !== false) existing.lastSeenMinute = now();
     const attitude = attitudeOf(raw.attitude);

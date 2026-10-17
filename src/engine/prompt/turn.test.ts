@@ -30,6 +30,15 @@ describe("people in the turn prompt", () => {
     ]);
   });
 
+  it("shows the 来历 of someone in play before their latest notes", () => {
+    const text = userPrompt([
+      person("葛敬之", "暗中送药送粮", 30, { origin: "早年受主角相救，知恩图报" }),
+      person("周氏", "发妻", 20, { origin: "发妻" }),
+    ], "葛敬之和周氏都在药铺。");
+    expect(text).toContain("葛敬之：坊里的人，对主角一般；来历：早年受主角相救，知恩图报；近况：暗中送药送粮");
+    expect(text).toContain("周氏：坊里的人，对主角一般；发妻");
+  });
+
   it("lists names only beyond thirty people", () => {
     const people = Array.from({ length: 33 }, (_, i) => person(`人物${i + 1}号`, "", i));
     const text = userPrompt(people, "街上人来人往。");

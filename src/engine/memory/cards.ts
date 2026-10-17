@@ -1,8 +1,10 @@
 // The 设定集 in context (PLAN §4.14, §5.3 layers 2 and 6, D121): the era
 // card goes with every turn; places and the other cards come in when their
 // name or an alias appears in recent text, most recently mentioned first,
-// within a character budget.
+// or when the player's action describes them without the exact name (after
+// eval H), within a character budget.
 import type { Card, Place, WorldState } from "../types";
+import { describes } from "./match";
 
 /** Characters of the era card sent to the model (≈1k tokens for Chinese). */
 export const ERA_CARD_LIMIT = 1000;
@@ -62,9 +64,10 @@ function shadowed(text: string, at: number, term: string, longer: string[]): boo
 /**
  * Lines for the triggered cards: the current place first (when it has a
  * description), then places and cards mentioned in `recent`, newest mention
- * first, as long as they fit the budget.
+ * first, then those the player's `action` describes without naming them
+ * ("乌木包银腰牌" for 乌木包银鹰牌), as long as they fit the budget.
  */
-export function activeCardLines(state: WorldState, recent: string, budget = CARD_BUDGET): string[] {
+export function activeCardLines(state: WorldState, recent: string, budget = CARD_BUDGET, action = ""): string[] {
   const entries: (Entry & { id: string })[] = [
     ...state.places.filter((p) => p.description.trim()).map((p) => ({ id: p.id, terms: termsOf(p.name, p.aliases ?? []), line: placeLine(p) })),
     ...state.cards.filter((c) => c.kind !== "时代" && c.content.trim()).map((c) => ({ id: c.id, terms: termsOf(c.name, c.keys), line: cardLine(c) })),
@@ -78,6 +81,14 @@ export function activeCardLines(state: WorldState, recent: string, budget = CARD
     .filter((m) => m.at >= 0)
     .sort((a, b) => b.at - a.at);
   ordered.push(...mentioned.map((m) => m.e));
+  if (action) {
+    const described = entries
+      .filter((e) => !ordered.includes(e))
+      .map((e) => ({ e, score: Math.max(0, ...e.terms.map((t) => describes(action, t))) }))
+      .filter((d) => d.score > 0)
+      .sort((a, b) => b.score - a.score);
+    ordered.push(...described.map((d) => d.e));
+  }
   const lines: string[] = [];
   let used = 0;
   for (const entry of ordered) {

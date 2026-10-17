@@ -167,7 +167,8 @@ check("panel lists people", panelText.includes("货栈管事"));
 // 人物志: open someone, edit them, and add a person by hand.
 await page.locator(".codex-item", { hasText: "货栈管事" }).click();
 await page.getByLabel("身份", { exact: true }).fill("西市货栈的管事，嘴碎");
-await page.getByLabel(/^备注/).fill("主角欠他三十文");
+await page.getByLabel(/^来历/).fill("主角落难时收留过他");
+await page.getByLabel(/^近况/).fill("主角欠他三十文");
 await page.waitForTimeout(400);
 await shot("06p-person");
 await page.getByRole("button", { name: "保存", exact: true }).click();
@@ -182,6 +183,13 @@ await page.locator(".codex-item", { hasText: "孙小二" }).waitFor();
 await page.waitForTimeout(400);
 await shot("06q-people");
 check("people records can be edited and added", (await page.textContent(".panel")).includes("主角欠他三十文"));
+check("a person keeps a 来历 apart from the latest news", await page.evaluate(async () => {
+  const { game } = window.__lishi;
+  const world = (await game.repo.listWorlds())[0];
+  const line = await game.repo.getLine(world.currentLineId);
+  const person = (await game.repo.getState(line.nodeId)).people.find((p) => p.name === "货栈管事");
+  return person?.origin === "主角落难时收留过他" && person.notes === "主角欠他三十文";
+}));
 await page.getByRole("tab", { name: /行囊/ }).click();
 check("panel lists items", (await page.textContent(".panel")).includes("旧书"));
 await shot("06-panel");
