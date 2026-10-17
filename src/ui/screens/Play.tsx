@@ -13,6 +13,8 @@ import { BookmarkSheet, LinesSheet } from "../components/Lines";
 import { Panel } from "../components/Panel";
 import { RulesSheet } from "../components/RulesSheet";
 import { MenuSheet, Sheet } from "../components/Sheet";
+import { RecapCard, useRecap } from "../components/Recap";
+import { TocSheet } from "../components/Toc";
 import { StoryText } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
 import { useLongPress } from "../components/useLongPress";
@@ -109,7 +111,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | "toc" | null>(null);
   const [panel, setPanel] = useState(false);
   const wide = useWide();
   const mouse = useMouse();
@@ -127,6 +129,16 @@ export default function Play({ worldId }: { worldId: string }) {
   const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const era = eraContext(world?.eraId ?? null, state);
   const turn = [...nodes].reverse().find((n) => n.kind !== "edit");
+  // 前情提要: back after more than six hours, a card at the bottom of the story (direction G).
+  const [recap, closeRecap] = useRecap(worldId, world?.playedAt ?? null, cursor?.head.id ?? null, state);
+  useEffect(() => { if (gen) closeRecap(); }, [!!gen]);
+  // The recap sits under the last passage: bring it into view rather than an old reading spot.
+  useEffect(() => {
+    if (!recap) return;
+    follow.current = true;
+    setFollowing(true);
+    requestAnimationFrame(() => { const el = scroller.current; if (el) el.scrollTop = el.scrollHeight; });
+  }, [recap]);
 
   const refresh = useCallback(async (keepLimit = limit) => {
     const w = await game.repo.getWorld(worldId);
@@ -200,7 +212,7 @@ export default function Play({ worldId }: { worldId: string }) {
       if (target && el) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top;
       restoreReading.current = null;
     } else if (follow.current) toBottom();
-  }, [nodes, gen?.text, gen?.phase, notice]);
+  }, [nodes, gen?.text, gen?.phase, notice, recap]);
 
   // Page came back from the background: replay what the stream cached meanwhile.
   useEffect(() => {
@@ -387,6 +399,34 @@ export default function Play({ worldId }: { worldId: string }) {
     requestAnimationFrame(() => { el.scrollTop += el.scrollHeight - before; });
   };
 
+  /** Scrolls the story to a passage on the current path, loading earlier pages when it is not shown yet (目录, search). */
+  const scrollToNode = async (nodeId: string) => {
+    const find = () => scroller.current?.querySelector<HTMLElement>(`.turn[data-node-id="${nodeId}"]`) ?? null;
+    const flash = (target: HTMLElement) => {
+      target.classList.remove("toc-flash");
+      void target.offsetWidth;
+      target.classList.add("toc-flash");
+      setTimeout(() => target.classList.remove("toc-flash"), 1800);
+    };
+    follow.current = false;
+    setFollowing(false);
+    const shownNow = find();
+    if (shownNow && scroller.current) {
+      scroller.current.scrollTop += shownNow.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top - 8;
+      flash(shownNow);
+      return;
+    }
+    if (!cursor) return;
+    const path = await game.repo.path(cursor.head.id);
+    const index = path.findIndex((n) => n.id === nodeId);
+    if (index < 0) return;
+    const next = Math.max(limit, Math.ceil((path.length - index) / PAGE) * PAGE);
+    restoreReading.current = nodeId;
+    setLimit(next);
+    await refresh(next);
+    setTimeout(() => { const target = find(); if (target) flash(target); }, 50);
+  };
+
   const updateSettings = async (patch: Partial<World["settings"]>) => {
     if (!world) return;
     const settings = { ...world.settings, ...patch };
@@ -483,6 +523,7 @@ export default function Play({ worldId }: { worldId: string }) {
               onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
               onLines={() => setSheet("lines")}
               onAgain={async () => { const setup = await game.setupOf(worldId); if (!setup) return; await game.repo.setSetting("newgameDraft", fromSetup(setup)); replace({ name: "newgame" }); }} />}
+            {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
           </div>
         </div>
         {!following && <button className="to-bottom" onClick={() => { follow.current = true; setFollowing(true); toBottom(true); }}>回到底部 ↓</button>}
@@ -622,6 +663,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "过些日子", hidden: !!gen, onSelect: () => setSheet("skip") },
             { label: "查一查", hidden: !!gen, onSelect: () => setSheet("ask") },
             { label: "幕后要求", hidden: noteOpen, onSelect: () => setNoteOpen(true) },
+            { label: "目录与搜索", onSelect: () => setSheet("toc") },
             { label: "世界线", onSelect: () => setSheet("lines") },
             { label: "故事设定与要点", onSelect: () => setSheet("story") },
             { label: "本局设置", onSelect: () => setSheet("settings") },
@@ -648,6 +690,9 @@ export default function Play({ worldId }: { worldId: string }) {
         </Sheet>
       )}
       {sheet === "rules" && <RulesSheet state={state} era={era} busy={!!gen} onClose={() => setSheet(null)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
+      {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
+        onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
+        onBookmark={(line) => void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); })} />}
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onChanged={(message) => { void refresh(); toast(message); }} />}
       {bookmark && <BookmarkSheet initial={bookmark.name} onClose={() => setBookmark(null)} onSave={(name) => {
         const node = bookmark.node;
