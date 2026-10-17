@@ -7,7 +7,7 @@ import type { TurnEvent, TurnHandle } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
 import type { Chip } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
-import type { ActionMode, Intensity, StoryNode, World, WorldState } from "../../engine/types";
+import type { ActionMode, Intensity, Pin, StoryNode, World, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
 import { Panel } from "../components/Panel";
 import { RulesSheet } from "../components/RulesSheet";
@@ -39,7 +39,7 @@ function ChipRow({ chips }: { chips: Chip[] }) {
 
 function TurnView({ node, onMenu, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; children?: React.ReactNode }) {
   const press = useLongPress(() => onMenu(node));
-  if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>你修改了：{node.actionText}</div>;
+  if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" ? node.actionText : `你修改了：${node.actionText}`}</div>;
   return (
     <div className="turn" data-node-id={node.id} {...press}>
       {node.kind !== "opening" && node.actionMode === "write" && node.actionText && (
@@ -74,6 +74,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
+  const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
@@ -392,11 +393,26 @@ export default function Play({ worldId }: { worldId: string }) {
           items={[
             { label: "改写这段文字", hidden: menuNode.kind === "edit", onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
             { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue", onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
+            { label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
             { label: "回到这里", hidden: menuNode.id === head.id, onSelect: () => void goBack(menuNode) },
             { label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
             { label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuNode) },
           ]}
         />
+      )}
+      {remember && (
+        <Sheet title="记住这件事" onClose={() => setRemember(null)}>
+          <div className="stack">
+            <p className="muted" style={{ margin: 0 }}>把这段删改成一句要点。AI 之后每一段都会记着它；只在这条路线有效，回到这段之前就不算数。</p>
+            <textarea rows={6} aria-label="要点" value={remember.text} onChange={(e) => setRemember({ ...remember, text: e.target.value })} />
+            {remember.text.length > 120 && <p className="muted" style={{ margin: 0 }}>{remember.text.length} 字，越短越好。</p>}
+            <button className="primary" disabled={!remember.text.trim()} onClick={() => {
+              const { node, text } = remember;
+              setRemember(null);
+              void game.repo.addPin(worldId, node.id, text).then(() => toast("记下了"));
+            }}>记下</button>
+          </div>
+        </Sheet>
       )}
       {editing && (
         <Sheet title={editing.field === "action" ? "改我的行动" : "改写这段文字"} onClose={() => setEditing(null)}>
@@ -458,7 +474,7 @@ export default function Play({ worldId }: { worldId: string }) {
       )}
       {sheet === "rules" && <RulesSheet state={state} era={era} busy={!!gen} onClose={() => setSheet(null)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
-      {sheet === "story" && <StorySheet world={world} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
+      {sheet === "story" && <StorySheet world={world} headId={head.id} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
       {panel && <Panel state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }}
         onOrganize={async (replaceOwnEra) => {
@@ -526,8 +542,11 @@ function LinesSheet({ worldId, current, onClose, onSwitch }: { worldId: string; 
   );
 }
 
-function StorySheet({ world, onSave, onClose }: { world: World; onSave: (p: Partial<World["settings"]>) => void; onClose: () => void }) {
+function StorySheet({ world, headId, onSave, onClose }: { world: World; headId: string; onSave: (p: Partial<World["settings"]>) => void; onClose: () => void }) {
+  const { game } = useApp();
   const s = world.settings;
+  const [pins, setPins] = useState<Pin[]>([]);
+  useEffect(() => { void game.repo.pinsOnPath(world.id, headId).then(setPins); }, [world.id, headId]);
   const [premise, setPremise] = useState(s.premise);
   const [essentials, setEssentials] = useState(s.essentials);
   const [rules, setRules] = useState(s.rules);
@@ -536,7 +555,16 @@ function StorySheet({ world, onSave, onClose }: { world: World; onSave: (p: Part
     <Sheet title="故事设定与要点" onClose={onClose}>
       <div className="stack">
         <label>故事设定（AI 每一段都会参考）<textarea rows={6} value={premise} onChange={(e) => setPremise(e.target.value)} /></label>
-        <label>要点（必须一直记住的事，每行一条）<textarea rows={4} value={essentials} onChange={(e) => setEssentials(e.target.value)} placeholder="比如：王掌柜其实是主角的远房舅舅" /></label>
+        <label>要点（必须一直记住的事，每行一条，所有路线都有效）<textarea rows={4} value={essentials} onChange={(e) => setEssentials(e.target.value)} placeholder="比如：王掌柜其实是主角的远房舅舅" /></label>
+        {pins.length > 0 && <div className="stack" style={{ gap: 4 }}>
+          <span className="muted">从剧情里记下的要点（只在这条路线有效；长按正文选“记住这件事”添加）</span>
+          {pins.map((pin) => (
+            <div className="item-row" key={pin.id}>
+              <div className="grow">{pin.text}</div>
+              <button aria-label={`删除要点：${pin.text}`} onClick={() => void game.repo.deletePin(pin.id).then(() => setPins((list) => list.filter((x) => x.id !== pin.id)))}>删除</button>
+            </div>
+          ))}
+        </div>}
         <label>叙事方针（文风和节奏）<textarea rows={2} value={directive} onChange={(e) => setDirective(e.target.value)} placeholder="比如：节奏快一些，多写市井人物" /></label>
         <label>给 AI 的额外规则<textarea rows={3} value={rules} onChange={(e) => setRules(e.target.value)} placeholder="比如：不要让主角轻易获得权力" /></label>
         <button className="primary" onClick={() => onSave({ premise, essentials, rules, directive })}>保存</button>

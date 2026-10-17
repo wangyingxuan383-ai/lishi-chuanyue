@@ -217,6 +217,30 @@ await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "撤销", exact: true }).click();
 await page.locator(".edit-line", { hasText: "开局日期改为" }).waitFor({ state: "detached" });
 check("rules edit can be undone", (await page.locator(".topbar .subtitle").textContent()) === clockBeforeRules);
+check("AI edits are not shown as the player's", !(await page.locator(".edit-line", { hasText: "AI 整理了设定集" }).textContent()).includes("你修改了"));
+
+// 记住这件事: a passage becomes a 要点 for this route.
+const lastTurn = page.locator(".turn").last();
+await lastTurn.scrollIntoViewIfNeeded();
+const turnBox = await lastTurn.boundingBox();
+await page.mouse.move(turnBox.x + 40, turnBox.y + 20);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+await page.getByRole("button", { name: "记住这件事" }).click();
+await page.getByLabel("要点", { exact: true }).waitFor();
+await page.waitForTimeout(400);
+await shot("06d-remember");
+await page.getByLabel("要点", { exact: true }).fill("漕帮在码头收保护费");
+await page.getByRole("button", { name: "记下", exact: true }).click();
+await page.getByText("记下了").waitFor();
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "故事设定与要点" }).click();
+await page.getByText("漕帮在码头收保护费").waitFor();
+await page.waitForTimeout(400);
+await shot("06e-pins");
+check("remembered passage listed as a 要点", true);
+await page.keyboard.press("Escape");
 
 // Long-press menu → go back to opening.
 const firstTurn = page.locator(".turn").first();
@@ -232,6 +256,11 @@ await shot("07-longpress");
 await page.getByRole("button", { name: "回到这里" }).click();
 await page.getByText(/已回到这里/).waitFor();
 check("go back to opening", (await page.locator(".turn").count()) === 1);
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "故事设定与要点" }).click();
+await page.getByLabel(/^要点/).waitFor();
+check("a 要点 from a later passage is not on the earlier route", (await page.getByText("漕帮在码头收保护费").count()) === 0);
+await page.keyboard.press("Escape");
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "世界线" }).click();
 const lines = await page.locator(".sheet .card").count();

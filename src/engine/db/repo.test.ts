@@ -55,6 +55,24 @@ describe("Repo", () => {
     expect((await repo.getState(parent.id)).protagonist.stats.money).toBe(295);
   });
 
+  it("applies a pin only while its origin is on the path", async () => {
+    const { world, node: root, line } = await repo.createWorld({
+      title: "长安", eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "开场", state: sampleState() },
+    });
+    const a = await repo.appendNode(world.id, line.id, { parentId: root.id, kind: "turn", narrative: "甲", state: sampleState() });
+    const b = await repo.appendNode(world.id, line.id, { parentId: a.id, kind: "turn", narrative: "乙", state: sampleState() });
+    const branch = await repo.appendNode(world.id, line.id, { parentId: root.id, kind: "turn", narrative: "另一条路", state: sampleState() });
+    const pin = await repo.addPin(world.id, a.id, "  王掌柜欠主角一个人情 ");
+    expect(pin.text).toBe("王掌柜欠主角一个人情");
+    expect((await repo.pinsOnPath(world.id, b.id)).map((p) => p.text)).toEqual(["王掌柜欠主角一个人情"]);
+    expect(await repo.pinsOnPath(world.id, a.id)).toHaveLength(1);
+    expect(await repo.pinsOnPath(world.id, root.id)).toEqual([]);
+    expect(await repo.pinsOnPath(world.id, branch.id)).toEqual([]);
+    await repo.deletePin(pin.id);
+    expect(await repo.pinsOnPath(world.id, b.id)).toEqual([]);
+  });
+
   it("rolls back the whole append when one statement fails", async () => {
     const { world, node: root, line } = await repo.createWorld({
       title: "长安", eraId: "tang-748",

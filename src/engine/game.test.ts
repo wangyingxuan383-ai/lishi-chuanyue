@@ -200,9 +200,44 @@ describe("Game", () => {
     expect((await game.repo.getState((await tree.cursor(game.repo, worldId)).head.id)).cards).toEqual([]);
     await game.editState(worldId, { cards: [{ op: "add", kind: "势力", name: "青衣卫", content: "我写的" }] }, "新建势力卡：青衣卫");
     const c = (await game.organize(worldId))!;
-    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：时代卡" });
+    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：时代卡", meta: { by: "AI" } });
     const state = await game.repo.getState(c.head.id);
     expect(state.cards.map((x) => [x.name, x.content])).toEqual([["青衣卫", "我写的"], ["大胤", "时局：太后垂帘。"]]);
+  });
+
+  it("sends pins remembered on the current path as 要点, and the world's 要点 on every path", async () => {
+    const { game, worldId, llm } = await setup([
+      { text: "掌柜松了口。" + RECORD({ choices: ["甲"] }) },
+      { text: "又一回。" + RECORD({ choices: ["乙"] }) },
+      { text: "重说一回。" + RECORD({ choices: ["乙"] }) },
+      { text: "另一条路。" + RECORD({ choices: ["丙"] }) },
+      { text: "回到原路。" + RECORD({ choices: ["丁"] }) },
+    ]);
+    const body = (i: number) => JSON.stringify(llm.calls[i].body);
+    const world = (await game.repo.getWorld(worldId))!;
+    await game.repo.updateSettings(worldId, { ...world.settings, essentials: "崔某怕水" });
+    await play(game, worldId, "求掌柜宽限");
+    const first = await tree.cursor(game.repo, worldId);
+    await game.repo.addPin(worldId, first.head.id, "王掌柜答应宽限三日");
+    await play(game, worldId, "出门");
+    await game.regenerate(worldId, null, () => {}).done;
+    for (const i of [2, 3]) {
+      expect(body(i)).toContain("王掌柜答应宽限三日");
+      expect(body(i)).toContain("崔某怕水");
+    }
+    // Keep this route as a world line, then go back before the pinned passage:
+    // the pin no longer applies, the world's 要点 still does.
+    const kept = await game.repo.createLine(worldId, (await tree.cursor(game.repo, worldId)).head.id, "原来的路", false);
+    const opening = (await game.repo.path(first.head.id))[0];
+    await tree.goBackTo(game.repo, await tree.cursor(game.repo, worldId), opening.id);
+    await play(game, worldId, "换个法子");
+    expect(body(4)).not.toContain("王掌柜答应宽限三日");
+    expect(body(4)).toContain("崔某怕水");
+    // Switching back to the kept route brings the pin back.
+    await tree.switchLine(game.repo, worldId, kept.id);
+    await play(game, worldId, "接着走");
+    expect(body(5)).toContain("王掌柜答应宽限三日");
+    expect(body(5)).toContain("崔某怕水");
   });
 
   it("uses the opening's purse, date and hour", async () => {

@@ -173,6 +173,15 @@ export interface StoryNode {
   createdAt: string;
 }
 
+/** A 要点 remembered from a passage; it applies while its origin is on the current path (D106). */
+export interface Pin {
+  id: string;
+  worldId: string;
+  originNodeId: string;
+  text: string;
+  createdAt: string;
+}
+
 export interface Line {
   id: string;
   worldId: string;

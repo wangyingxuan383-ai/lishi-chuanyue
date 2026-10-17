@@ -126,6 +126,8 @@ export interface TurnPromptInput extends StoryContext {
   notes?: string[];
   /** Regenerate direction, e.g. "写短一点" or "换个结果". */
   rewriteHint?: string | null;
+  /** 要点 remembered from passages on the current path (D106). */
+  pins?: string[];
   /** Rough input budget in characters (≈ tokens for Chinese). */
   budgetChars?: number;
 }
@@ -146,8 +148,8 @@ function historyMessages(history: StoryNode[], budget: number): ChatMessage[] {
   return pairs.flat();
 }
 
-function essentialsBlock(settings: WorldSettings): string {
-  const lines = settings.essentials.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+function essentialsBlock(settings: WorldSettings, pins: string[] = []): string {
+  const lines = [...settings.essentials.split(/\n+/), ...pins].map((l) => l.trim()).filter(Boolean);
   return lines.length ? `\n【要点，必须记住】\n- ${lines.join("\n- ")}` : "";
 }
 
@@ -170,7 +172,7 @@ export function turnMessages(input: TurnPromptInput): ChatMessage[] {
     ...historyMessages(input.history, budget),
     {
       role: "user",
-      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings)}${cardsBlock(input)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
+      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings, input.pins)}${cardsBlock(input)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
     },
   ];
 }

@@ -1,8 +1,8 @@
-// Data access for worlds, nodes, lines and settings. All writes that must
+// Data access for worlds, nodes, lines, pins and settings. All writes that must
 // land together go through one sql.batch call.
 import type { Json, Platform, Row, SqlStatement } from "../../platform";
 import {
-  DEFAULT_SETTINGS, type Line, type StoryNode, type World, type WorldSettings, type WorldState,
+  DEFAULT_SETTINGS, type Line, type Pin, type StoryNode, type World, type WorldSettings, type WorldState,
 } from "../types";
 
 const now = () => new Date().toISOString();
@@ -188,6 +188,32 @@ export class Repo {
   async opening(worldId: string): Promise<StoryNode | null> {
     const rows = await this.q(`SELECT ${NODE_COLUMNS} FROM nodes WHERE world_id = ? AND kind = 'opening' ORDER BY seq LIMIT 1`, [worldId]);
     return rows[0] ? toNode(rows[0]) : null;
+  }
+
+  async addPin(worldId: string, originNodeId: string, text: string): Promise<Pin> {
+    const pin: Pin = { id: newId(), worldId, originNodeId, text: text.trim(), createdAt: now() };
+    await this.q("INSERT INTO pins (id, world_id, origin_node_id, text, created_at) VALUES (?, ?, ?, ?, ?)", [pin.id, worldId, originNodeId, pin.text, pin.createdAt]);
+    return pin;
+  }
+
+  async deletePin(id: string): Promise<void> {
+    await this.q("DELETE FROM pins WHERE id = ?", [id]);
+  }
+
+  /** Pins whose origin is on the path from the root to `nodeId`, oldest first. */
+  async pinsOnPath(worldId: string, nodeId: string): Promise<Pin[]> {
+    const rows = await this.q(
+      `WITH RECURSIVE up(id) AS (
+         SELECT id FROM nodes WHERE id = ?
+         UNION ALL
+         SELECT n.parent_id FROM nodes n JOIN up ON n.id = up.id WHERE n.parent_id IS NOT NULL
+       )
+       SELECT id, world_id, origin_node_id, text, created_at FROM pins
+       WHERE world_id = ? AND origin_node_id IN (SELECT id FROM up)
+       ORDER BY created_at, id`,
+      [nodeId, worldId],
+    );
+    return rows.map((r) => ({ id: r.id as string, worldId: r.world_id as string, originNodeId: r.origin_node_id as string, text: r.text as string, createdAt: r.created_at as string }));
   }
 
   async getState(nodeId: string): Promise<WorldState> {

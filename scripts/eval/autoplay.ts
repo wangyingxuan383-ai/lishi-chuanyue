@@ -5,7 +5,9 @@ import path from "node:path";
 import { Game, type TurnEvent } from "../../src/engine/game.ts";
 import { ChatError, chatCompletionsUrl, parseChunk, streamChat, type ChatUsage } from "../../src/engine/llm/chat.ts";
 import { CLICHES, PROMPT_VERSION } from "../../src/engine/prompt/turn.ts";
-import { eraPack } from "../../src/engine/era/index.ts";
+import { eraContext, eraPack } from "../../src/engine/era/index.ts";
+import { nowOf, timeOfDay } from "../../src/engine/calendar/clock.ts";
+import { formatDate } from "../../src/engine/calendar/date.ts";
 import { cursor } from "../../src/engine/tree.ts";
 import type { ActionMode, StoryNode } from "../../src/engine/types.ts";
 import { TEMPLATES, templateName } from "../../src/content/templates.ts";
@@ -37,7 +39,15 @@ type Entry = {
   firstTokenMs: number | null; totalMs: number; modelTotalMs: number | null;
   usage: ChatUsage | null; status: string | null;
   meta: { extracted: boolean | null; log: string[]; chips: unknown[] };
+  /** The game clock after the turn, as the player sees it in 此时此地. */
+  clock: { text: string; shichen: string; elapsedMinutes: number } | null;
   failures: Failure[]; calls: Call[];
+};
+const BRANCHES = "子丑寅卯辰巳午未申酉戌亥";
+/** Steps between two 时辰 on the 12-hour dial. */
+const shichenGap = (a: string, b: string) => {
+  const d = Math.abs(BRANCHES.indexOf(a) - BRANCHES.indexOf(b));
+  return Math.min(d, 12 - d);
 };
 const serverFailure = (f: Failure) => f.reason === "network" || f.reason === "timeout"
   || f.status === 429 || (f.status !== undefined && f.status >= 500 && f.status < 600);
@@ -156,6 +166,14 @@ async function main() {
     // Assigned by the synchronous event callback above.
     const saved = node as StoryNode | null;
     if (saved?.status === "no_record" && !failures.length) failures.push({ reason: "no_record" });
+    let clock: Entry["clock"] = null;
+    if (saved) {
+      const state = await game.repo.getState(saved.id);
+      const era = eraContext(t!.eraId, state);
+      const now = nowOf(era.clock, state.time.elapsedMinutes);
+      const when = now.date ? formatDate(now.date, era.clock.rules) : `第 ${now.day} 日`;
+      clock = { text: `${when} ${timeOfDay(now)}`, shichen: now.shichen, elapsedMinutes: state.time.elapsedMinutes };
+    }
     return {
       turn, mode, action, narrative: saved?.narrative ?? narrative, firstTokenMs,
       totalMs: performance.now() - start, modelTotalMs: (saved?.meta.totalMs as number) ?? null,
@@ -164,7 +182,7 @@ async function main() {
         extracted: typeof saved?.meta.extracted === "boolean" ? saved.meta.extracted : null,
         log: (saved?.meta.log as string[]) ?? [], chips: (saved?.meta.chips as unknown[]) ?? [],
       },
-      failures, calls: calls.slice(callStart),
+      clock, failures, calls: calls.slice(callStart),
     };
   }
 
@@ -218,7 +236,7 @@ async function main() {
     } catch (error) {
       entry = {
         turn, mode: action.mode, action: action.text, narrative: "", firstTokenMs: null, totalMs: 0, modelTotalMs: null,
-        usage: null, status: null, meta: { extracted: null, log: [], chips: [] }, failures: [fromError(error)], calls: [],
+        usage: null, status: null, meta: { extracted: null, log: [], chips: [] }, clock: null, failures: [fromError(error)], calls: [],
       };
     }
     entry.calls = calls.slice(callStart);
@@ -250,6 +268,19 @@ async function main() {
     const characters = entries.reduce((n, e) => n + [...e.narrative.replace(/\s/g, "")].length, 0);
     return { count, characters, per1000Characters: characters ? count * 1000 / characters : 0, byWord };
   };
+  // 时辰 named in the text that are more than one 时辰 away from the clock at both ends of the turn.
+  const timeMismatches: { turn: number; word: string; clock: string; context: string }[] = [];
+  entries.forEach((e, i) => {
+    const before = i === 0 ? opening.clock : entries[i - 1].clock;
+    if (!e.clock) return;
+    for (const m of e.narrative.matchAll(/([子丑寅卯辰巳午未申酉戌亥])时/g)) {
+      const gap = Math.min(shichenGap(m[1], e.clock.shichen), before ? shichenGap(m[1], before.shichen) : 12);
+      if (gap > 1) timeMismatches.push({
+        turn: e.turn, word: m[0], clock: e.clock.text,
+        context: e.narrative.slice(Math.max(0, m.index! - 16), m.index! + 8).replace(/\s+/g, " "),
+      });
+    }
+  });
   const direct = entries.filter((e) => e.status === "ok" && e.meta.extracted === false).length;
   const summary = {
     model, playerModel, template: templateId, promptVersion: PROMPT_VERSION,
@@ -266,6 +297,8 @@ async function main() {
     correctionsOrDiscards: log.filter((l) => !l.startsWith("新人物")).length,
     newPeople, suspectedDuplicates, cliches: frequency(CLICHES),
     anachronisms: pack ? { eraId: pack.id, ...frequency(tabooKeywords) } : null,
+    clock: { start: opening.clock?.text ?? null, end: entries.at(-1)?.clock?.text ?? null, elapsedMinutes: entries.at(-1)?.clock?.elapsedMinutes ?? null },
+    timeMismatches,
     latencyMs: { firstToken: latency(entries.map((e) => e.firstTokenMs)), total: latency(entries.filter((e) => e.calls.some((c) => c.purpose === "turn")).map((e) => e.totalMs)) },
     calls: { total: calls.length, byPurpose: counts(calls.map((c) => c.purpose)), failuresByReason: counts(calls.filter((c) => c.failure).map((c) => c.failure!.status ? `${c.failure!.reason}:${c.failure!.status}` : c.failure!.reason)) },
     tokens: { ...tokens(calls), byPurpose: Object.fromEntries((["opening", "player", "turn", "extract"] as Purpose[]).map((p) => [p, tokens(calls.filter((c) => c.purpose === p))])) },
@@ -274,13 +307,14 @@ async function main() {
       "首字为 game.play 到首个正文事件；总耗时含补记，不含玩家生成；p90 用最近秩，字数为不含空白的 Unicode 字符数。",
       "directParseRate 严格按 status=ok 且 meta.extracted=false / 所有尝试回合；补记次数以实际调用计，失败补记也计。",
       "疑似重复人物和时代禁词仅为字面筛查；八股词逐词计数，词表重叠可能重复计数。",
+      "时辰不符为字面筛查：正文提到的时辰与本回合前后的游戏时钟都相差一个时辰以上就记一次；约定的时间、规矩里的时间也会被算进去，需要人工复核。",
       "每十回合第十回合继续；每十五回合一次写（与继续重合时提前一回合）；固定四个回合选建议，输出不合规则使用第一个原选项。",
       "达到调用上限后不再发请求；最后一次调用的结果仍会保存。引擎内部重试仅本地重放失败，不再次请求。",
     ],
     opening, entries,
   };
   const labels: Record<ActionMode, string> = { do: "做", say: "说", write: "写", direct: "导演", continue: "继续" };
-  const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
+  const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
   fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}`, "utf8");

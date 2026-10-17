@@ -199,7 +199,7 @@ export class Game {
     });
     const patch = result ? codexPatch(result.text, state, opts) : null;
     await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.llm!.auxModel || this.llm!.model)]);
-    return patch ? this.editState(worldId, patch, codexSummary(patch)) : null;
+    return patch ? this.editState(worldId, patch, codexSummary(patch), "AI") : null;
   }
 
   async createWorld(input: NewWorld, onEvent: (e: TurnEvent) => void): Promise<string | null> {
@@ -340,7 +340,8 @@ export class Game {
 
   // ---------- turns ----------
 
-  async editState(worldId: string, patch: TurnRecord, summary: string): Promise<tree.Cursor> {
+  /** A hidden edit node after the head; `by` marks edits the AI made for the player (organizing). */
+  async editState(worldId: string, patch: TurnRecord, summary: string, by?: "AI"): Promise<tree.Cursor> {
     const c = await tree.cursor(this.repo, worldId);
     const state = await this.repo.getState(c.head.id);
     const world = (await this.repo.getWorld(worldId))!;
@@ -348,7 +349,7 @@ export class Game {
     const applied = applyRecord(state, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock }, { advanceTime: false });
     return tree.append(this.repo, c, {
       kind: "edit", narrative: "", actionText: summary, record: patch, choices: [],
-      state: applied.state, meta: { chips: applied.chips },
+      state: applied.state, meta: { chips: applied.chips, ...(by ? { by } : {}) },
     });
   }
 
@@ -385,9 +386,10 @@ export class Game {
       const state = await this.repo.getState(base.id);
       const era = eraContext(world.eraId, state);
       const history = await this.repo.path(base.id, 40);
+      const pins = (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text);
       const messages = turnMessages({
         era, settings: world.settings, protagonistName: state.protagonist.name, state, history, mode: action.mode, text: action.text,
-        directorNote: action.directorNote, notes: (base.meta.notes as string[] | undefined) ?? [], rewriteHint: hint,
+        directorNote: action.directorNote, notes: (base.meta.notes as string[] | undefined) ?? [], rewriteHint: hint, pins,
       });
 
       const splitter = new RecordSplitter();
@@ -498,7 +500,7 @@ export class Game {
       const era = eraContext(world.eraId, state);
       const base = (node.meta.messages as ChatMessage[] | undefined) ?? turnMessages({
         era, settings: world.settings, protagonistName: state.protagonist.name, state, history: await this.repo.path(node.parentId, 40),
-        mode: node.actionMode ?? "continue", text: node.actionText ?? "",
+        mode: node.actionMode ?? "continue", text: node.actionText ?? "", pins: (await this.repo.pinsOnPath(worldId, node.parentId)).map((p) => p.text),
       });
       const splitter = new RecordSplitter();
       let shown = node.narrative;
