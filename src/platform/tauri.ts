@@ -68,6 +68,8 @@ export async function createTauriPlatform(): Promise<Platform> {
       list: () => call("llm_stream_list"),
       ack: (streamId) => call("llm_stream_ack", { streamId }),
       get: (request) => call("llm_get", request),
+      getPublic: (url, timeoutMs) => call("http_get_public", { url, timeoutMs }),
+      setNetwork: (config) => call("network_set", { config: { proxy: config.proxy, proxyUrl: config.proxyUrl ?? null } }),
     },
     files: {
       exportText: (suggestedName, text) => call("file_export_text", { suggestedName, text }),
@@ -75,6 +77,9 @@ export async function createTauriPlatform(): Promise<Platform> {
     },
     system: {
       requestNotifications: () => call("plugin:notifications|request_notification_permission"),
+      notificationStatus: () => call("plugin:notifications|notification_status"),
+      openSystemSettings: (which) => call(which === "notifications" ? "plugin:notifications|open_notification_settings" : "plugin:notifications|open_app_settings"),
+      openUrl: (url) => call("plugin:notifications|open_url", { url }),
       onBack(handler) {
         backHandlers.push(handler);
         listenBack();

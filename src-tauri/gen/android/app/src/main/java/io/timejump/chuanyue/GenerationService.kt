@@ -1,5 +1,6 @@
 package io.timejump.chuanyue
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,7 +10,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 
 /** Rust-only JNI entry; no mobile plugin command or notification permission prompt. */
@@ -92,7 +95,7 @@ class GenerationService : Service() {
             Notification.Builder(this)
         }
         builder
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_seal)
             .setContentTitle("历史穿越")
             .setContentText("正在写下一段…")
             .setContentIntent(openApp)
@@ -111,9 +114,71 @@ class GenerationService : Service() {
         private const val TAG = "GenerationService"
         private const val CHANNEL_ID = "generation"
         private const val NOTIFICATION_ID = 1001
+        /** Default importance so it shows in the drawer and on the lock screen (the progress channel is silent). */
+        private const val DONE_CHANNEL_ID = "story_ready"
+        private const val DONE_NOTIFICATION_ID = 1002
+        /**
+         * A turn can make two requests (the story, then a short record fill-in);
+         * the service stays up a little after one ends so the second is still
+         * covered in the background (ANDROID_COMPAT F3).
+         */
+        private const val STOP_DELAY_MS = 8000L
         private val lock = Any()
+        private val main = Handler(Looper.getMainLooper())
         private var requested = false
         private var current: GenerationService? = null
+        private var pendingStop: Runnable? = null
+        private var appContext: Context? = null
+
+        /** True when the app is not on screen; then a finished passage is worth a notification. */
+        private fun inBackground(): Boolean {
+            val state = ActivityManager.RunningAppProcessInfo()
+            ActivityManager.getMyMemoryState(state)
+            return state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+        }
+
+        /** "写好了" when a passage finished while the player was away (ANDROID_COMPAT F2). */
+        private fun notifyReady(context: Context) {
+            try {
+                val manager = context.getSystemService(NotificationManager::class.java) ?: return
+                if (!manager.areNotificationsEnabled()) return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    manager.createNotificationChannel(
+                        NotificationChannel(DONE_CHANNEL_ID, "写好了提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                            description = "切到后台时，下一段写好会提醒你"
+                        }
+                    )
+                }
+                val open = PendingIntent.getActivity(
+                    context, 1,
+                    Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, DONE_CHANNEL_ID) else Notification.Builder(context)
+                manager.notify(
+                    DONE_NOTIFICATION_ID,
+                    builder.setSmallIcon(R.drawable.ic_stat_seal)
+                        .setContentTitle("历史穿越")
+                        .setContentText("下一段有结果了，回来看看")
+                        .setContentIntent(open)
+                        .setAutoCancel(true)
+                        .setCategory(Notification.CATEGORY_STATUS)
+                        .build()
+                )
+            } catch (error: Exception) {
+                warn("ready notification", error)
+            }
+        }
+
+        /** Clears the "写好了" notification once the player is back. */
+        @JvmStatic
+        fun clearReady(context: Context) {
+            try {
+                context.getSystemService(NotificationManager::class.java)?.cancel(DONE_NOTIFICATION_ID)
+            } catch (error: Exception) {
+                warn("ready notification removal", error)
+            }
+        }
 
         private fun warn(operation: String, error: Exception) {
             // Log the failure class only; never include platform exception text.
@@ -123,6 +188,11 @@ class GenerationService : Service() {
         @JvmStatic
         fun start(context: Context) {
             synchronized(lock) {
+                pendingStop?.let { main.removeCallbacks(it) }
+                pendingStop = null
+                appContext = context.applicationContext
+                // Already up (a second request of the same turn): nothing to start.
+                if (requested && current != null) return
                 requested = true
                 try {
                     val app = context.applicationContext
@@ -142,16 +212,26 @@ class GenerationService : Service() {
         }
 
         @JvmStatic
-        fun stop(@Suppress("UNUSED_PARAMETER") context: Context) {
+        fun stop(context: Context) {
             synchronized(lock) {
-                requested = false
-                try {
-                    // If onCreate has not run, onStartCommand observes false
-                    // and stops after promotion. Never start a service to stop it.
-                    current?.stopGeneration()
-                } catch (error: Exception) {
-                    warn("stop", error)
+                pendingStop?.let { main.removeCallbacks(it) }
+                val app = context.applicationContext
+                val stop = Runnable {
+                    synchronized(lock) {
+                        pendingStop = null
+                        requested = false
+                        try {
+                            // If onCreate has not run, onStartCommand observes false
+                            // and stops after promotion. Never start a service to stop it.
+                            current?.stopGeneration()
+                        } catch (error: Exception) {
+                            warn("stop", error)
+                        }
+                        if (inBackground()) notifyReady(app)
+                    }
                 }
+                pendingStop = stop
+                main.postDelayed(stop, STOP_DELAY_MS)
             }
         }
     }

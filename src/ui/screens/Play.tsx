@@ -17,6 +17,7 @@ import { StoryText } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
 import { useLongPress } from "../components/useLongPress";
 import { useMouse, useWide } from "../components/useMedia";
+import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 
 const PAGE = 30;
 const MODES: { mode: ActionMode; label: string; placeholder: string }[] = [
@@ -253,15 +254,22 @@ export default function Play({ worldId }: { worldId: string }) {
     }
   };
 
+  // Asked once before the first passage on Android. Closing the sheet is not a no (it asks again next time);
+  // a no is remembered, and Settings shows the state with a way to the system switch (ANDROID_COMPAT F1).
   const beforeGenerating = async (start: () => void) => {
-    if (game.platform.name === "android" && !await game.repo.getSetting("notifAsked", false)) setNotificationStart(() => start);
-    else start();
+    if (game.platform.name !== "android" || await game.repo.getSetting("notifAsked", false)) { start(); return; }
+    const status = await game.platform.system.notificationStatus().catch(() => ({ granted: false, enabled: false }));
+    if (status.enabled) { await game.repo.setSetting("notifAsked", true); start(); return; }
+    setNotificationStart(() => start);
   };
-  const answerNotifications = async (allow: boolean) => {
+  const answerNotifications = async (answer: "allow" | "no" | "later") => {
     const start = notificationStart;
     setNotificationStart(null);
-    await game.repo.setSetting("notifAsked", true);
-    if (allow) await game.platform.system.requestNotifications().catch(() => false);
+    if (answer !== "later") await game.repo.setSetting("notifAsked", true);
+    if (answer === "allow") {
+      const granted = await game.platform.system.requestNotifications().catch(() => false);
+      if (!granted) toast("没有打开通知。以后可以在 设置 → 通知 里打开", { label: "去打开", run: () => void game.platform.system.openSystemSettings("notifications") });
+    }
     start?.();
   };
 
@@ -642,9 +650,9 @@ export default function Play({ worldId }: { worldId: string }) {
       {sheet === "story" && <StorySheet world={world} headId={head.id} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
       {panel && !wide && <Panel {...panelProps} />}
-      {notificationStart && <Sheet title="允许通知吗？" onClose={() => void answerNotifications(false)}>
-        <p>切到后台时，故事会继续写完。允许通知后，写作期间通知栏会显示“正在写下一段…”。</p>
-        <div className="row"><button className="primary" onClick={() => void answerNotifications(true)}>允许</button><button onClick={() => void answerNotifications(false)}>不用了</button></div>
+      {notificationStart && <Sheet title="写好了提醒你？" onClose={() => void answerNotifications("later")}>
+        <p>切到别的应用时，故事会在后台接着写。打开通知后，写的时候通知栏会显示进度，写好了会提醒你回来看。</p>
+        <div className="row"><button className="primary" onClick={() => void answerNotifications("allow")}>打开通知</button><button onClick={() => void answerNotifications("no")}>不用了</button></div>
       </Sheet>}
     </div>
     {wide && <div className="play-side"><Panel {...panelProps} docked /></div>}
@@ -768,7 +776,13 @@ function StorySheet({ world, headId, onSave, onClose }: { world: World; headId: 
 }
 
 function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: World; onChange: (p: Partial<World["settings"]>) => void; onRules: () => void; onClose: () => void }) {
+  const { game, toast } = useApp();
   const s = world.settings;
+  const [defaults, setDefaults] = useState<PlayDefaults | null>(null);
+  useEffect(() => { void loadPlayDefaults(game.repo).then(setDefaults); }, []);
+  const differs = defaults ? differsFromDefaults(s, defaults) : [];
+  /** “本局” on a heading whose value differs from the play defaults. */
+  const mark = (key: keyof PlayDefaults) => (differs.includes(key) ? <span className="tag own">本局</span> : null);
   const levels: Intensity[] = ["含蓄", "写实", "浓烈"];
   const intensity = (key: keyof typeof s.intensity, label: string) => (
     <div className="stack" style={{ gap: 6 }}>
@@ -781,28 +795,34 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
   return (
     <Sheet title="本局设置" onClose={onClose}>
       <div className="stack">
-        <span className="muted">每段篇幅</span>
+        <p className="muted" style={{ margin: 0 }}>只影响这个世界，从下一段开始生效。新开一局的默认在 设置 → 写作与叙事 / 游玩默认。</p>
+        <span className="muted">难度 {mark("difficulty")}</span>
+        <div className="segmented">
+          {(["宽松", "标准", "残酷"] as const).map((l) => <button key={l} aria-pressed={s.difficulty === l} onClick={() => onChange({ difficulty: l })}>{l}</button>)}
+        </div>
+        <p className="muted" style={{ margin: 0 }}>{s.difficulty === "宽松" ? "运气偏好；受了重伤也只是昏过去，不会死。" : s.difficulty === "残酷" ? "运气偏差；重伤可能直接丧命。" : "运气平常；伤重时先“垂危”，剧情真写到才会死。"}</p>
+        <span className="muted">每段篇幅 {mark("length")}</span>
         <div className="segmented">
           {(["短", "中", "长"] as const).map((l) => <button key={l} aria-pressed={s.length === l} onClick={() => onChange({ length: l })}>{l}</button>)}
         </div>
-        <span className="muted">建议选项数量</span>
+        <span className="muted">建议选项数量 {mark("choiceCount")}</span>
         <div className="segmented">
           {[0, 2, 3, 4].map((n) => <button key={n} aria-pressed={s.choiceCount === n} onClick={() => onChange({ choiceCount: n })}>{n === 0 ? "不要" : n}</button>)}
         </div>
-        <span className="muted">叙述视角</span>
+        <span className="muted">叙述视角 {mark("perspective")}</span>
         <div className="segmented">
           {([["你", "你"], ["我", "我"], ["他", "他 / 她"]] as const).map(([v, l]) => <button key={v} aria-pressed={s.perspective === v} onClick={() => onChange({ perspective: v })}>{l}</button>)}
         </div>
-        <span className="muted">文风</span>
+        <span className="muted">文风 {mark("style")}</span>
         <div className="segmented">
           {(["白话", "半文半白"] as const).map((v) => <button key={v} aria-pressed={s.style === v} onClick={() => onChange({ style: v })}>{v}</button>)}
         </div>
-        <span className="muted">设定集自动整理</span>
+        <span className="muted">设定集自动整理 {mark("autoUpkeep")}</span>
         <div className="segmented">
           {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={s.autoUpkeep === v} onClick={() => onChange({ autoUpkeep: v })}>{l}</button>)}
         </div>
-        <p className="muted" style={{ margin: 0 }}>开着时，每过 6 回合 AI 会把新出现的势力、物品和地点记进设定集，多一次辅助模型的调用。</p>
-        <span className="muted">章节摘要</span>
+        <p className="muted" style={{ margin: 0 }}>开着时，每过几回合 AI 会把新出现的人物、地点和势力记进设定集；只改它自己写的卡，你写的不会动。</p>
+        <span className="muted">章节摘要 {mark("chapterEvery")}</span>
         <div className="segmented">
           {[0, 8, 12, 20].map((n) => <button key={n} aria-pressed={s.chapterEvery === n} onClick={() => onChange({ chapterEvery: n })}>{n ? `每 ${n} 回合` : "关"}</button>)}
         </div>
@@ -810,7 +830,11 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
         {intensity("violence", "暴力与伤亡")}
         {intensity("romance", "感情与亲密")}
         {intensity("darkness", "黑暗与压抑")}
-        <p className="muted">修改从下一段开始生效。“浓烈”仍受所用 AI 服务的规则限制。</p>
+        <p className="muted">“浓烈”仍受所用 AI 服务的规则限制。</p>
+        {defaults && differs.length > 0 && <div className="row" style={{ flexWrap: "wrap" }}>
+          <button onClick={() => { onChange({ difficulty: defaults.difficulty, length: defaults.length, choiceCount: defaults.choiceCount, perspective: defaults.perspective, style: defaults.style, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery, intensity: defaults.intensity }); toast("已恢复为默认"); }}>全部恢复为默认</button>
+          <button className="ghost" onClick={() => { const next = { ...defaults, difficulty: s.difficulty, length: s.length, choiceCount: s.choiceCount, perspective: s.perspective, style: s.style, autoUpkeep: s.autoUpkeep, chapterEvery: s.chapterEvery, intensity: s.intensity }; void savePlayDefaults(game.repo, next).then(() => { setDefaults(next); toast("以后新开一局都用这些设置"); }); }}>设为以后的默认</button>
+        </div>}
         <button className="ghost" style={{ textAlign: "left" }} onClick={onRules}>纪年与货币 ›</button>
       </div>
     </Sheet>

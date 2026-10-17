@@ -46,6 +46,8 @@ export function fakeLlm(scripts: Script[]): Platform["llm"] & { calls: { body: a
     async list() { return []; },
     async ack(id) { cache.delete(id); },
     async get() { return { status: 200, body: "{}" }; },
+    async getPublic() { return { status: 404, body: "{}" }; },
+    async setNetwork() {},
   };
 }
 

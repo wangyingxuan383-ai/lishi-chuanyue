@@ -11,6 +11,10 @@
     "core:app:allow-register-listener",
     "core:app:allow-remove-listener",
     "core:app:allow-exit",
-    "notifications:allow-request-notification-permission"
+    "notifications:allow-request-notification-permission",
+    "notifications:allow-notification-status",
+    "notifications:allow-open-notification-settings",
+    "notifications:allow-open-app-settings",
+    "notifications:allow-open-url"
   ]
 }

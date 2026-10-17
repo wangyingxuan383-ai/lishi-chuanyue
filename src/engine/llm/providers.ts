@@ -13,19 +13,77 @@ export interface ProviderPreset {
   keyHint: string;
   /** Substrings that make a model a good default, in order of preference. */
   prefer: string[];
+  /** One line on why someone would pick it (UX_PROVIDERS J-10). */
+  blurb: string;
+  /** Where to create a key and see prices: the link is the guide (J-06). */
+  keyUrl?: string;
+  priceUrl?: string;
 }
 
+// Links and model names checked 2026-10-17 against each provider's own docs
+// (docs/research/UX_PROVIDERS.md). deepseek-chat was retired on 2026-07-24.
 export const PRESETS: ProviderPreset[] = [
-  { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", keyHint: "sk-…", prefer: ["deepseek-chat", "deepseek"] },
-  { id: "qwen", name: "通义千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyHint: "sk-…", prefer: ["qwen-plus", "qwen-max", "qwen"] },
-  { id: "kimi", name: "Kimi", baseUrl: "https://api.moonshot.cn/v1", keyHint: "sk-…", prefer: ["kimi-k2", "moonshot-v1-32k", "kimi"] },
-  { id: "zhipu", name: "智谱", baseUrl: "https://open.bigmodel.cn/api/paas/v4", keyHint: "…", prefer: ["glm-4-plus", "glm-4", "glm"] },
-  { id: "siliconflow", name: "硅基流动", baseUrl: "https://api.siliconflow.cn/v1", keyHint: "sk-…", prefer: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3", "deepseek"] },
-  { id: "volcengine", name: "火山方舟", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", keyHint: "…", prefer: ["doubao", "deepseek"] },
-  { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", keyHint: "sk-or-…", prefer: ["deepseek/deepseek-chat", "google/gemini", "anthropic/claude"] },
-  { id: "gemini", name: "Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", keyHint: "AIza…", prefer: ["gemini-2.5-flash", "gemini-flash", "gemini"] },
-  { id: "custom", name: "自定义", baseUrl: "", keyHint: "", prefer: ["flash", "chat", "plus", "turbo"] },
+  { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", keyHint: "sk-…", prefer: ["deepseek-flash", "deepseek-v4-flash", "deepseek"], blurb: "便宜，中文好，新手推荐", keyUrl: "https://platform.deepseek.com/api_keys", priceUrl: "https://api-docs.deepseek.com/zh-cn/quick_start/pricing" },
+  { id: "siliconflow", name: "硅基流动", baseUrl: "https://api.siliconflow.cn/v1", keyHint: "sk-…", prefer: ["deepseek-ai/DeepSeek-V4", "deepseek-ai/DeepSeek-V3", "Qwen/Qwen3", "deepseek"], blurb: "一把 Key 用很多模型，新人有赠送额度", keyUrl: "https://cloud.siliconflow.cn/account/ak", priceUrl: "https://cloud.siliconflow.cn/models" },
+  { id: "zhipu", name: "智谱", baseUrl: "https://open.bigmodel.cn/api/paas/v4", keyHint: "…", prefer: ["glm-4.7", "glm-4.6", "glm-4-plus", "glm"], blurb: "有免费的 Flash 模型，可以先试玩", keyUrl: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys", priceUrl: "https://open.bigmodel.cn/pricing" },
+  { id: "qwen", name: "通义千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", keyHint: "sk-…", prefer: ["qwen-plus", "qwen-max", "qwen"], blurb: "阿里云百炼，模型多", keyUrl: "https://bailian.console.aliyun.com/?apiKey=1#/api-key", priceUrl: "https://help.aliyun.com/zh/model-studio/model-pricing" },
+  { id: "kimi", name: "Kimi", baseUrl: "https://api.moonshot.cn/v1", keyHint: "sk-…", prefer: ["kimi-k2", "moonshot-v1-32k", "kimi"], blurb: "月之暗面，长文好", keyUrl: "https://platform.moonshot.cn/console/api-keys", priceUrl: "https://platform.moonshot.cn/docs/pricing/chat" },
+  { id: "volcengine", name: "火山方舟", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", keyHint: "…", prefer: ["doubao", "deepseek"], blurb: "字节豆包系列", keyUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey", priceUrl: "https://www.volcengine.com/docs/82379/1544106" },
+  { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", keyHint: "sk-or-…", prefer: ["deepseek/deepseek", "google/gemini", "anthropic/claude"], blurb: "海外，各家模型都有", keyUrl: "https://openrouter.ai/settings/keys", priceUrl: "https://openrouter.ai/models" },
+  { id: "gemini", name: "Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", keyHint: "AIza…", prefer: ["gemini-2.5-flash", "gemini-flash", "gemini"], blurb: "谷歌，海外", keyUrl: "https://aistudio.google.com/app/apikey", priceUrl: "https://ai.google.dev/pricing" },
+  { id: "custom", name: "自定义", baseUrl: "", keyHint: "", prefer: ["flash", "chat", "plus", "turbo"], blurb: "其他兼容 OpenAI 接口的服务或中转" },
 ];
+
+/**
+ * Cleans what a player pastes as a service address (J-05): spaces, a missing
+ * https://, a pasted …/chat/completions or …/models, trailing slashes.
+ */
+export function cleanBaseUrl(input: string): string {
+  let url = input.trim().replace(/[\s　]+/g, "");
+  if (!url) return "";
+  if (!/^[a-z]+:\/\//i.test(url)) url = `https://${url}`;
+  url = url.replace(/\/(chat\/completions|completions|models)\/?$/i, "").replace(/\/+$/, "");
+  return url;
+}
+
+/** The preset a pasted address belongs to, by its host (so 自定义 with api.deepseek.com is DeepSeek). */
+export function presetForUrl(url: string): ProviderPreset | null {
+  let host = "";
+  try { host = new URL(cleanBaseUrl(url)).host; } catch { return null; }
+  return PRESETS.find((p) => p.baseUrl && new URL(p.baseUrl).host === host) ?? null;
+}
+
+/** Looks like a key rather than an address, or the other way round (pasted into the wrong box). */
+export const looksLikeUrl = (text: string) => /^(https?:\/\/|[\w-]+(\.[\w-]+)+(:\d+)?(\/|$))/i.test(text.trim());
+
+/**
+ * A name for a new service (J-02): the preset's name, or the address's host
+ * for a custom one; a number when the name is taken.
+ */
+export function defaultProfileName(preset: ProviderPreset, baseUrl: string, taken: string[]): string {
+  let base = preset.id === "custom" ? "" : preset.name;
+  if (!base) {
+    try { base = new URL(cleanBaseUrl(baseUrl)).hostname.replace(/^(api|www)\./, ""); } catch { base = "我的服务"; }
+  }
+  if (!taken.includes(base)) return base;
+  for (let i = 2; ; i++) if (!taken.includes(`${base} ${i}`)) return `${base} ${i}`;
+}
+
+/** Chat models first, recommended ones at the top; embedding, image and audio models are left out (J-03). */
+export function chatModels(models: string[], preset: ProviderPreset): string[] {
+  const chat = models.filter((m) => !NOT_CHAT.test(m));
+  const rank = (m: string) => {
+    const i = preset.prefer.findIndex((p) => m.toLowerCase().includes(p.toLowerCase()));
+    return i < 0 ? preset.prefer.length : i;
+  };
+  return [...chat].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
+/** A cheaper sibling for 整理记录 (J-12): flash, mini, lite, air, turbo… or the main model when none. */
+export function recommendAuxModel(models: string[], main: string): string {
+  const chat = models.filter((m) => !NOT_CHAT.test(m) && m !== main);
+  return chat.find((m) => /flash|mini|lite|air|turbo|haiku|small/i.test(m)) ?? main;
+}
 
 const NOT_CHAT = /embed|image|tts|audio|whisper|vision|rerank|moderation|dall|speech|ocr/i;
 
@@ -111,4 +169,4 @@ export function explainFailure(kind: string, status?: number): string {
   return "连不上服务，请检查网络和服务地址。";
 }
 
-export { chatCompletionsUrl, type ChatError };
+export { chatCompletionsUrl, serviceBase, type ChatError };

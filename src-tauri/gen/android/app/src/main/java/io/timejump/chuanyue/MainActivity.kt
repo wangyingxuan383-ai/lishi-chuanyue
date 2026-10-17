@@ -42,4 +42,10 @@ class MainActivity : TauriActivity() {
     }
     content.post { ViewCompat.requestApplyInsets(content) }
   }
+
+  override fun onResume() {
+    super.onResume()
+    // Back in the app: the "写好了" notification has done its job.
+    GenerationService.clearReady(this)
+  }
 }

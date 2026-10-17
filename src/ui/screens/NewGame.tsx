@@ -11,6 +11,7 @@ import { newId } from "../../engine/db/repo";
 import { useApp, useBack } from "../app/context";
 import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
+import { loadPlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { ARRIVALS, EMPTY, ORIGINS, fromTemplate, parseShare, shareText, toNewWorld, type Draft } from "./openingDraft";
 
 /** "唐 · 天宝七载" → "唐" */
@@ -47,12 +48,20 @@ export default function NewGame() {
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const tip = useMemo(() => pickRandom(TIPS), []);
+  /** 设置 → 游玩默认: what a fresh draft (and 清空重填) starts from. */
+  const [defaults, setDefaults] = useState<PlayDefaults | null>(null);
+  const fresh = (d: PlayDefaults | null = defaults): Draft => d
+    ? { ...EMPTY, settings: { ...EMPTY.settings, perspective: d.perspective, style: d.style, length: d.length, choiceCount: d.choiceCount, intensity: d.intensity, rules: d.rules } }
+    : EMPTY;
 
   // The draft survives leaving the screen.
   useEffect(() => {
     void (async () => {
       const saved = await game.repo.getSetting<Draft | null>("newgameDraft", null);
-      if (saved) setDraftState({ ...EMPTY, ...saved, settings: { ...EMPTY.settings, ...saved.settings } });
+      const d = await loadPlayDefaults(game.repo);
+      setDefaults(d);
+      const base = fresh(d);
+      setDraftState(saved ? { ...base, ...saved, settings: { ...base.settings, ...saved.settings } } : base);
       const rows = await game.platform.sql.query("SELECT id, name, json FROM templates WHERE kind = 'opening' ORDER BY created_at DESC");
       setMine(rows.map((r) => ({ id: r.id as string, name: r.name as string, draft: JSON.parse(r.json as string) })));
       setLoaded(true);
@@ -114,7 +123,7 @@ export default function NewGame() {
     setError(null);
     setText(d.openingMode === "player" ? d.openingText : "");
     setPhase(d.openingMode === "player" ? "organizing" : "loading");
-    const input = toNewWorld(d);
+    const input = toNewWorld(d, defaults ? { difficulty: defaults.difficulty, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery } : undefined);
     const onEvent = (e: TurnEvent) => {
       if (e.type === "thinking") setPhase("thinking");
       else if (e.type === "text") { setPhase("writing"); setText(e.full); }
@@ -331,7 +340,7 @@ export default function NewGame() {
             { label: "保存为文件", onSelect: () => void exportFile() },
             { label: "导入开局设定", onSelect: () => { setPasted(""); setSheet("import"); } },
             { label: "从文件导入", onSelect: async () => { importFrom(await game.platform.files.importText().catch(() => null)); } },
-            { label: "清空重填", danger: true, onSelect: () => { setDraft({ ...EMPTY, settings: draft.settings }); toast("已清空"); } },
+            { label: "清空重填", danger: true, onSelect: () => { setDraft({ ...fresh(), settings: draft.settings }); toast("已清空"); } },
           ]}
         />
       )}

@@ -374,17 +374,64 @@ impl Emitter {
     }
 }
 
+/// How requests reach the internet (设置 → 网络): straight, through the
+/// system's proxy, or through one the player entered (http:// or socks5://).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkConfig {
+    /// "none" | "system" | "custom"
+    pub proxy: String,
+    pub proxy_url: Option<String>,
+}
+
+static NETWORK: std::sync::RwLock<Option<NetworkConfig>> = std::sync::RwLock::new(None);
+
+/// Applies the player's network choice to every later request.
+pub fn set_network(config: NetworkConfig) -> Result<()> {
+    if config.proxy == "custom" {
+        let url = config.proxy_url.as_deref().unwrap_or_default();
+        let parsed = reqwest::Url::parse(url).map_err(|_| proxy_error())?;
+        if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+            || parsed.host_str().is_none()
+        {
+            return Err(proxy_error());
+        }
+        reqwest::Proxy::all(url).map_err(|_| proxy_error())?;
+    }
+    *NETWORK.write().unwrap_or_else(|e| e.into_inner()) = Some(config);
+    Ok(())
+}
+
+fn proxy_error() -> PlatformError {
+    PlatformError::new(
+        "proxy_invalid",
+        "代理地址要写成 http://主机:端口 或 socks5://主机:端口",
+    )
+}
+
 fn client() -> std::result::Result<Client, StreamEvent> {
     #[cfg(target_os = "android")]
     if !crate::android_tls::is_ready() {
         return Err(StreamEvent::error("network"));
     }
-    Client::builder()
+    let builder = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .no_proxy()
-        .build()
-        .map_err(|_| StreamEvent::error("network"))
+        .retry(reqwest::retry::never());
+    let network = NETWORK
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    let builder = match network.proxy.as_str() {
+        // reqwest reads the system proxy when no proxy is set explicitly.
+        "system" => builder,
+        "custom" => match network.proxy_url.as_deref().map(reqwest::Proxy::all) {
+            Some(Ok(proxy)) => builder.proxy(proxy),
+            _ => return Err(StreamEvent::error("network")),
+        },
+        _ => builder.no_proxy(),
+    };
+    builder.build().map_err(|_| StreamEvent::error("network"))
 }
 
 struct Budget {
@@ -569,6 +616,39 @@ pub async fn get(url: &str, timeout_ms: u64, key: SecretValue) -> Result<GetResp
             body.truncate(end);
         }
         Ok::<_, StreamEvent>(GetResponse { status, body })
+    };
+    run.await.map_err(|event| match event {
+        StreamEvent::Error { kind, .. } if kind.starts_with("timeout_") => {
+            PlatformError::new("llm_timeout", "请求超时")
+        }
+        _ => PlatformError::new("llm_network", "网络请求失败"),
+    })
+}
+
+/// A public HTTPS GET without a key (the GitHub release check). Redirects
+/// are not followed; only https is allowed; the body is size-bounded.
+pub async fn get_public(url: &str, timeout_ms: u64) -> Result<GetResponse> {
+    if !url.starts_with("https://") {
+        return Err(PlatformError::new("llm_network", "只允许 https 地址"));
+    }
+    let run = async {
+        let request: RequestBuilder = client()?
+            .get(url)
+            .header(header::USER_AGENT, "lishi-chuanyue")
+            .header(header::ACCEPT, "application/vnd.github+json");
+        let mut budget = Budget::new(Timeouts {
+            first_byte_ms: timeout_ms,
+            idle_ms: timeout_ms,
+            total_ms: timeout_ms,
+        })?;
+        let cancel = CancellationToken::new();
+        let mut response = budget.wait(&cancel, request.send()).await?;
+        let status = response.status().as_u16();
+        let bytes = bounded_body(&mut response, &mut budget, &cancel, MAX_GET).await?;
+        Ok::<_, StreamEvent>(GetResponse {
+            status,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        })
     };
     run.await.map_err(|event| match event {
         StreamEvent::Error { kind, .. } if kind.starts_with("timeout_") => {

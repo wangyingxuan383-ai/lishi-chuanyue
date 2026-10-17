@@ -145,3 +145,15 @@ pub fn platform_info() -> PlatformInfo {
         app_version: env!("CARGO_PKG_VERSION"),
     }
 }
+
+/// 设置 → 网络: no proxy, the system's, or a custom http/socks5 one.
+#[tauri::command]
+pub async fn network_set(config: crate::stream::NetworkConfig) -> Result<()> {
+    crate::stream::set_network(config)
+}
+
+/// A keyless HTTPS GET for public data (checking GitHub for a new release).
+#[tauri::command]
+pub async fn http_get_public(url: String, timeout_ms: u64) -> Result<crate::stream::GetResponse> {
+    crate::stream::get_public(&url, timeout_ms).await
+}

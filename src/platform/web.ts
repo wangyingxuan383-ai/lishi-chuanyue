@@ -152,6 +152,9 @@ export async function createWebPlatform(): Promise<Platform> {
         streams.delete(streamId);
       },
       get: (request) => bridge("llm/get", request),
+      // The dev harness reads public pages straight from the browser (GitHub allows it).
+      getPublic: async (url) => { const r = await fetch(url, { headers: { accept: "application/vnd.github+json" } }); return { status: r.status, body: await r.text() }; },
+      setNetwork: async () => {},
     },
     files: {
       async exportText(suggestedName, text) {
@@ -172,6 +175,9 @@ export async function createWebPlatform(): Promise<Platform> {
     },
     system: {
       requestNotifications: async () => true,
+      notificationStatus: async () => ({ granted: true, enabled: true }),
+      openSystemSettings: async () => {},
+      openUrl: async (url) => { window.open(url, "_blank", "noopener"); },
       onBack(handler) {
         backHandlers.push(handler);
         return () => {

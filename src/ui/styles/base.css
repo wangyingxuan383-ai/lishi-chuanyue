@@ -22,6 +22,8 @@
   --divider: "◇";
   --story-size: 18px;
   --story-leading: 2;
+  --story-paragraph: 0.7em;
+  --story-measure: 36em;
   --radius: 4px;
   --tap: 44px;
   --serif: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
@@ -174,7 +176,7 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
   .sheet { max-width: 600px; margin: 0 auto; }
 }
 .story { flex: 1; overflow-y: auto; overflow-anchor: none; padding: 8px 18px 24px; -webkit-overflow-scrolling: touch; }
-.story-inner { max-width: 640px; margin: 0 auto; }
+.story-inner { max-width: min(640px, calc(var(--story-measure) * 1.05 * var(--story-size) / 16)); margin: 0 auto; }
 .turn { padding: 10px 0 6px; border-radius: 3px; transition: background-color 0.15s; }
 .turn.pressed { background: var(--accent-soft); }
 .turn + .turn::before { content: var(--divider); display: block; text-align: center; color: var(--accent); opacity: 0.8; font-size: 12px; line-height: 1; margin: 2px 0 12px; }
@@ -205,9 +207,10 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
   white-space: pre-wrap; word-break: break-word; margin: 0;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
-.story-text p { margin: 0 0 0.7em; }
+.story-text p { margin: 0 0 var(--story-paragraph); }
 /* Chinese book setting: paragraphs indented two characters, in the story only. */
 .story .story-text p { text-indent: 2em; }
+:root[data-indent="off"] .story .story-text p { text-indent: 0; }
 .story .story-text p.date-line, .story-text p.date-line { text-indent: 0; text-align: center; letter-spacing: 0.25em; color: var(--accent); margin: 1em 0; font-size: 0.85em; font-family: var(--serif); }
 .cursor-blink::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent); }
 @keyframes blink { 50% { opacity: 0; } }
@@ -315,6 +318,7 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .item-row b { font-family: var(--serif); }
 .item-row small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
 .tag { font-size: 12px; padding: 1px 7px; border-radius: 3px; border: 1px solid var(--accent); color: var(--accent); background: transparent; white-space: nowrap; align-self: flex-start; font-family: var(--serif); }
+.tag.own { margin-left: 6px; border-color: var(--warn); color: var(--warn); vertical-align: middle; }
 
 .toast {
   position: fixed; left: 50%; top: calc(60px + env(safe-area-inset-top)); z-index: 40;
@@ -329,6 +333,73 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .segmented button { min-height: var(--tap); padding: 6px 14px; }
 .segmented button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: color-mix(in srgb, var(--fg) 6%, transparent); padding: 10px; border-radius: 3px; }
+
+/* ---------- forms: labelled fields, pickers, links ---------- */
+.field-label { font-size: 14px; color: var(--muted); }
+.field { display: grid; gap: 6px; }
+.field-hint { font-size: 13px; color: var(--muted); }
+.field-hint.warn { color: var(--warn); }
+.picker { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; text-align: left; padding: 10px 14px; background: var(--raised); }
+.picker span:first-child { display: grid; gap: 2px; min-width: 0; }
+.picker b { font-family: var(--serif); font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker small { color: var(--muted); font-size: 13px; }
+.picker > span:last-child { color: var(--accent); font-size: 18px; }
+.links { margin: 0; font-size: 14px; color: var(--muted); }
+button.link { min-height: 32px; padding: 0 2px; border: none; background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.input-tools { display: flex; gap: 4px; align-items: stretch; }
+.input-tools input { flex: 1; min-width: 0; }
+/* Our own 看 button shows the key; Edge's built-in eye would be a second one. */
+input::-ms-reveal, input::-ms-clear { display: none; }
+.input-tools .icon-btn { font-size: 14px; font-family: var(--serif); color: var(--accent); border: 1px solid var(--line); background: var(--surface); }
+.notice.ok { border-left-color: var(--gain); }
+.model-list { max-height: 50vh; overflow-y: auto; }
+.model-list b, .picker b.model { font-family: var(--sans); font-weight: 500; font-size: 15px; word-break: break-all; }
+.model-list small { color: var(--gain); }
+
+/* ---------- settings (R11-T006) ---------- */
+.settings { gap: 16px; }
+.settings-group h2 { margin: 4px 0 8px; font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.1em; color: var(--accent); }
+.settings-list { display: grid; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); overflow: hidden; }
+.settings-entry { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; text-align: left; border: none; border-radius: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 12px 14px; min-height: 60px; }
+.settings-entry:last-child { border-bottom: none; }
+.settings-entry span:first-child { display: grid; gap: 2px; min-width: 0; }
+.settings-entry b { font-family: var(--serif); font-weight: 600; font-size: 16px; }
+.settings-entry small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-entry > span:last-child { color: var(--accent); font-size: 18px; }
+.setting { display: grid; gap: 8px; }
+.setting-head { display: grid; gap: 2px; }
+.setting-head b { font-family: var(--serif); font-weight: 600; font-size: 15px; color: var(--fg); }
+.setting-head small { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.settings-sub { margin: 8px 0 0; font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.06em; border-top: 1px solid var(--line); padding-top: 14px; }
+.settings-note { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+.reset { justify-self: start; color: var(--muted); }
+.status-card { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--line); border-left: 4px solid var(--warn); border-radius: 3px; background: var(--surface); }
+.status-card.ok { border-left-color: var(--gain); }
+.status-card b { font-family: var(--serif); font-size: 16px; }
+.status-card small { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.status-card .row { margin-top: 4px; flex-wrap: wrap; }
+.release-notes { white-space: pre-wrap; }
+.steps { margin: 0; padding-left: 22px; color: var(--fg); font-size: 14px; line-height: 1.8; }
+.theme-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.theme-card { display: grid; justify-items: center; gap: 6px; padding: 10px 4px; font-size: 14px; }
+.theme-card[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.theme-card .swatch { width: 36px; height: 24px; border-radius: 3px; border: 1px solid var(--line); }
+.theme-paper .swatch { background: #efe5cf; }
+.theme-day .swatch { background: #faf7f0; }
+.theme-night .swatch { background: #131518; }
+.theme-auto .swatch { background: linear-gradient(135deg, #efe5cf 50%, #131518 50%); }
+.reading-preview { padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 3px; }
+.reading-preview p { text-indent: 2em; }
+:root[data-indent="off"] .reading-preview p { text-indent: 0; }
+.about-head { display: flex; align-items: center; gap: 16px; }
+.about-head h2 { margin: 0; font-family: var(--serif); letter-spacing: 0.2em; }
+.about-head p { margin: 2px 0 0; }
+.dev-switch { justify-self: center; color: var(--muted); font-size: 13px; min-height: 40px; }
+.service-card { padding: 0; }
+.service-main { display: block; width: 100%; text-align: left; border: none; background: transparent; padding: 12px 14px 4px; min-height: auto; }
+.service-main h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 17px; font-family: var(--serif); }
+.service-main p { margin: 0; font-size: 14px; color: var(--muted); word-break: break-all; }
+.service-actions { padding: 0 6px 4px; gap: 0; }
 
 /* ---------- new game ---------- */
 .sticky-bar { position: sticky; bottom: 0; z-index: 2; padding: 10px 0 calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 3px double var(--line); box-shadow: 0 -12px 12px -6px color-mix(in srgb, var(--bg) 90%, transparent); }
@@ -362,3 +433,4 @@ button.danger-text { color: var(--loss); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+:root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }

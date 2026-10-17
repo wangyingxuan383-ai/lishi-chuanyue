@@ -60,6 +60,8 @@ pub fn run() {
             commands::llm_stream_list,
             commands::llm_stream_ack,
             commands::llm_get,
+            commands::network_set,
+            commands::http_get_public,
             files::file_export_text,
             files::file_import_text,
             commands::platform_info

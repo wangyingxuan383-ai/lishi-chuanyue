@@ -35,9 +35,11 @@ export async function createMemoryPlatform(llm?: Platform["llm"], options: { dat
       list: unsupported,
       ack: unsupported,
       get: unsupported,
+      getPublic: unsupported,
+      setNetwork: async () => {},
     },
     files: { exportText: unsupported, importText: unsupported },
-    system: { requestNotifications: async () => true, onBack: () => () => {} },
+    system: { requestNotifications: async () => true, notificationStatus: async () => ({ granted: true, enabled: true }), openSystemSettings: async () => {}, openUrl: async () => {}, onBack: () => () => {} },
     exportDb: () => exportDatabase(db),
   };
 }

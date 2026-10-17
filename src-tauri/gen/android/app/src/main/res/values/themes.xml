@@ -2,6 +2,7 @@
     <!-- Base application theme. -->
     <style name="Theme.lishi_app" parent="Theme.Material3.DayNight.NoActionBar">
         <!-- R09-T003: no white flash before the page draws; Android 12+ uses it for the launch screen. -->
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="android:windowBackground">@color/paper</item>
     </style>
 </resources>

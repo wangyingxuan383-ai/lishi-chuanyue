@@ -1,6 +1,7 @@
 // R02 game flow at phone size in the browser dev harness, against fake-llm.
 //   node scripts/fake-llm.mjs & pnpm dev &  node scripts/ui/game-flow.mjs
 // Uses a fresh browser profile; screenshots go to .cache/ui/game-*.png.
+import { connectFake } from "./connect.mjs";
 import fs from "node:fs";
 import { chromium } from "playwright-core";
 
@@ -29,17 +30,7 @@ await page.goto("http://127.0.0.1:1420/");
 // First launch → AI service setup.
 await page.getByText("连接 AI 服务").waitFor();
 await shot("01-setup");
-await page.getByRole("button", { name: "自定义" }).click();
-await page.getByLabel("服务地址").fill("http://127.0.0.1:18800/v1");
-await page.getByText(/这是 HTTP 地址/).click();
-await page.getByLabel(/API Key/).fill("fake-ui-key");
-await page.getByRole("button", { name: "获取模型列表" }).click();
-await page.locator("select").waitFor();
-await page.locator("select").selectOption("fake-normal");
-await page.getByRole("button", { name: "测试连接" }).click();
-await page.getByText(/连接成功/).waitFor();
-check("setup: models + connection test", true);
-await page.getByRole("button", { name: "保存，开始穿越" }).click();
+await connectFake(page, { check });
 
 // New game: templates fill fields, gender locks when the identity implies it.
 await page.getByRole("button", { name: "随便穿" }).waitFor();
@@ -525,8 +516,15 @@ check("new generation follows the bottom again", (await page.getByRole("button",
 // Developer call history is only shown after enabling developer mode.
 await page.getByRole("button", { name: "返回", exact: true }).click();
 await page.getByRole("button", { name: "设置", exact: true }).click();
-check("call history hidden outside developer mode", (await page.getByText("调用记录", { exact: true }).count()) === 0);
-await page.getByLabel(/开发者模式/).check();
+check("settings home lists AI, game and app groups with the current state", (await page.locator(".settings-group h2").allTextContents()).join() === "AI,游戏,应用" && (await page.locator(".settings-entry", { hasText: "AI 服务" }).textContent()).includes("fake-normal") && (await page.locator(".settings-entry", { hasText: "关于与更新" }).textContent()).includes("版本"));
+await shot("11b-settings-home");
+check("call history hidden outside developer mode", (await page.getByText("调用记录", { exact: true }).count()) === 0 && (await page.locator(".settings-entry", { hasText: "开发者" }).count()) === 0);
+// Developer mode: tap the version line seven times on 关于与更新, like Android.
+await page.locator(".settings-entry", { hasText: "关于与更新" }).click();
+for (let i = 0; i < 7; i++) await page.locator(".dev-switch").click();
+await page.getByText("开发者模式已打开").first().waitFor();
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "开发者" }).click();
 await page.getByText("调用记录", { exact: true }).waitFor();
 await page.locator(".item-row").first().waitFor();
 const callText = await page.locator(".item-row").first().textContent();
@@ -536,7 +534,10 @@ await page.getByText("调用记录", { exact: true }).scrollIntoViewIfNeeded();
 await shot("12-call-history");
 
 // R08-T004: usage by world, day and purpose, with the player's prices.
-await page.getByRole("button", { name: "用量明细与费用估算 ›" }).click();
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "存档与数据" }).click();
+check("data page shows the last backup and a way to back up now", (await page.locator(".status-card").first().textContent()).includes("备份") && (await page.getByRole("button", { name: "现在备份" }).count()) === 1);
+await page.getByRole("button", { name: "用量明细与费用估算" }).click();
 await page.getByRole("heading", { name: "用量明细" }).waitFor();
 await page.getByRole("button", { name: "按用途" }).click();
 await page.locator(".sheet .item-row", { hasText: "回合" }).first().waitFor();
@@ -549,8 +550,25 @@ check("usage shows calls by purpose with an estimated cost", (await page.textCon
 await page.keyboard.press("Escape");
 
 // Context size per service and the developer context viewer (R04-T004).
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "记忆与整理" }).click();
 await page.getByRole("button", { name: "记得更多" }).click();
 check("context size saved on the service", (await page.getByRole("button", { name: "记得更多" }).getAttribute("aria-pressed")) === "true");
+// Play defaults: a new world starts from them; a world shows which settings are its own.
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "游玩默认" }).click();
+await page.getByRole("button", { name: "残酷" }).click();
+check("the difficulty default can be set (it had no way in before)", (await page.getByRole("button", { name: "残酷" }).getAttribute("aria-pressed")) === "true");
+await page.getByRole("button", { name: "标准" }).click();
+await page.getByRole("button", { name: "返回", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "网络与代理" }).click();
+await page.getByRole("button", { name: "自定义代理" }).click();
+await page.getByLabel("代理地址").fill("http://127.0.0.1:7890");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.getByText(/已保存，下一次请求开始生效/).waitFor();
+check("a custom proxy can be entered and saved", (await page.evaluate(async () => JSON.stringify(await window.__lishi.game.repo.getSetting("network", null)))).includes("7890"));
+await page.getByRole("button", { name: "直接连接" }).click();
+await page.getByRole("button", { name: "返回", exact: true }).click();
 await page.getByRole("button", { name: "返回", exact: true }).click();
 await page.locator(".world-open").first().click();
 await page.getByRole("button", { name: "更多" }).click();
@@ -565,8 +583,10 @@ check("context viewer fits the phone width", !(await page.evaluate(() => documen
 await page.keyboard.press("Escape");
 await page.getByRole("button", { name: "返回", exact: true }).click();
 await page.getByRole("button", { name: "设置", exact: true }).click();
+await page.locator(".settings-entry", { hasText: "开发者" }).click();
 await page.getByLabel(/开发者模式/).uncheck();
-check("disabling developer mode hides call history", (await page.getByText("调用记录", { exact: true }).count()) === 0);
+await page.getByRole("button", { name: "返回", exact: true }).click();
+check("disabling developer mode hides the developer page", (await page.locator(".settings-entry", { hasText: "开发者" }).count()) === 0);
 
 // R08-T001: export a world to a file and import it back as a new world.
 await page.getByRole("button", { name: "返回", exact: true }).click();

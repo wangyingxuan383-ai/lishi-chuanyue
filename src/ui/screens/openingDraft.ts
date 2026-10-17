@@ -58,11 +58,11 @@ export function fromTemplate(t: OpeningTemplate, keep: Draft, gender?: "男" | "
   };
 }
 
-export function toNewWorld(d: Draft): NewWorld {
+export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery">>): NewWorld {
   return {
     title: d.title,
     eraId: d.eraId,
-    settings: { ...d.settings, premise: d.premise },
+    settings: { ...defaults, ...d.settings, premise: d.premise },
     protagonist: { name: d.name.trim(), gender: d.lockedGender ?? d.gender, age: Number(d.age) || null, identity: d.identity.trim() },
     arrival: d.arrival,
     origin: d.arrival === "不穿越" ? "" : d.origin,

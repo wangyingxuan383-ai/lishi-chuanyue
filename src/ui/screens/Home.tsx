@@ -8,6 +8,7 @@ import { MenuSheet } from "../components/Sheet";
 import { useLongPress } from "../components/useLongPress";
 import { fromSetup } from "./openingDraft";
 import { Seal } from "../components/Seal";
+import { latestRelease, newer, type ReleaseInfo } from "../app/update";
 
 interface WorldCard {
   world: World;
@@ -106,6 +107,20 @@ export default function Home() {
   };
   useEffect(() => { void load(); }, []);
 
+  // Once a day, if the player allows it: is there a newer release? (设置 → 关于与更新)
+  const [update, setUpdate] = useState<ReleaseInfo | null>(null);
+  useEffect(() => {
+    void (async () => {
+      if (!await game.repo.getSetting("autoUpdateCheck", true)) return;
+      const last = await game.repo.getSetting<number>("updateCheckedAt", 0);
+      const skipped = await game.repo.getSetting<string | null>("updateSkipped", null);
+      if (Date.now() - last < 86_400_000) return;
+      await game.repo.setSetting("updateCheckedAt", Date.now());
+      const latest = await latestRelease(game.platform).catch(() => null);
+      if (latest && newer(latest.version, __APP_VERSION__) && latest.version !== skipped) setUpdate(latest);
+    })();
+  }, []);
+
   const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup" }));
   const again = async (worldId: string) => {
     const setup = await game.setupOf(worldId);
@@ -121,6 +136,15 @@ export default function Home() {
         <button className="icon-btn" aria-label="设置" onClick={() => push({ name: "settings" })}>⚙</button>
       </div>
       <div className="screen-body stack">
+        {update && (
+          <div className="notice">
+            有新版本 {update.version}，覆盖安装即可，不要先卸载。
+            <div className="row">
+              <button className="primary" onClick={() => void game.platform.system.openUrl(update.url)}>去下载</button>
+              <button className="ghost" onClick={() => { void game.repo.setSetting("updateSkipped", update.version); setUpdate(null); }}>这版不提醒</button>
+            </div>
+          </div>
+        )}
         {cards && cards.length === 0 && (
           <div className="hero">
             <Seal />

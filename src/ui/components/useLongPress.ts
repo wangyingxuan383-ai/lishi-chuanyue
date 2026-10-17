@@ -21,7 +21,7 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
       start.current = { x: e.clientX, y: e.clientY };
       timer.current = setTimeout(() => {
         fired.current = true;
-        navigator.vibrate?.(10);
+        if (document.documentElement.dataset.haptics !== "off") navigator.vibrate?.(10);
         onLongPress();
       }, 450);
     },

@@ -3,6 +3,7 @@
 // line, sheets keep a readable width; a narrow window falls back to the phone
 // layout (Enter still sends with a keyboard and mouse).
 //   node scripts/fake-llm.mjs & pnpm dev &  node scripts/ui/desktop.mjs
+import { connectFake } from "./connect.mjs";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright-core";
 
@@ -20,16 +21,7 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
 await page.goto("http://127.0.0.1:1420/");
 await page.getByText("连接 AI 服务").waitFor();
-await page.getByRole("button", { name: "自定义" }).click();
-await page.getByLabel("服务地址").fill("http://127.0.0.1:18800/v1");
-await page.getByText(/这是 HTTP 地址/).click();
-await page.getByLabel(/API Key/).fill("fake-ui-key");
-await page.getByRole("button", { name: "获取模型列表" }).click();
-await page.locator("select").waitFor();
-await page.locator("select").selectOption("fake-normal");
-await page.getByRole("button", { name: "测试连接" }).click();
-await page.getByText(/连接成功/).waitFor();
-await page.getByRole("button", { name: "保存，开始穿越" }).click();
+await connectFake(page);
 await page.waitForFunction(() => !!window.__lishi);
 await page.evaluate(async () => {
   const repo = window.__lishi.game.repo;

@@ -760,3 +760,26 @@ async fn aborting_unpolled_stream_guard_releases_registration_and_lease() {
     assert!(!service.active.lock().unwrap().contains_key(&id));
     assert_eq!(service.keep_alive.count(), 0);
 }
+
+#[test]
+fn network_settings_accept_http_and_socks_proxies_and_reject_others() {
+    let custom = |url: &str| NetworkConfig {
+        proxy: "custom".into(),
+        proxy_url: Some(url.into()),
+    };
+    assert!(set_network(custom("http://127.0.0.1:7890")).is_ok());
+    assert!(set_network(custom("socks5://127.0.0.1:1080")).is_ok());
+    assert_eq!(
+        set_network(custom("ftp://127.0.0.1:21")).unwrap_err().code,
+        "proxy_invalid"
+    );
+    assert_eq!(
+        set_network(custom("not a url")).unwrap_err().code,
+        "proxy_invalid"
+    );
+    assert!(set_network(NetworkConfig {
+        proxy: "none".into(),
+        proxy_url: None
+    })
+    .is_ok());
+}

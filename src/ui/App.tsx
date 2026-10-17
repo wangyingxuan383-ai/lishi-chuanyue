@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getPlatform, type Platform } from "../platform";
 import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
-import { AppProvider, DEFAULT_READING, THEME_KEY, useToast, type AppValue, type Reading, type Route } from "./app/context";
+import { AppProvider, DEFAULT_READING, THEME_KEY, resolvedTheme, useToast, type AppValue, type Reading, type Route } from "./app/context";
 import { Dialog, type DialogRequest } from "./components/Dialog";
 import { Seal } from "./components/Seal";
 import Home from "./screens/Home";
@@ -25,10 +25,30 @@ export function llmFor(profile: Profile | null): LlmConfig | null {
 
 function applyReading(r: Reading) {
   const root = document.documentElement;
-  root.dataset.theme = r.theme;
+  root.dataset.theme = resolvedTheme(r.theme);
   root.dataset.font = r.serif ? "serif" : "sans";
+  root.dataset.motion = r.motion;
+  root.dataset.indent = r.indent ? "on" : "off";
+  root.dataset.haptics = r.haptics ? "on" : "off";
   try { localStorage.setItem(THEME_KEY, r.theme); } catch { /* storage may be unavailable */ }
   root.style.setProperty("--story-size", `${r.size}px`);
+  // Sans text reads better a little tighter (AUDIT_V4 10.3).
+  root.style.setProperty("--story-leading", String(r.serif ? r.leading : Math.max(1.6, r.leading - 0.2)));
+  root.style.setProperty("--story-paragraph", `${r.paragraph}em`);
+  root.style.setProperty("--story-measure", `${r.measure}em`);
+}
+
+/** Keeps the screen on while the setting asks for it (Screen Wake Lock, where the WebView has it). */
+function useKeepAwake(on: boolean) {
+  useEffect(() => {
+    const nav = navigator as Navigator & { wakeLock?: { request(type: "screen"): Promise<{ release(): Promise<void> }> } };
+    if (!on || !nav.wakeLock) return;
+    let lock: { release(): Promise<void> } | null = null;
+    const take = () => { if (document.visibilityState === "visible") void nav.wakeLock!.request("screen").then((l) => { lock = l; }).catch(() => {}); };
+    take();
+    document.addEventListener("visibilitychange", take);
+    return () => { document.removeEventListener("visibilitychange", take); void lock?.release().catch(() => {}); };
+  }, [on]);
 }
 
 export default function App() {
@@ -39,6 +59,15 @@ export default function App() {
   const [devMode, setDevModeState] = useState(false);
   const [stack, setStack] = useState<Route[]>([{ name: "home" }]);
   const [toastState, toast, clearToast] = useToast();
+  useKeepAwake(reading.keepAwake);
+  // "Follow the system" follows it live, too.
+  useEffect(() => {
+    if (reading.theme !== "auto") return;
+    const query = matchMedia("(prefers-color-scheme: dark)");
+    const change = () => applyReading(reading);
+    query.addEventListener("change", change);
+    return () => query.removeEventListener("change", change);
+  }, [reading]);
   const [dialog, setDialog] = useState<DialogRequest | null>(null);
   const exitArmed = useRef(false);
 
@@ -54,6 +83,9 @@ export default function App() {
       const active = profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null;
       game.llm = llmFor(active);
       const r = { ...DEFAULT_READING, ...(await game.repo.getSetting<Partial<Reading>>("reading", {})) };
+      // The network choice applies to every request from the start.
+      const network = await game.repo.getSetting<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>("network", { proxy: "none" });
+      void platform.llm.setNetwork(network).catch(() => {});
       applyReading(r);
       setReadingState(r);
       setDevModeState(await game.repo.getSetting("devMode", false));

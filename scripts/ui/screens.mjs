@@ -3,6 +3,7 @@
 // empty home, then one board per theme for review (and the README).
 // Web fonts stand in for the phone's own serif (Noto Serif SC, OFL).
 //   node scripts/fake-llm.mjs & pnpm dev &  node scripts/ui/screens.mjs [--out docs/images]
+import { connectFake } from "./connect.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright-core";
@@ -45,16 +46,7 @@ await page.screenshot({ path: `${shots}/once-0-boot.png` });
 await page.getByText("连接 AI 服务").waitFor();
 await settle();
 await page.screenshot({ path: `${shots}/once-1-setup.png` });
-await page.getByRole("button", { name: "自定义" }).click();
-await page.getByLabel("服务地址").fill("http://127.0.0.1:18800/v1");
-await page.getByText(/这是 HTTP 地址/).click();
-await page.getByLabel(/API Key/).fill("fake-ui-key");
-await page.getByRole("button", { name: "获取模型列表" }).click();
-await page.locator("select").waitFor();
-await page.locator("select").selectOption("fake-normal");
-await page.getByRole("button", { name: "测试连接" }).click();
-await page.getByText(/连接成功/).waitFor();
-await page.getByRole("button", { name: "保存，开始穿越" }).click();
+await connectFake(page);
 await page.waitForFunction(() => !!window.__lishi);
 await page.getByRole("button", { name: /开始/ }).first().waitFor();
 await page.locator(".toast").waitFor({ state: "detached", timeout: 5000 }).catch(() => {});

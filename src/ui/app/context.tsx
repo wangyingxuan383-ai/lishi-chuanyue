@@ -13,10 +13,28 @@ export type Route =
 
 export interface Reading {
   size: number;
-  theme: "paper" | "day" | "night";
+  /** "auto" follows the system: paper by day, night when the phone is dark. */
+  theme: "auto" | "paper" | "day" | "night";
   serif: boolean;
+  /** Line height of the story text. */
+  leading: number;
+  /** Space between paragraphs, in em. */
+  paragraph: number;
+  /** Indent paragraphs two characters, like a Chinese book. */
+  indent: boolean;
+  /** Widest the story column gets on a big screen, in characters. */
+  measure: number;
+  /** Animations: follow the system's "reduce motion", or always off. */
+  motion: "system" | "off";
+  /** A short vibration on long press. */
+  haptics: boolean;
+  /** Keep the screen on while reading and writing. */
+  keepAwake: boolean;
 }
-export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: true };
+export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "system", haptics: true, keepAwake: false };
+/** The theme a setting resolves to now. */
+export const resolvedTheme = (theme: Reading["theme"]): "paper" | "day" | "night" =>
+  theme === "auto" ? (matchMedia?.("(prefers-color-scheme: dark)").matches ? "night" : "paper") : theme;
 /** The theme is remembered outside the database too, so the first frame already has it. */
 export const THEME_KEY = "lishi.theme";
 
