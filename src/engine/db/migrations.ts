@@ -130,4 +130,11 @@ ALTER TABLE chapters ADD COLUMN gist TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS chapters_world ON chapters(world_id);
 `,
   },
+  {
+    // R06-T001: deleted world lines wait in the trash for 30 days.
+    version: 3,
+    sql: `
+ALTER TABLE lines ADD COLUMN deleted_at TEXT;
+`,
+  },
 ];

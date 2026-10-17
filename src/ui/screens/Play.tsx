@@ -9,6 +9,7 @@ import type { Chip, TurnRecord } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
 import type { ActionMode, Intensity, Pin, StoryNode, World, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
+import { BookmarkSheet, LinesSheet } from "../components/Lines";
 import { Panel } from "../components/Panel";
 import { RulesSheet } from "../components/RulesSheet";
 import { MenuSheet, Sheet } from "../components/Sheet";
@@ -90,6 +91,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
+  const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
   const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | null>(null);
   const [panel, setPanel] = useState(false);
   const [following, setFollowing] = useState(true);
@@ -412,6 +414,7 @@ export default function Play({ worldId }: { worldId: string }) {
             { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue" || menuNode.actionMode === "skip", onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
             { label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
             { label: "回到这里", hidden: menuNode.id === head.id, onSelect: () => void goBack(menuNode) },
+            { label: "加书签", hidden: menuNode.kind === "edit", onSelect: () => setBookmark({ node: menuNode, name: menuNode.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
             { label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
             { label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuNode) },
           ]}
@@ -507,7 +510,12 @@ export default function Play({ worldId }: { worldId: string }) {
         </Sheet>
       )}
       {sheet === "rules" && <RulesSheet state={state} era={era} busy={!!gen} onClose={() => setSheet(null)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
-      {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onSwitch={async (id) => { await tree.switchLine(game.repo, worldId, id); setSheet(null); await refresh(); }} />}
+      {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onChanged={(message) => { void refresh(); toast(message); }} />}
+      {bookmark && <BookmarkSheet initial={bookmark.name} onClose={() => setBookmark(null)} onSave={(name) => {
+        const node = bookmark.node;
+        setBookmark(null);
+        void tree.addBookmark(game.repo, worldId, node.id, name).then(() => toast("已加书签，在“世界线”里能找到"));
+      }} />}
       {sheet === "story" && <StorySheet world={world} headId={head.id} onSave={(p) => { void updateSettings(p); setSheet(null); toast("已保存，从下一段开始生效"); }} onClose={() => setSheet(null)} />}
       {sheet === "settings" && <WorldSettingsSheet world={world} onChange={updateSettings} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
       {panel && <Panel worldId={worldId} headId={head.id} chapterEvery={world.settings.chapterEvery} state={state} era={era} busy={!!gen} onClose={() => setPanel(false)} onOpenStory={() => { setPanel(false); setSheet("story"); }}
@@ -571,34 +579,6 @@ function HintInput({ onSubmit }: { onSubmit: (hint: string) => void }) {
   );
 }
 
-function LinesSheet({ worldId, current, onClose, onSwitch }: { worldId: string; current: string; onClose: () => void; onSwitch: (id: string) => void }) {
-  const { game } = useApp();
-  const [lines, setLines] = useState<{ id: string; name: string; last: string; turns: number }[]>([]);
-  useEffect(() => {
-    void (async () => {
-      const out = [];
-      for (const l of await tree.listedLines(game.repo, worldId)) {
-        const path = await game.repo.path(l.nodeId);
-        const last = path[path.length - 1]?.narrative.replace(/\s+/g, "").slice(-30) ?? "";
-        out.push({ id: l.id, name: l.name, last, turns: path.length - 1 });
-      }
-      setLines(out);
-    })();
-  }, []);
-  return (
-    <Sheet title="世界线" onClose={onClose}>
-      <div className="list">
-        {lines.map((l) => (
-          <button key={l.id} className={`card${l.id === current ? " selected" : ""}`} onClick={() => onSwitch(l.id)}>
-            <h3>{l.name}{l.id === current ? "（当前）" : ""}</h3>
-            <p>{l.turns} 回合 · …{l.last}</p>
-          </button>
-        ))}
-      </div>
-      <p className="muted">长按任意一段选“回到这里”，就能从那里开出新的路线。</p>
-    </Sheet>
-  );
-}
 
 function StorySheet({ world, headId, onSave, onClose }: { world: World; headId: string; onSave: (p: Partial<World["settings"]>) => void; onClose: () => void }) {
   const { game } = useApp();

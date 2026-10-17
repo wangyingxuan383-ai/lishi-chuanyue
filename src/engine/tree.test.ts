@@ -101,3 +101,96 @@ describe("turn tree", () => {
     expect((await repo.getState(back.head.id)).protagonist.stats.money).toBe(260);
   });
 });
+
+describe("world lines (R06-T001)", () => {
+  /** A card unique to the branch, so states can be told apart. */
+  const branchTurn = (n: number) => {
+    const state = sampleState(300 + n);
+    state.cards = [{ id: `k${n}`, kind: "设定", name: `第${n}路的规矩`, keys: [], content: `只属于第 ${n} 条路` }];
+    return { kind: "turn" as const, actionMode: "do" as const, actionText: `走第${n}条路`, narrative: `第${n}条路`, state };
+  };
+
+  it("keeps ten branches apart: state, cards, chapters and pins", async () => {
+    const opening = c.head;
+    const ids: string[] = [];
+    for (let n = 1; n <= 10; n++) {
+      const line = await repo.createLine(c.worldId, opening.id, `第${n}条路`, false);
+      await repo.setCurrentLine(c.worldId, line.id);
+      let cur = await tree.cursor(repo, c.worldId);
+      cur = await tree.append(repo, cur, branchTurn(n));
+      await repo.addPin(c.worldId, cur.head.id, `第${n}路的要点`);
+      await repo.addChapter({ worldId: c.worldId, firstNodeId: cur.head.id, lastNodeId: cur.head.id, title: `第${n}章`, gist: "", summary: "", model: null, promptVersion: null });
+      ids.push(line.id);
+    }
+    for (let n = 1; n <= 10; n++) {
+      const cur = await tree.switchLine(repo, c.worldId, ids[n - 1]);
+      const state = await repo.getState(cur.head.id);
+      expect(state.protagonist.stats.money).toBe(300 + n);
+      expect(state.cards.map((k) => k.name)).toEqual([`第${n}路的规矩`]);
+      expect((await repo.pinsOnPath(c.worldId, cur.head.id)).map((p) => p.text)).toEqual([`第${n}路的要点`]);
+      expect((await repo.chaptersOnPath(c.worldId, cur.head.id)).map((x) => x.title)).toEqual([`第${n}章`]);
+    }
+  });
+
+  it("deletes into the trash, restores, and purges only turns nothing else reaches", async () => {
+    c = await tree.append(repo, c, turn("一"));
+    const shared = c.head;
+    c = await tree.append(repo, c, turn("二"));
+    c = await tree.append(repo, c, turn("三"));
+    // A second line from 一 with three turns of its own, then back to the main line.
+    const branch = await repo.createLine(c.worldId, shared.id, "岔路", false);
+    let b = await tree.switchLine(repo, c.worldId, branch.id);
+    b = await tree.append(repo, b, turn("岔一"));
+    const marked = b.head;
+    b = await tree.append(repo, b, turn("岔二"));
+    b = await tree.append(repo, b, turn("岔三"));
+    await repo.addPin(c.worldId, b.head.id, "岔路上的要点");
+    await tree.switchLine(repo, c.worldId, c.line.id);
+    await expect(repo.setLineDeleted(c.line.id, true)).rejects.toThrow();
+
+    await repo.setLineDeleted(branch.id, true);
+    expect((await tree.listedLines(repo, c.worldId)).map((l) => l.name)).toEqual(["主线"]);
+    await repo.setLineDeleted(branch.id, false);
+    expect((await tree.listedLines(repo, c.worldId)).map((l) => l.name)).toEqual(["主线", "岔路"]);
+
+    // A bookmark on 岔一 keeps it; only 岔二 and 岔三 go.
+    await tree.addBookmark(repo, c.worldId, marked.id, "岔路口");
+    await repo.setLineDeleted(branch.id, true);
+    expect(await repo.purgeLine(branch.id)).toBe(2);
+    expect((await repo.getNode(marked.id))?.narrative).toBe("岔一");
+    expect(await repo.getNode(b.head.id)).toBeNull();
+    expect(await repo.pinsOnPath(c.worldId, marked.id)).toEqual([]);
+    expect(await texts(await tree.cursor(repo, c.worldId))).toEqual(["开场", "一", "二", "三"]);
+    expect((await repo.lines(c.worldId)).map((l) => [l.name, l.kind])).toEqual([["主线", "line"], ["岔路口", "bookmark"]]);
+  });
+
+  it("purges the trash only after thirty days", async () => {
+    c = await tree.append(repo, c, turn("一"));
+    const branch = await repo.createLine(c.worldId, c.head.id, "岔路", false);
+    await repo.setLineDeleted(branch.id, true);
+    expect(await repo.purgeTrash(c.worldId)).toBe(0);
+    expect(await repo.getLine(branch.id)).not.toBeNull();
+    await repo.platform.sql.query("UPDATE lines SET deleted_at = ? WHERE id = ?", [new Date(Date.now() - 31 * 86_400_000).toISOString(), branch.id]);
+    await repo.purgeTrash(c.worldId);
+    expect(await repo.getLine(branch.id)).toBeNull();
+    // Its node is still on the main line, so it stays.
+    expect((await repo.getNode(c.head.id))?.narrative).toBe("一");
+  });
+
+  it("jumps to a bookmark: back along the path, or a new line elsewhere", async () => {
+    c = await tree.append(repo, c, turn("一"));
+    const one = c.head;
+    c = await tree.append(repo, c, turn("二"));
+    c = await tree.append(repo, c, turn("三"));
+    // A passage on another branch, then back on the main line.
+    const side = await tree.switchLine(repo, c.worldId, (await repo.createLine(c.worldId, one.id, "岔路", false)).id);
+    const sideTurn = (await tree.append(repo, side, turn("岔一"))).head;
+    await tree.switchLine(repo, c.worldId, c.line.id);
+    const jumped = await tree.jumpTo(repo, c.worldId, sideTurn.id, "从书签继续");
+    expect(jumped.head.narrative).toBe("岔一");
+    expect(jumped.line.name).toBe("从书签继续");
+    await tree.switchLine(repo, c.worldId, c.line.id);
+    const back = await tree.jumpTo(repo, c.worldId, one.id, "从书签继续");
+    expect([back.head.id, back.line.id]).toEqual([one.id, c.line.id]);
+  });
+});

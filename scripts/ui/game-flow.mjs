@@ -292,6 +292,38 @@ await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "世界线" }).click();
 const lines = await page.locator(".sheet .card").count();
 check("old route kept as a world line", lines === 2, `${lines} lines`);
+// R06-T001: rename the old route, put it in the trash and restore it.
+const oldRoute = page.locator(".line-row").filter({ hasNotText: "（当前）" }).first();
+await oldRoute.getByRole("button", { name: /更多操作/ }).click();
+await page.getByRole("button", { name: "重命名" }).click();
+await page.getByLabel("名称", { exact: true }).fill("当铺那条路");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".line-row", { hasText: "当铺那条路" }).waitFor();
+await page.locator(".line-row", { hasText: "当铺那条路" }).getByRole("button", { name: /更多操作/ }).click();
+await page.getByRole("button", { name: "删除", exact: true }).click();
+await page.getByText(/回收站 1/).waitFor();
+await page.getByText(/回收站 1/).click();
+await page.locator(".line-row", { hasText: "当铺那条路" }).locator(".card").click();
+await page.getByRole("button", { name: "恢复", exact: true }).click();
+await page.waitForTimeout(300);
+check("a route can be renamed, deleted and restored", (await page.locator(".line-row", { hasText: "当铺那条路" }).count()) === 1 && (await page.getByText(/回收站/).count()) === 0);
+await page.waitForTimeout(400);
+await shot("07b-lines");
+await page.keyboard.press("Escape");
+// A bookmark on the opening, listed under 世界线.
+const openingTurn = page.locator(".turn").first();
+const openingBox = await openingTurn.boundingBox();
+await page.mouse.move(openingBox.x + 40, openingBox.y + 40);
+await page.mouse.down();
+await page.waitForTimeout(650);
+await page.mouse.up();
+await page.getByRole("button", { name: "加书签" }).click();
+await page.getByLabel("名称", { exact: true }).fill("刚穿越来时");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.getByText(/已加书签/).waitFor();
+await page.getByRole("button", { name: "更多" }).click();
+await page.getByRole("button", { name: "世界线" }).click();
+check("the bookmark is listed", (await page.locator(".line-row", { hasText: "刚穿越来时" }).count()) === 1);
 await page.keyboard.press("Escape");
 
 // Every six turns the AI files new cards in the background (R04-T001).

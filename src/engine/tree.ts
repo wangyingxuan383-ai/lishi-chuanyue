@@ -120,7 +120,7 @@ export async function goBackTo(repo: Repo, c: Cursor, nodeId: string): Promise<C
     await repo.moveLine(c.line.id, target.id);
     return { ...c, line: { ...c.line, nodeId: target.id }, head: target };
   }
-  const line = await repo.createLine(c.worldId, target.id, `第 ${at} 回合后的另一条路`, true);
+  const line = await repo.createLine(c.worldId, target.id, at === 0 ? "从开场重来的路" : `第 ${at} 回合后的另一条路`, true);
   await repo.setCurrentLine(c.worldId, line.id);
   return { worldId: c.worldId, line, head: target };
 }
@@ -130,7 +130,24 @@ export async function switchLine(repo: Repo, worldId: string, lineId: string): P
   return cursor(repo, worldId);
 }
 
-/** Lines that should appear in the world-line list (bookmarks excluded). */
+/** Lines that should appear in the world-line list (bookmarks, archived and deleted ones excluded). */
 export async function listedLines(repo: Repo, worldId: string): Promise<Line[]> {
-  return (await repo.lines(worldId)).filter((l) => l.kind === "line" && !l.archived);
+  return (await repo.lines(worldId)).filter((l) => l.kind === "line" && !l.archived && !l.deletedAt);
+}
+
+/** A bookmark at a passage, kept as a line of its own so its turns are never purged (R06-T001). */
+export async function addBookmark(repo: Repo, worldId: string, nodeId: string, name: string): Promise<Line> {
+  return repo.createLine(worldId, nodeId, name.trim() || "书签", false, "bookmark");
+}
+
+/**
+ * Carry on from any passage: on the current path it is "回到这里"; elsewhere
+ * (a bookmark, another branch) a new line starts there and becomes current.
+ */
+export async function jumpTo(repo: Repo, worldId: string, nodeId: string, name: string): Promise<Cursor> {
+  const c = await cursor(repo, worldId);
+  if ((await repo.path(c.head.id)).some((n) => n.id === nodeId)) return goBackTo(repo, c, nodeId);
+  const line = await repo.createLine(worldId, nodeId, name, true);
+  await repo.setCurrentLine(worldId, line.id);
+  return cursor(repo, worldId);
 }

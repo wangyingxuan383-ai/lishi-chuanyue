@@ -66,8 +66,12 @@ function toLine(r: Row): Line {
     autoNamed: !!r.auto_named,
     archived: !!r.archived,
     createdAt: r.created_at as string,
+    deletedAt: (r.deleted_at as string) ?? null,
   };
 }
+
+/** The node and everything under it, for statements that remove a branch. */
+const SUBTREE = `WITH RECURSIVE down(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN down ON n.parent_id = down.id) SELECT id FROM down`;
 
 export interface NewNode {
   id?: string;
@@ -339,6 +343,65 @@ export class Repo {
 
   async setCurrentLine(worldId: string, lineId: string): Promise<void> {
     await this.q("UPDATE worlds SET current_line_id = ?, played_at = ? WHERE id = ?", [lineId, now(), worldId]);
+  }
+
+  async renameLine(lineId: string, name: string): Promise<void> {
+    await this.q("UPDATE lines SET name = ?, auto_named = 0 WHERE id = ?", [name.trim(), lineId]);
+  }
+
+  async setLineArchived(lineId: string, archived: boolean): Promise<void> {
+    await this.q("UPDATE lines SET archived = ? WHERE id = ?", [archived ? 1 : 0, lineId]);
+  }
+
+  /** Into the trash, or back out of it (R06-T001). The current line cannot be deleted. */
+  async setLineDeleted(lineId: string, deleted: boolean): Promise<void> {
+    const line = await this.getLine(lineId);
+    if (deleted && line && (await this.getWorld(line.worldId))?.currentLineId === lineId) throw new Error("the current line cannot be deleted");
+    await this.q("UPDATE lines SET deleted_at = ? WHERE id = ?", [deleted ? now() : null, lineId]);
+  }
+
+  /**
+   * Removes a line for good, with the turns only it reached: the branch below
+   * the first node on its path that no other line or bookmark reaches.
+   * Returns how many nodes were removed.
+   */
+  async purgeLine(lineId: string): Promise<number> {
+    const line = await this.getLine(lineId);
+    if (!line) return 0;
+    if ((await this.getWorld(line.worldId))?.currentLineId === lineId) throw new Error("the current line cannot be purged");
+    const keep = new Set((await this.q(
+      `WITH RECURSIVE keep(id) AS (
+         SELECT node_id FROM lines WHERE world_id = ? AND id <> ? AND deleted_at IS NULL
+         UNION
+         SELECT n.parent_id FROM nodes n JOIN keep ON n.id = keep.id WHERE n.parent_id IS NOT NULL
+       ) SELECT id FROM keep`,
+      [line.worldId, lineId],
+    )).map((r) => r.id as string));
+    const first = (await this.path(line.nodeId)).find((n) => !keep.has(n.id));
+    const statements: SqlStatement[] = [{ sql: "DELETE FROM lines WHERE id = ?", params: [lineId] }];
+    let removed = 0;
+    if (first) {
+      removed = Number((await this.q(`SELECT COUNT(*) AS n FROM (${SUBTREE})`, [first.id]))[0].n);
+      statements.push(
+        { sql: `DELETE FROM pins WHERE origin_node_id IN (${SUBTREE})`, params: [first.id] },
+        { sql: `DELETE FROM chapters WHERE last_node_id IN (${SUBTREE}) OR first_node_id IN (${SUBTREE})`, params: [first.id, first.id] },
+        // Lines still in the trash that pointed into the branch go with it.
+        { sql: `DELETE FROM lines WHERE node_id IN (${SUBTREE})`, params: [first.id] },
+        { sql: `UPDATE nodes SET last_child_id = NULL WHERE last_child_id IN (${SUBTREE})`, params: [first.id] },
+        { sql: `DELETE FROM nodes WHERE id IN (${SUBTREE})`, params: [first.id] },
+      );
+    }
+    await this.platform.sql.batch(statements);
+    return removed;
+  }
+
+  /** Purges lines that have been in the trash longer than `days`. */
+  async purgeTrash(worldId: string, days = 30): Promise<number> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const old = await this.q("SELECT id FROM lines WHERE world_id = ? AND deleted_at IS NOT NULL AND deleted_at < ?", [worldId, cutoff]);
+    let removed = 0;
+    for (const r of old) removed += await this.purgeLine(r.id as string);
+    return removed;
   }
 
   // ---------- usage ----------

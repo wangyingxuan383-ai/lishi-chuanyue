@@ -242,4 +242,6 @@ export interface Line {
   autoNamed: boolean;
   archived: boolean;
   createdAt: string;
+  /** In the trash since then (R06-T001); purged after 30 days. */
+  deletedAt: string | null;
 }
