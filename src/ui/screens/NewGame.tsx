@@ -44,6 +44,13 @@ export default function NewGame() {
   const [pasted, setPasted] = useState("");
   const [assisting, setAssisting] = useState(false);
   const [phase, setPhase] = useState<"form" | "loading" | "thinking" | "writing" | "organizing">("form");
+  /** "pick": choose a way in (随便穿, an inspiration, a line of your own); "setup": the fields. */
+  const [step, setStep] = useState<"pick" | "setup">("pick");
+  /** Folded parts of the setup; a part opens when tapped or when something is missing there. */
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const nameBox = useRef<HTMLInputElement>(null);
+  const identityBox = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -62,6 +69,7 @@ export default function NewGame() {
       setDefaults(d);
       const base = fresh(d);
       setDraftState(saved ? { ...base, ...saved, settings: { ...base.settings, ...saved.settings } } : base);
+      if (saved && (saved.name || saved.premise || saved.identity)) setStep("setup");
       const rows = await game.platform.sql.query("SELECT id, name, json FROM templates WHERE kind = 'opening' ORDER BY created_at DESC");
       setMine(rows.map((r) => ({ id: r.id as string, name: r.name as string, draft: JSON.parse(r.json as string) })));
       setLoaded(true);
@@ -83,7 +91,8 @@ export default function NewGame() {
   const useTemplate = (t: OpeningTemplate) => {
     setDraft((d) => fromTemplate(t, d));
     setError(null);
-    toast(`已填入「${t.title}」，可以随意修改`);
+    setStep("setup");
+    window.scrollTo?.(0, 0);
   };
 
   const assist = async () => {
@@ -97,6 +106,7 @@ export default function NewGame() {
     const result = await game.assist(idea, current);
     setAssisting(false);
     if (!result) { toast("没能生成，再试一次？"); return; }
+    setStep("setup");
     const fill = (mineValue: string, theirs: unknown) => (mineValue.trim() ? mineValue : typeof theirs === "string" ? theirs : mineValue);
     setDraft((d) => {
       const gender = d.lockedGender ?? (result.gender === "女" ? "女" : result.gender === "男" ? "男" : d.gender);
@@ -115,7 +125,7 @@ export default function NewGame() {
         settings: { ...d.settings, essentials: fill(d.settings.essentials, result.essentials) },
       };
     });
-    toast("已补全空着的部分");
+    toast("已补全空着的部分，都可以改");
   };
 
   const start = async (d: Draft) => {
@@ -200,138 +210,7 @@ export default function NewGame() {
     </div>
   );
 
-  return (
-    <div className="screen">
-      <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={pop}>‹</button>
-        <div className="title"><h1>新的故事</h1></div>
-        <button className="ghost" onClick={randomStart}>随便穿</button>
-        <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}>⋯</button>
-      </div>
-      <div className="screen-body stack">
-        {error && <div className="notice">{error}</div>}
-
-        <section className="stack" style={{ gap: 8 }}>
-          <span className="muted">灵感（点一下填入，之后都能改）</span>
-          <div className="segmented" role="group" aria-label="灵感分类">
-            {["全部", ...GROUPS, "其他", ...(mine.length ? ["我的"] : [])].map((g) => <button key={g} aria-pressed={group === g} onClick={() => setGroup(g)}>{g}</button>)}
-          </div>
-          <div className="template-row">
-            {(group === "全部" || group === "我的") && mine.map((m) => (
-              <button key={m.id} className="template-card" onClick={() => { setDraft({ ...EMPTY, ...m.draft }); toast(`已填入「${m.name}」`); }}>
-                <b>{m.name}</b><small>我的开局</small>
-              </button>
-            ))}
-            {shownTemplates.map((t) => (
-              <button key={t.id} className={`template-card${draft.templateId === t.id ? " selected" : ""}`} onClick={() => useTemplate(t)}>
-                <b>{t.title}</b><small>{t.era}</small>
-              </button>
-            ))}
-          </div>
-          {group === "全部" && !allTemplates && <button className="ghost" onClick={() => setAllTemplates(true)}>查看全部 {TEMPLATES.length} 个灵感</button>}
-        </section>
-
-        <section className="stack" style={{ gap: 8 }}>
-          <label>一句话想法（可选，交给 AI 补全空着的部分）
-            <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} placeholder="比如：靖康之变前一年，我是汴京的一个小吏，想办法救下更多的人" />
-          </label>
-          <button onClick={assist} disabled={assisting}>{assisting ? "构思中…" : "AI 帮我补全"}</button>
-        </section>
-
-        <label>故事设定（时代、地点、时局、你想讲的故事。会一直交给 AI）
-          <textarea rows={6} value={draft.premise} onChange={(e) => set("premise", e.target.value)} placeholder="比如：北宋宣和年间，汴京。花石纲扰民，金国崛起……" />
-        </label>
-
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="muted">主角</span>
-          <div className="row">
-            <input className="grow" value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="名字" aria-label="名字" />
-            <input style={{ width: 84 }} value={draft.age} onChange={(e) => set("age", e.target.value.replace(/\D/g, ""))} placeholder="年龄" inputMode="numeric" aria-label="年龄" />
-          </div>
-          {draft.lockedGender ? (
-            <p className="muted" style={{ margin: 0 }}>性别：{draft.lockedGender}（由身份决定）<button className="ghost" style={{ minHeight: 32, padding: "2px 8px" }} onClick={() => set("lockedGender", null)}>改</button></p>
-          ) : (
-            <div className="segmented">
-              {(["男", "女"] as const).map((g) => <button key={g} aria-pressed={draft.gender === g} onClick={() => set("gender", g)}>{g}</button>)}
-            </div>
-          )}
-          <label>身份与处境
-            <textarea rows={4} value={draft.identity} onChange={(e) => set("identity", e.target.value)} placeholder="你是谁、身处什么境地、眼下有什么麻烦" />
-          </label>
-        </div>
-
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="muted">穿越</span>
-          <div className="segmented">
-            {ARRIVALS.map((a) => <button key={a} aria-pressed={draft.arrival === a} onClick={() => set("arrival", a)}>{a}</button>)}
-          </div>
-          {draft.arrival !== "不穿越" && (
-            <>
-              <input value={draft.origin} onChange={(e) => set("origin", e.target.value)} placeholder="穿越前，你是…" aria-label="穿越前的身份" />
-              <div className="segmented">
-                {ORIGINS.map((o) => <button key={o} aria-pressed={draft.origin === o} onClick={() => set("origin", o)}>{o}</button>)}
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="muted">开场</span>
-          <div className="segmented">
-            <button aria-pressed={draft.openingMode === "ai"} onClick={() => set("openingMode", "ai")}>AI 来写</button>
-            <button aria-pressed={draft.openingMode === "player"} onClick={() => set("openingMode", "player")}>我自己写</button>
-          </div>
-          {draft.openingMode === "ai" ? (
-            <input value={draft.hint} onChange={(e) => set("hint", e.target.value)} placeholder="第一幕想看到什么（可不填）" aria-label="开场提示" />
-          ) : (
-            <textarea rows={8} value={draft.openingText} onChange={(e) => set("openingText", e.target.value)} placeholder="写下故事的第一段，AI 会从这里接着写。" aria-label="开场正文" />
-          )}
-        </div>
-
-        <details>
-          <summary className="muted">更多设置</summary>
-          <div className="stack" style={{ marginTop: 12 }}>
-            <label>故事名<input value={draft.title} onChange={(e) => set("title", e.target.value)} placeholder="不填则用主角名字" /></label>
-            <span className="muted">时代设定（放进设定集，开局后可在“我 → 设定”里修改）</span>
-            <div className="segmented" role="group" aria-label="时代设定">
-              <button aria-pressed={!draft.eraId && draft.organize} onClick={() => setDraft((d) => ({ ...d, eraId: null, organize: true }))}>AI 按故事设定整理</button>
-              {ERAS.map((e) => <button key={e.id} aria-pressed={draft.eraId === e.id} onClick={() => set("eraId", e.id)}>{e.title}</button>)}
-              <button aria-pressed={!draft.eraId && !draft.organize} onClick={() => setDraft((d) => ({ ...d, eraId: null, organize: false }))}>不要</button>
-            </div>
-            <p className="muted" style={{ margin: 0 }}>{draft.eraId ? "使用整理好的内置资料：时代卡、主要地点、年号与货币。"
-              : draft.organize ? "开场时 AI 按你的故事设定整理一张时代卡和几张关键卡片，只补你没写的部分。"
-              : "不准备时代卡，AI 只按故事设定来写。"}</p>
-            <span className="muted">叙述视角</span>
-            <div className="segmented">
-              {([["你", "你（第二人称）"], ["我", "我（第一人称）"], ["他", "他 / 她（小说式）"]] as [Perspective, string][]).map(([v, l]) => <button key={v} aria-pressed={draft.settings.perspective === v} onClick={() => setS("perspective", v)}>{l}</button>)}
-            </div>
-            <span className="muted">文风与篇幅</span>
-            <div className="segmented">
-              {(["白话", "半文半白"] as const).map((v) => <button key={v} aria-pressed={draft.settings.style === v} onClick={() => setS("style", v)}>{v}</button>)}
-              {(["短", "中", "长"] as const).map((v) => <button key={v} aria-pressed={draft.settings.length === v} onClick={() => setS("length", v)}>{v}篇幅</button>)}
-            </div>
-            <span className="muted">建议选项</span>
-            <div className="segmented">
-              {[0, 2, 3, 4].map((n) => <button key={n} aria-pressed={draft.settings.choiceCount === n} onClick={() => setS("choiceCount", n)}>{n === 0 ? "不要" : `${n} 个`}</button>)}
-            </div>
-            {intensity("violence", "暴力与伤亡")}
-            {intensity("romance", "感情与亲密")}
-            {intensity("darkness", "黑暗与压抑")}
-            <label>要点（AI 必须一直记住的事，每行一条）
-              <textarea rows={3} value={draft.settings.essentials} onChange={(e) => setS("essentials", e.target.value)} placeholder="比如：主角知道三年后会有大乱" />
-            </label>
-            <label>给 AI 的额外规则
-              <textarea rows={3} value={draft.settings.rules} onChange={(e) => setS("rules", e.target.value)} placeholder="比如：多写人物对话；不要让主角轻易获得权力" />
-            </label>
-          </div>
-        </details>
-
-        <div className="row sticky-bar">
-          <button onClick={saveTemplate}>存为我的开局</button>
-          <button className="primary grow" disabled={!ready} onClick={() => void start(draft)}>开始</button>
-        </div>
-        {!ready && <p className="muted" style={{ margin: 0, textAlign: "center" }}>填好名字和身份就能开始{draft.openingMode === "player" ? "（还要写下开场）" : ""}。</p>}
-      </div>
+  const menuSheets = (<>
       {sheet === "menu" && (
         <MenuSheet
           onClose={() => setSheet(null)}
@@ -352,6 +231,184 @@ export default function NewGame() {
           </div>
         </Sheet>
       )}
+  </>);
+
+  const missing = !draft.name.trim() ? "名字" : !draft.identity.trim() ? "身份" : draft.openingMode === "player" && !draft.openingText.trim() ? "开场" : null;
+  const startOrPoint = () => {
+    if (!missing) { void start(draft); return; }
+    // A grey button that does nothing is a dead end: take the player to what is missing (AUDIT_V4 3.7).
+    if (missing === "名字") nameBox.current?.focus();
+    else if (missing === "身份") identityBox.current?.focus();
+    else setOpen((o) => ({ ...o, opening: true }));
+    toast(`还差${missing}`);
+  };
+
+  if (step === "pick") {
+    return (
+      <div className="screen">
+        <div className="topbar">
+          <button className="icon-btn" aria-label="返回" onClick={pop}>‹</button>
+          <div className="title"><h1>新的故事</h1></div>
+          <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}>⋯</button>
+        </div>
+        <div className="screen-body stack">
+          {error && <div className="notice">{error}</div>}
+          <button className="random-card" onClick={randomStart}>
+            <span className="seal small" aria-hidden="true"><span>随</span><span>缘</span></span>
+            <span><b>随便穿</b><small>让命运替你选一个时代和身份，马上开始</small></span>
+          </button>
+
+          <section className="stack" style={{ gap: 8 }}>
+            <h2 className="section-title">一句话，AI 帮你补全</h2>
+            <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} aria-label="一句话想法" placeholder="比如：靖康之变前一年，我是汴京的一个小吏，想办法救下更多的人" />
+            <button className={idea.trim() ? "primary" : ""} onClick={assist} disabled={assisting || !idea.trim()}>{assisting ? "构思中…" : "补全设定"}</button>
+          </section>
+
+          <section className="stack" style={{ gap: 8 }}>
+            <h2 className="section-title">从灵感开始</h2>
+            <div className="segmented" role="group" aria-label="灵感分类">
+              {["全部", ...GROUPS, "其他", ...(mine.length ? ["我的"] : [])].map((g) => <button key={g} aria-pressed={group === g} onClick={() => setGroup(g)}>{g}</button>)}
+            </div>
+            <div className="template-row">
+              {(group === "全部" || group === "我的") && mine.map((m) => (
+                <button key={m.id} className="template-card" onClick={() => { setDraft({ ...fresh(), ...m.draft }); setStep("setup"); }}>
+                  <b>{m.name}</b><small>我的开局</small>
+                </button>
+              ))}
+              {shownTemplates.map((t) => (
+                <button key={t.id} className={`template-card${draft.templateId === t.id ? " selected" : ""}`} onClick={() => useTemplate(t)}>
+                  <b>{t.title}</b><small>{t.era}</small><span className="hook">{t.openingHint}</span>
+                </button>
+              ))}
+            </div>
+            {group === "全部" && !allTemplates && <button className="ghost" onClick={() => setAllTemplates(true)}>查看全部 {TEMPLATES.length} 个灵感</button>}
+          </section>
+
+          <button className="ghost" onClick={() => { setDraft(fresh()); setStep("setup"); }}>什么都不选，自己从头写 ›</button>
+        </div>
+        {menuSheets}
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen">
+      <div className="topbar">
+        <button className="icon-btn" aria-label="返回" onClick={() => setStep("pick")}>‹</button>
+        <div className="title"><h1>{draft.title || "开局设定"}</h1></div>
+        <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}>⋯</button>
+      </div>
+      <div className="screen-body stack">
+        {error && <div className="notice">{error}</div>}
+        <p className="muted" style={{ margin: 0 }}>都可以改。名字和身份填好就能开始，其余有默认。</p>
+
+        <label className="field">故事设定
+          <textarea rows={5} value={draft.premise} onChange={(e) => set("premise", e.target.value)} placeholder="时代、地点、时局，你想讲的故事。比如：北宋宣和年间，汴京。花石纲扰民，金国崛起……" />
+        </label>
+
+        <section className="stack" style={{ gap: 8 }}>
+          <span className="field-label">主角</span>
+          <div className="row">
+            <input ref={nameBox} className={`grow${missing === "名字" ? " wanted" : ""}`} value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="名字" aria-label="名字" />
+            <input style={{ width: 84 }} value={draft.age} onChange={(e) => set("age", e.target.value.replace(/\D/g, ""))} placeholder="年龄" inputMode="numeric" aria-label="年龄" />
+          </div>
+          {draft.lockedGender ? (
+            <button className="picker" onClick={() => set("lockedGender", null)} aria-label={`性别：${draft.lockedGender}（由身份决定），点一下可以改`}>
+              <span><b>{draft.lockedGender}</b><small>由身份决定，点一下可以改</small></span><span aria-hidden="true">›</span>
+            </button>
+          ) : (
+            <div className="segmented">
+              {(["男", "女"] as const).map((g) => <button key={g} aria-pressed={draft.gender === g} onClick={() => set("gender", g)}>{g}</button>)}
+            </div>
+          )}
+          <textarea ref={identityBox} className={missing === "身份" && draft.name.trim() ? "wanted" : ""} rows={4} value={draft.identity} onChange={(e) => set("identity", e.target.value)} aria-label="身份与处境" placeholder="身份与处境：你是谁、身处什么境地、眼下有什么麻烦" />
+        </section>
+
+        <Fold open={open} onToggle={toggle} id="arrival" title="穿越" summary={draft.arrival === "不穿越" ? "不穿越，本来就是这个时代的人" : `${draft.arrival} · 穿越前是${draft.origin || "……"}`}>
+          <div className="segmented">
+            {ARRIVALS.map((a) => <button key={a} aria-pressed={draft.arrival === a} onClick={() => set("arrival", a)}>{a}</button>)}
+          </div>
+          {draft.arrival !== "不穿越" && (
+            <>
+              <input value={draft.origin} onChange={(e) => set("origin", e.target.value)} placeholder="穿越前，你是…" aria-label="穿越前的身份" />
+              <div className="segmented">
+                {ORIGINS.map((o) => <button key={o} aria-pressed={draft.origin === o} onClick={() => set("origin", o)}>{o}</button>)}
+              </div>
+            </>
+          )}
+        </Fold>
+
+        <Fold open={open} onToggle={toggle} id="opening" title="开场" summary={draft.openingMode === "player" ? (draft.openingText.trim() ? "我自己写的开场" : "我自己写（还没写）") : draft.hint.trim() ? `AI 来写：${draft.hint.trim().slice(0, 18)}` : "AI 来写"}>
+          <div className="segmented">
+            <button aria-pressed={draft.openingMode === "ai"} onClick={() => set("openingMode", "ai")}>AI 来写</button>
+            <button aria-pressed={draft.openingMode === "player"} onClick={() => set("openingMode", "player")}>我自己写</button>
+          </div>
+          {draft.openingMode === "ai" ? (
+            <input value={draft.hint} onChange={(e) => set("hint", e.target.value)} placeholder="第一幕想看到什么（可不填）" aria-label="开场提示" />
+          ) : (
+            <textarea rows={8} value={draft.openingText} onChange={(e) => set("openingText", e.target.value)} placeholder="写下故事的第一段，AI 会从这里接着写。" aria-label="开场正文" />
+          )}
+        </Fold>
+
+        <Fold open={open} onToggle={toggle} id="writing" title="写法" summary={`${draft.settings.style} · 每段${draft.settings.length} · ${draft.settings.perspective === "你" ? "第二人称" : draft.settings.perspective === "我" ? "第一人称" : "小说式"} · 建议选项 ${draft.settings.choiceCount || "不要"}`}>
+          <span className="muted">叙述视角</span>
+          <div className="segmented">
+            {([["你", "你（第二人称）"], ["我", "我（第一人称）"], ["他", "他 / 她（小说式）"]] as [Perspective, string][]).map(([v, l]) => <button key={v} aria-pressed={draft.settings.perspective === v} onClick={() => setS("perspective", v)}>{l}</button>)}
+          </div>
+          <span className="muted">文风</span>
+          <div className="segmented">
+            {(["白话", "半文半白"] as const).map((v) => <button key={v} aria-pressed={draft.settings.style === v} onClick={() => setS("style", v)}>{v}</button>)}
+          </div>
+          <span className="muted">每段长短</span>
+          <div className="segmented">
+            {(["短", "中", "长"] as const).map((v) => <button key={v} aria-pressed={draft.settings.length === v} onClick={() => setS("length", v)}>{v}</button>)}
+          </div>
+          <span className="muted">建议选项</span>
+          <div className="segmented">
+            {[0, 2, 3, 4].map((n) => <button key={n} aria-pressed={draft.settings.choiceCount === n} onClick={() => setS("choiceCount", n)}>{n === 0 ? "不要" : `${n} 个`}</button>)}
+          </div>
+          {intensity("violence", "暴力与伤亡")}
+          {intensity("romance", "感情与亲密")}
+          {intensity("darkness", "黑暗与压抑")}
+          <p className="muted" style={{ margin: 0 }}>默认值在 设置 → 写作与叙事 / 游玩默认 里改。</p>
+        </Fold>
+
+        <Fold open={open} onToggle={toggle} id="more" title="更多" summary={`${draft.title ? `故事名“${draft.title}” · ` : ""}${draft.eraId ? "内置时代资料" : draft.organize ? "AI 整理时代资料" : "不准备时代资料"}${draft.settings.essentials.trim() ? " · 有要点" : ""}`}>
+          <label className="field">故事名<input value={draft.title} onChange={(e) => set("title", e.target.value)} placeholder="不填则用主角名字" /></label>
+          <span className="muted">时代资料（放进设定集，开局后在“我 → 设定”里改）</span>
+          <div className="segmented" role="group" aria-label="时代设定">
+            <button aria-pressed={!draft.eraId && draft.organize} onClick={() => setDraft((d) => ({ ...d, eraId: null, organize: true }))}>AI 按故事设定整理</button>
+            {ERAS.map((e) => <button key={e.id} aria-pressed={draft.eraId === e.id} onClick={() => set("eraId", e.id)}>{e.title.split(" · ")[0]}（内置）</button>)}
+            <button aria-pressed={!draft.eraId && !draft.organize} onClick={() => setDraft((d) => ({ ...d, eraId: null, organize: false }))}>不要</button>
+          </div>
+          <label className="field">要点（AI 必须一直记住的事，每行一条）
+            <textarea rows={3} value={draft.settings.essentials} onChange={(e) => setS("essentials", e.target.value)} placeholder="比如：主角知道三年后会有大乱" />
+          </label>
+          <label className="field">给 AI 的额外规则
+            <textarea rows={3} value={draft.settings.rules} onChange={(e) => setS("rules", e.target.value)} placeholder="比如：多写人物对话；不要让主角轻易获得权力" />
+          </label>
+        </Fold>
+
+        <div className="row sticky-bar">
+          <button onClick={saveTemplate}>存为我的开局</button>
+          <button className={`primary grow${missing ? " soft" : ""}`} onClick={startOrPoint}>{missing ? `还差${missing}` : "开始"}</button>
+        </div>
+      </div>
+      {menuSheets}
     </div>
+  );
+}
+
+/** A part of the setup folded to a one-line summary, so the whole reads in one screen (AUDIT_V4 3.1). */
+function Fold({ id, title, summary, open, onToggle, children }: {
+  id: string; title: string; summary: string; open: Record<string, boolean>; onToggle: (id: string) => void; children: React.ReactNode;
+}) {
+  return (
+    <section className={`fold${open[id] ? " open" : ""}`}>
+      <button className="fold-head" aria-expanded={!!open[id]} onClick={() => onToggle(id)}>
+        <span><b>{title}</b>{!open[id] && <small>{summary}</small>}</span><span aria-hidden="true">{open[id] ? "收起" : "改"}</span>
+      </button>
+      {open[id] && <div className="stack fold-body">{children}</div>}
+    </section>
   );
 }

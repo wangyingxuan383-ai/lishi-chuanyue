@@ -407,6 +407,21 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 .template-card { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 3px; }
 .template-card b { font-size: 15px; font-weight: 600; font-family: var(--serif); }
 .template-card small { font-size: 12px; color: var(--muted); }
+.template-card .hook { font-size: 13px; color: var(--fg); font-family: var(--serif); line-height: 1.5; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.template-card b { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.template-row { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important; }
+.random-card { display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; padding: 16px; border: 1px solid var(--accent); border-left-width: 5px; background: var(--surface); min-height: 76px; }
+.random-card b { display: block; font-family: var(--serif); font-size: 19px; letter-spacing: 0.1em; color: var(--accent); }
+.random-card small { color: var(--muted); font-size: 14px; }
+.fold { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.fold-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; text-align: left; border: none; background: transparent; padding: 10px 14px; min-height: 56px; }
+.fold-head span:first-child { display: grid; gap: 2px; min-width: 0; }
+.fold-head b { font-family: var(--serif); font-weight: 600; font-size: 15px; }
+.fold-head small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fold-head > span:last-child { color: var(--accent); font-size: 14px; flex-shrink: 0; }
+.fold-body { padding: 0 14px 14px; }
+.wanted { border-color: var(--warn) !important; }
+button.primary.soft { background: color-mix(in srgb, var(--accent) 70%, var(--line)); border-color: transparent; }
 .template-card.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .turn-written { border-left: 3px solid var(--accent-soft); padding-left: 10px; margin-bottom: 6px; }
 

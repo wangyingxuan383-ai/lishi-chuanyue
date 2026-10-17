@@ -33,30 +33,44 @@ await shot("01-setup");
 await connectFake(page, { check });
 
 // New game: templates fill fields, gender locks when the identity implies it.
-await page.getByRole("button", { name: "随便穿" }).waitFor();
+await page.getByRole("button", { name: /随便穿/ }).waitFor();
 await shot("02-newgame");
-const formScreens = await page.evaluate(() => document.documentElement.scrollHeight / innerHeight);
-check("whole new-story form within four screens", formScreens <= 4, `${formScreens.toFixed(1)} 屏`);
-await page.locator(".template-card", { hasText: "相府庶女" }).click();
-check("template fills premise and identity", (await page.getByLabel(/故事设定/).inputValue()).includes("平康坊") && (await page.getByLabel("身份与处境").inputValue()).includes("庶女"));
-check("gender locked by identity", (await page.textContent("body")).includes("性别：女（由身份决定）"));
+check("the first step offers 随便穿, a line for AI and inspirations, not a form", (await page.locator(".random-card").count()) === 1 && (await page.getByLabel("名字", { exact: true }).count()) === 0);
+check("inspiration cards say what the story is about", (await page.locator(".template-card .hook").count()) >= 6);
 await page.getByRole("button", { name: /查看全部/ }).click();
 check("all templates listed", (await page.locator(".template-card").count()) >= 18);
-await page.locator(".template-card", { hasText: "留洋归来" }).click();
-check("neutral identity offers a gender choice", (await page.getByRole("button", { name: "男", exact: true }).count()) === 1);
 const groups = page.getByRole("group", { name: "灵感分类" });
 await groups.getByRole("button", { name: "明", exact: true }).click();
 const mingCards = await page.locator(".template-card").allTextContents();
 check("dynasty filter shows only that dynasty", mingCards.length >= 4 && mingCards.every((t) => t.includes("明 ·")), `${mingCards.length} cards`);
 await groups.getByRole("button", { name: "全部", exact: true }).click();
+await page.locator(".template-card", { hasText: "相府庶女" }).click();
+check("template fills premise and identity", (await page.getByLabel(/故事设定/).inputValue()).includes("平康坊") && (await page.getByLabel("身份与处境").inputValue()).includes("庶女"));
+check("gender locked by identity", (await page.textContent("body")).includes("由身份决定"));
+const setupScreens = await page.evaluate(() => document.documentElement.scrollHeight / innerHeight);
+check("the setup fits in about two screens, the rest folded to summaries", setupScreens <= 2.2 && (await page.locator(".fold").count()) >= 4, `${setupScreens.toFixed(1)} 屏`);
+await shot("02a-setup");
+await page.getByRole("button", { name: "返回" }).click();
+// The full list stays open when coming back.
+if (await page.getByRole("button", { name: /查看全部/ }).count()) await page.getByRole("button", { name: /查看全部/ }).click();
+await page.locator(".template-card", { hasText: "留洋归来" }).click();
+check("neutral identity offers a gender choice", (await page.getByRole("button", { name: "男", exact: true }).count()) === 1);
 
 // AI assist fills only empty fields.
 await page.getByLabel(/故事设定/).fill("");
-await page.getByLabel(/一句话想法/).fill("靖康之变前，我是汴京小吏");
-await page.getByRole("button", { name: "AI 帮我补全" }).click();
-await page.getByText("已补全空着的部分").waitFor({ timeout: 15000 });
+await page.getByRole("button", { name: "返回" }).click();
+await page.getByLabel("一句话想法").fill("靖康之变前，我是汴京小吏");
+await page.getByRole("button", { name: "补全设定" }).click();
+await page.getByText(/已补全空着的部分/).waitFor({ timeout: 15000 });
 check("assist fills the empty premise", (await page.getByLabel(/故事设定/).inputValue()).includes("宣和七年"));
 check("assist keeps the filled identity", (await page.getByLabel("身份与处境").inputValue()).includes("留学归来"));
+// An empty name: the start button says what is missing and takes you there.
+const keptName = await page.getByLabel("名字", { exact: true }).inputValue();
+await page.getByLabel("名字", { exact: true }).fill("");
+check("the start button says what is still missing", (await page.locator(".sticky-bar .primary").textContent()) === "还差名字");
+await page.locator(".sticky-bar .primary").click();
+check("tapping it goes to the missing field", await page.getByLabel("名字", { exact: true }).evaluate((el) => el === document.activeElement));
+await page.getByLabel("名字", { exact: true }).fill(keptName || "沈默");
 
 // Opening setups can be pasted in and copied out for sharing.
 await page.getByRole("button", { name: "开局菜单" }).click();
@@ -64,7 +78,7 @@ await page.getByRole("button", { name: "导入开局设定" }).click();
 await page.getByLabel("分享文字").fill(`朋友发来的：\n<<<LISHI-OPENING\n${JSON.stringify({ v: 1, title: "赤壁小吏", premise: "建安十三年冬，江东。曹军压境。", name: "周平", gender: "男", age: "24", identity: "你是柴桑城里的一个小吏。", arrival: "不穿越" })}\nLISHI-OPENING>>>`);
 await page.getByRole("button", { name: "导入", exact: true }).click();
 await page.getByText("已导入「赤壁小吏」").waitFor();
-check("pasted setup imported", (await page.getByLabel(/故事设定/).inputValue()).includes("建安十三年") && (await page.getByRole("button", { name: "不穿越" }).getAttribute("aria-pressed")) === "true");
+check("pasted setup imported", (await page.getByLabel(/故事设定/).inputValue()).includes("建安十三年") && (await page.locator(".fold", { hasText: "穿越" }).first().textContent()).includes("不穿越"));
 await page.getByRole("button", { name: "开局菜单" }).click();
 await page.getByRole("button", { name: "复制开局设定（发给朋友）" }).click();
 await page.getByText("已复制开局设定，可以发给朋友").waitFor();
@@ -72,10 +86,12 @@ const copied = await page.evaluate(() => navigator.clipboard.readText());
 check("setup copied as shareable text", copied.startsWith("【历史穿越 · 开局设定】赤壁小吏") && copied.includes("<<<LISHI-OPENING"));
 
 // A player-written opening on a fresh template.
+await page.getByRole("button", { name: "返回" }).click();
 await page.locator(".template-card", { hasText: "落第举子" }).click();
+await page.locator(".fold-head", { hasText: "开场" }).click();
 await page.getByRole("button", { name: "我自己写" }).click();
 await page.getByLabel("开场正文").fill("雨夜，破庙。你缩在神像后面，听见外面有脚步声。");
-await page.getByRole("button", { name: "开始" }).click();
+await page.getByRole("button", { name: "开始", exact: true }).click();
 await page.locator(".dock .choice").first().waitFor({ timeout: 20000 });
 check("player-written opening kept verbatim", (await page.textContent(".story")).includes("雨夜，破庙。你缩在神像后面"));
 check("opening state extracted", (await page.locator(".choice").first().textContent()) === "生火取暖");
@@ -92,7 +108,7 @@ await page.getByRole("button", { name: "返回" }).click();
 
 // An AI-written opening via one-tap random start.
 await page.getByRole("button", { name: /^(开始穿越|开始新的故事)$/ }).click();
-await page.getByRole("button", { name: "随便穿" }).click();
+await page.getByRole("button", { name: /随便穿/ }).click();
 await page.locator(".dock .choice").first().waitFor({ timeout: 20000 });
 await shot("03-opening");
 check("opening streamed and choices shown", (await page.locator(".choice").count()) === 3);
@@ -448,8 +464,9 @@ await page.mouse.down();
 await page.waitForTimeout(650);
 await page.mouse.up();
 await page.getByRole("button", { name: "用同样设定再开一局" }).click();
-await page.getByRole("button", { name: "随便穿" }).waitFor();
-check("same setup again prefills the new story", (await page.getByLabel(/故事设定/).inputValue()).length > 0 && (await page.getByLabel("名字", { exact: true }).inputValue()).length > 0 && (await page.textContent("body")).includes("（由身份决定）"));
+await page.getByLabel("名字", { exact: true }).waitFor();
+check("same setup again opens the filled setup", (await page.getByLabel(/故事设定/).inputValue()).length > 0 && (await page.getByLabel("名字", { exact: true }).inputValue()).length > 0 && (await page.textContent("body")).includes("由身份决定"));
+await page.getByRole("button", { name: "返回" }).click();
 await page.getByRole("button", { name: "返回" }).click();
 await page.locator(".world-card").first().waitFor();
 
