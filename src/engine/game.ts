@@ -14,6 +14,7 @@ import {
   type Arrival, type SetupDraft,
 } from "./prompt/turn";
 import { CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
+import { UPKEEP_EVERY, UPKEEP_PROMPT_VERSION, upkeepMessages, upkeepPatch } from "./prompt/upkeep";
 import { lenientJson } from "./record/parse";
 import { parseRecord } from "./record/parse";
 import { RecordSplitter } from "./record/split";
@@ -103,6 +104,11 @@ const retryable = (e: unknown) => e instanceof ChatError && !e.partial
 
 export class Game {
   readonly repo: Repo;
+  /** Per world: the tail of the queue that turns and edits wait on, so nodes are never appended concurrently. */
+  private queues = new Map<string, Promise<unknown>>();
+  private upkeeping = new Set<string>();
+  private background = new Set<Promise<void>>();
+  private listeners = new Set<(worldId: string) => void>();
 
   private constructor(readonly platform: Platform, public llm: LlmConfig | null) {
     this.repo = new Repo(platform);
@@ -111,6 +117,30 @@ export class Game {
   static async open(platform: Platform, llm: LlmConfig | null = null): Promise<Game> {
     await migrate(platform);
     return new Game(platform, llm);
+  }
+
+  /** Runs `fn` after everything already queued for the world. */
+  private serial<T>(worldId: string, fn: () => Promise<T>): Promise<T> {
+    const next = (this.queues.get(worldId) ?? Promise.resolve()).catch(() => {}).then(fn);
+    this.queues.set(worldId, next);
+    void next.catch(() => {}).then(() => { if (this.queues.get(worldId) === next) this.queues.delete(worldId); });
+    return next;
+  }
+
+  /** Resolves once background work (设定集 upkeep) has finished; for tests and evals. */
+  async settled(): Promise<void> {
+    while (this.background.size) await Promise.allSettled([...this.background]);
+  }
+
+  private inBackground(work: Promise<void>): void {
+    this.background.add(work);
+    void work.catch(() => {}).then(() => this.background.delete(work));
+  }
+
+  /** Told when a world changed in the background (the AI kept its 设定集 up to date). Returns an unsubscribe. */
+  subscribe(fn: (worldId: string) => void): () => void {
+    this.listeners.add(fn);
+    return () => { this.listeners.delete(fn); };
   }
 
   private requireLlm(): LlmConfig {
@@ -341,7 +371,11 @@ export class Game {
   // ---------- turns ----------
 
   /** A hidden edit node after the head; `by` marks edits the AI made for the player (organizing). */
-  async editState(worldId: string, patch: TurnRecord, summary: string, by?: "AI"): Promise<tree.Cursor> {
+  editState(worldId: string, patch: TurnRecord, summary: string, by?: "AI"): Promise<tree.Cursor> {
+    return this.serial(worldId, () => this.appendEdit(worldId, patch, summary, by ? { by } : {}));
+  }
+
+  private async appendEdit(worldId: string, patch: TurnRecord, summary: string, meta: Record<string, unknown> = {}): Promise<tree.Cursor> {
     const c = await tree.cursor(this.repo, worldId);
     const state = await this.repo.getState(c.head.id);
     const world = (await this.repo.getWorld(worldId))!;
@@ -349,7 +383,7 @@ export class Game {
     const applied = applyRecord(state, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock }, { advanceTime: false });
     return tree.append(this.repo, c, {
       kind: "edit", narrative: "", actionText: summary, record: patch, choices: [],
-      state: applied.state, meta: { chips: applied.chips, ...(by ? { by } : {}) },
+      state: applied.state, meta: { chips: applied.chips, ...meta },
     });
   }
 
@@ -366,17 +400,21 @@ export class Game {
   private run(worldId: string, actionIn: PlayerAction | null, kind: "turn" | "variant", hint: string | null, onEvent: (e: TurnEvent) => void): TurnHandle {
     let handle: ChatHandle | null = null;
     let stopped = false;
-    const done = (async () => {
+    const done = this.serial(worldId, async () => {
       let c = await tree.cursor(this.repo, worldId);
       let edit: StoryNode | null = null;
       if (kind === "variant") {
+        // The player's edit closest to the turn is carried to the new version; the AI's
+        // edits came from the old text and are left behind.
+        const edits: StoryNode[] = [];
         while (c.head.kind === "edit") {
-          edit = c.head;
+          edits.unshift(c.head);
           c = { ...c, head: (await this.repo.getNode(c.head.parentId!))! };
         }
-        if (!edit && c.head.lastChildId) {
+        edit = edits.find((e) => e.meta.by !== "AI") ?? null;
+        if (!edits.length && c.head.lastChildId) {
           const child = await this.repo.getNode(c.head.lastChildId);
-          if (child?.kind === "edit") edit = child;
+          if (child?.kind === "edit" && child.meta.by !== "AI") edit = child;
         }
       }
       const world = (await this.repo.getWorld(worldId))!;
@@ -432,10 +470,11 @@ export class Game {
         return;
       }
       const cursor = await this.commit(c, base, kind, action, narrative, parsed.record, parsed.issues, state, era, world.settings, result, onEvent);
-      if (edit) cursor.cursor = await this.editState(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
+      if (edit) cursor.cursor = await this.appendEdit(worldId, edit.record as TurnRecord, `${edit.actionText ?? ""}（已沿用）`);
       await this.repo.setSetting("pending", null);
       onEvent({ type: "done", cursor: cursor.cursor, node: cursor.node, chips: cursor.chips });
-    })();
+      if (kind === "turn") this.inBackground(this.upkeep(worldId, cursor.node));
+    });
     return {
       stop: () => {
         stopped = true;
@@ -491,7 +530,7 @@ export class Game {
   /** Continues an interrupted head turn in place. */
   resumeInterrupted(worldId: string, onEvent: (e: TurnEvent) => void): TurnHandle {
     let handle: ChatHandle | null = null;
-    const done = (async () => {
+    const done = this.serial(worldId, async () => {
       const c = await tree.cursor(this.repo, worldId);
       const node = c.head;
       if (node.status !== "interrupted" || !node.parentId) return;
@@ -532,8 +571,48 @@ export class Game {
         meta: { ...node.meta, messages: undefined, chips: applied.chips, notes: applied.notes, log: applied.log, resumed: true, usage: result.usage },
       }, applied.state, [this.usage(worldId, node.id, "continue", result, "ok", this.llm!.model)]);
       onEvent({ type: "done", cursor: { ...c, head: updated }, node: updated, chips: applied.chips });
-    })();
+    });
     return { stop: () => handle?.cancel(), catchUp: async () => { await handle?.catchUp(); }, done };
+  }
+
+  /**
+   * Keeps the 设定集 up to date (R04-T001, D122): once UPKEEP_EVERY turns have
+   * passed on this path since the last pass, the auxiliary model reads them in
+   * the background while the player goes on. The result becomes an AI edit node
+   * after whatever turn is current by then; it is dropped if the player has
+   * since gone back before the turns it read.
+   */
+  private async upkeep(worldId: string, head: StoryNode): Promise<void> {
+    const world = await this.repo.getWorld(worldId);
+    if (!world?.settings.autoUpkeep || !this.llm || this.upkeeping.has(worldId)) return;
+    const turns: StoryNode[] = [];
+    for (const n of (await this.repo.path(head.id, UPKEEP_EVERY * 4)).reverse()) {
+      if (n.kind === "opening" || n.meta.upkeep) break;
+      if (n.kind === "turn") turns.unshift(n);
+    }
+    if (turns.length < UPKEEP_EVERY) return;
+    this.upkeeping.add(worldId);
+    try {
+      // Marked first, so a failed pass waits for the next window instead of retrying every turn.
+      await this.repo.setMeta(head.id, { ...head.meta, upkeep: true });
+      const state = await this.repo.getState(head.id);
+      let result: ChatResult | null = null;
+      try {
+        result = await this.call(upkeepMessages({ premise: world.settings.premise, state, turns }), { aux: true, timeouts: CODEX_TIMEOUT });
+      } catch { /* the story goes on without it */ }
+      await this.serial(worldId, async () => {
+        const c = await tree.cursor(this.repo, worldId);
+        const onPath = (await this.repo.path(c.head.id, UPKEEP_EVERY * 4)).some((n) => n.id === head.id);
+        const patch = result && onPath ? upkeepPatch(result.text, await this.repo.getState(c.head.id)) : null;
+        const outcome = !result ? "failed" : !onPath ? "stale" : patch ? "ok" : "no_record";
+        await this.platform.sql.batch([this.usage(worldId, head.id, "upkeep", result, outcome, this.llm!.auxModel || this.llm!.model)]);
+        if (!patch) return;
+        await this.appendEdit(worldId, patch, codexSummary(patch), { by: "AI", promptVersion: UPKEEP_PROMPT_VERSION });
+        for (const fn of this.listeners) fn(worldId);
+      });
+    } finally {
+      this.upkeeping.delete(worldId);
+    }
   }
 
   /**

@@ -43,7 +43,7 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
     const clean = name.trim();
     if (!clean) return;
     if (editing.type === "place") {
-      const fields = { name: clean, aliases: splitNames(aliases), description: text };
+      const fields = { name: clean, aliases: splitNames(aliases), description: text, source: "玩家" as const };
       void run({ places: [stored ? { op: "update", id: original!.id, ...fields } : { op: "add", ...fields }] }, stored ? `修改地点：${clean}` : `新建地点：${clean}`);
     } else {
       const fields = { kind: editing.kind, name: clean, keys: isEra ? [] : splitNames(aliases), content: text, source: "玩家" as const };
@@ -95,7 +95,7 @@ export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
   const items = (kind: "地点" | CardKind): { id: string; name: string; text: string; tag?: string; edit: Editing }[] =>
     kind === "地点"
       ? [...state.places].sort((a, b) => Number(b.id === state.placeId) - Number(a.id === state.placeId))
-        .map((p) => ({ id: p.id, name: p.name, text: p.description, tag: p.id === state.placeId ? "所在" : undefined, edit: { type: "place", place: p } }))
+        .map((p) => ({ id: p.id, name: p.name, text: p.description, tag: p.id === state.placeId ? "所在" : p.source === "AI" ? "AI 整理" : undefined, edit: { type: "place", place: p } }))
       : state.cards.filter((c) => c.kind === kind).map((c) => ({ id: c.id, name: c.name, text: c.content, tag: c.source === "AI" ? "AI 整理" : undefined, edit: { type: "card", kind, card: c } }));
 
   return (

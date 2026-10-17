@@ -15,6 +15,14 @@ const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 const shot = (name) => page.screenshot({ path: `${out}/game-${name}.png` });
+// A step that throws still reports the checks so far, the page errors and a screenshot.
+process.on("uncaughtException", async (error) => {
+  await page.screenshot({ path: `${out}/game-failure.png` }).catch(() => {});
+  const first = String(error.message ?? error).split("\n")[0];
+  console.log([...results, `FAIL crashed — ${first}`, ...errors.map((e) => `page error: ${e}`)].join("\n"));
+  await browser.close().catch(() => {});
+  process.exit(1);
+});
 
 await page.goto("http://127.0.0.1:1420/");
 
@@ -155,6 +163,24 @@ await page.getByRole("button", { name: "角色" }).click();
 await page.getByRole("tab", { name: /人物/ }).click();
 const panelText = await page.textContent(".panel");
 check("panel lists people", panelText.includes("货栈管事"));
+// 人物志: open someone, edit them, and add a person by hand.
+await page.locator(".codex-item", { hasText: "货栈管事" }).click();
+await page.getByLabel("身份", { exact: true }).fill("西市货栈的管事，嘴碎");
+await page.getByLabel(/^备注/).fill("主角欠他三十文");
+await page.waitForTimeout(400);
+await shot("06p-person");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".codex-item", { hasText: "嘴碎" }).waitFor();
+await page.getByRole("button", { name: "添加人物" }).click();
+await page.getByLabel("名字", { exact: true }).fill("货栈管事");
+check("adding someone already listed is blocked", (await page.getByText("人物表里已经有").count()) === 1 && await page.getByRole("button", { name: "保存", exact: true }).isDisabled());
+await page.getByLabel("名字", { exact: true }).fill("孙小二");
+await page.getByLabel("身份", { exact: true }).fill("不良人");
+await page.getByRole("button", { name: "保存", exact: true }).click();
+await page.locator(".codex-item", { hasText: "孙小二" }).waitFor();
+await page.waitForTimeout(400);
+await shot("06q-people");
+check("people records can be edited and added", (await page.textContent(".panel")).includes("主角欠他三十文"));
 await page.getByRole("tab", { name: /行囊/ }).click();
 check("panel lists items", (await page.textContent(".panel")).includes("旧书"));
 await shot("06-panel");
@@ -267,12 +293,27 @@ const lines = await page.locator(".sheet .card").count();
 check("old route kept as a world line", lines === 2, `${lines} lines`);
 await page.keyboard.press("Escape");
 
+// Every six turns the AI files new cards in the background (R04-T001).
+for (let i = 0; i < 6; i++) {
+  await page.locator(".send-btn").click();
+  await page.getByRole("button", { name: "停止" }).waitFor();
+  await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
+}
+await page.locator(".edit-line", { hasText: "AI 整理了设定集：铜鹰符" }).waitFor({ timeout: 20000 });
+await page.getByRole("button", { name: "角色" }).click();
+await page.getByRole("tab", { name: "设定" }).click();
+check("AI files new cards every six turns", (await page.locator(".codex-item", { hasText: "铜鹰符" }).textContent()).includes("AI 整理"));
+await page.keyboard.press("Escape");
+await page.locator(".panel").waitFor({ state: "detached" });
+
 // Stop mid-generation keeps partial text as interrupted.
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "本局设置" }).click();
 await page.keyboard.press("Escape");
 
-// Reload persists everything.
+// Reload persists everything. The browser harness saves the database one second
+// after the last write, so give it time before reloading.
+await page.waitForTimeout(1500);
 await page.reload();
 await page.getByText("继续游玩").waitFor();
 await shot("08-home");
@@ -312,11 +353,11 @@ check("regenerate stays on the preceding turn", (await page.locator(".turn").las
 await shot("10-edit-saved");
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "撤销", exact: true }).click();
-await page.locator(".edit-line").waitFor({ state: "detached" });
+await page.locator(".edit-line", { hasText: "你修改了：钱" }).waitFor({ state: "detached" });
 check("undo removes the edit from the story", true);
 await page.getByRole("button", { name: "更多" }).click();
 await page.getByRole("button", { name: "重做", exact: true }).click();
-await page.locator(".edit-line").waitFor();
+await page.locator(".edit-line", { hasText: "你修改了：钱" }).waitFor();
 check("redo restores the edit", true);
 await page.getByRole("button", { name: "重说", exact: true }).click();
 await page.locator(".edit-line", { hasText: "（已沿用）" }).waitFor({ timeout: 20000 });
@@ -326,7 +367,7 @@ await page.getByRole("button", { name: "修改", exact: true }).click();
 await page.getByRole("button", { name: "保存修改" }).click();
 await page.getByRole("button", { name: "修改", exact: true }).waitFor();
 await page.getByRole("button", { name: "关闭", exact: true }).click();
-check("saving unchanged panel adds no edit", (await page.locator(".edit-line").count()) === 1);
+check("saving unchanged panel adds no edit", (await page.locator(".edit-line", { hasText: "你修改了" }).count()) === 1);
 
 // Reading an earlier turn is restored when reopening the world.
 for (let i = 0; i < 3; i++) {

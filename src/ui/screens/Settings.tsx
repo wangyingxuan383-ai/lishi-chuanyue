@@ -3,7 +3,8 @@ import { deleteProfile, listProfiles, type Profile } from "../../engine/llm/prov
 import { useApp, type Reading } from "../app/context";
 import type { Row } from "../../platform";
 
-const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", test: "测试" };
+const PURPOSES: Record<string, string> = { turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", upkeep: "整理设定（游玩中）", test: "测试" };
+const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用" };
 
 export default function Settings() {
   const { game, push, pop, profile, setProfile, reading, setReading, devMode, setDevMode, toast } = useApp();
@@ -79,7 +80,7 @@ export default function Settings() {
             <small>{String(c.model)}</small>
             <small>输入 {String(c.prompt_tokens ?? "未知")} / 输出 {String(c.completion_tokens ?? "未知")} token</small>
             <small>首字 {String(c.first_token_ms ?? "未知")} 毫秒 · 总计 {String(c.total_ms ?? "未知")} 毫秒</small>
-          </div><span>{c.outcome === "ok" ? "成功" : c.outcome === "refused" ? "被拒" : String(c.outcome)}</span></div>)}
+          </div><span>{OUTCOMES[String(c.outcome)] ?? String(c.outcome)}</span></div>)}
           {!calls.length && <p className="muted">还没有调用记录。</p>}
         </div>}
       </div>

@@ -42,6 +42,8 @@ export interface Place {
   /** Other names that bring the card into context. */
   aliases?: string[];
   description: string;
+  /** Who wrote the description, as for cards; absent for places the ledger created. */
+  source?: Card["source"];
 }
 
 export interface Goal {
@@ -107,6 +109,8 @@ export interface WorldState {
     calendar?: CalendarRules;
   };
   deviations: string[];
+  /** Names of cards and places the player deleted; the AI does not propose them again (D122). */
+  dismissed?: string[];
 }
 
 export type Perspective = "你" | "我" | "他";
@@ -125,6 +129,8 @@ export interface WorldSettings {
   difficulty: Difficulty;
   intensity: { violence: Intensity; romance: Intensity; darkness: Intensity };
   directive: string;
+  /** Let the auxiliary model keep the 设定集 up to date every few turns (R04-T001, D122). */
+  autoUpkeep: boolean;
 }
 
 export const DEFAULT_SETTINGS: WorldSettings = {
@@ -138,6 +144,7 @@ export const DEFAULT_SETTINGS: WorldSettings = {
   difficulty: "标准",
   intensity: { violence: "写实", romance: "写实", darkness: "写实" },
   directive: "",
+  autoUpkeep: true,
 };
 
 export interface World {

@@ -205,5 +205,7 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; backgro
 /* ---------- 设定集 ---------- */
 .codex-era { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .codex-text { margin: 0; white-space: pre-wrap; line-height: 1.7; font-size: 14px; }
+.person-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.person-side small { color: var(--muted); font-size: 12px; white-space: nowrap; }
 button.codex-item { width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; min-height: auto; padding: 10px 0; }
 button.danger-text { color: var(--loss); }

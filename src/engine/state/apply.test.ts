@@ -202,6 +202,46 @@ describe("设定集 edits", () => {
     expect(r.log).toContain("“西市”是当前所在地，不能删除");
     expect(apply(r.state, { place: "西市场" }).state.placeId).toBe(s.placeId);
   });
+
+  it("keeps the old name as a key after a rename, and never renames by alias", () => {
+    let s = apply(sampleState(), { cards: [{ op: "add", kind: "势力", name: "天地会", keys: ["会党"], content: "反清" }], places: [{ op: "add", name: "鬼市", description: "夜市" }] }).state;
+    s = apply(s, { cards: [{ op: "update", kind: "势力", name: "会党", content: "秘密结社" }] }).state;
+    expect(s.cards[0]).toMatchObject({ name: "天地会", keys: ["会党"], content: "秘密结社" });
+    s = apply(s, { cards: [{ op: "update", id: s.cards[0].id, name: "洪门", keys: ["会党"] }], places: [{ op: "update", id: s.places[0].id, name: "夜市" }] }).state;
+    expect(s.cards[0]).toMatchObject({ name: "洪门", keys: ["会党", "天地会"] });
+    expect(s.places[0]).toMatchObject({ name: "夜市", aliases: ["鬼市"] });
+  });
+
+  it("remembers deleted cards and places so the AI does not bring them back", () => {
+    let s = apply(sampleState(), { cards: [{ op: "add", kind: "势力", name: "漕帮", content: "码头帮会", source: "AI" }], places: [{ op: "add", name: "鬼市", description: "夜里的市", source: "AI" }] }).state;
+    expect(s.places[0].source).toBe("AI");
+    s = apply(s, { cards: [{ op: "remove", id: s.cards[0].id }], places: [{ op: "remove", id: s.places[0].id }] }).state;
+    expect(s.dismissed).toEqual(["漕帮", "鬼市"]);
+  });
+});
+
+describe("people edits", () => {
+  const edit = (s: WorldState, r: TurnRecord) => applyRecord(s, r, ctx(), { advanceTime: false });
+  const met = () => apply(sampleState(), { time: "一个时辰", people: [{ name: "货栈管事", role: "货栈的管事", attitude: "冷淡" }] }).state;
+
+  it("renames, replaces aliases and edits by id without counting as a meeting", () => {
+    const s = met();
+    const id = s.people[0].id;
+    const later = apply(s, { time: "一天" }).state;
+    const r = edit(later, { people: [{ id, name: "刘三郎", aliases: ["货栈管事", "刘管事"], role: "", attitude: "友善", note: "其实是主角的舅舅", alive: true }] });
+    expect(r.state.people[0]).toMatchObject({ name: "刘三郎", aliases: ["货栈管事", "刘管事"], role: "", attitude: "友善", notes: "其实是主角的舅舅", lastSeenMinute: s.people[0].lastSeenMinute });
+    // Renamed without listing the old name: it is kept as an alias anyway.
+    expect(edit(later, { people: [{ id, name: "刘三郎" }] }).state.people[0].aliases).toEqual(["货栈管事"]);
+    expect(apply(r.state, { people: [{ name: "刘管事", attitude: "亲近" }] }).state.people).toHaveLength(1);
+  });
+
+  it("removes a person by id and remembers the name", () => {
+    const s = met();
+    const r = edit(s, { people: [{ id: s.people[0].id, op: "remove", name: "货栈管事" }, { id: "nobody", name: "无名氏" }] });
+    expect(r.state.people).toEqual([]);
+    expect(r.state.dismissed).toEqual(["货栈管事"]);
+    expect(r.log).toContain("人物“无名氏”不存在，修改已忽略");
+  });
 });
 
 describe("rules edits", () => {

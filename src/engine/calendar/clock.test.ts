@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TANG_748 } from "../../content/eras/tang-748";
-import { newYearsBetween, nowOf, shichen, timeRows, type GameClock } from "./clock";
+import { agoText, newYearsBetween, nowOf, shichen, timeRows, type GameClock } from "./clock";
 
 const tang: GameClock = { date: { era: "天宝", year: 7, month: 11, day: 17, ceYear: 748, lunar: true }, hour: 7, label: "天宝七载 冬月十七", rules: TANG_748.calendar };
 const vague: GameClock = { date: null, hour: 8, label: "中平元年秋", rules: {} };
@@ -42,6 +42,16 @@ describe("game clock", () => {
       { label: "时辰", value: "辰时（约 08:00）" },
       { label: "开局", value: "中平元年秋 · 今天开局" },
     ]);
+  });
+
+  it("says how long ago by calendar days", () => {
+    // tang starts at 07:00: minute 1000 is 23:40 the same day, 1100 is past midnight.
+    expect(agoText(tang, 0, 60)).toBe("刚刚");
+    expect(agoText(tang, 0, 1000)).toBe("今天");
+    expect(agoText(tang, 900, 1100)).toBe("昨天");
+    expect(agoText(tang, 0, 5 * 1440)).toBe("5 天前");
+    expect(agoText(tang, 0, 65 * 1440)).toBe("2 个月前");
+    expect(agoText(tang, 0, 800 * 1440)).toBe("2 年前");
   });
 
   it("shows western dates without 干支", () => {

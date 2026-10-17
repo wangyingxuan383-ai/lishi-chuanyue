@@ -8,7 +8,7 @@ import { ERA_CARD_LIMIT, activeCardLines } from "../memory/cards";
 import { formatMoney } from "../money";
 import type { ActionMode, Perspective, StoryNode, WorldSettings, WorldState } from "../types";
 
-export const PROMPT_VERSION = "turn-5";
+export const PROMPT_VERSION = "turn-6";
 
 const LENGTH: Record<WorldSettings["length"], string> = { 短: "约两百字", 中: "约四百字", 长: "约八百字" };
 
@@ -68,11 +68,11 @@ function systemPrompt(ctx: StoryContext): string {
   return `你是一部历史互动小说的作者兼叙事者。玩家扮演主角，你负责写出世界、其他人物和剧情。
 【写作要求】
 - ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}。先写画面、声音、气味和动作，少用总结句；对话简短、口吻符合人物身份。叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，人物对白带时代口吻。每回合${LENGTH[settings.length]}。
-- 只写到玩家需要做决定为止：不替玩家说话，不替玩家做行动以外的决定，不擅自把玩家没说要做完的事做完。玩家说“先试一下”“先问问”，就只写试一下、问一下的结果。
+- 只写到玩家需要做决定为止。主角只做玩家写下的事：玩家只说了大意，就照大意写，不替主角添新的计划、约定、许诺、威胁或贿赂，不替主角说出或藏起玩家没提的秘密、证据和底牌，不擅自把玩家没说要做完的事做完。玩家说“先试一下”“先问问”，就只写试一下、问一下的结果。拿不准主角会怎么做，就写到那里停下，让玩家决定。
 - 玩家的行动可能失败。行动有难度或风险时，按情理决定成败，失败也要写出后果。
 - 其他人物有自己的目的、脾气和处境，不围着主角转；态度变化要有缘由。
 - 涉及钱和物品时，只能使用【当前】中列出的数量，正文写清具体数目；钱不够就买不成、付不起。
-- 主角的性别、身份、年龄，以及日期和时辰，都以【当前】为准，前后保持一致。
+- 主角的性别、身份、年龄以【当前】为准，前后保持一致。正文里的时辰要和【当前】的时辰加上本回合经过的时间对得上；要跳过一段时间（如等到傍晚），就在记录的 time 里写明经过了多久。
 - 避免套话和重复上一回合的开头与句式。不要用：${CLICHES.slice(0, 6).join("、")}。
 - 内容尺度：${INTENSITY_TEXT.violence[i.violence]}；${INTENSITY_TEXT.romance[i.romance]}；${INTENSITY_TEXT.darkness[i.darkness]}。
 - 每回合结尾留一个自然的行动点。${settings.choiceCount > 0 ? `在记录里给出 ${settings.choiceCount} 个简短、彼此不同的建议行动（各不超过二十字）` : "记录里的 choices 写空数组 []"}。
@@ -84,15 +84,29 @@ ${RECORD_SPEC}`;
 
 const level = (n: number, words: string[]) => words[Math.min(words.length - 1, Math.floor((100 - n) / (100 / words.length)))];
 
-export function renderState(state: WorldState, era: EraContext): string {
+/** People listed with their role and attitude; beyond this, names only. */
+const PEOPLE_LINES = 30;
+
+/**
+ * The 【当前】 block. `present` (person ids mentioned in the recent text) puts
+ * those people first with their notes (R04-T001); without it everyone's notes
+ * are shown.
+ */
+export function renderState(state: WorldState, era: EraContext, present?: Set<string>): string {
   const me = state.protagonist;
   const now = nowOf(era.clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name ?? "（未记录）";
   const items = me.items.map((i) => `${i.name}×${i.quantity}${i.unit}${i.place ? `（放在${i.place}）` : ""}`).join("、") || "无";
   const statuses = me.statuses.map((s) => `${s.name}${s.detail ? `：${s.detail}` : ""}`).join("；") || "无";
-  const people = state.people
-    .map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${p.notes ? `；${p.notes}` : ""}`)
-    .join("\n") || "无";
+  const here = (id: string) => !present || present.has(id);
+  const ordered = present
+    ? [...state.people].sort((a, b) => Number(present.has(b.id)) - Number(present.has(a.id)) || (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1))
+    : state.people;
+  const rest = ordered.slice(PEOPLE_LINES);
+  const people = [
+    ...ordered.slice(0, PEOPLE_LINES).map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${p.notes && here(p.id) ? `；${p.notes}` : ""}`),
+    ...(rest.length ? [`另有：${rest.map((p) => `${p.name}${p.alive ? "" : "（已死）"}`).join("、")}`] : []),
+  ].join("\n") || "无";
   const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
   const smallest = era.currency.units[era.currency.units.length - 1].name;
   const when = now.date ? formatDate(now.date, era.clock.rules) : `${era.clock.label ? `${era.clock.label}起 ` : ""}第 ${now.day} 日`;
@@ -153,11 +167,20 @@ function essentialsBlock(settings: WorldSettings, pins: string[] = []): string {
   return lines.length ? `\n【要点，必须记住】\n- ${lines.join("\n- ")}` : "";
 }
 
+/** The last three turns and this action: what decides which cards and people's notes come in. */
+function recentText(input: TurnPromptInput): string {
+  return [...input.history.filter((n) => n.kind !== "edit").slice(-3).flatMap((n) => [n.actionText ?? "", n.narrative]), input.text, input.directorNote ?? ""].join("\n");
+}
+
 /** Places and cards mentioned in the last three turns or this action (D121). */
-function cardsBlock(input: TurnPromptInput): string {
-  const recent = [...input.history.filter((n) => n.kind !== "edit").slice(-3).flatMap((n) => [n.actionText ?? "", n.narrative]), input.text, input.directorNote ?? ""].join("\n");
+function cardsBlock(input: TurnPromptInput, recent: string): string {
   const lines = activeCardLines(input.state, recent);
   return lines.length ? `\n【相关设定】\n${lines.join("\n")}` : "";
+}
+
+/** People named in the recent text (by name or alias). */
+function presentPeople(state: WorldState, recent: string): Set<string> {
+  return new Set(state.people.filter((p) => [p.name, ...p.aliases].some((n) => n && recent.includes(n))).map((p) => p.id));
 }
 
 export function turnMessages(input: TurnPromptInput): ChatMessage[] {
@@ -167,12 +190,13 @@ export function turnMessages(input: TurnPromptInput): ChatMessage[] {
   const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
   const budget = (input.budgetChars ?? 12000) - system.length - 1500;
+  const recent = recentText(input);
   return [
     { role: "system", content: system },
     ...historyMessages(input.history, budget),
     {
       role: "user",
-      content: `${renderState(input.state, input.era)}${essentialsBlock(input.settings, input.pins)}${cardsBlock(input)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
+      content: `${renderState(input.state, input.era, presentPeople(input.state, recent))}${essentialsBlock(input.settings, input.pins)}${cardsBlock(input, recent)}${directive}${notes}\n\n${ACTION_TEXT[input.mode](input.text)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`,
     },
   ];
 }

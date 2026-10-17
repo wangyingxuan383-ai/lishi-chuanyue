@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { applyRecord } from "../state/apply";
+import { TANG_CURRENCY } from "../money";
 import { sampleState } from "../testing/fixtures";
 import { activeCardLines, eraCardOf } from "./cards";
 
@@ -40,6 +42,11 @@ describe("cards in context", () => {
   it("does not fire a short name inside a longer one", () => {
     expect(activeCardLines(world(), "他去了长安县衙")).toEqual(["【地点】长安县：朱雀街以西"]);
     expect(activeCardLines(world(), "长安县衙在西，长安城很大")).toEqual(["【设定】长安：京城", "【地点】长安县：朱雀街以西"]);
+  });
+
+  it("still brings a renamed card in by its old name", () => {
+    const renamed = applyRecord(world(), { cards: [{ op: "update", id: "c1", name: "洪门" }] }, { mode: "do", difficulty: "标准", currency: TANG_CURRENCY }, { advanceTime: false }).state;
+    expect(activeCardLines(renamed, "天地会的人来了")).toEqual(["【势力】洪门（又称会党、天地会）：反清秘密结社"]);
   });
 
   it("never sends the era card here and keeps to the budget", () => {

@@ -23,8 +23,9 @@ function relative(iso: string): string {
   return `${Math.round(minutes / 1440)} 天前`;
 }
 
-function lastSentence(text: string): string {
-  const sentences = text.replace(/\s+/g, "").split(/(?<=[。！？”])/).filter(Boolean);
+export function lastSentence(text: string): string {
+  // A closing quote stays with its sentence: “……？”
+  const sentences = text.replace(/\s+/g, "").match(/[^。！？]+[。！？]*[”」』]*/g) ?? [];
   const last = sentences[sentences.length - 1] ?? "";
   return last.length > 40 ? `…${last.slice(-40)}` : last;
 }
@@ -52,13 +53,13 @@ export default function Home() {
     for (const world of worlds) {
       const line = world.currentLineId ? await game.repo.getLine(world.currentLineId) : null;
       if (!line) continue;
-      const head = await game.repo.getNode(line.nodeId);
       const state = await game.repo.getState(line.nodeId);
       const path = await game.repo.path(line.nodeId);
+      const latest = [...path].reverse().find((n) => n.kind !== "edit");
       const era = eraContext(world.eraId, state);
       out.push({
-        world, protagonist: state.protagonist.name, lastLine: lastSentence(head?.narrative ?? ""),
-        clock: nowOf(era.clock, state.time.elapsedMinutes).text, turns: path.length - 1,
+        world, protagonist: state.protagonist.name, lastLine: lastSentence(latest?.narrative ?? ""),
+        clock: nowOf(era.clock, state.time.elapsedMinutes).text, turns: path.filter((n) => n.kind === "turn" || n.kind === "fastforward").length,
       });
     }
     setCards(out);

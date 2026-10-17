@@ -7,6 +7,7 @@ import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
 import { useBack } from "../app/context";
 import { Codex } from "./Codex";
+import { People } from "./People";
 
 const TABS = ["我", "行囊", "人物", "目标", "设定"] as const;
 type Tab = (typeof TABS)[number];
@@ -41,7 +42,6 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, bu
   const place = state.places.find((p) => p.id === state.placeId)?.name;
   const active = shown.goals.filter((g) => g.status === "进行中");
   const finished = shown.goals.filter((g) => g.status !== "进行中");
-  const people = [...shown.people].sort((a, b) => (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1));
 
   const save = async () => {
     if (!draft) return;
@@ -73,12 +73,6 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, bu
       (patch.items ??= []).push({ name, delta: quantity - old });
       summary.push(old === 0 ? `添加物品 ${name}` : `${name} ${old} → ${quantity}`);
     }
-    for (const p of shown.people) {
-      const old = state.people.find((x) => x.id === p.id)!;
-      if (p.attitude === old.attitude && p.notes === old.notes && p.alive === old.alive) continue;
-      (patch.people ??= []).push({ name: p.name, attitude: p.attitude, note: p.notes, alive: p.alive });
-      summary.push(p.attitude !== old.attitude ? `${p.name}：${p.attitude}` : p.alive !== old.alive ? `${p.name}：${p.alive ? "健在" : "已故"}` : `${p.name}：修改备注`);
-    }
     for (const g of shown.goals.filter((x) => x.name.trim())) {
       const old = state.goals.find((x) => x.id === g.id);
       if (old?.status === g.status) continue;
@@ -99,10 +93,10 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, bu
       <div className="topbar">
         <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}>‹</button>
         <div className="title"><h1>{me.name}</h1><div className="subtitle">{[me.gender, me.age ? `${me.age}岁` : ""].filter(Boolean).join(" · ")}</div></div>
-        {!editing && tab !== "设定" && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
+        {!editing && tab !== "设定" && tab !== "人物" && <button className="ghost" disabled={busy} onClick={() => setDraft(structuredClone(state))}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
-        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && t === "设定"} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
+        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && (t === "设定" || t === "人物")} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
       </div>
       <div className="panel-body" style={saving ? { pointerEvents: "none" } : undefined}>
         {tab === "我" && (
@@ -152,22 +146,7 @@ export function Panel({ state, era, onClose, onSave, onOpenStory, onOrganize, bu
         )) : <p className="muted">行囊空空。</p>)}
           {editing && <button onClick={() => change((d) => { d.protagonist.items.push({ name: "", quantity: 1, unit: "", place: null, note: "" }); })}>＋ 添加物品</button>}
         </div>}
-        {tab === "人物" && (people.length ? people.map((p) => (
-          <div className="item-row" key={p.id}>
-            <div className="grow">
-              <b>{p.name}</b>{!p.alive && " （已故）"}
-              <small>{p.role}{p.aliases.length ? ` · 又称${p.aliases.join("、")}` : ""}</small>
-              {editing ? <div className="stack">
-                <select aria-label={`${p.name}的态度`} value={p.attitude} onChange={(e) => change((d) => { d.people.find((x) => x.id === p.id)!.attitude = e.target.value as typeof p.attitude; })}>
-                  {["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"].map((a) => <option key={a}>{a}</option>)}
-                </select>
-                <input aria-label={`${p.name}的备注`} placeholder="备注" value={p.notes} onChange={(e) => change((d) => { d.people.find((x) => x.id === p.id)!.notes = e.target.value; })} />
-                <label className="row"><input type="checkbox" style={{ width: 20, minHeight: 20 }} checked={!p.alive} onChange={(e) => change((d) => { d.people.find((x) => x.id === p.id)!.alive = !e.target.checked; })} />已故</label>
-              </div> : p.notes && <small>{p.notes}</small>}
-            </div>
-            {!editing && <span className="tag">{p.attitude}</span>}
-          </div>
-        )) : <p className="muted">还没有结识什么人。</p>)}
+        {tab === "人物" && <People state={state} era={era} busy={busy} onSave={onSave} />}
         {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && (
           <div className="stack">

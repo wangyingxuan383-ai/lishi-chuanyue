@@ -117,6 +117,8 @@ export default function Play({ worldId }: { worldId: string }) {
   }, [game, worldId, limit, pop]);
 
   useEffect(() => { void refresh(); }, []);
+  // The AI filed new cards in the background: show its line and the new 设定集.
+  useEffect(() => game.subscribe((id) => { if (id === worldId) void refresh(); }), [game, worldId, refresh]);
   useEffect(() => () => { if (readingTimer.current) clearTimeout(readingTimer.current); }, []);
 
   // Follow the bottom while the player is there; stop when they scroll up.
@@ -603,6 +605,11 @@ function WorldSettingsSheet({ world, onChange, onRules, onClose }: { world: Worl
         <div className="segmented">
           {(["白话", "半文半白"] as const).map((v) => <button key={v} aria-pressed={s.style === v} onClick={() => onChange({ style: v })}>{v}</button>)}
         </div>
+        <span className="muted">设定集自动整理</span>
+        <div className="segmented">
+          {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={s.autoUpkeep === v} onClick={() => onChange({ autoUpkeep: v })}>{l}</button>)}
+        </div>
+        <p className="muted" style={{ margin: 0 }}>开着时，每过 6 回合 AI 会把新出现的势力、物品和地点记进设定集，多一次辅助模型的调用。</p>
         {intensity("violence", "暴力与伤亡")}
         {intensity("romance", "感情与亲密")}
         {intensity("darkness", "黑暗与压抑")}

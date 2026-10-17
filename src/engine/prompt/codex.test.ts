@@ -29,7 +29,7 @@ describe("organizing the 设定集", () => {
       { op: "add", kind: "势力", name: "青衣卫", keys: ["青衣"], content: "太后亲领的密探", source: "AI" },
       { op: "add", kind: "设定", name: "天机阁", keys: [], content: "江湖情报组织", source: "AI" },
     ]);
-    expect(patch.places).toEqual([{ op: "add", name: "云京", aliases: [], description: "大胤京城，分内外两城" }]);
+    expect(patch.places).toEqual([{ op: "add", name: "云京", aliases: [], description: "大胤京城，分内外两城", source: "AI" }]);
     expect(codexSummary(patch)).toBe("AI 整理了设定集：时代卡、青衣卫、天机阁等");
   });
 

@@ -40,6 +40,7 @@ ${JSON.stringify(r)}
   if (prompt.includes("请写这部小说的开场")) return TEXT + record(OPENING_RECORD);
   if (prompt.includes("你帮玩家构思")) return JSON.stringify({ title: "汴京小吏", premise: "北宋宣和七年，汴京。金兵南下在即，朝野却仍歌舞升平。", name: "沈默", gender: "男", age: 26, identity: "你是开封府的一名小吏，掌管户籍文书。", arrival: "魂穿", origin: "历史系研究生", hint: "府衙里，上官让你连夜誊抄一份名册。", essentials: "主角知道靖康之变将至" });
   if (prompt.includes("整理出一张时代卡")) return JSON.stringify({ era: { name: "AI 整理的时代", content: "时局：天下初定。\n不要出现：手机" }, cards: [{ kind: "势力", name: "漕帮", keys: ["帮里"], content: "运河上的帮会" }] });
+  if (prompt.includes("替作者维护“设定集”")) return JSON.stringify({ cards: [{ kind: "物品", name: "铜鹰符", keys: ["鹰符"], content: "平卢军的调兵信物" }], places: [{ name: "西市货栈", description: "王掌柜的货栈，主角在此落脚" }] });
   if (prompt.includes("玩家亲手写了开场")) return JSON.stringify({ time: "0", date: "某年某月", hour: 20, money: 12, place: "破庙", people: [{ name: "老乞丐", role: "乞丐", attitude: "友善" }], goals: [{ op: "add", name: "熬过今夜" }], log: "开场", choices: ["生火取暖", "去庙外看看", "问老乞丐话"] });
   if (prompt.includes("互动小说的记录员")) return JSON.stringify({ time: "一刻", log: "补记", choices: ["继续"] });
   // Pick the scripted turn from the conversation length so runs are repeatable.

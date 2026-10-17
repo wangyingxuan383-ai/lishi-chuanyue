@@ -59,6 +59,16 @@ export function timeOfDay(now: Now): string {
   return `${now.shichen}时（约 ${hhmm(now)}）`;
 }
 
+/** How long ago, by calendar days: "刚刚" / "今天" / "昨天" / "3 天前" / "2 个月前" / "1 年前". */
+export function agoText(clock: GameClock, thenMinutes: number, nowMinutes: number): string {
+  const days = nowOf(clock, nowMinutes).day - nowOf(clock, thenMinutes).day;
+  if (days <= 0) return nowMinutes - thenMinutes < 120 ? "刚刚" : "今天";
+  if (days === 1) return "昨天";
+  if (days < 30) return `${days} 天前`;
+  if (days < 365) return `${Math.floor(days / 30)} 个月前`;
+  return `${Math.floor(days / 365)} 年前`;
+}
+
 /** Rows for the time sheet: date, hour, CE year and 干支, season, time since the start. */
 export function timeRows(clock: GameClock, elapsedMinutes: number): { label: string; value: string }[] {
   const now = nowOf(clock, elapsedMinutes);

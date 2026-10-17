@@ -29,7 +29,7 @@ const positive = (name: string, fallback: string) => {
 };
 
 type Failure = { reason: string; status?: number };
-type Purpose = "opening" | "player" | "turn" | "extract";
+type Purpose = "opening" | "player" | "turn" | "extract" | "upkeep";
 type Call = {
   turn: number; purpose: Purpose; usage: ChatUsage | null;
   firstTokenMs: number | null; totalMs: number; failure: Failure | null;
@@ -111,6 +111,26 @@ async function main() {
     ...upstream,
     ack: async () => {},
     async stream(request, emit) {
+      // 设定集 upkeep runs in the background between turns: counted, but kept out of the turn's retry gate.
+      const body = request.body as { messages?: { content?: string }[] } | undefined;
+      if (String(body?.messages?.[0]?.content ?? "").includes("替作者维护“设定集”")) {
+        if (calls.length >= maxCalls) {
+          emit({ type: "error", kind: "cancelled" });
+          return crypto.randomUUID();
+        }
+        const call: Call = { turn, purpose: "upkeep", usage: null, firstTokenMs: null, totalMs: 0, failure: null };
+        calls.push(call);
+        const start = performance.now();
+        return upstream.stream(request, (event) => {
+          if (event.type === "data") {
+            const chunk = parseChunk(event.data);
+            if (chunk?.usage) call.usage = chunk.usage;
+          }
+          if (event.type === "error") call.failure = { reason: event.kind.startsWith("timeout_") ? "timeout" : event.kind, status: event.status };
+          if (event.type === "error" || event.type === "done") call.totalMs = performance.now() - start;
+          emit(event);
+        });
+      }
       if (blocked || calls.length >= maxCalls) {
         emit(blocked ?? { type: "error", kind: "cancelled" });
         return crypto.randomUUID();
@@ -247,12 +267,20 @@ async function main() {
     if (consecutiveFailures >= 3) { stopReason = "three_failures"; break; }
   }
 
+  await game.settled();
   const failures = entries.flatMap((e) => e.failures);
   const failedTurns = entries.filter((e) => e.failures.length);
   const serverFailedTurns = failedTurns.filter((e) => e.failures.every(serverFailure)).length;
   const log = entries.flatMap((e) => e.meta.log);
   const newPeople = [...new Set(log.filter((l) => l.startsWith("新人物")).map((l) => l.replace(/^新人物[:：]?\s*/, "")).filter(Boolean))];
-  const state = worldId ? await game.repo.getState((await cursor(game.repo, worldId)).head.id) : null;
+  const head = worldId ? (await cursor(game.repo, worldId)).head : null;
+  const state = head ? await game.repo.getState(head.id) : null;
+  const upkeep = {
+    calls: calls.filter((c) => c.purpose === "upkeep").length,
+    edits: head ? (await game.repo.path(head.id)).filter((n) => n.kind === "edit" && n.meta.by === "AI").map((n) => n.actionText ?? "") : [],
+    cards: (state?.cards ?? []).filter((c) => c.source === "AI").map((c) => ({ kind: c.kind, name: c.name, keys: c.keys, content: c.content })),
+    places: (state?.places ?? []).filter((p) => p.source === "AI").map((p) => ({ name: p.name, aliases: p.aliases ?? [], description: p.description })),
+  };
   const names = [...new Set([...(state?.people.map((p) => p.name) ?? []), ...newPeople])];
   const stripped = (name: string) => name.replace(/管事|掌柜|郎君|娘子|大人|老丈|伙计/g, "").trim();
   const suspectedDuplicates: string[][] = [];
@@ -298,10 +326,10 @@ async function main() {
     newPeople, suspectedDuplicates, cliches: frequency(CLICHES),
     anachronisms: pack ? { eraId: pack.id, ...frequency(tabooKeywords) } : null,
     clock: { start: opening.clock?.text ?? null, end: entries.at(-1)?.clock?.text ?? null, elapsedMinutes: entries.at(-1)?.clock?.elapsedMinutes ?? null },
-    timeMismatches,
+    timeMismatches, upkeep,
     latencyMs: { firstToken: latency(entries.map((e) => e.firstTokenMs)), total: latency(entries.filter((e) => e.calls.some((c) => c.purpose === "turn")).map((e) => e.totalMs)) },
     calls: { total: calls.length, byPurpose: counts(calls.map((c) => c.purpose)), failuresByReason: counts(calls.filter((c) => c.failure).map((c) => c.failure!.status ? `${c.failure!.reason}:${c.failure!.status}` : c.failure!.reason)) },
-    tokens: { ...tokens(calls), byPurpose: Object.fromEntries((["opening", "player", "turn", "extract"] as Purpose[]).map((p) => [p, tokens(calls.filter((c) => c.purpose === p))])) },
+    tokens: { ...tokens(calls), byPurpose: Object.fromEntries((["opening", "player", "turn", "extract", "upkeep"] as Purpose[]).map((p) => [p, tokens(calls.filter((c) => c.purpose === p))])) },
     notes: [
       "回合指标不含开场；调用和 token 合计含开场、玩家、主模型和补记。缺失 usage 不估算。",
       "首字为 game.play 到首个正文事件；总耗时含补记，不含玩家生成；p90 用最近秩，字数为不含空白的 Unicode 字符数。",
@@ -317,7 +345,7 @@ async function main() {
   const render = (e: Entry, heading: string) => `${heading}\n\n${e.narrative || "（无正文）"}\n\n状态：${e.status ?? "未生成节点"}；补记：${e.meta.extracted ?? "未记录"}；首字：${e.firstTokenMs === null ? "无" : Math.round(e.firstTokenMs) + "ms"}；总耗时：${Math.round(e.totalMs)}ms\n\n游戏时间：${e.clock?.text ?? "（无）"}\n\n状态标签：${e.meta.chips.map((c) => (c as { text?: string }).text ?? "").join(" | ") || "（无）"}\n\n记录日志：\n${e.meta.log.map((l) => `- ${l}`).join("\n") || "（无）"}\n\n失败：${e.failures.map((f) => `${f.reason}${f.status ? ` (${f.status})` : ""}`).join("；") || "（无）"}\n`;
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, "summary.json"), JSON.stringify(summary, null, 2) + "\n", "utf8");
-  fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}`, "utf8");
+  fs.writeFileSync(path.join(out, "transcript.md"), `# 自动玩家试玩\n\n模板：${templateId}；主模型：${model}；玩家模型：${playerModel}\n\n${render(opening, "## 开场")}\n${entries.map((e) => render(e, `### 第 ${e.turn} 回合 · ${labels[e.mode]} · ${e.action || "（玩家生成失败）"}`)).join("\n")}\n## 设定集（AI 整理）\n\n${upkeep.edits.map((x) => `- ${x}`).join("\n") || "（没有整理）"}\n\n${upkeep.cards.map((c) => `- 【${c.kind}】${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${c.content}`).join("\n")}\n${upkeep.places.map((x) => `- 【地点】${x.name}：${x.description}`).join("\n")}\n`, "utf8");
   const { opening: _opening, entries: _entries, ...totals } = summary;
   console.log(JSON.stringify(totals, null, 2));
   console.log(`结果：${path.relative(ROOT, out)}`);

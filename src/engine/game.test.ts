@@ -459,3 +459,109 @@ describe("Game", () => {
     expect(await game.recoverPending()).toBeNull();
   });
 });
+
+describe("设定集 upkeep during play", () => {
+  const UPKEEP = JSON.stringify({
+    cards: [{ kind: "势力", name: "漕帮", keys: ["帮里"], content: "把持西市码头的帮会" }],
+    places: [{ name: "西市旁邸店", description: "主角落脚的邸店，掌柜姓王" }],
+  });
+  const turns = (n: number, from = 1) => Array.from({ length: n }, (_, i) => ({ text: `第${from + i}段，漕帮的人在码头收钱。` + RECORD({}) }));
+  const isUpkeep = (body: any) => String(body.messages?.[0]?.content).includes("资料员");
+
+  /** Turns and upkeep calls get their own scripts; upkeep answers only after `open()`. */
+  async function routed(turnScripts: Script[], upkeepScripts: Script[]) {
+    const story = fakeLlm([{ text: OPENING }, ...turnScripts]);
+    const aux = fakeLlm(upkeepScripts);
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const llm = {
+      ...story,
+      async stream(request: Parameters<typeof story.stream>[0], onEvent: Parameters<typeof story.stream>[1]) {
+        if (!isUpkeep(request.body)) return story.stream(request, onEvent);
+        await gate;
+        return aux.stream(request, onEvent);
+      },
+    };
+    const game = await Game.open(await createMemoryPlatform(llm), LLM);
+    const worldId = (await game.createWorld({
+      title: "长安", eraId: "tang-748", settings: { premise: "天宝七载，长安。" },
+      protagonist: { name: "李安", gender: "男", age: 22, identity: "你是落第举子，欠房钱。" },
+      arrival: "魂穿", origin: "历史系研究生", opening: { mode: "ai", hint: "" },
+    }, () => {}))!;
+    return { game, worldId, story, aux, open };
+  }
+
+  it("files new cards every six turns as an AI edit, in the background", async () => {
+    const { game, worldId, story, aux, open } = await routed(turns(7), [{ text: UPKEEP }]);
+    let told = 0;
+    game.subscribe(() => told++);
+    for (let i = 1; i <= 5; i++) await play(game, worldId, `走第${i}步`);
+    await game.settled();
+    expect(aux.calls).toHaveLength(0);
+    await play(game, worldId, "走第6步");
+    open();
+    await game.settled();
+    expect(aux.calls).toHaveLength(1);
+    expect(aux.calls[0].body.model).toBe("aux");
+    expect(JSON.stringify(aux.calls[0].body)).toContain("走第6步");
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head).toMatchObject({ kind: "edit", actionText: "AI 整理了设定集：漕帮、西市旁邸店", meta: { by: "AI", promptVersion: "upkeep-1" } });
+    expect((await game.repo.getNode(c.head.parentId!))!.meta.upkeep).toBe(true);
+    const state = await game.repo.getState(c.head.id);
+    expect(state.cards.find((x) => x.name === "漕帮")).toMatchObject({ kind: "势力", source: "AI" });
+    expect(state.places.find((x) => x.name === "西市旁邸店")).toMatchObject({ description: "主角落脚的邸店，掌柜姓王", source: "AI" });
+    expect(told).toBe(1);
+    // Undoing the AI edit takes its cards away again.
+    const undone = await tree.undo(game.repo, c);
+    expect((await game.repo.getState(undone.head.id)).cards.some((x) => x.name === "漕帮")).toBe(false);
+    await tree.redo(game.repo, undone);
+    // The next turn starts a new window.
+    await play(game, worldId, "走第7步");
+    await game.settled();
+    expect(aux.calls).toHaveLength(1);
+    expect(story.calls).toHaveLength(8);
+  });
+
+  it("files after a turn that started meanwhile", async () => {
+    const { game, worldId, open } = await routed(turns(7), [{ text: UPKEEP }]);
+    for (let i = 1; i <= 6; i++) await play(game, worldId, `走第${i}步`);
+    const seventh = game.play(worldId, { mode: "do", text: "走第7步" }, () => {}).done;
+    open();
+    await seventh;
+    await game.settled();
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head.kind).toBe("edit");
+    expect((await game.repo.getNode(c.head.parentId!))!.actionText).toBe("走第7步");
+  });
+
+  it("drops the result when the player went back before it arrived", async () => {
+    const { game, worldId, open } = await routed(turns(6), [{ text: UPKEEP }]);
+    for (let i = 1; i <= 6; i++) await play(game, worldId, `走第${i}步`);
+    const c = await tree.cursor(game.repo, worldId);
+    await tree.goBackTo(game.repo, c, (await game.repo.path(c.head.id))[2].id);
+    open();
+    await game.settled();
+    const after = await tree.cursor(game.repo, worldId);
+    expect(after.head.kind).toBe("turn");
+    expect((await game.repo.getState(after.head.id)).cards.some((x) => x.name === "漕帮")).toBe(false);
+  });
+
+  it("does not run when turned off, and is not carried into a regenerated turn", async () => {
+    const off = await routed(turns(6), []);
+    const world = (await off.game.repo.getWorld(off.worldId))!;
+    await off.game.repo.updateSettings(off.worldId, { ...world.settings, autoUpkeep: false });
+    for (let i = 1; i <= 6; i++) await play(off.game, off.worldId, `走第${i}步`);
+    await off.game.settled();
+    expect(off.aux.calls).toHaveLength(0);
+
+    const { game, worldId, open } = await routed([...turns(6), { text: "重写的第6段。" + RECORD({}) }], [{ text: UPKEEP }]);
+    for (let i = 1; i <= 6; i++) await play(game, worldId, `走第${i}步`);
+    open();
+    await game.settled();
+    await game.regenerate(worldId, null, () => {}).done;
+    await game.settled();
+    const c = await tree.cursor(game.repo, worldId);
+    expect(c.head).toMatchObject({ kind: "turn", narrative: "重写的第6段。" });
+    expect((await game.repo.getState(c.head.id)).cards.some((x) => x.name === "漕帮")).toBe(false);
+  });
+});

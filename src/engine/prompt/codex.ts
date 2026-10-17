@@ -57,12 +57,13 @@ const text = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slic
  * places that already have a description, and their era card unless
  * `replaceOwnEra`. Null when nothing usable came back.
  */
-export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "places">, opts: { replaceOwnEra?: boolean } = {}): TurnRecord | null {
+export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "places" | "dismissed">, opts: { replaceOwnEra?: boolean } = {}): TurnRecord | null {
   const value = lenientJson(raw) as { era?: { name?: unknown; content?: unknown }; cards?: unknown } | null;
   if (!value || typeof value !== "object") return null;
   const cards: CardPatch[] = [];
   const places: PlacePatch[] = [];
-  const mine = (kind: CardKind, name: string) => !!matchName(state.cards.filter((c) => c.source === "玩家" && c.kind === kind).map((c) => ({ name: c.name, aliases: c.keys })), name);
+  const dismissed = new Set(state.dismissed ?? []);
+  const mine = (kind: CardKind, name: string) => dismissed.has(name) || !!matchName(state.cards.filter((c) => c.source === "玩家" && c.kind === kind).map((c) => ({ name: c.name, aliases: c.keys })), name);
   const described = (name: string) => !!matchName(state.places, name)?.description.trim();
   const eraName = text(value.era?.name, 40);
   const eraContent = text(value.era?.content, 1200);
@@ -76,7 +77,7 @@ export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "place
     const keys = Array.isArray(c.keys) ? c.keys.map((k) => text(k, 20)).filter(Boolean).slice(0, 4) : [];
     if (!name || !content) continue;
     if (c.kind === "地点") {
-      if (!described(name)) places.push({ op: "add", name, aliases: keys, description: content });
+      if (!described(name) && !dismissed.has(name)) places.push({ op: "add", name, aliases: keys, description: content, source: "AI" });
     } else {
       const kind = KINDS.includes(c.kind as CardKind) ? (c.kind as CardKind) : "设定";
       if (!mine(kind, name)) cards.push({ op: "add", kind, name, keys, content, source: "AI" });

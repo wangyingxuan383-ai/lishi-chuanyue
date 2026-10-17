@@ -17,7 +17,8 @@ export interface TurnRecord {
   stats?: { health?: number; energy?: number; fame?: number } | null;
   setStats?: { money?: number; health?: number; energy?: number; fame?: number };
   items?: { name: string; delta: number | string; place?: string | null; unit?: string }[] | null;
-  people?: { name: string; role?: string; attitude?: string; note?: string; alive?: boolean; aliases?: string[] }[] | null;
+  /** By name from the model; panel edits pass the id (and may rename, replace aliases or remove). */
+  people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; alive?: boolean; aliases?: string[] }[] | null;
   status?: { op: string; name: string; detail?: string }[] | null;
   goals?: { op: string; name: string; detail?: string; kind?: string }[] | null;
   log?: string | null;
@@ -52,6 +53,7 @@ export interface PlacePatch {
   name?: string;
   aliases?: string[];
   description?: string;
+  source?: Card["source"];
 }
 
 const KINDS: CardKind[] = ["时代", "势力", "物品", "设定"];
@@ -105,6 +107,7 @@ export function applyRecord(
   const log: string[] = [];
   const me = s.protagonist;
   const now = () => s.time.elapsedMinutes;
+  const dismiss = (name: string) => { s.dismissed = [...new Set([...(s.dismissed ?? []), name])]; };
 
   // Edits keep the current time; turns fall back to the action's default.
   const parsed = parseDurationMinutes(record?.time ?? null);
@@ -214,6 +217,25 @@ export function applyRecord(
 
   // People
   for (const raw of record.people ?? []) {
+    if (raw?.id) {
+      const person = s.people.find((p) => p.id === raw.id);
+      if (!person) { log.push(`人物“${raw.name}”不存在，修改已忽略`); continue; }
+      if (raw.op === "remove") {
+        s.people.splice(s.people.indexOf(person), 1);
+        dismiss(person.name);
+        continue;
+      }
+      const renamed = !!raw.name?.trim() && raw.name.trim() !== person.name;
+      const aliases = [...(raw.aliases ?? person.aliases), ...(renamed ? [person.name] : [])];
+      if (renamed) person.name = raw.name.trim();
+      person.aliases = cleanNames(aliases, person.name);
+      if (raw.role !== undefined) person.role = raw.role.trim();
+      if (raw.note !== undefined) person.notes = raw.note.trim();
+      const attitude = attitudeOf(raw.attitude);
+      if (attitude) person.attitude = attitude;
+      if (raw.alive !== undefined) person.alive = raw.alive;
+      continue;
+    }
     if (!raw?.name) continue;
     // A person first met unnamed ("货栈管事") may later be named ("刘三郎"):
     // the model lists the old label in aliases, which finds the same entry.
@@ -240,7 +262,8 @@ export function applyRecord(
     }
     if (raw.role) existing.role = raw.role;
     if (raw.note !== undefined) existing.notes = raw.note;
-    existing.lastSeenMinute = now();
+    // Panel edits do not count as meeting someone.
+    if (opts?.advanceTime !== false) existing.lastSeenMinute = now();
     const attitude = attitudeOf(raw.attitude);
     if (attitude && attitude !== existing.attitude) {
       const up = ATTITUDES.indexOf(attitude) > ATTITUDES.indexOf(existing.attitude);
@@ -333,13 +356,18 @@ export function applyRecord(
         return found && s.cards.find((c) => c.id === found.id);
       })() : undefined;
     if (raw.op === "remove") {
-      if (card) s.cards.splice(s.cards.indexOf(card), 1);
-      else log.push(`卡片“${name ?? raw.id}”不存在，删除已忽略`);
+      if (card) {
+        s.cards.splice(s.cards.indexOf(card), 1);
+        if (card.kind !== "时代") dismiss(card.name);
+      } else log.push(`卡片“${name ?? raw.id}”不存在，删除已忽略`);
       continue;
     }
     if (card) {
-      if (name) card.name = name;
-      if (raw.keys) card.keys = cleanNames(raw.keys, card.name);
+      // Only an edit by id (or of the one era card) renames; the old name stays a key so it still brings the card in.
+      const renamed = (!!raw.id || card.kind === "时代") && !!name && name !== card.name;
+      const keys = [...(raw.keys ?? card.keys), ...(renamed && card.kind !== "时代" ? [card.name] : [])];
+      if (renamed) card.name = name!;
+      if (raw.keys || renamed) card.keys = cleanNames(keys, card.name);
       if (raw.content !== undefined) card.content = raw.content.trim();
       if (raw.source) card.source = raw.source;
       continue;
@@ -353,17 +381,23 @@ export function applyRecord(
     if (raw.op === "remove") {
       if (!place) log.push(`地点“${name ?? raw.id}”不存在，删除已忽略`);
       else if (place.id === s.placeId) log.push(`“${place.name}”是当前所在地，不能删除`);
-      else s.places.splice(s.places.indexOf(place), 1);
+      else {
+        s.places.splice(s.places.indexOf(place), 1);
+        dismiss(place.name);
+      }
       continue;
     }
     if (place) {
-      if (name) place.name = name;
-      if (raw.aliases) place.aliases = cleanNames(raw.aliases, place.name);
+      const renamed = !!raw.id && !!name && name !== place.name;
+      const aliases = [...(raw.aliases ?? place.aliases ?? []), ...(renamed ? [place.name] : [])];
+      if (renamed) place.name = name!;
+      if (raw.aliases || renamed) place.aliases = cleanNames(aliases, place.name);
       if (raw.description !== undefined) place.description = raw.description.trim();
+      if (raw.source) place.source = raw.source;
       continue;
     }
     if (!name) { log.push(`地点缺少名称：${JSON.stringify(raw)}`); continue; }
-    s.places.push({ id: newId(), name, aliases: cleanNames(raw.aliases, name), description: (raw.description ?? "").trim() });
+    s.places.push({ id: newId(), name, aliases: cleanNames(raw.aliases, name), description: (raw.description ?? "").trim(), ...(raw.source ? { source: raw.source } : {}) });
   }
 
   return { state: s, chips, notes, log, minutes };

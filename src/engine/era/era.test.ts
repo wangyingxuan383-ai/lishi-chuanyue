@@ -101,7 +101,8 @@ describe("era card from a pack", () => {
 
   it("mentions the past year's events, newest first", () => {
     expect(recentEvents(TANG_748).map((e) => `${e.ceYear}/${e.month}`)).toEqual(["748/11", "747/12"]);
-    expect(eraCardText(TANG_748)).toContain("天宝六载腊月，高仙芝");
+    // Trimmed to fit 1000 characters, the card keeps the newest event.
+    expect(eraCardText(TANG_748)).toContain("近来大事：天宝七载冬月，杨贵妃的三位姐姐");
   });
 
   it("gives a new world an era card and a card per place", () => {
