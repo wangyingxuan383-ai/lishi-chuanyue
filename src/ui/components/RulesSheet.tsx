@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { LUNAR_MONTHS, formatDate, monthDays } from "../../engine/calendar/date";
 import type { EraContext } from "../../engine/era";
+import { rejectedReason } from "../../engine/game";
 import { currencyIssues, formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
@@ -24,6 +25,8 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
   const [ceYear, setCeYear] = useState(start?.ceYear != null ? String(start.ceYear) : "");
   const [units, setUnits] = useState(era.currency.units.map((u) => ({ name: u.name, value: String(u.value) })));
   const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const events = (state.timeline ?? []).length;
 
   const parsedUnits = units.map((u) => ({ name: u.name.trim(), value: Number(u.value) }));
   const currencyChanged = JSON.stringify(parsedUnits) !== JSON.stringify(era.currency.units.map((u) => ({ name: u.name, value: u.value })));
@@ -58,7 +61,8 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
     const { patch, summary: lines } = changes();
     if (!lines.length) { onClose(); return; }
     setSaving(true);
-    try { await onSave(patch, lines.join("、")); onClose(); } finally { setSaving(false); }
+    setProblem(null);
+    try { await onSave(patch, lines.join("、")); onClose(); } catch (e) { setProblem(rejectedReason(e)); } finally { setSaving(false); }
   };
 
   return (
@@ -83,6 +87,7 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
           <input aria-label="对应公元年" inputMode="numeric" value={ceYear} onChange={(e) => setCeYear(e.target.value.replace(/[^\d-]/g, ""))} placeholder="如 748" />
         </label>
         {!dateOk && <p className="notice" style={{ margin: 0 }}>日期不完整：要有年号、年份，日子在 1～{dayLimit} 之间。</p>}
+        {dateOk && events > 0 && summary.some((s) => s.startsWith("开局日期") || s.startsWith("历法")) && <p className="field-hint" style={{ margin: 0 }}>年表里的 {events} 件大事会按新的开局日期重新排时间。</p>}
         <span className="muted">货币（从大到小，换算以最小的单位计，最小的写 1）</span>
         {units.map((u, i) => (
           <div className="row" key={i}>
@@ -95,6 +100,7 @@ export function RulesSheet({ state, era, busy, onSave, onClose }: {
         <button onClick={() => setUnits([...units, { name: "", value: "" }])}><Icon name="plus" size={18} />添加单位</button>
         {unitProblems.length ? <p className="notice" style={{ margin: 0 }}>{unitProblems[0].message}</p>
           : <p className="muted" style={{ margin: 0 }}>你现在有 {formatMoney(state.protagonist.stats.money, { units: parsedUnits })}。</p>}
+        {problem && <p className="notice" style={{ margin: 0 }}>{problem}</p>}
         <button className="primary" disabled={busy || saving || !dateOk || unitProblems.length > 0} onClick={() => void save()}>{summary.length ? "保存" : "关闭"}</button>
       </div>
     </Sheet>

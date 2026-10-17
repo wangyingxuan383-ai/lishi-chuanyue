@@ -2,6 +2,7 @@
 // Each person opens on their own and can be edited or removed; every save
 // becomes an edit node that can be undone.
 import { useApp } from "../app/context";
+import { rejectedReason } from "../../engine/game";
 import { useState } from "react";
 import { agoText } from "../../engine/calendar/clock";
 import type { EraContext } from "../../engine/era";
@@ -14,11 +15,15 @@ import { Icon } from "./Icon";
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
 const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.trim()).filter(Boolean);
 const preview = (text: string, max = 40) => (text.length > max ? `${text.slice(0, max)}…` : text);
+/** Closeness at a glance (AUDIT_V4 8.4): hostile in cinnabar, cold grey, friendly green, close gold. */
+export function attitudeClass(a: Attitude): string {
+  return a === "仇视" || a === "敌意" ? "att-hostile" : a === "冷淡" ? "att-cold" : a === "友善" ? "att-friendly" : a === "亲近" || a === "生死之交" ? "att-close" : "att-plain";
+}
 
 function Editor({ person, state, era, onClose, onSave }: {
   person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
 }) {
-  const { ask } = useApp();
+  const { ask, toast } = useApp();
   const [name, setName] = useState(person?.name ?? "");
   const [aliases, setAliases] = useState(person?.aliases.join("、") ?? "");
   const [role, setRole] = useState(person?.role ?? "");
@@ -34,7 +39,7 @@ function Editor({ person, state, era, onClose, onSave }: {
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } finally { setSaving(false); }
+    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
   const save = () => {
     if (!clean || clash) return;
@@ -95,7 +100,7 @@ export function People({ state, era, busy, onSave }: {
             {p.notes && <small>{preview(p.notes)}</small>}
           </div>
           <div className="person-side">
-            <span className="tag">{p.attitude}</span>
+            <span className={`tag ${attitudeClass(p.attitude)}`}>{p.attitude}</span>
             {p.lastSeenMinute != null && <small>{agoText(era.clock, p.lastSeenMinute, now)}</small>}
           </div>
         </button>

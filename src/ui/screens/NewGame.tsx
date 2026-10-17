@@ -11,6 +11,7 @@ import { newId } from "../../engine/db/repo";
 import { useApp, useBack } from "../app/context";
 import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
+import { useLongPress } from "../components/useLongPress";
 import { loadPlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { ARRIVALS, EMPTY, ORIGINS, fromTemplate, parseShare, shareText, toNewWorld, type Draft } from "./openingDraft";
 import { Icon } from "../components/Icon";
@@ -32,13 +33,33 @@ const TIPS = [
 ];
 
 interface UserTemplate { id: string; name: string; draft: Draft }
+/** The saved draft keeps the one-line idea too (AUDIT_V4_FUNCTION D6). */
+type SavedDraft = Draft & { idea?: string };
+const NAME_MAX = 12;
+const ageProblem = (age: string) => (age && (Number(age) < 1 || Number(age) > 120) ? "年龄要在 1～120 岁之间" : null);
+
+/** One of 我的开局: tap to use it, long press or ⋯ to rename or delete it (AUDIT_V4_FUNCTION D5). */
+function MyTemplateCard({ t, onUse, onMenu }: { t: UserTemplate; onUse: () => void; onMenu: () => void }) {
+  const press = useLongPress(onMenu, onUse);
+  return (
+    <div className="my-template">
+      <button className="template-card" {...press} aria-label={`我的开局：${t.name}`}>
+        <b>{t.name}</b><small>我的开局</small>{t.draft.premise && <span className="hook">{t.draft.premise}</span>}
+      </button>
+      <button className="icon-btn my-template-menu" aria-label={`“${t.name}”的更多操作`} onClick={onMenu}>⋯</button>
+    </div>
+  );
+}
 
 export default function NewGame() {
-  const { game, replace, pop, toast, askName } = useApp();
+  const { game, replace, pop, toast, ask, askName } = useApp();
   const [draft, setDraftState] = useState<Draft>(EMPTY);
   const [loaded, setLoaded] = useState(false);
   const [mine, setMine] = useState<UserTemplate[]>([]);
-  const [idea, setIdea] = useState("");
+  const [idea, setIdeaState] = useState("");
+  const ideaRef = useRef("");
+  const draftRef = useRef<Draft>(EMPTY);
+  const [templateMenu, setTemplateMenu] = useState<UserTemplate | null>(null);
   const [allTemplates, setAllTemplates] = useState(false);
   const [group, setGroup] = useState("全部");
   const [sheet, setSheet] = useState<"menu" | "import" | null>(null);
@@ -51,6 +72,7 @@ export default function NewGame() {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
   const nameBox = useRef<HTMLInputElement>(null);
+  const ageBox = useRef<HTMLInputElement>(null);
   const identityBox = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -65,24 +87,37 @@ export default function NewGame() {
   // The draft survives leaving the screen.
   useEffect(() => {
     void (async () => {
-      const saved = await game.repo.getSetting<Draft | null>("newgameDraft", null);
+      const stored = await game.repo.getSetting<SavedDraft | null>("newgameDraft", null);
+      const { idea: savedIdea, ...saved } = stored ?? ({} as SavedDraft);
+      if (savedIdea) { ideaRef.current = savedIdea; setIdeaState(savedIdea); }
       const d = await loadPlayDefaults(game.repo);
       setDefaults(d);
       const base = fresh(d);
-      setDraftState(saved ? { ...base, ...saved, settings: { ...base.settings, ...saved.settings } } : base);
-      if (saved && (saved.name || saved.premise || saved.identity)) setStep("setup");
+      const restored = stored ? { ...base, ...saved, settings: { ...base.settings, ...saved.settings } } : base;
+      draftRef.current = restored;
+      setDraftState(restored);
+      if (stored && (saved.name || saved.premise || saved.identity)) setStep("setup");
       const rows = await game.platform.sql.query("SELECT id, name, json FROM templates WHERE kind = 'opening' ORDER BY created_at DESC");
       setMine(rows.map((r) => ({ id: r.id as string, name: r.name as string, draft: JSON.parse(r.json as string) })));
       setLoaded(true);
     })();
   }, []);
+  const persist = () => {
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => void game.repo.setSetting("newgameDraft", { ...draftRef.current, idea: ideaRef.current } satisfies SavedDraft), 500);
+  };
   const setDraft = (next: Draft | ((d: Draft) => Draft)) => {
     setDraftState((current) => {
       const value = typeof next === "function" ? next(current) : next;
-      clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => void game.repo.setSetting("newgameDraft", value), 500);
+      draftRef.current = value;
+      persist();
       return value;
     });
+  };
+  const setIdea = (value: string) => {
+    ideaRef.current = value;
+    setIdeaState(value);
+    persist();
   };
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => {
     const next = { ...d, [key]: value };
@@ -172,6 +207,22 @@ export default function NewGame() {
     setMine((m) => [{ id, name: name.trim(), draft }, ...m]);
     toast("已保存到“我的开局”");
   };
+  const renameTemplate = async (t: UserTemplate) => {
+    const name = await askName({ title: "给这个开局改名", initial: t.name, placeholder: "开局的名字" });
+    if (!name || name === t.name) return;
+    await game.platform.sql.query("UPDATE templates SET name = ? WHERE id = ?", [name, t.id]);
+    setMine((m) => m.map((x) => (x.id === t.id ? { ...x, name } : x)));
+    toast("已改名");
+  };
+  const deleteTemplate = async (t: UserTemplate) => {
+    if (!await ask({ title: `删除“${t.name}”？`, message: "只删掉这份存下的开局设定，已经开始的故事不受影响。", confirm: "删除", danger: true })) return;
+    await game.platform.sql.query("DELETE FROM templates WHERE id = ?", [t.id]);
+    setMine((m) => m.filter((x) => x.id !== t.id));
+    toast(`已删除“${t.name}”`, { label: "撤销", run: () => {
+      void game.platform.sql.query("INSERT INTO templates (id, kind, name, json, created_at) VALUES (?, 'opening', ?, ?, ?)", [t.id, t.name, JSON.stringify(t.draft), new Date().toISOString()]);
+      setMine((m) => [t, ...m]);
+    } });
+  };
 
   const share = async () => {
     await navigator.clipboard?.writeText(shareText(draft));
@@ -229,7 +280,24 @@ export default function NewGame() {
             { label: "保存为文件", onSelect: () => void exportFile() },
             { label: "导入开局设定", onSelect: () => { setPasted(""); setSheet("import"); } },
             { label: "从文件导入", onSelect: async () => { importFrom(await game.platform.files.importText().catch(() => null)); } },
-            { label: "清空重填", danger: true, onSelect: () => { setDraft({ ...fresh(), settings: draft.settings }); toast("已清空"); } },
+            { label: "清空重填", danger: true, onSelect: () => {
+              const before = draft;
+              const beforeIdea = idea;
+              setDraft({ ...fresh(), settings: draft.settings });
+              setIdea("");
+              toast("已清空", { label: "撤销", run: () => { setDraft(before); setIdea(beforeIdea); } });
+            } },
+          ]}
+        />
+      )}
+      {templateMenu && (
+        <MenuSheet
+          title={templateMenu.name}
+          onClose={() => setTemplateMenu(null)}
+          items={[
+            { label: "用这个开局", onSelect: () => { setDraft({ ...fresh(), ...templateMenu.draft }); setStep("setup"); } },
+            { label: "改名", onSelect: () => void renameTemplate(templateMenu) },
+            { label: "删除", danger: true, onSelect: () => void deleteTemplate(templateMenu) },
           ]}
         />
       )}
@@ -243,14 +311,16 @@ export default function NewGame() {
       )}
   </>);
 
-  const missing = !draft.name.trim() ? "名字" : !draft.identity.trim() ? "身份" : draft.openingMode === "player" && !draft.openingText.trim() ? "开场" : null;
+  const nameLength = [...draft.name.trim()].length;
+  const missing = !draft.name.trim() || nameLength > NAME_MAX ? "名字" : ageProblem(draft.age) ? "年龄" : !draft.identity.trim() ? "身份" : draft.openingMode === "player" && !draft.openingText.trim() ? "开场" : null;
   const startOrPoint = () => {
     if (!missing) { void start(draft); return; }
     // A grey button that does nothing is a dead end: take the player to what is missing (AUDIT_V4 3.7).
     if (missing === "名字") nameBox.current?.focus();
+    else if (missing === "年龄") ageBox.current?.focus();
     else if (missing === "身份") identityBox.current?.focus();
     else setOpen((o) => ({ ...o, opening: true }));
-    toast(`还差${missing}`);
+    toast(missing === "名字" && nameLength > NAME_MAX ? `名字最多 ${NAME_MAX} 个字` : missing === "年龄" ? ageProblem(draft.age)! : `还差${missing}`);
   };
 
   if (step === "pick") {
@@ -281,9 +351,7 @@ export default function NewGame() {
             </div>
             <div className="template-row">
               {(group === "全部" || group === "我的") && mine.map((m) => (
-                <button key={m.id} className="template-card" onClick={() => { setDraft({ ...fresh(), ...m.draft }); setStep("setup"); }}>
-                  <b>{m.name}</b><small>我的开局</small>
-                </button>
+                <MyTemplateCard key={m.id} t={m} onUse={() => { setDraft({ ...fresh(), ...m.draft }); setStep("setup"); }} onMenu={() => setTemplateMenu(m)} />
               ))}
               {shownTemplates.map((t) => (
                 <button key={t.id} className={`template-card${draft.templateId === t.id ? " selected" : ""}`} onClick={() => useTemplate(t)}>
@@ -319,9 +387,13 @@ export default function NewGame() {
         <section className="stack" style={{ gap: 8 }}>
           <span className="field-label">主角</span>
           <div className="row">
-            <input ref={nameBox} className={`grow${missing === "名字" ? " wanted" : ""}`} value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="名字" aria-label="名字" />
-            <input style={{ width: 84 }} value={draft.age} onChange={(e) => set("age", e.target.value.replace(/\D/g, ""))} placeholder="年龄" inputMode="numeric" aria-label="年龄" />
+            <span className="field-line grow">
+              <input ref={nameBox} className={missing === "名字" ? "wanted" : ""} value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="名字" aria-label="名字" />
+              <span className={`field-suffix${nameLength > NAME_MAX ? " over" : ""}`}>{nameLength}/{NAME_MAX}</span>
+            </span>
+            <input ref={ageBox} style={{ width: 84 }} className={ageProblem(draft.age) ? "wanted" : ""} value={draft.age} onChange={(e) => set("age", e.target.value.replace(/\D/g, "").slice(0, 3))} placeholder="年龄" inputMode="numeric" aria-label="年龄" />
           </div>
+          {(nameLength > NAME_MAX || ageProblem(draft.age)) && <p className="field-hint warn" style={{ margin: 0 }}>{nameLength > NAME_MAX ? `名字最多 ${NAME_MAX} 个字，现在 ${nameLength} 个` : ageProblem(draft.age)}</p>}
           {draft.lockedGender ? (
             <button className="picker" onClick={() => set("lockedGender", null)} aria-label={`性别：${draft.lockedGender}（由身份决定），点一下可以改`}>
               <span><b>{draft.lockedGender}</b><small>由身份决定，点一下可以改</small></span><span aria-hidden="true">›</span>

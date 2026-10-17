@@ -7,6 +7,10 @@ import type { Chapter, StoryNode, TimelineEvent, WorldState } from "../../engine
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
+import type { EraContext } from "../../engine/era";
+import { monthLabel } from "../../engine/calendar/date";
+import { rejectedReason } from "../../engine/game";
+import { readEventDate } from "../../engine/timeline";
 
 interface Row { chapter: Chapter; n: number; from: number; to: number; turns: StoryNode[] }
 
@@ -28,7 +32,7 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
   const save = async () => {
     setBusy(true);
     try {
-      await game.repo.updateChapter(c.id, { title: title.trim() || c.title, gist: gist.trim() || c.gist, summary: summary.trim() || c.summary, edited: true });
+      await game.repo.updateChapter(c.id, { title: title.trim(), gist: gist.trim() || c.gist, summary: summary.trim() || c.summary, edited: true });
       onChanged();
       onClose();
     } finally { setBusy(false); }
@@ -53,12 +57,13 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
   return (
     <Sheet title={`第 ${row.n} 章 · ${c.title}`} onClose={onClose}>
       {editing ? <div className="stack" style={{ gap: 10 }}>
-        <label>标题<input value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+        <label>标题<input value={title} onChange={(e) => setTitle(e.target.value)} className={title.trim() ? "" : "wanted"} /></label>
+        {!title.trim() && <p className="field-hint warn" style={{ margin: 0 }}>标题不能空着，写几个字概括这一章。</p>}
         <label>一句话梗概（更早的章节只交给 AI 这一句）<input value={gist} onChange={(e) => setGist(e.target.value)} /></label>
         <label>摘要<textarea rows={8} value={summary} onChange={(e) => setSummary(e.target.value)} /></label>
         <div className="row">
           <button disabled={busy} onClick={() => setEditing(false)}>取消</button>
-          <button className="primary grow" disabled={busy} onClick={() => void save()}>保存</button>
+          <button className="primary grow" disabled={busy || !title.trim()} onClick={() => void save()}>保存</button>
         </div>
       </div> : <div className="stack" style={{ gap: 10 }}>
         <p className="muted" style={{ margin: 0 }}>第 {row.from}～{row.to} 回合 · {c.edited ? "你改过" : "AI 写的"}</p>
@@ -79,40 +84,66 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
 
 type Save = (patch: TurnRecord, summary: string) => Promise<void>;
 
-function EventSheet({ event, onClose, onSave }: { event: TimelineEvent | null; onClose: () => void; onSave: Save }) {
-  const [date, setDate] = useState("");
-  const [title, setTitle] = useState("");
-  const [kind, setKind] = useState<TimelineEvent["kind"]>("可变");
+function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEvent | null; others: TimelineEvent[]; era: EraContext; onClose: () => void; onSave: Save }) {
+  const { toast } = useApp();
+  const [editing, setEditing] = useState(!event);
+  const [date, setDate] = useState(event?.date ?? "");
+  const [title, setTitle] = useState(event?.title ?? "");
+  const [kind, setKind] = useState<TimelineEvent["kind"]>(event?.kind ?? "可变");
   const [saving, setSaving] = useState(false);
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } finally { setSaving(false); }
+    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
-  if (event) return (
+  // The date is checked while typing, so a date the game cannot count is never saved silently (AUDIT_V4_FUNCTION F9).
+  const placed = date.trim() ? readEventDate(era.clock, date) : null;
+  const clean = title.trim();
+  const taken = !!clean && others.some((e) => e.title === clean && e.id !== event?.id);
+  const unchanged = !!event && placed?.label === event.date && clean === event.title && kind === event.kind;
+  const save = () => {
+    if (!placed || !clean) return;
+    const add = { op: "add" as const, date: date.trim(), title: clean, kind, ...(event?.source ? { source: event.source } : {}) };
+    if (!event) void run({ timeline: [add] }, `添加大事：${clean}`);
+    else void run({ timeline: [{ op: "remove", id: event.id }, add] }, `修改大事：${clean}`);
+  };
+  if (event && !editing) return (
     <Sheet title={event.title} onClose={onClose}>
       <div className="stack" style={{ gap: 10 }}>
         <p className="muted" style={{ margin: 0 }}>{event.date} · {event.kind === "固定" ? "固定：不管你做什么都会发生" : "可变：你的行动可能改变它"}{event.source === "卡组" ? " · 来自内置卡组" : event.source === "AI" ? " · AI 整理" : ""}</p>
-        <button className="danger-text" disabled={saving} onClick={() => void run({ timeline: [{ op: "remove", id: event.id }] }, `删除大事：${event.title}`)}>从年表删除</button>
+        {event.atMinute === null && <p className="field-hint warn">这个日期换算不了，时间到了不会提醒。点“修改”换个写法。</p>}
+        <div className="row">
+          <button className="danger-text" disabled={saving} onClick={() => void run({ timeline: [{ op: "remove", id: event.id }] }, `删除大事：${event.title}`)}>从年表删除</button>
+          <button className="primary grow" disabled={saving} onClick={() => setEditing(true)}>修改</button>
+        </div>
       </div>
     </Sheet>
   );
+  const example = era.clock.date ? monthLabel(era.clock.date, era.clock.rules).replace(/\s+/g, "") : "天宝九载十月";
   return (
-    <Sheet title="添加大事" onClose={onClose}>
+    <Sheet title={event ? "修改大事" : "添加大事"} onClose={onClose}>
       <div className="stack" style={{ gap: 10 }}>
-        <p className="muted" style={{ margin: 0 }}>史书上记载、或你想让它发生的大事。游戏时间到了，回合下会提醒，AI 也会知道。</p>
-        <label>日期（写到月份）<input value={date} onChange={(e) => setDate(e.target.value)} placeholder="如：天宝九载十月" /></label>
+        {!event && <p className="muted" style={{ margin: 0 }}>史书上记载、或你想让它发生的大事。游戏时间到了，回合下会提醒，AI 也会知道。</p>}
+        <label>日期（年号、年份和月份）<input value={date} onChange={(e) => setDate(e.target.value)} placeholder={`如：${example}`} className={date.trim() && !placed ? "wanted" : ""} /></label>
+        {!era.clock.date ? <p className="field-hint warn" style={{ margin: 0 }}>这个世界还没有开局日期，大事没法按时提醒。先在“此时此地 → 修改纪年与货币”里填开局日期。</p>
+          : date.trim() && <p className={`field-hint${placed ? "" : " warn"}`} style={{ margin: 0 }}>{placed
+          ? `${placed.label}${placed.atMinute < 0 ? "，在开局之前" : placed.atMinute <= 0 ? "" : `，从开局算起约 ${Math.max(1, Math.round(placed.atMinute / 1440))} 天后`}`
+          : `换算不了。写成“${example}”这样：年号、第几年、几月。`}</p>}
         <label>发生什么<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="如：杨钊请改名，玄宗赐名国忠" /></label>
+        {taken && <p className="field-hint warn" style={{ margin: 0 }}>年表里已经有这件事了。</p>}
         <div className="segmented">
           {(["固定", "可变"] as const).map((k) => <button key={k} aria-pressed={kind === k} onClick={() => setKind(k)}>{k === "固定" ? "固定（一定发生）" : "可变（能被改变）"}</button>)}
         </div>
-        <button className="primary" disabled={saving || !date.trim() || !title.trim()} onClick={() => void run({ timeline: [{ op: "add", date: date.trim(), title: title.trim(), kind }] }, `添加大事：${title.trim()}`)}>添加</button>
+        <div className="row">
+          {event && <button disabled={saving} onClick={() => setEditing(false)}>取消</button>}
+          <button className="primary grow" disabled={saving || !placed || !clean || taken || unchanged} onClick={save}>{event ? "保存" : "添加"}</button>
+        </div>
       </div>
     </Sheet>
   );
 }
 
-export function Journal({ worldId, headId, chapterEvery, busy, state, onSave }: {
-  worldId: string; headId: string; chapterEvery: number; busy: boolean; state: WorldState; onSave: Save;
+export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSave }: {
+  worldId: string; headId: string; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save;
 }) {
   const { game, toast } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -184,7 +215,7 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, onSave }: 
         {state.deviations.map((d, i) => <small key={i} className="muted">{d}</small>)}
       </section>}
       {open && <ChapterSheet row={open} worldId={worldId} onClose={() => setOpen(null)} onChanged={() => void load()} />}
-      {event && <EventSheet event={event.event} onClose={() => setEvent(null)} onSave={onSave} />}
+      {event && <EventSheet event={event.event} others={timeline} era={era} onClose={() => setEvent(null)} onSave={onSave} />}
     </div>
   );
 }

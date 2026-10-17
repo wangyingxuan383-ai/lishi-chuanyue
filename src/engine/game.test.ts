@@ -782,3 +782,61 @@ describe("daily backup", () => {
     expect(await game.autoBackup(now + 2 * 86_400_000)).toMatch(/-auto\.sqlite$/);
   });
 });
+
+describe("panel edits the engine does not carry out (AUDIT_V4_FUNCTION H1)", () => {
+  it("adds no edit node and says why when nothing changes or a part is refused", async () => {
+    const { game, worldId } = await setup([]);
+    const before = await tree.cursor(game.repo, worldId);
+    const state = await game.repo.getState(before.head.id);
+    // A wish under a goal's name, a date without an era, a stat already at that value.
+    await expect(game.editState(worldId, { goals: [{ op: "add", kind: "心愿", name: "三日内付清房钱九十文" }] }, "新心愿")).rejects.toMatchObject({ name: "EditRejected", reason: "已经有目标“三日内付清房钱九十文”了" });
+    await expect(game.editState(worldId, { rules: { date: { era: "", year: 9, month: 11, day: 17 } } }, "开局日期改为九年")).rejects.toMatchObject({ reason: "开局日期写得不完整，没有生效" });
+    await expect(game.editState(worldId, { setStats: { money: state.protagonist.stats.money } }, "钱")).rejects.toMatchObject({ reason: expect.stringContaining("没有需要保存的改动") });
+    // One refused part rejects the whole edit, so the summary never claims what did not happen.
+    await expect(game.editState(worldId, { setStats: { money: 1 }, profile: { age: 999 } }, "钱、年龄")).rejects.toMatchObject({ reason: "年龄 999 不在 1～120 之间，没有生效" });
+    expect((await tree.cursor(game.repo, worldId)).head.id).toBe(before.head.id);
+    expect((await game.repo.getState(before.head.id)).protagonist.stats.money).toBe(state.protagonist.stats.money);
+    // A real change still goes through.
+    const c = await game.editState(worldId, { setStats: { money: 1 } }, "钱");
+    expect(c.head.kind).toBe("edit");
+  });
+
+  it("edits the protagonist's 人物小传 and an item's own fields", async () => {
+    const { game, worldId } = await setup([]);
+    const c = await game.editState(worldId, {
+      profile: { name: "李长安", age: 23, identity: "替人抄书的落第举子", origin: "程序员", cheat: "熟读唐史" },
+      items: [{ name: "旧书", set: { name: "旧书卷", quantity: 2, unit: "卷", place: "邸店床下", note: "《文选》残本" } }, { name: "紫毫笔", set: { quantity: 1, unit: "支" } }],
+    }, "人物小传");
+    const me = (await game.repo.getState(c.head.id)).protagonist;
+    expect(me).toMatchObject({ name: "李长安", aliases: ["李安"], age: 23, identity: "替人抄书的落第举子", origin: "程序员", cheat: "熟读唐史" });
+    expect(me.items).toEqual([
+      { name: "旧书卷", quantity: 2, unit: "卷", place: "邸店床下", note: "《文选》残本" },
+      { name: "紫毫笔", quantity: 1, unit: "支", place: null, note: "" },
+    ]);
+    const dropped = await game.editState(worldId, { items: [{ name: "紫毫笔", set: { quantity: 0 } }] }, "去掉物品 紫毫笔");
+    expect((await game.repo.getState(dropped.head.id)).protagonist.items.map((i) => i.name)).toEqual(["旧书卷"]);
+  });
+
+  it("places the great events again when the opening date changes (F2)", async () => {
+    const { game, worldId } = await setup([]);
+    const start = await game.repo.getState((await tree.cursor(game.repo, worldId)).head.id);
+    const shibao = start.timeline!.find((e) => e.title.includes("石堡城"))!;
+    // A year earlier: the same written date is about a year further away.
+    const c = await game.editState(worldId, { rules: { date: { era: "天宝", year: 6, month: 11, day: 17, ceYear: 747 } } }, "开局日期改为天宝六载");
+    const moved = (await game.repo.getState(c.head.id)).timeline!.find((e) => e.id === shibao.id)!;
+    expect(moved.date).toBe(shibao.date);
+    const days = Math.round((moved.atMinute! - shibao.atMinute!) / 1440);
+    expect(days).toBeGreaterThan(350);
+    expect(days).toBeLessThan(390);
+  });
+
+  it("purges routes left in the trash for 30 days when the game opens (G2)", async () => {
+    const { game, worldId, platform } = await setup([]);
+    const c = await tree.cursor(game.repo, worldId);
+    const old = await game.repo.createLine(worldId, c.head.id, "旧路", false);
+    await game.repo.setLineDeleted(old.id, true);
+    await platform.sql.query("UPDATE lines SET deleted_at = ? WHERE id = ?", [new Date(Date.now() - 31 * 86_400_000).toISOString(), old.id]);
+    await Game.open(platform, LLM);
+    expect(await game.repo.getLine(old.id)).toBeNull();
+  });
+});

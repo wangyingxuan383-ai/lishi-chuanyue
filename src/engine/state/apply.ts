@@ -8,7 +8,7 @@ import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money
 import { newId } from "../db/repo";
 import type { Fortune } from "../fortune";
 import type { ActionMode, Attitude, Card, CardKind, Difficulty, Goal, Person, TimelineEvent, WorldState } from "../types";
-import { eventsBetween, placeEvent } from "../timeline";
+import { eventsBetween, placeEvent, retime } from "../timeline";
 
 export type RiskResult = "成" | "败" | "半成";
 const RISK_TEXT: Record<RiskResult, string> = { 成: "成了", 败: "没成", 半成: "成了一半" };
@@ -23,7 +23,10 @@ export interface TurnRecord {
   setStats?: { money?: number; health?: number; energy?: number; fame?: number };
   /** The protagonist died in this passage; counts only while 垂危 (or on 残酷), D124. */
   died?: boolean | null;
-  items?: { name: string; delta: number | string; place?: string | null; unit?: string }[] | null;
+  /** delta from the story; `set` from the 行囊 editor: the item's own fields, a new name, quantity 0 drops it (AUDIT_V4_FUNCTION F8). */
+  items?: { name: string; delta?: number | string; place?: string | null; unit?: string; set?: ItemSet }[] | null;
+  /** Panel edits only: the protagonist's own record, 人物小传 (AUDIT_V4_FUNCTION F7). */
+  profile?: { name?: string; age?: number | null; identity?: string; origin?: string; cheat?: string } | null;
   /** By name from the model; panel edits pass the id (and may rename, replace aliases or remove). */
   people?: { id?: string; op?: "remove"; name: string; role?: string; attitude?: string; note?: string; origin?: string; alive?: boolean; aliases?: string[] }[] | null;
   status?: { op: string; name: string; detail?: string }[] | null;
@@ -48,6 +51,15 @@ export interface TurnRecord {
   places?: PlacePatch[] | null;
   /** Panel edits: the world's rules (D121). date is the start date as {era, year, month, day, ceYear?}; null clears it. */
   rules?: { currency?: { name: string; value: number }[]; lunar?: boolean; date?: Record<string, unknown> | null } | null;
+}
+
+/** One item as the 行囊 editor saves it; quantity 0 removes it. */
+export interface ItemSet {
+  name?: string;
+  quantity?: number;
+  unit?: string;
+  place?: string | null;
+  note?: string;
 }
 
 /** update and remove find the card by id, or by kind and name. */
@@ -199,7 +211,7 @@ export function applyRecord(
     if (!ctx.clock) { log.push("没有游戏日期，大事无法放进年表"); continue; }
     const placed = placeEvent(ctx.clock, { date: raw.date, title: raw.title, kind: raw.kind });
     if (placed.atMinute === null) log.push(`大事“${placed.title}”的日期无法换算，只记录不提醒`);
-    if ((s.timeline ?? []).some((e) => e.title === placed.title)) continue;
+    if ((s.timeline ?? []).some((e) => e.title === placed.title)) { log.push(`年表里已经有“${placed.title}”了`); continue; }
     s.timeline = [...(s.timeline ?? []), { id: newId(), ...placed, source: raw.source ?? "玩家" }].sort((a, b) => (a.atMinute ?? Infinity) - (b.atMinute ?? Infinity));
   }
 
@@ -301,6 +313,24 @@ export function applyRecord(
 
   // Items
   for (const raw of record.items ?? []) {
+    if (raw?.set) {
+      if (opts?.advanceTime !== false) { log.push(`物品“${raw.name}”的直接修改只能来自面板，已忽略`); continue; }
+      const set = raw.set;
+      const item = me.items.find((i) => i.name === raw.name);
+      const name = set.name?.trim() || raw.name;
+      const quantity = set.quantity === undefined || !Number.isFinite(set.quantity) ? undefined : Math.max(0, Math.round(set.quantity));
+      if (isCurrency(name, ctx.currency)) { log.push(`“${name}”是钱，按钱记，不放进行囊`); continue; }
+      if (item) {
+        item.name = name;
+        if (quantity !== undefined) item.quantity = quantity;
+        if (set.unit !== undefined) item.unit = set.unit.trim();
+        if (set.place !== undefined) item.place = set.place?.trim() || null;
+        if (set.note !== undefined) item.note = set.note.trim();
+      } else if (quantity) {
+        me.items.push({ name, quantity, unit: set.unit?.trim() ?? "", place: set.place?.trim() || null, note: set.note?.trim() ?? "" });
+      } else log.push(`没有 ${raw.name}，修改已忽略`);
+      continue;
+    }
     const delta = typeof raw?.delta === "number" ? raw.delta : Number(String(raw?.delta ?? "").replace(/[^\d+-]/g, ""));
     if (!raw?.name || !Number.isFinite(delta)) { log.push(`物品记录不完整：${JSON.stringify(raw)}`); continue; }
     // Money is counted in money, not in the bag ("开元通宝×180" next to 钱 +180).
@@ -327,6 +357,28 @@ export function applyRecord(
     }
   }
   me.items = me.items.filter((i) => i.quantity > 0);
+
+  // The protagonist's own record, from the panel only; an old name stays an alias.
+  const profile = opts?.advanceTime === false ? record.profile : null;
+  if (profile) {
+    if (profile.name !== undefined) {
+      const name = profile.name.trim();
+      if (!name) log.push("名字不能为空，没有生效");
+      else if (name !== me.name) {
+        me.aliases = cleanNames([...me.aliases, me.name], name);
+        me.name = name;
+      }
+    }
+    if (profile.age !== undefined) {
+      if (profile.age === null) me.age = null;
+      else if (Number.isInteger(profile.age) && profile.age >= 1 && profile.age <= 120) me.age = profile.age;
+      else log.push(`年龄 ${profile.age} 不在 1～120 之间，没有生效`);
+    }
+    for (const key of ["identity", "origin", "cheat"] as const) {
+      const value = profile[key];
+      if (value !== undefined) me[key] = value.trim();
+    }
+  }
 
   // People
   for (const raw of record.people ?? []) {
@@ -440,7 +492,7 @@ export function applyRecord(
     const goal = raw.id ? s.goals.find((g) => g.id === raw.id)
       : matchName(s.goals.filter((g) => g.status === "进行中" || op === "add"), raw.name);
     if (op === "add") {
-      if (goal) continue;
+      if (goal) { log.push(`已经有目标“${goal.name}”了`); continue; }
       const kind = raw.kind === "主线" || raw.kind === "心愿" ? raw.kind : "支线";
       const added: Goal = { id: newId(), name: raw.name, kind, progress: raw.detail ?? "", status: "进行中", startedMinute: now(), steps: [] };
       step(added, raw.detail);
@@ -479,6 +531,7 @@ export function applyRecord(
     s.era.calendar = { ...(s.era.calendar ?? {}), lunar: rules.lunar };
     if (s.time.date && rules.date === undefined) s.time.date = { ...s.time.date, lunar: rules.lunar };
   }
+  let startMoved = rules?.lunar !== undefined;
   if (rules?.date !== undefined) {
     const calendar = s.era.calendar ?? {};
     const date = rules.date ? coerceDate({ ...rules.date, lunar: calendar.lunar ?? rules.date.lunar }, calendar) : null;
@@ -486,7 +539,14 @@ export function applyRecord(
     else {
       s.time.date = date;
       if (date) s.time.start = formatDate(date, calendar);
+      startMoved = true;
     }
+  }
+  // Each great event was placed against the old start: place it again by its written date (AUDIT_V4_FUNCTION F2).
+  if (startMoved && s.timeline?.length) {
+    const calendar = s.era.calendar ?? ctx.clock?.rules ?? {};
+    const start = s.time.date !== undefined ? s.time.date : ctx.clock?.date ?? null;
+    s.timeline = retime(s.timeline, { date: start, hour: s.time.startHour ?? ctx.clock?.hour ?? 8, label: s.time.start, rules: calendar });
   }
 
   // 设定集: a world has one era card; other cards are found by kind and name.

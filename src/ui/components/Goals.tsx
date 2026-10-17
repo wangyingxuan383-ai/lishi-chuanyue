@@ -2,6 +2,8 @@
 // by kind, how each one went, the player's own wishes, and finished goals.
 // Every change is an edit node that can be undone.
 import { useState } from "react";
+import { rejectedReason } from "../../engine/game";
+import { useApp } from "../app/context";
 import { nowOf } from "../../engine/calendar/clock";
 import { formatDate } from "../../engine/calendar/date";
 import type { EraContext } from "../../engine/era";
@@ -20,10 +22,11 @@ function dayOf(era: EraContext, minute: number): string {
 }
 
 function GoalSheet({ goal, era, onClose, onSave }: { goal: Goal; era: EraContext; onClose: () => void; onSave: Save }) {
+  const { toast } = useApp();
   const [saving, setSaving] = useState(false);
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } finally { setSaving(false); }
+    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
   const active = goal.status === "进行中";
   const ref = { id: goal.id, name: goal.name };
@@ -49,6 +52,7 @@ function GoalSheet({ goal, era, onClose, onSave }: { goal: Goal; era: EraContext
 }
 
 function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => void; onSave: Save }) {
+  const { toast } = useApp();
   const [name, setName] = useState("");
   const taken = goals.some((g) => g.name === name.trim());
   const [how, setHow] = useState("");
@@ -58,7 +62,7 @@ function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => v
     try {
       await onSave({ goals: [{ op: "add", kind: "心愿", name: name.trim(), ...(how.trim() ? { detail: how.trim() } : {}) }] }, `新心愿：${name.trim()}`);
       onClose();
-    } finally { setSaving(false); }
+    } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
   return (
     <Sheet title="我的心愿" onClose={onClose}>

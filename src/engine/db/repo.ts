@@ -411,11 +411,23 @@ export class Repo {
     await this.q("UPDATE lines SET node_id = ? WHERE id = ?", [nodeId, lineId]);
   }
 
+  /**
+   * `name`, or `name（2）`, `name（3）`… when another route or bookmark of the
+   * world already has it (AUDIT_V4_FUNCTION G1). `except` is the line being renamed.
+   */
+  async uniqueLineName(worldId: string, name: string, except?: string): Promise<string> {
+    const base = name.trim().replace(/（\d+）$/, "") || "未命名";
+    const taken = new Set((await this.q("SELECT name FROM lines WHERE world_id = ? AND id <> ?", [worldId, except ?? ""])).map((r) => r.name as string));
+    if (!taken.has(name.trim()) && name.trim()) return name.trim();
+    for (let n = 2; ; n++) if (!taken.has(`${base}（${n}）`)) return `${base}（${n}）`;
+  }
+
   async createLine(worldId: string, nodeId: string, name: string, autoNamed: boolean, kind: Line["kind"] = "line"): Promise<Line> {
     const id = newId();
+    const unique = await this.uniqueLineName(worldId, name);
     await this.q(
       "INSERT INTO lines (id, world_id, name, node_id, kind, auto_named, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [id, worldId, name, nodeId, kind, autoNamed ? 1 : 0, now()],
+      [id, worldId, unique, nodeId, kind, autoNamed ? 1 : 0, now()],
     );
     return (await this.getLine(id))!;
   }
@@ -424,8 +436,12 @@ export class Repo {
     await this.q("UPDATE worlds SET current_line_id = ?, played_at = ? WHERE id = ?", [lineId, now(), worldId]);
   }
 
-  async renameLine(lineId: string, name: string): Promise<void> {
-    await this.q("UPDATE lines SET name = ?, auto_named = 0 WHERE id = ?", [name.trim(), lineId]);
+  /** Renames a line; a name another line has gets a number. Returns the name it got. */
+  async renameLine(lineId: string, name: string): Promise<string> {
+    const line = await this.getLine(lineId);
+    const unique = line ? await this.uniqueLineName(line.worldId, name, lineId) : name.trim();
+    await this.q("UPDATE lines SET name = ?, auto_named = 0 WHERE id = ?", [unique, lineId]);
+    return unique;
   }
 
   async setLineArchived(lineId: string, archived: boolean): Promise<void> {
@@ -478,6 +494,15 @@ export class Repo {
   async purgeTrash(worldId: string, days = 30): Promise<number> {
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
     const old = await this.q("SELECT id FROM lines WHERE world_id = ? AND deleted_at IS NOT NULL AND deleted_at < ?", [worldId, cutoff]);
+    let removed = 0;
+    for (const r of old) removed += await this.purgeLine(r.id as string);
+    return removed;
+  }
+
+  /** The trash of every world, at app start (AUDIT_V4_FUNCTION G2): worlds never opened again are cleaned too. */
+  async purgeAllTrash(days = 30): Promise<number> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const old = await this.q("SELECT id FROM lines WHERE deleted_at IS NOT NULL AND deleted_at < ?", [cutoff]);
     let removed = 0;
     for (const r of old) removed += await this.purgeLine(r.id as string);
     return removed;

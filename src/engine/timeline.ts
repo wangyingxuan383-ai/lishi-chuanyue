@@ -22,6 +22,27 @@ export function placeEvent(clock: GameClock, raw: { date: string; title: string;
   return { date: date ? monthLabel(date, clock.rules) : raw.date.trim(), atMinute: date ? minutesTo(clock, date) : null, title: raw.title.trim(), kind: raw.kind === "固定" ? "固定" : "可变" };
 }
 
+/**
+ * The events placed again against a new start (AUDIT_V4_FUNCTION F2): the
+ * written date stays, the minute follows the clock; one that no longer fits
+ * the calendar is kept without a reminder.
+ */
+export function retime(events: TimelineEvent[], clock: GameClock): TimelineEvent[] {
+  return events
+    .map((e) => {
+      const date = readDate(e.date, clock.rules);
+      return { ...e, atMinute: date ? minutesTo(clock, date) : null };
+    })
+    .sort((a, b) => (a.atMinute ?? Infinity) - (b.atMinute ?? Infinity));
+}
+
+/** Whether a written date can be placed on this clock, for the 年表 editor (AUDIT_V4_FUNCTION F9). */
+export function readEventDate(clock: GameClock, text: string): { label: string; atMinute: number } | null {
+  const date = readDate(text.trim(), clock.rules);
+  const at = date ? minutesTo(clock, date) : null;
+  return date && at !== null ? { label: monthLabel(date, clock.rules), atMinute: at } : null;
+}
+
 /** A pack's events, placed against the world's own clock. */
 export function packTimeline(events: EraEvent[], clock: GameClock): Omit<TimelineEvent, "id">[] {
   return events.flatMap((e) => {

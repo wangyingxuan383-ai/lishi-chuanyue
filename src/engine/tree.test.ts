@@ -194,3 +194,16 @@ describe("world lines (R06-T001)", () => {
     expect([back.head.id, back.line.id]).toEqual([one.id, c.line.id]);
   });
 });
+
+describe("line names (AUDIT_V4_FUNCTION G1)", () => {
+  it("numbers a route or bookmark whose name is taken, also on rename", async () => {
+    c = await tree.append(repo, c, turn("一"));
+    const a = await tree.addBookmark(repo, c.worldId, c.head.id, "主线");
+    const b = await tree.addBookmark(repo, c.worldId, c.head.id, "主线");
+    expect([a.name, b.name]).toEqual(["主线（2）", "主线（3）"]);
+    expect(await repo.renameLine(b.id, "主线")).toBe("主线（3）");
+    expect(await repo.renameLine(b.id, "当铺")).toBe("当铺");
+    expect(await repo.renameLine(a.id, "当铺")).toBe("当铺（2）");
+    expect(await repo.renameLine(a.id, "当铺（2）")).toBe("当铺（2）");
+  });
+});

@@ -4,12 +4,15 @@
 import { useEffect, useState } from "react";
 import * as tree from "../../engine/tree";
 import type { Line } from "../../engine/types";
+import { nowOf } from "../../engine/calendar/clock";
+import { eraContext } from "../../engine/era";
 import { useApp } from "../app/context";
 import { MenuSheet, Sheet } from "./Sheet";
 import { TreeView } from "./TreeView";
 import { Icon } from "./Icon";
 
-interface Row { line: Line; turns: number; last: string }
+/** `when`: the game time at the line's head, so lines with alike names still read apart (AUDIT_V4_FUNCTION G1). */
+interface Row { line: Line; turns: number; last: string; when: string }
 
 function NameSheet({ title, initial, onSave, onClose }: { title: string; initial: string; onSave: (name: string) => void; onClose: () => void }) {
   const [name, setName] = useState(initial);
@@ -33,10 +36,13 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
   const load = async () => {
     await game.repo.purgeTrash(worldId);
     const out: Row[] = [];
+    const world = await game.repo.getWorld(worldId);
     for (const line of await game.repo.lines(worldId)) {
       const summary = await game.repo.homeSummary(line.nodeId);
       const last = summary.last.replace(/\s+/g, "");
-      out.push({ line, turns: summary.turns, last: last.length > 28 ? `…${last.slice(-28)}` : last });
+      const state = await game.repo.getState(line.nodeId).catch(() => null);
+      const when = state ? nowOf(eraContext(world?.eraId ?? null, state).clock, state.time.elapsedMinutes).text : "";
+      out.push({ line, turns: summary.turns, last: last.length > 28 ? `…${last.slice(-28)}` : last, when });
     }
     setRows(out);
   };
@@ -51,7 +57,8 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
   const card = (r: Row, onTap: () => void) => (
     <div key={r.line.id} className="row line-row">
       <button className={`card grow${r.line.id === current ? " selected" : ""}`} onClick={onTap}>
-        <h3>{r.line.name}{r.line.id === current ? "（当前）" : ""}</h3>
+        <h3><span className={`line-mark ${r.line.kind}`} aria-hidden="true">{r.line.kind === "bookmark" ? "签" : "路"}</span>{r.line.name}{r.line.id === current ? "（当前）" : ""}</h3>
+        {r.when && <p className="line-when">{r.when}</p>}
         <p>{r.turns} 回合 · {r.last}</p>
       </button>
       <button className="ghost" aria-label={`${r.line.name}的更多操作`} onClick={() => setMenu(r)}><Icon name="more" /></button>
@@ -95,7 +102,7 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
         ]}
       />}
       {renaming && <NameSheet title="重命名" initial={renaming.line.name} onClose={() => setRenaming(null)}
-        onSave={(name) => { const id = renaming.line.id; setRenaming(null); void act(() => game.repo.renameLine(id, name), "已重命名"); }} />}
+        onSave={(name) => { const id = renaming.line.id; setRenaming(null); void (async () => { const got = await game.repo.renameLine(id, name); await load(); onChanged(got === name ? "已重命名" : `已有同名的，改名为“${got}”`); })(); }} />}
     </Sheet>
   );
 }
