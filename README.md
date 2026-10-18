@@ -83,3 +83,6 @@
 ## 开发者
 
 界面用 React + TypeScript + Vite，外壳是 Tauri 2，存储、密钥、网络这些平台服务用 Rust 写；安卓优先，Windows 同步。怎样构建、在浏览器里调试、接本地模拟模型、跑测试和装到手机上，见[开发说明](docs/DEVELOPMENT.md)。
+## 友链
+
+学AI 上L站！ [L站链接](https://linux.do/)
