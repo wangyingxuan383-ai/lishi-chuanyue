@@ -116,7 +116,7 @@ function TurnView({ node, onMenu, pressed, watch, children }: { node: StoryNode;
 }
 
 export default function Play({ worldId }: { worldId: string }) {
-  const { game, push, replace, toast, devMode, pop, profile } = useApp();
+  const { game, push, replace, toast, devMode, pop, profile, reading } = useApp();
   const [world, setWorld] = useState<World | null>(null);
   const [cursor, setCursor] = useState<tree.Cursor | null>(null);
   // The head now, for toast actions: one offered before a newer turn or edit does nothing.
@@ -179,12 +179,13 @@ export default function Play({ worldId }: { worldId: string }) {
   const inputBox = useRef<HTMLTextAreaElement>(null);
   // The box grows with what is typed; shrink it back once the action is sent.
   useEffect(() => { if (!input && inputBox.current) inputBox.current.style.height = ""; }, [input]);
-  const [following, setFollowing] = useState(true);
+  const [atBottom, setAtBottom] = useState(true);
   const [typing, setTyping] = useState(false);
   const [notificationStart, setNotificationStart] = useState<(() => void) | null>(null);
   const handle = useRef<TurnHandle | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
-  const follow = useRef(true);
+  const follow = useRef(reading.autoScroll);
+  const initialScroll = useRef(true);
   const readingLoaded = useRef(false);
   const restoreReading = useRef<string | null>(null);
   const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -196,8 +197,7 @@ export default function Play({ worldId }: { worldId: string }) {
   // The recap sits under the last passage: bring it into view rather than an old reading spot.
   useEffect(() => {
     if (!recap) return;
-    follow.current = true;
-    setFollowing(true);
+    follow.current = reading.autoScroll;
     requestAnimationFrame(() => { const el = scroller.current; if (el) el.scrollTop = el.scrollHeight; });
   }, [recap]);
   // 印谱: "得一枚印：…" the first time a seal is earned (PLAN_V4 direction G).
@@ -220,7 +220,6 @@ export default function Play({ worldId }: { worldId: string }) {
       if (loaded.some((n) => n.id === saved) && saved !== loaded.filter((n) => n.kind !== "edit").at(-1)?.id) {
         restoreReading.current = saved;
         follow.current = false;
-        setFollowing(false);
       }
     }
     setHasMore(path.length > keepLimit);
@@ -252,12 +251,12 @@ export default function Play({ worldId }: { worldId: string }) {
   useEffect(() => game.subscribe((id) => { if (id === worldId) void refresh(); }), [game, worldId, refresh]);
   useEffect(() => () => { if (readingTimer.current) clearTimeout(readingTimer.current); }, []);
 
-  // Follow the bottom while the player is there; stop when they scroll up.
+  // The arrow reflects the viewport; following also requires the player's preference.
   const onScroll = () => {
     const el = scroller.current!;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    follow.current = atBottom;
-    setFollowing(atBottom);
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    follow.current = reading.autoScroll && bottom;
+    setAtBottom(bottom);
     if (readingTimer.current) clearTimeout(readingTimer.current);
     readingTimer.current = setTimeout(() => {
       const top = el.getBoundingClientRect().top;
@@ -271,13 +270,20 @@ export default function Play({ worldId }: { worldId: string }) {
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   };
   useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
     if (restoreReading.current) {
-      const el = scroller.current;
-      const target = el?.querySelector<HTMLElement>(`[data-node-id="${restoreReading.current}"]`);
-      if (target && el) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const target = el.querySelector<HTMLElement>(`[data-node-id="${restoreReading.current}"]`);
+      if (target) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top;
       restoreReading.current = null;
-    } else if (follow.current) toBottom();
-  }, [nodes, gen?.text, gen?.phase, notice, recap]);
+      initialScroll.current = false;
+    } else if (initialScroll.current) {
+      // Opening a world still starts at its latest passage when no earlier spot was saved.
+      toBottom();
+      initialScroll.current = false;
+    } else if (reading.autoScroll && follow.current) toBottom();
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+  }, [nodes, gen?.text, gen?.phase, notice, recap, reading.autoScroll]);
 
   // Page came back from the background: replay what the stream cached meanwhile.
   useEffect(() => {
@@ -364,8 +370,7 @@ export default function Play({ worldId }: { worldId: string }) {
       setSlow(false);
       retry.current = () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); };
       setNotice(null);
-      follow.current = true;
-      setFollowing(true);
+      follow.current = reading.autoScroll;
       setGen({ phase: "starting", text: "", action: { mode, text }, variant: false });
       setInput("");
       setNote("");
@@ -387,8 +392,7 @@ export default function Play({ worldId }: { worldId: string }) {
       let played = 0;
       retry.current = () => startAutoplay(Math.max(1, turns - played));
       setNotice(null);
-      follow.current = true;
-      setFollowing(true);
+      follow.current = reading.autoScroll;
       setAuto({ step: 0, total: turns });
       const forward = onEvent(null);
       autoHandle.current = game.autoplay(worldId, { turns }, (e: AutoplayEvent) => {
@@ -417,8 +421,7 @@ export default function Play({ worldId }: { worldId: string }) {
     if (busy || !turn?.parentId) return;
     void beforeGenerating(() => {
       setNotice(null);
-      follow.current = true;
-      setFollowing(true);
+      follow.current = reading.autoScroll;
       lastWords.current = Date.now();
       setSlow(false);
       retry.current = () => regenerate(hint);
@@ -431,8 +434,7 @@ export default function Play({ worldId }: { worldId: string }) {
     if (busy || !cursor) return;
     void beforeGenerating(() => {
       setNotice(null);
-      follow.current = true;
-      setFollowing(true);
+      follow.current = reading.autoScroll;
       setGen({ phase: "starting", text: cursor.head.narrative, action: null, variant: true });
       handle.current = game.resumeInterrupted(worldId, onEvent(null));
     });
@@ -543,7 +545,6 @@ export default function Play({ worldId }: { worldId: string }) {
       setTimeout(() => target.classList.remove("toc-flash"), 1800);
     };
     follow.current = false;
-    setFollowing(false);
     const shownNow = find();
     if (shownNow && scroller.current) {
       scroller.current.scrollTop += shownNow.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top - 8;
@@ -719,7 +720,7 @@ export default function Play({ worldId }: { worldId: string }) {
             {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
           </div>
         </div>
-        {!following && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = true; setFollowing(true); toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
+        {!atBottom && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
       </div>
 
       <div className="dock">

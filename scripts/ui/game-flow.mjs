@@ -536,7 +536,7 @@ check("reopening restores the earlier reading position", await page.locator(".st
 await shot("11-reading-restored");
 await page.locator(".send-btn").click();
 await page.getByRole("button", { name: "重说" }).waitFor({ timeout: 20000 });
-check("new generation follows the bottom again", (await page.getByRole("button", { name: "回到底部 ↓" }).count()) === 0);
+check("new generation keeps the earlier reading position by default", await page.locator(".story").evaluate((el) => el.scrollTop < 30) && (await page.getByRole("button", { name: "回到底部 ↓" }).count()) === 1);
 
 // The play guide: every feature and where it lives, from the home screen.
 await page.getByRole("button", { name: "返回", exact: true }).click();

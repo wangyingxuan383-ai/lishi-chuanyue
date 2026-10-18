@@ -240,6 +240,7 @@ function ReadingPage() {
       <Choice label="段首空两格" value={reading.indent} options={[[true, "空"], [false, "不空"]]} onChange={(v) => set({ indent: v })} />
       <div className="story-text reading-preview" aria-label="效果预览"><p>西市的鼓声一声接一声，你裹紧单衣，跟着人流走进坊门。</p><p>“郎君，买胡饼么？”炉边的老汉抬起头。</p></div>
       <h3 className="settings-sub">更多</h3>
+      <Choice label="生成时自动滚动" note="打开后，跟着新写出的内容往下读" value={reading.autoScroll} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ autoScroll: v })} />
       <Choice label="动画" note="弹层、标签出现时的轻微动画" value={reading.motion} options={[["system", "跟随系统"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />
       <Choice label="触感" note="长按时轻轻振一下" value={reading.haptics} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ haptics: v })} />
       <Choice label="阅读时不锁屏" note="只在读故事时生效" value={reading.keepAwake} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ keepAwake: v })} />

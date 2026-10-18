@@ -31,8 +31,10 @@ export interface Reading {
   haptics: boolean;
   /** Keep the screen on while reading and writing. */
   keepAwake: boolean;
+  /** Follow newly generated story text to the bottom. */
+  autoScroll: boolean;
 }
-export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "system", haptics: true, keepAwake: false };
+export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "system", haptics: true, keepAwake: false, autoScroll: false };
 /** The theme a setting resolves to now. */
 export const resolvedTheme = (theme: Reading["theme"]): "paper" | "day" | "night" =>
   theme === "auto" ? (matchMedia?.("(prefers-color-scheme: dark)").matches ? "night" : "paper") : theme;
