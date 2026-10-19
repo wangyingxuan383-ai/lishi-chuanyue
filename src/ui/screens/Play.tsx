@@ -128,8 +128,9 @@ export default function Play({ worldId }: { worldId: string }) {
   const busyRef = useRef(false);
   const still = (headId: string, run: () => void) => () => { if (headRef.current === headId && !busyRef.current) run(); else toast("故事已经往下走了，这一步不再适用"); };
   const [nodes, setNodes] = useState<StoryNode[]>([]);
+  const visibleNodes = useRef<StoryNode[]>([]);
   const [hasMore, setHasMore] = useState(false);
-  const [limit, setLimit] = useState(PAGE);
+  const limit = useRef(PAGE);
   const [state, setState] = useState<WorldState | null>(null);
   const [variants, setVariants] = useState<tree.Variants | null>(null);
   const [gen, setGen] = useState<Gen | null>(null);
@@ -207,12 +208,21 @@ export default function Play({ worldId }: { worldId: string }) {
   // 印谱: "得一枚印：…" the first time a seal is earned (PLAN_V4 direction G).
   useSealToast(world, state, nodes.filter((n) => n.kind === "turn" || n.kind === "fastforward").length);
 
-  const refresh = useCallback(async (keepLimit = limit) => {
+  const refresh = useCallback(async (keepLimit = limit.current) => {
     const version = ++refreshVersion.current;
     const w = await game.repo.getWorld(worldId);
     if (!w) return pop();
     const c = await tree.cursor(game.repo, worldId);
-    const path = await game.repo.path(c.head.id, keepLimit + 1);
+    let path = await game.repo.path(c.head.id, keepLimit + 1);
+    // A growing story keeps the history already on screen. Dropping the first
+    // loaded turn shifts every visible paragraph, even without a scroll call.
+    const visible = visibleNodes.current;
+    const oldHead = path.findIndex((n) => n.id === visible.at(-1)?.id);
+    const needed = oldHead < 0 ? keepLimit : Math.max(keepLimit, visible.length + path.length - oldHead - 1);
+    if (needed > keepLimit) {
+      keepLimit = needed;
+      path = await game.repo.path(c.head.id, keepLimit + 1);
+    }
     const currentState = await game.repo.getState(c.head.id);
     let latest = c.head;
     while (latest.kind === "edit") latest = (await game.repo.getNode(latest.parentId!))!;
@@ -230,13 +240,15 @@ export default function Play({ worldId }: { worldId: string }) {
       }
     }
     setHasMore(path.length > keepLimit);
+    limit.current = keepLimit;
+    visibleNodes.current = loaded;
     setNodes(loaded);
     setWorld(w);
     setCursor(c);
     setState(currentState);
     setBefore(previous);
     setVariants(currentVariants);
-  }, [game, worldId, limit, pop]);
+  }, [game, worldId, pop]);
 
   useEffect(() => { void refresh(); }, []);
   // No new words for 8 seconds while writing: say so, rather than a silent cursor (AUDIT 5.5).
@@ -327,12 +339,13 @@ export default function Play({ worldId }: { worldId: string }) {
   // do not temporarily shrink the scroll range while refresh is reading from SQLite.
   const showSaved = (node: StoryNode) => {
     refreshVersion.current++;
-    setNodes((current) => {
-      const existing = current.findIndex((n) => n.id === node.id);
-      if (existing >= 0) return current.map((n) => n.id === node.id ? node : n);
-      const parent = current.findIndex((n) => n.id === node.parentId);
-      return [...(parent >= 0 ? current.slice(0, parent + 1) : current), node];
-    });
+    const current = visibleNodes.current;
+    const existing = current.findIndex((n) => n.id === node.id);
+    const parent = current.findIndex((n) => n.id === node.parentId);
+    const saved = existing >= 0 ? current.map((n) => n.id === node.id ? node : n)
+      : [...(parent >= 0 ? current.slice(0, parent + 1) : current), node];
+    visibleNodes.current = saved;
+    setNodes(saved);
     setGen(null);
   };
   const onEvent = (restore: { mode: ActionMode; text: string; note: string } | null) => (e: TurnEvent) => {
@@ -562,8 +575,8 @@ export default function Play({ worldId }: { worldId: string }) {
   const loadMore = async () => {
     const el = scroller.current!;
     const before = el.scrollHeight;
-    const next = limit + PAGE;
-    setLimit(next);
+    const next = limit.current + PAGE;
+    limit.current = next;
     await refresh(next);
     requestAnimationFrame(() => { el.scrollTop += el.scrollHeight - before; });
   };
@@ -588,9 +601,9 @@ export default function Play({ worldId }: { worldId: string }) {
     const path = await game.repo.path(cursor.head.id);
     const index = path.findIndex((n) => n.id === nodeId);
     if (index < 0) return;
-    const next = Math.max(limit, Math.ceil((path.length - index) / PAGE) * PAGE);
+    const next = Math.max(limit.current, Math.ceil((path.length - index) / PAGE) * PAGE);
     restoreReading.current = nodeId;
-    setLimit(next);
+    limit.current = next;
     await refresh(next);
     setTimeout(() => { const target = find(); if (target) flash(target); }, 50);
   };

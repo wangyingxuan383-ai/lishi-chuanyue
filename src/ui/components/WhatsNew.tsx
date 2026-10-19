@@ -8,12 +8,9 @@ import { Sheet } from "./Sheet";
 
 /** What this version adds, in the player's words: a name and one line each. Update with the version. */
 const NOTES: [string, string][] = [
-  ["参考书籍", "导入 TXT、EPUB、文字 PDF 或 DOCX，预览后保存，多局可以共用一本书。"],
-  ["同人开局", "选择原著和章节，允许改写或尽量沿原剧情；本局已经发生的事继续保留。"],
-  ["原著怎么用", "自行填写并保存常用用法；默认直接检索，也可以主动让 AI 通读整理，暂停后继续。"],
-  ["阅读位置修订", "关闭自动滚动后，减少生成开始和保存正文时的位置回弹，仍可手动跳到底部。"],
+  ["长故事阅读位置", "修复生成完成时移除顶部旧回合导致的跳转，推荐选项保持原样。"],
 ];
-const SUMMARY = "参考书籍、同人开局与阅读位置修订";
+const SUMMARY = "修复长故事生成结束时的跳转";
 
 export function WhatsNewSheet({ onClose }: { onClose: () => void }) {
   return (
