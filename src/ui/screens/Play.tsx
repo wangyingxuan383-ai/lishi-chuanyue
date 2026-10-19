@@ -36,6 +36,8 @@ import { AutoplaySheet, ChallengeEndCard, ModeBanner, ModesSettings, ScriptEndCa
 import { ScriptSheet } from "../components/ScriptSheet";
 import { ChallengeSheet } from "../components/ChallengeSheet";
 import { Switch } from "../components/Switch";
+import { SourceSetup, ReferenceSheet } from "../components/Sources";
+import type { SourceBinding } from "../../engine/sources/types";
 
 // These optional fields also accept saves from before R13. The engine owns their interpretation.
 type WritingSettings = World["settings"] & { mode?: "history" | "free"; clockStyle?: "era" | "elapsed"; heroPanelEnabled?: boolean };
@@ -70,6 +72,7 @@ const SPANS: [string, string][] = [
 const PASTIMES = ["照常过日子", "读书", "经营", "练武"];
 
 interface Gen {
+  minHeight?: number;
   phase: "starting" | "thinking" | "writing" | "organizing";
   text: string;
   action: { mode: ActionMode; text: string } | null;
@@ -189,21 +192,23 @@ export default function Play({ worldId }: { worldId: string }) {
   const readingLoaded = useRef(false);
   const restoreReading = useRef<string | null>(null);
   const readingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshVersion = useRef(0);
   const era = eraContext(world?.eraId ?? null, state);
   const turn = [...nodes].reverse().find((n) => n.kind !== "edit");
   // 前情提要: back after more than six hours, a card at the bottom of the story (direction G).
   const [recap, closeRecap] = useRecap(worldId, world?.playedAt ?? null, cursor?.head.id ?? null, state);
   useEffect(() => { if (gen) closeRecap(); }, [!!gen]);
-  // The recap sits under the last passage: bring it into view rather than an old reading spot.
+  // A late recap follows the same reading preference as new story text.
   useEffect(() => {
-    if (!recap) return;
-    follow.current = reading.autoScroll;
-    requestAnimationFrame(() => { const el = scroller.current; if (el) el.scrollTop = el.scrollHeight; });
-  }, [recap]);
+    if (!recap || !reading.autoScroll || !follow.current) return;
+    const frame = requestAnimationFrame(() => { const el = scroller.current; if (el) el.scrollTop = el.scrollHeight; });
+    return () => cancelAnimationFrame(frame);
+  }, [recap, reading.autoScroll]);
   // 印谱: "得一枚印：…" the first time a seal is earned (PLAN_V4 direction G).
   useSealToast(world, state, nodes.filter((n) => n.kind === "turn" || n.kind === "fastforward").length);
 
   const refresh = useCallback(async (keepLimit = limit) => {
+    const version = ++refreshVersion.current;
     const w = await game.repo.getWorld(worldId);
     if (!w) return pop();
     const c = await tree.cursor(game.repo, worldId);
@@ -214,8 +219,10 @@ export default function Play({ worldId }: { worldId: string }) {
     const currentVariants = await tree.variants(game.repo, latest);
     const previous = latest.parentId ? await game.repo.getState(latest.parentId) : null;
     const loaded = path.slice(-keepLimit);
+    if (version !== refreshVersion.current) return;
     if (!readingLoaded.current) {
       const saved = await game.repo.getSetting<string | null>("reading:" + worldId, null);
+      if (version !== refreshVersion.current) return;
       readingLoaded.current = true;
       if (loaded.some((n) => n.id === saved) && saved !== loaded.filter((n) => n.kind !== "edit").at(-1)?.id) {
         restoreReading.current = saved;
@@ -269,9 +276,21 @@ export default function Play({ worldId }: { worldId: string }) {
     const el = scroller.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   };
+  // Choices and writing tools fold away during a request. Reserve their space
+  // in the story until new words fill it, so a taller viewport cannot clamp a
+  // reader at the bottom upward. No scroll position is restored at completion.
+  const streamFloor = () => {
+    const el = scroller.current;
+    const dock = el?.closest(".play")?.querySelector<HTMLElement>(".dock");
+    const input = dock?.querySelector<HTMLElement>(".inputbar");
+    if (!el || !dock || !input) return undefined;
+    const dockStyle = getComputedStyle(dock), storyStyle = getComputedStyle(el);
+    const folding = Math.max(0, dock.offsetHeight - input.offsetHeight - parseFloat(dockStyle.paddingTop) - parseFloat(dockStyle.paddingBottom) - parseFloat(dockStyle.borderTopWidth));
+    return Math.max(0, el.scrollTop + el.clientHeight + folding - parseFloat(storyStyle.paddingTop) - parseFloat(storyStyle.paddingBottom));
+  };
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el) return;
+    if (!el || !nodes.length) return;
     if (restoreReading.current) {
       const target = el.querySelector<HTMLElement>(`[data-node-id="${restoreReading.current}"]`);
       if (target) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top;
@@ -304,24 +323,38 @@ export default function Play({ worldId }: { worldId: string }) {
     return false;
   }, busy);
 
+  // Install the saved passage in the same render that removes its stream. In particular,
+  // do not temporarily shrink the scroll range while refresh is reading from SQLite.
+  const showSaved = (node: StoryNode) => {
+    refreshVersion.current++;
+    setNodes((current) => {
+      const existing = current.findIndex((n) => n.id === node.id);
+      if (existing >= 0) return current.map((n) => n.id === node.id ? node : n);
+      const parent = current.findIndex((n) => n.id === node.parentId);
+      return [...(parent >= 0 ? current.slice(0, parent + 1) : current), node];
+    });
+    setGen(null);
+  };
   const onEvent = (restore: { mode: ActionMode; text: string; note: string } | null) => (e: TurnEvent) => {
     if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
     else if (e.type === "text") { lastWords.current = Date.now(); setSlow(false); setGen((g) => g && { ...g, phase: "writing", text: e.full }); }
     else if (e.type === "organizing") setGen((g) => g && { ...g, phase: "organizing" });
     else if (e.type === "done") {
-      setGen(null);
+      showSaved(e.node);
       handle.current = null;
       failures.current = 0;
       void refresh();
       void countTurn();
     } else if (e.type === "failed") {
-      setGen(null);
       handle.current = null;
       if (e.partialSaved) {
+        if (e.node || e.cursor) showSaved(e.node ?? e.cursor!.head);
+        else void refresh().then(() => setGen(null));
         // The interrupted passage shows its own 续写 / 重说; here only why it stopped.
         void refresh();
         if (e.reason !== "cancelled") setNotice({ text: `${explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
       } else {
+        setGen(null);
         if (restore) {
           setInput(restore.text);
           setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === restore.mode)));
@@ -371,7 +404,7 @@ export default function Play({ worldId }: { worldId: string }) {
       retry.current = () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); };
       setNotice(null);
       follow.current = reading.autoScroll;
-      setGen({ phase: "starting", text: "", action: { mode, text }, variant: false });
+      setGen({ phase: "starting", text: "", action: { mode, text }, variant: false, minHeight: streamFloor() });
       setInput("");
       setNote("");
       setNoteOpen(false);
@@ -400,7 +433,7 @@ export default function Play({ worldId }: { worldId: string }) {
           lastWords.current = Date.now();
           setSlow(false);
           setAuto({ step: e.index, total: e.total });
-          setGen({ phase: "starting", text: "", action: null, variant: false });
+          setGen({ phase: "starting", text: "", action: null, variant: false, minHeight: streamFloor() });
         } else if (e.type === "finished") {
           autoHandle.current = null;
           setAuto(null);
@@ -435,7 +468,7 @@ export default function Play({ worldId }: { worldId: string }) {
     void beforeGenerating(() => {
       setNotice(null);
       follow.current = reading.autoScroll;
-      setGen({ phase: "starting", text: cursor.head.narrative, action: null, variant: true });
+      setGen({ phase: "starting", text: turn?.narrative ?? cursor.head.narrative, action: null, variant: true, minHeight: streamFloor() });
       handle.current = game.resumeInterrupted(worldId, onEvent(null));
     });
   };
@@ -659,7 +692,7 @@ export default function Play({ worldId }: { worldId: string }) {
 
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
         <div className="story" ref={scroller} onScroll={onScroll}>
-          <div className="story-inner">
+          <div className="story-inner" style={gen?.minHeight === undefined ? undefined : { minHeight: gen.minHeight }}>
             {hasMore && <button className="load-more ghost" onClick={loadMore}>加载更早的剧情</button>}
             {shown.map((node) => {
               const isHead = node.id === turn?.id && !busy;
@@ -929,7 +962,7 @@ export default function Play({ worldId }: { worldId: string }) {
         const patch: TurnRecord & { profile: { panel: string } } = { profile: { panel: text.slice(0, 2000) } };
         await game.editState(worldId, patch, "主角面板"); await refresh();
       }} onPilot={(pilot) => { void updateSettings({ pilot }); toast(pilot === "ai" ? "主角交给 AI 了，你在幕后指点" : "主角由你来演了"); }}
-        onScript={() => setSheet("script")} onChallenge={() => setSheet("challenge")} onRules={() => setSheet("rules")} onClose={() => setSheet(null)} />}
+        onScript={() => setSheet("script")} onChallenge={() => setSheet("challenge")} onRules={() => setSheet("rules")} onSourceSave={async (source) => { await game.bindSource(worldId, source); await refresh(); }} onClose={() => setSheet(null)} />}
       {sheet === "script" && <ScriptSheet state={state} busy={busy} onClose={() => setSheet(null)}
         onSave={(script: Script | null, summary) => saveMode({ scriptSet: script }, summary)} />}
       {sheet === "challenge" && <ChallengeSheet state={state} busy={busy} onClose={() => setSheet(null)}
@@ -1068,15 +1101,18 @@ function StorySheet({ world, headId, onSave, onClose }: { world: World; headId: 
   );
 }
 
-function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot, onScript, onChallenge, onRules, onClose }: {
+function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot, onScript, onChallenge, onRules, onSourceSave, onClose }: {
   world: World; state: WorldState; busy: boolean; onChange: (p: Partial<WritingSettings>) => void; onPanelSave: (text: string) => Promise<void>;
   onPilot: (pilot: Pilot) => void; onScript: () => void; onChallenge: () => void; onRules: () => void; onClose: () => void;
+  onSourceSave: (source: SourceBinding | null) => Promise<void>;
 }) {
   const { game, toast } = useApp();
   const s = world.settings as WritingSettings;
   const storedPanel = (state.protagonist as { panel?: string }).panel ?? "";
   const [heroPanel, setHeroPanel] = useState(storedPanel);
   const [savingPanel, setSavingPanel] = useState(false);
+  const [source, setSource] = useState(state.source ?? null), [savingSource, setSavingSource] = useState(false), [reference, setReference] = useState(false);
+  const sourceDirty = JSON.stringify(source) !== JSON.stringify(state.source ?? null);
   const [defaults, setDefaults] = useState<PlayDefaults | null>(null);
   useEffect(() => { void loadPlayDefaults(game.repo).then(setDefaults); }, []);
   const differs = defaults ? differsFromDefaults(s, defaults) : [];
@@ -1092,7 +1128,7 @@ function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot
     </div>
   );
   return (
-    <Sheet title="本局设置" dirty={heroPanel !== storedPanel} onClose={onClose}>
+    <Sheet title="本局设置" dirty={heroPanel !== storedPanel || sourceDirty} onClose={onClose}>
       <div className="stack">
         <p className="muted" style={{ margin: 0 }}>只改这个故事，从下一段起生效。</p>
         <h3 className="settings-sub">玩法</h3>
@@ -1127,6 +1163,10 @@ function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot
         </div>
 
         <h3 className="settings-sub">记忆与整理</h3>
+        <details><summary>参考书籍</summary><div className="stack"><SourceSetup value={source} onChange={setSource} disabled={busy || savingSource} />
+          <div className="row"><button disabled={busy || savingSource || !sourceDirty} onClick={() => { setSavingSource(true); void onSourceSave(source).then(() => toast("书籍用法已保存，可撤销")).catch((e) => toast(e.message ?? "没能保存")).finally(() => setSavingSource(false)); }}>保存书籍用法</button>{state.source && <button onClick={() => setReference(true)}>查看参考资料</button>}</div>
+        </div></details>
+        {reference && state.source && <ReferenceSheet worldId={world.id} binding={state.source} onClose={() => setReference(false)} />}
         <Switch label="显示主角面板" note={s.heroPanelEnabled ? "写下想随时查看的能力、境界或约定" : undefined} checked={s.heroPanelEnabled ?? false} onChange={(v) => onChange({ heroPanelEnabled: v })} />
         {s.heroPanelEnabled && <div className="stack" style={{ gap: 8 }}>
           <label>主角面板内容<textarea rows={5} maxLength={2000} value={heroPanel} onChange={(e) => setHeroPanel(e.target.value.slice(0, 2000))} placeholder="如：境界、技能、特长……" /></label>

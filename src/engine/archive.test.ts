@@ -40,14 +40,16 @@ async function content(repo: Repo, worldId: string) {
 }
 
 describe("world archive", () => {
-  it("exports version two and continues to read version-one historical archives", async () => {
+  it("exports version three and continues to read version-one/two historical archives", async () => {
     const repo = await emptyRepo();
     const { worldId } = await richWorld(repo);
     const file = await exportWorld(repo, worldId);
-    expect(file.version).toBe(2);
+    expect(file.version).toBe(3);
     const old = { ...file, version: 1 };
     const copy = await importWorld(repo, old, "new");
     expect(await content(repo, copy)).toEqual(await content(repo, worldId));
+    const copyTwo = await importWorld(repo, { ...file, version: 2 }, "new");
+    expect(await content(repo, copyTwo)).toEqual(await content(repo, worldId));
     expect(archiveProblems({ ...file, version: 0 })).toEqual(["存档格式版本无效"]);
   });
   it("round-trips a world to another device unchanged, ids included", async () => {

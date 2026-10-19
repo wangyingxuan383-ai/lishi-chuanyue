@@ -1,7 +1,8 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
-import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent } from "./types";
+import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText } from "./types";
 import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
+import { cancellable } from "./bookFiles";
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -77,6 +78,26 @@ export async function createTauriPlatform(): Promise<Platform> {
     files: {
       exportText: (suggestedName, text) => call("file_export_text", { suggestedName, text }),
       importText: () => call("file_import_text"),
+      importBook: async (signal, onProgress) => {
+        if (signal?.aborted) throw new DOMException("已取消", "AbortError");
+        const requestId = crypto.randomUUID(), channel = new Channel<number>();
+        channel.onmessage = (bytes) => { if (!signal?.aborted) onProgress?.(bytes); };
+        const abort = () => { void call("file_cancel_book", { requestId }).catch(() => {}); };
+        signal?.addEventListener("abort", abort, { once: true });
+        try {
+          const file = await cancellable(call<{ name: string; data: string } | null>("file_import_book", { requestId, onProgress: channel }), signal);
+          return file && { name: file.name, bytes: Uint8Array.from(atob(file.data), (c) => c.charCodeAt(0)) };
+        } finally { signal?.removeEventListener("abort", abort); }
+      },
+      extractPdf: async (bytes, signal) => {
+        if (signal?.aborted) throw new DOMException("已取消", "AbortError");
+        const requestId = crypto.randomUUID();
+        const abort = () => { void call("file_cancel_book", { requestId }).catch(() => {}); };
+        let raw = ""; for (let i = 0; i < bytes.length; i += 32768) raw += String.fromCharCode(...bytes.subarray(i, i + 32768));
+        signal?.addEventListener("abort", abort, { once: true });
+        try { return await cancellable(call<PdfText>("file_extract_pdf", { data: btoa(raw), requestId }), signal); }
+        finally { signal?.removeEventListener("abort", abort); }
+      },
     },
     update: {
       download: (request, onEvent) => {

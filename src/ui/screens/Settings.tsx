@@ -18,6 +18,7 @@ import { Icon } from "../components/Icon";
 import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget";
 import { WhatsNewSheet } from "../components/WhatsNew";
 import { UpdateButton, UpdateDevSource } from "../components/UpdateSheet";
+import { SourceLibrary } from "../components/Sources";
 
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用", cancelled: "已取消" };
 type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev" | "budget";
@@ -280,6 +281,7 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
 
 function DataPage() {
   const { game, toast } = useApp();
+  const [sources, setSources] = useState(false);
   const [backups, setBackups] = useState<{ name: string; at: string; bytes?: number }[]>([]);
   const [worldCount, setWorldCount] = useState<number | null>(null);
   const load = () => {
@@ -310,6 +312,8 @@ function DataPage() {
         <summary className="muted">从备份恢复（{backups.length} 份）</summary>
         <BackupRestore refresh={backups[0]?.name ?? ""} />
       </details>}
+      <button onClick={() => setSources(true)}>参考书籍</button>
+      {sources && <SourceLibrary onClose={() => setSources(false)} />}
       <h3 className="settings-sub">导出</h3>
       <Note>导出的文件，在另一台手机或电脑的首页用“从文件导入世界…”打开。只导出一个世界：点首页卡片上的“⋯”。</Note>
       <button onClick={() => void exportAll()}>导出全部世界{worldCount !== null ? `（${worldCount} 个）` : ""}</button>

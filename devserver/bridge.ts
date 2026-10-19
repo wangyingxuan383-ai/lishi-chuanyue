@@ -7,6 +7,7 @@ import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { isBound, maskSecret, relayStream } from "./relay.ts";
+import { extractBookPdf } from "./books.ts";
 
 interface SecretEntry {
   value: string;
@@ -117,6 +118,7 @@ export function devBridge(options: { root: string; env: Record<string, string> }
         if (!/^(::1|127\.|::ffff:127\.)/.test(remote)) return sendJson(res, 403, { code: "forbidden", message: "仅限本机" });
         const route = req.url ?? "";
         const handle = async () => {
+          if (route === "/book/pdf" && req.method === "POST") return extractBookPdf(options.root, req, res);
           if (route.startsWith("/llm/stream")) return stream(req, res);
           if (route.startsWith("/llm/get")) return get(req, res);
           if (route.startsWith("/config")) {

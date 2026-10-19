@@ -137,6 +137,7 @@ export interface Protagonist {
 }
 
 export interface WorldState {
+  source?: import("./sources/types").SourceBinding | null;
   /** 2 from D121: the era card lives in `cards`; version 1 saves get it from their pack. */
   version: 1 | 2;
   /**

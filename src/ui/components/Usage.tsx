@@ -10,7 +10,7 @@ import { readBudget } from "./budgetMath";
 
 export const PURPOSES: Record<string, string> = {
   turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", upkeep: "整理设定（游玩中）",
-  chapter: "章节摘要", ask: "查一查", test: "测试", outline: "拟大纲", challenge: "出题",
+  chapter: "章节摘要", ask: "查一查", test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍",
 };
 type By = "world" | "day" | "purpose";
 interface Prices { input: number | null; output: number | null }

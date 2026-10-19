@@ -1,9 +1,9 @@
 [workspace]
-members = ["src-tauri"]
+members = ["src-tauri", "crates/book-pdf"]
 resolver = "2"
 
 [workspace.package]
-version = "0.10.1"
+version = "0.11.0"
 edition = "2021"
 rust-version = "1.90"
 

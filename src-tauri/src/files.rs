@@ -1,11 +1,145 @@
 use crate::error::{blocking, io_error, PlatformError, Result};
+use base64::Engine;
+use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use tauri::AppHandle;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FilePath;
 
 const MAX_IMPORT: u64 = 64 * 1024 * 1024;
+
+#[derive(serde::Serialize)]
+pub struct BookFile {
+    name: String,
+    data: String,
+}
+static BOOK_IMPORTS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+struct BookImport {
+    id: String,
+    cancelled: Arc<AtomicBool>,
+}
+impl BookImport {
+    fn new(id: String) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        BOOK_IMPORTS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(id.clone(), cancelled.clone());
+        Self { id, cancelled }
+    }
+    fn check(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            Err(PlatformError::new("book_cancelled", "已取消"))
+        } else {
+            Ok(())
+        }
+    }
+}
+impl Drop for BookImport {
+    fn drop(&mut self) {
+        if let Some(map) = BOOK_IMPORTS.get() {
+            if let Ok(mut map) = map.lock() {
+                map.remove(&self.id);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn file_cancel_book(request_id: String) {
+    if let Some(map) = BOOK_IMPORTS.get() {
+        if let Ok(map) = map.lock() {
+            if let Some(cancelled) = map.get(&request_id) {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn file_import_book(
+    app: AppHandle,
+    request_id: String,
+    on_progress: tauri::ipc::Channel<u64>,
+) -> Result<Option<BookFile>> {
+    let operation = BookImport::new(request_id);
+    #[cfg(target_os = "android")]
+    let selected = crate::document_picker::pick_import(&app)
+        .await
+        .map_err(|_| io_error())?;
+    #[cfg(not(target_os = "android"))]
+    let selected = {
+        let handle = app.clone();
+        blocking(move || {
+            Ok(handle
+                .dialog()
+                .file()
+                .add_filter("书籍", &["txt", "epub", "pdf", "docx"])
+                .blocking_pick_file())
+        })
+        .await?
+    };
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    blocking(move || {
+        operation.check()?;
+        let name = match &selected {
+            FilePath::Path(path) => path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("参考书籍")
+                .to_string(),
+            _ => "参考书籍".to_string(),
+        };
+        let mut bytes = Vec::new();
+        let mut file = open_file(&app, selected, "r")?;
+        let mut buffer = [0u8; 65536];
+        loop {
+            operation.check()?;
+            let count = file.read(&mut buffer).map_err(|_| io_error())?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            if bytes.len() as u64 > MAX_IMPORT {
+                return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
+            }
+            let _ = on_progress.send(bytes.len() as u64);
+        }
+        operation.check()?;
+        Ok(Some(BookFile {
+            name,
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn file_extract_pdf(data: String, request_id: String) -> Result<book_pdf::PdfText> {
+    let operation = BookImport::new(request_id);
+    blocking(move || {
+        operation.check()?;
+        if data.len() > 90 * 1024 * 1024 {
+            return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| io_error())?;
+        let pages = book_pdf::extract(&bytes)
+            .map_err(|message| PlatformError::new("pdf_extract", message))?;
+        operation.check()?;
+        Ok(pages)
+    })
+    .await
+}
 
 fn read_text(file: impl Read) -> Result<String> {
     let mut bytes = Vec::new();

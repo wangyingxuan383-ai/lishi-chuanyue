@@ -22,6 +22,9 @@ import {
 } from "./openingDraft";
 import { Icon } from "../components/Icon";
 import { ChallengeSetup, PlayStyles, ScriptOutline } from "../components/ModeSetup";
+import { SourceSetup } from "../components/Sources";
+import type { SourceBinding } from "../../engine/sources/types";
+import { getBook } from "../../engine/sources/library";
 
 /** "唐 · 天宝七载" → "唐" */
 const dynastyOf = (t: OpeningTemplate) => t.era.split(" · ")[0];
@@ -118,9 +121,11 @@ export default function NewGame() {
       setDefaults(d);
       const base = fresh(d);
       const restored = stored ? { ...base, ...saved, settings: { ...base.settings, ...saved.settings } } : base;
+      const pendingSource = await game.repo.getSetting<SourceBinding | null>("source:pending", null);
+      if (pendingSource) { restored.source = pendingSource; restored.fanfic = pendingSource.fanfic; if (pendingSource.fanfic) { restored.settings.mode = "free"; restored.settings.clockStyle = "elapsed"; } await game.repo.setSetting("source:pending", null); setStep("setup"); }
       draftRef.current = restored;
       setDraftState(restored);
-      if (stored && (saved.name || saved.premise || saved.identity)) setStep("setup");
+      if (stored && (saved.name || saved.premise || saved.identity || saved.source || saved.fanfic)) setStep("setup");
       // 再挑战一次: the same opening starts at once, as a game's retry does.
       const autostart = await game.repo.getSetting<boolean>("newgameAutostart", false);
       if (!live) return;
@@ -160,12 +165,14 @@ export default function NewGame() {
     return next;
   });
   const setS = <K extends keyof Draft["settings"]>(key: K, value: Draft["settings"][K]) => setDraft((d) => ({ ...d, settings: { ...d.settings, [key]: value } }));
-  const switchMode = (mode: "history" | "free") => {
-    setDraft((d) => ({ ...d, templateId: null, eraId: null, settings: { ...d.settings, mode, clockStyle: mode === "free" ? "elapsed" : "era" } }));
+  const switchMode = (choice: "history" | "free" | "fanfic") => {
+    const mode = choice === "fanfic" ? "free" : choice;
+    setDraft((d) => ({ ...d, fanfic: choice === "fanfic", source: d.source ? { ...d.source, fanfic: choice === "fanfic" } : null, templateId: null, eraId: null, settings: { ...d.settings, mode, clockStyle: mode === "free" ? "elapsed" : "era" } }));
+    if (choice === "fanfic") setStep("setup");
     setGroup("全部");
     setAllTemplates(false);
   };
-  const blank = () => ({ ...fresh(), settings: { ...fresh().settings, mode: draft.settings.mode, clockStyle: free ? "elapsed" as const : "era" as const }, ...(free ? { origin: "", arrival: "不穿越" as const } : {}) });
+  const blank = () => ({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: { ...fresh().settings, mode: draft.settings.mode, clockStyle: free ? "elapsed" as const : "era" as const }, ...(free ? { origin: "", arrival: "不穿越" as const } : {}) });
 
   useBack(() => phase !== "form", phase !== "form");
   useEffect(() => () => { assistTicket.current++; draftTicket.current++; }, []);
@@ -275,6 +282,7 @@ export default function NewGame() {
 
   const start = async (d: Draft, defs: PlayDefaults | null = defaults) => {
     if (!game.llm) { toast("先连接 AI 服务"); return; }
+    if (d.source && !await getBook(game.repo, d.source.bookId)) { setError("这台设备上没有选中的参考书籍，请重新选择或导入。"); return; }
     setError(null);
     setText(d.openingMode === "player" ? d.openingText : "");
     setPhase(d.openingMode === "player" ? "organizing" : "loading");
@@ -418,7 +426,7 @@ export default function NewGame() {
   const nameLength = [...draft.name.trim()].length;
   /** 运势 the new world gets: a challenge defaults to 有影响 until the player picks one. */
   const fortune = draftFortune(draft, defaults?.fortune);
-  const missing = !draft.name.trim() || nameLength > NAME_MAX ? "名字" : ageProblem(draft.age, free) ? "年龄" : !draft.identity.trim() ? "身份"
+  const missing = draft.fanfic && !draft.source ? "原著书籍" : !draft.name.trim() || nameLength > NAME_MAX ? "名字" : ageProblem(draft.age, free) ? "年龄" : !draft.identity.trim() ? "身份"
     : draft.play === "script" && !filledBeats(draft.script).length ? "剧本"
     : draft.play === "challenge" && !draft.challenge.goal.trim() ? "挑战目标"
     : draft.openingMode === "player" && !draft.openingText.trim() ? "开场" : null;
@@ -447,7 +455,8 @@ export default function NewGame() {
           {error && <div className="notice">{error}</div>}
           <div className="segmented" role="group" aria-label="故事模式">
             <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
-            <button aria-pressed={free} onClick={() => switchMode("free")}>自由世界</button>
+            <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
+            <button aria-pressed={!!draft.fanfic} onClick={() => switchMode("fanfic")}>同人</button>
           </div>
           <p className="muted" style={{ margin: 0 }}>{free ? "仙侠、奇幻、科幻，或你喜欢的作品里的世界，都由你来定义。" : "从真实历史出发，也可以自由改写。"}</p>
           <button className="random-card" onClick={randomStart}>
@@ -502,9 +511,11 @@ export default function NewGame() {
         {error && <div className="notice">{error}</div>}
         <div className="segmented" role="group" aria-label="故事模式">
           <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
-          <button aria-pressed={free} onClick={() => switchMode("free")}>自由世界</button>
+          <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
+          <button aria-pressed={!!draft.fanfic} onClick={() => switchMode("fanfic")}>同人</button>
         </div>
         <p className="muted" style={{ margin: 0 }}>都可以改。名字和身份填好就能开始，其余有默认。</p>
+        <details open={draft.fanfic || undefined}><summary>{draft.fanfic ? "原著与用法" : "参考书籍（可选）"}</summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
 
         <label className="field">故事设定
           <textarea aria-label="故事设定" rows={5} value={draft.premise} onChange={(e) => set("premise", e.target.value)} placeholder={free ? "世界、作品或题材，故事从哪里开始，你想保留或改变什么。都可以自己写。" : "时代、地点、时局，你想讲的故事。比如：北宋宣和年间，汴京……"} />

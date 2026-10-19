@@ -75,6 +75,9 @@ pub fn run() {
             commands::http_get_public,
             files::file_export_text,
             files::file_import_text,
+            files::file_import_book,
+            files::file_extract_pdf,
+            files::file_cancel_book,
             commands::platform_info
         ])
         .run(tauri::generate_context!())

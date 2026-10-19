@@ -7,6 +7,7 @@ import { challengeName, type ChallengeCard } from "../../content/challenges";
 import type { NewWorld } from "../../engine/game";
 import type { FortuneMode } from "../../engine/fortune";
 import { DEFAULT_SETTINGS, type Intensity, type Perspective, type WorldSettings } from "../../engine/types";
+import { validBinding, type SourceBinding } from "../../engine/sources/types";
 
 /**
  * How the story is played (R14): plain 自由, a 剧本 outline, a 挑战, or 旁观
@@ -19,6 +20,8 @@ export interface ChallengeDraft { goal: string; limit: string; failIf: string }
 export const MAX_BEATS = 12;
 
 export interface Draft {
+  fanfic?: boolean;
+  source?: SourceBinding | null;
   templateId: string | null;
   lockedGender: "男" | "女" | null;
   title: string;
@@ -126,6 +129,7 @@ export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "dif
   const beats = filledBeats(d.script);
   return {
     title: d.title,
+    source: d.source,
     eraId: d.settings.mode === "free" ? null : d.eraId,
     settings: {
       ...defaults, ...d.settings, premise: d.premise,
@@ -149,6 +153,8 @@ export function fromSetup(setup: NewWorld): Draft {
   const gender = setup.protagonist.gender === "女" ? "女" : "男";
   return clean({
     ...EMPTY,
+    source: setup.source,
+    fanfic: setup.source?.fanfic,
     title: setup.title, eraId: setup.eraId, premise: s.premise ?? "",
     name: setup.protagonist.name, gender, lockedGender: gender, age: setup.protagonist.age ? String(setup.protagonist.age) : "",
     identity: setup.protagonist.identity, arrival: setup.arrival, origin: setup.origin || EMPTY.origin,
@@ -212,6 +218,8 @@ function clean(raw: Record<string, unknown>): Draft {
   const challenge = (raw.challenge && typeof raw.challenge === "object" ? raw.challenge : {}) as Record<string, unknown>;
   return {
     templateId: null,
+    ...(raw.source !== undefined ? { source: validBinding(raw.source) ? raw.source : null } : {}),
+    ...(raw.fanfic !== undefined ? { fanfic: raw.fanfic === true } : {}),
     challengeId: null,
     play: oneOf(raw.play, ["plain", "script", "challenge", "watch"] as const, "plain"),
     aiPilot: raw.aiPilot === true,

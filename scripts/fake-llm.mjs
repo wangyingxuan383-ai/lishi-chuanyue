@@ -50,6 +50,7 @@ function modeFields(messages, turn) {
   return fields;
 }
 function gameReply(request) {
+  if (String(request.messages?.[0]?.content ?? "").includes("小说资料整理员")) return "人物与关系：阿青守信，珍视朋友。世界规则：青石桥边有一间书铺。剧情顺序：人物在灯下交谈。出处：本次提供的章节与片段。";
   const prompt = JSON.stringify(request.messages ?? []);
   const record = (r) => `
 

@@ -10,6 +10,7 @@ import type { Fortune } from "../fortune";
 import type { ActionMode, Attitude, Card, CardKind, Challenge, Difficulty, Goal, Person, Script, TimelineEvent, WorldState } from "../types";
 import { eventsBetween, placeEvent, retime } from "../timeline";
 import { beatTitle, checkChallenge, checkScript } from "../modes";
+import { validBinding, type SourceBinding } from "../sources/types";
 
 export type RiskResult = "成" | "败" | "半成";
 const RISK_TEXT: Record<RiskResult, string> = { 成: "成了", 败: "没成", 半成: "成了一半" };
@@ -17,6 +18,8 @@ import { matchName } from "./names";
 
 /** The normalised record every output format is converted into. */
 export interface TurnRecord {
+  /** Player edits only; never parsed from the model's record. */
+  sourceSet?: SourceBinding | null;
   time?: string | number | null;
   place?: string | null;
   money?: number | string | null;
@@ -187,6 +190,7 @@ export function applyRecord(
   opts?: { advanceTime?: boolean },
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
+  if (opts?.advanceTime === false && record?.sourceSet !== undefined && (record.sourceSet === null || validBinding(record.sourceSet))) s.source = structuredClone(record.sourceSet);
   const free = s.era.mode === "free";
   const chips: Chip[] = [];
   const notes: string[] = [];

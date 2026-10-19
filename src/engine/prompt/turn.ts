@@ -14,7 +14,9 @@ import { tabooReminder, type TabooHit } from "../era/taboo";
 import { RECALL_BUDGET, recallBlock } from "../memory/recall";
 import { beatTitle, challengeView } from "../modes";
 
-export const PROMPT_VERSION = "turn-19";
+import { fitReference, referenceBlock } from "../sources/library";
+import type { ReferenceContext } from "../sources/types";
+export const PROMPT_VERSION = "turn-20";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -277,6 +279,7 @@ function challengeBlock(state: Pick<WorldState, "challenge" | "time">): string {
 }
 
 export interface TurnPromptInput extends StoryContext {
+  reference?: ReferenceContext;
   state: WorldState;
   /** Committed story so far on the current path, oldest first (opening included); the newest 40 nodes. */
   history: StoryNode[];
@@ -341,7 +344,7 @@ function presentPeople(state: WorldState, recent: string): Set<string> {
 
 /** One layer of a turn's context, for the developer context viewer (PLAN §5.3). */
 export interface ContextLayer {
-  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "recall" | "directive" | "modes" | "notes" | "action" | "spec";
+  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "recall" | "directive" | "modes" | "notes" | "action" | "spec" | "reference";
   label: string;
   chars: number;
   /** Why it is in, and what was left out. */
@@ -350,6 +353,7 @@ export interface ContextLayer {
 }
 
 export interface TurnContext {
+  reference?: ReferenceContext;
   messages: ChatMessage[];
   layers: ContextLayer[];
   /** Characters sent, and the target they were fitted to. */
@@ -418,8 +422,11 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   while (total() > hardCap && cardLines.length) cardLines = cardLines.slice(0, -1);
 
   const cards = cardsBlock(cardLines);
+  // References only use spare room, after the current facts and recent story.
+  const usedReference = fitReference(input.reference, Math.max(0, Math.min(Math.floor(target / 4), target - total())));
+  const reference = referenceBlock(usedReference);
   const system = joinSystem(parts, recap);
-  const user = `${state}${essentials}${world}${cards}${recall}${directive}${modes}${notes}${action}`;
+  const user = `${state}${essentials}${world}${cards}${recall}${reference}${directive}${modes}${notes}${action}`;
   const messages: ChatMessage[] = [{ role: "system", content: system }, ...window.messages, { role: "user", content: user }];
 
   const turnsIn = input.history.filter((n) => n.kind !== "edit" && window.ids.has(n.id)).length;
@@ -449,11 +456,12 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
     { key: "directive", label: "叙事方针", content: directive, note: directive ? "玩家写的，每回合都有" : "没写" },
     // Listed only in worlds that have them, so ordinary worlds keep their layers.
     ...(modes ? [{ key: "modes", label: "剧本与挑战", content: modes, note: "玩家定的剧本和挑战，每回合都有，不裁剪" }] : []),
+    ...(input.reference ? [{ key: "reference", label: "参考书籍", content: reference, note: "只用预算余量，最多四分之一；原文和整理均限所选章节" }] : []),
     { key: "notes", label: "程序提示", content: notes, note: notes ? `${input.notes?.length ? "上回合程序修正过的变化；" : ""}${luck ? `本回合运势：${input.fortune}（${luckMode === "on" ? "有影响" : "只作参考"}）` : ""}` : "没有" },
     { key: "action", label: "玩家行动", content: action, note: "本回合的行动与幕后要求" },
     { key: "spec", label: "输出格式", content: parts.spec, note: "每回合都有，不裁剪" },
   ] as Omit<ContextLayer, "chars">[]).map((l) => ({ ...l, chars: l.content.length }));
-  return { messages, layers, chars: messages.reduce((n, m) => n + m.content.length, 0), budgetChars: target };
+  return { messages, layers, reference: usedReference, chars: messages.reduce((n, m) => n + m.content.length, 0), budgetChars: target };
 }
 
 export function turnMessages(input: TurnPromptInput): ChatMessage[] {
@@ -465,6 +473,7 @@ export function turnMessages(input: TurnPromptInput): ChatMessage[] {
 export type Arrival = "魂穿" | "身穿" | "投胎" | "不穿越";
 
 export interface OpeningInput extends StoryContext {
+  reference?: ReferenceContext;
   protagonist: { name: string; gender: string; age: number | null; identity: string };
   arrival: Arrival;
   origin: string;
@@ -505,7 +514,7 @@ export function openingMessages(input: OpeningInput): ChatMessage[] {
       content: `请写这部小说的开场。
 ${protagonistLine(input)}
 ${input.hint ? `玩家希望开场：${input.hint}\n` : ""}${modes ? `${modes.slice(1)}\n` : ""}从符合玩家设定的具体场景写起，${aiPilot(input.settings) ? "写到一个有意思的地方停下" : "写到需要玩家决定为止"}。
-${openingExtra(input.settings)}${packLine(input.era, input.settings)}`,
+${openingExtra(input.settings)}${packLine(input.era, input.settings)}${referenceBlock(input.reference, 3000)}`,
     },
   ];
 }

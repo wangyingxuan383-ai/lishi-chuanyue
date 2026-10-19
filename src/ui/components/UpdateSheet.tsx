@@ -137,6 +137,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
       <p className="update-meta">{meta}</p>
       {notes && <div className="update-notes">{notes}</div>}
       {body}
+      <p className="update-hint">下载较慢时，建议开启代理后重试。</p>
     </div>
   </Sheet>;
 }

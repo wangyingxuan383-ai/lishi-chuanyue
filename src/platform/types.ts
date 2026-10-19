@@ -3,6 +3,7 @@
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type Row = Record<string, Json>;
+export interface PdfText { pages: string[]; headings: { title: string; page: number }[] }
 
 export interface SqlStatement {
   sql: string;
@@ -133,6 +134,8 @@ export interface Platform {
   files: {
     exportText(suggestedName: string, text: string): Promise<boolean>;
     importText(): Promise<string | null>;
+    importBook(signal?: AbortSignal, onProgress?: (bytes: number) => void): Promise<{ name: string; bytes: Uint8Array } | null>;
+    extractPdf(bytes: Uint8Array, signal?: AbortSignal): Promise<PdfText>;
   };
   system: {
     /** Only after the chosen story node is durably committed. Never for streams, candidates, tests or cancellation. */

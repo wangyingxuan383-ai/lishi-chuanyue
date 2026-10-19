@@ -30,6 +30,8 @@ tauri-plugin-dialog = "2.8.2"
 tempfile = "3"
 # SHA-256 of the update package (already in the tree through wry).
 sha2 = "0.10"
+book-pdf = { path = "../crates/book-pdf" }
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util"] }

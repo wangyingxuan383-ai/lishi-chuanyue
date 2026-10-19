@@ -15,6 +15,7 @@
 | `src-tauri/` | Tauri 2 外壳和 Rust 平台服务：SQLite、系统加密存储、流式请求、文件、通知、窗口状态、更新下载 |
 | `src-tauri/gen/android/` | 安卓工程，含 Kotlin 写的系统桥接：文件选择、加密存储、后台生成、通知、安装更新 |
 | `devserver/` | 浏览器开发台的 Vite 中间件：保管开发用的 Key、转发模型请求 |
+| `crates/book-pdf/` | 原生版与开发桥共用的 PDF 文字提取核心 |
 | `scripts/` | 本地模拟模型、界面检查、打包与检查脚本 |
 | `assets/` | 图标的源文件 |
 
@@ -59,6 +60,10 @@ cargo test --workspace      # Rust 平台服务的测试，只连本机的测试
 3. 可选：把 `.env.example` 复制成 `.env.local`（不入 Git），预先填好服务地址和模型。
 
 存档在浏览器里（sql.js），和原生版互不相干。开发模式下页面上有 `window.__lishi`，脚本可以借它直接读写引擎；正式构建里没有。
+
+导入书籍的 TXT、EPUB 和 DOCX 在本地按需解析。PDF 使用 Rust 的同一套按页提取核心；浏览器开发前先运行 `cargo build -p book-pdf`，开发桥会调用生成的本机程序，原生版直接调用库。扫描 PDF 不做 OCR，某些未提供字形映射的中文字体编码暂不支持。导入只使用系统选定文件，不申请整个存储空间权限。
+
+参考书籍的定向界面检查可用 `node --import tsx scripts/ui/sources.mjs --text-pdf <中文短文本样本.pdf> --image-pdf <图片型短样本.pdf>`；使用独立浏览器与模拟模型，不读写个人 AI 设置。当前文字样本断言使用“中文书籍第一页阿青守信”。
 
 ### 本地模拟模型
 

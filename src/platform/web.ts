@@ -241,6 +241,33 @@ export async function createWebPlatform(): Promise<Platform> {
     // The update sheet's download, simulated (webUpdate.ts): nothing is fetched or installed.
     update: simulatedUpdate(),
     files: {
+      importBook(signal, onProgress) {
+        return new Promise((resolve, reject) => {
+          const input = Object.assign(document.createElement("input"), { type: "file", accept: ".txt,.epub,.pdf,.docx" });
+          const abort = () => { input.remove(); reject(new DOMException("已取消", "AbortError")); };
+          if (signal?.aborted) { abort(); return; }
+          signal?.addEventListener("abort", abort, { once: true });
+          const finish = () => signal?.removeEventListener("abort", abort);
+          input.onchange = () => void (async () => {
+            try {
+              const file = input.files?.[0];
+              if (!file) { resolve(null); return; }
+              if (file.size > 64 * 1024 * 1024) throw new Error("文件超过 64 MiB");
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              onProgress?.(bytes.length);
+              if (!signal?.aborted) resolve({ name: file.name, bytes });
+            } catch (error) { reject(error); } finally { finish(); }
+          })();
+          input.oncancel = () => { finish(); resolve(null); };
+          input.click();
+        });
+      },
+      async extractPdf(bytes, signal) {
+        const response = await fetch("/__dev/book/pdf", { method: "POST", body: bytes as BodyInit, signal, headers: { "Content-Type": "application/pdf" } });
+        const result = await response.json();
+        if (!response.ok || result.error) throw new Error(result.error || "PDF 提取失败，请启动本地开发桥");
+        return { pages: result.pages, headings: result.headings ?? [] };
+      },
       async exportText(suggestedName, text) {
         const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
         const link = Object.assign(document.createElement("a"), { href: url, download: suggestedName });
