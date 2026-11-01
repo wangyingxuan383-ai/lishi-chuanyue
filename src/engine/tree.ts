@@ -1,7 +1,7 @@
 // Turn-tree operations (docs/PLAN_V3.md §6.4). Nothing here deletes nodes:
 // undo, variants and "go back" only move line pointers, and a long abandoned
 // branch is kept reachable by giving it an auto-named line.
-import type { Repo, NewNode } from "./db/repo";
+import type { Repo, NewNode, RevisionGuard } from "./db/repo";
 import type { Line, StoryNode } from "./types";
 
 /** Branches shorter than this after the fork stay only in the tree view. */
@@ -61,6 +61,12 @@ export async function addVariant(repo: Repo, c: Cursor, node: Omit<NewNode, "par
   if (!c.head.parentId) throw new Error("the opening has no parent to branch from");
   const created = await repo.appendNode(c.worldId, c.line.id, { ...node, parentId: c.head.parentId });
   return { ...c, line: { ...c.line, nodeId: created.id }, head: created };
+}
+
+/** Explicit fact correction always preserves the complete original route, including short tails. */
+export async function forkRevision(repo: Repo, guard: RevisionGuard, node: NewNode): Promise<Cursor> {
+  const created = await repo.forkRevision(guard, node, node.parentId ? "原著纠错后的路线" : "修订开场后的路线");
+  return { worldId: guard.worldId, line: created.line, head: created.node };
 }
 
 export interface Variants {

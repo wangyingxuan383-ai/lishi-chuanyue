@@ -89,7 +89,7 @@ async fn open_app_settings<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), S
 
 /// A business-level success signal, independent of request/service lifetime.
 #[tauri::command]
-async fn story_committed<R: Runtime>(
+pub(crate) async fn story_committed<R: Runtime>(
     app: tauri::AppHandle<R>,
     completion_id: String,
 ) -> Result<(), String> {

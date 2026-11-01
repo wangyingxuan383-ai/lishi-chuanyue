@@ -80,6 +80,18 @@ pub async fn pick_import(app: &AppHandle) -> Result<Option<FilePath>, &'static s
 }
 
 #[cfg(target_os = "android")]
+pub async fn pick_agent_grant(app:&AppHandle,directory:bool,writable:bool)->Result<Option<(FilePath,String,bool)>,&'static str>{
+    ensure_idle(app).await?;
+    let picker=app.state::<AndroidDocumentPicker<tauri::Wry>>();
+    let reply:serde_json::Value=picker.0.run_mobile_plugin_async("grantDocument",serde_json::json!({"directory":directory,"writable":writable})).await.map_err(|_|"file_unavailable")?;
+    let name=reply["name"].as_str().unwrap_or(if directory{"资料目录"}else{"资料文件"}).chars().take(512).collect();
+    let safe=serde_json::json!({"status":reply["status"],"uri":reply["uri"]});
+    if reply["status"]=="cancelled"{return Ok(None);}
+    if reply["status"]!="selected"{return Err("file_unavailable");}
+    selected_document(serde_json::from_value(safe).map_err(|_|"file_unavailable")?).map(|selected|selected.map(|file|(file,name,writable&&reply["writable"]==true)))
+}
+
+#[cfg(target_os = "android")]
 pub async fn pick_export(
     app: &AppHandle,
     suggested_name: &str,

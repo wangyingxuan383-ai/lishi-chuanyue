@@ -6,7 +6,8 @@ import {
 } from "../types";
 
 const now = () => new Date().toISOString();
-export const newId = () => crypto.randomUUID().replace(/-/g, "");
+import { newId } from "./ids";
+export { newId } from "./ids";
 
 function parse<T>(text: Json, fallback: T): T {
   if (typeof text !== "string" || !text) return fallback;
@@ -87,6 +88,12 @@ export interface NewNode {
   fate?: string | null;
   meta?: Record<string, unknown>;
   state: WorldState;
+}
+
+export interface RevisionGuard {
+  worldId: string; lineId: string; headId: string; nodeId: string; original: string;
+  /** Exact JSON of the source binding on the preview's head; absent/null is "null". */
+  sourceGuard: string;
 }
 
 export class Repo {
@@ -212,6 +219,35 @@ export class Repo {
       ...extra,
     ]);
     return (await this.getNode(nodeId))!;
+  }
+
+  /** A preview becomes a new route atomically; an old route is never moved or rewritten. */
+  async forkRevision(guard: RevisionGuard, node: NewNode, name: string): Promise<{ node: StoryNode; line: Line }> {
+    const t = now(), lineId = newId();
+    const unique = await this.uniqueLineName(guard.worldId, name);
+    const [next] = await this.q("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM nodes WHERE world_id=?", [guard.worldId]);
+    const { statements, nodeId } = this.nodeStatements(guard.worldId, Number(next.seq), node, t);
+    const condition = `EXISTS (
+      SELECT 1 FROM worlds w JOIN lines l ON l.id=w.current_line_id
+      JOIN states s ON s.node_id=l.node_id JOIN nodes target ON target.id=?
+      WHERE w.id=? AND w.archived=0 AND w.current_line_id=? AND l.world_id=w.id
+        AND l.node_id=? AND l.deleted_at IS NULL AND l.archived=0
+        AND target.world_id=w.id AND target.narrative=? AND target.parent_id IS ?
+        AND COALESCE(json_extract(s.state_json,'$.source'),'null')=?
+        AND target.id IN (WITH RECURSIVE path(id) AS (
+          SELECT l.node_id UNION ALL SELECT n.parent_id FROM nodes n JOIN path p ON n.id=p.id WHERE n.parent_id IS NOT NULL
+        ) SELECT id FROM path)
+    )`;
+    const exists = "EXISTS(SELECT 1 FROM nodes WHERE id=?)";
+    await this.platform.sql.batch([
+      { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, guard.nodeId, guard.worldId, guard.lineId, guard.headId, guard.original, node.parentId, guard.sourceGuard] },
+      { sql: "INSERT INTO states(node_id,state_json) SELECT ?,? WHERE " + exists, params: [nodeId, JSON.stringify(node.state), nodeId] },
+      { sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique, nodeId, t, nodeId] },
+      { sql: "UPDATE worlds SET current_line_id=?,updated_at=?,played_at=? WHERE id=? AND " + exists, params: [lineId, t, t, guard.worldId, nodeId] },
+    ]);
+    const created = await this.getNode(nodeId), line = await this.getLine(lineId);
+    if (!created || !line) throw new Error("故事、原文或参考用法已经改变，请重新生成改稿。");
+    return { node: created, line };
   }
 
   async getNode(id: string): Promise<StoryNode | null> {

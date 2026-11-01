@@ -77,8 +77,45 @@ export interface UpdateRequest {
 
 export type InstallStatus = "started" | "permission" | "unsupported";
 
+export interface ExecutionSnapshot {
+  id: string; worldId: string; status: string;
+  budget: { modelRequests: number; toolCalls: number; corrections: number; activeMs: number };
+  draft: Json; result: Json; error: string | null;
+  events: { seq: number; event: Json }[];
+}
+
+/** Safe native Pi projections; raw provider messages never become UI context. */
+export interface AgentProjectionMessage {
+  id: string; sessionId?: string; taskId?: string;
+  role: "user" | "assistant" | "tool"; content: string; displayContent?: string; createdAt: string;
+  status?: string; seq?: number; truncated?: boolean; delivery?: string;
+}
+export interface AgentProjectionStep {
+  id: string; callId: string; taskId: string; childId?: string | null; parentCallId?: string | null;
+  tool: string; action: string; object: string; status: string; outcome: string;
+  summary: string; resultText: string; seq: number; attempts: number; durationMs?: number | null;
+  truncated?: boolean; deliveryFailed?: boolean; read?: Json;
+}
+export interface AgentExecutionSnapshot<TTask = Json> {
+  id: string; worldId: string; status: string; task: TTask; result: Json; error: string | null;
+  events: { seq: number; event: Json }[]; messages: AgentProjectionMessage[]; steps: AgentProjectionStep[];
+  hasMore?: boolean; nextAfter?: number; nextCallAfter?: number; hasMoreCalls?: boolean; incremental?: boolean;
+}
+
 export interface Platform {
   readonly name: "android" | "windows" | "web-dev" | "other";
+  /** Runs survive page suspension; unsubscribe by stopping polling, never by cancelling. */
+  execution?: {
+    /** Dedicated Pi RPC, including Agent snapshot/stop; ordinary runs use the methods below. */
+    agent(request: Json): Promise<Json>;
+    settle(state: Json, record: Json, options: Json): Promise<Json>;
+    context?(input: Json): Promise<Json>;
+    start(plan: Json): Promise<string>;
+    snapshot(id: string, after?: number): Promise<ExecutionSnapshot>;
+    list(): Promise<{ id: string; worldId: string; status: string }[]>;
+    stop(id: string): Promise<void>;
+    resume(id: string): Promise<void>;
+  };
   /**
    * In-app update (R14). Android downloads, verifies and installs; Windows has
    * it for the debug test source only (the sheet sends players to the browser);
@@ -134,6 +171,8 @@ export interface Platform {
   files: {
     exportText(suggestedName: string, text: string): Promise<boolean>;
     importText(): Promise<string | null>;
+    importSkillPackage?(): Promise<{ name: string; bytes: number[] } | null>;
+    grantAgentResource?(directory: boolean, writable: boolean): Promise<{ id: string; name: string; directory: boolean; writable: boolean; enabled: boolean; revision: number } | null>;
     importBook(signal?: AbortSignal, onProgress?: (bytes: number) => void): Promise<{ name: string; bytes: Uint8Array } | null>;
     extractPdf(bytes: Uint8Array, signal?: AbortSignal): Promise<PdfText>;
   };

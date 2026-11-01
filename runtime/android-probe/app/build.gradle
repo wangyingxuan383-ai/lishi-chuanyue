@@ -1,0 +1,63 @@
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+
+apply plugin: 'com.android.application'
+
+def runtimeDirectory = providers.gradleProperty('piRuntimeDirectory').map { file(it) }
+def nativeDirectory = providers.gradleProperty('piNativeDirectory').map { file(it) }
+def nativeNoticesDirectory = providers.gradleProperty('piNativeNoticesDirectory').map { file(it) }
+def testTlsDirectory = providers.gradleProperty('piTestTlsDirectory').map { file(it) }
+def runtimeAssets = layout.buildDirectory.dir('generated/probe-assets')
+
+def stageRuntime = tasks.register('stageProbeRuntime', Sync) {
+    from(runtimeDirectory) { into 'pi-runtime' }
+    from(rootProject.file('bootstrap.mjs')) { into 'probe' }
+    from(testTlsDirectory) { include 'tls-cert.pem', 'tls-key.pem'; into 'probe' }
+    from(nativeNoticesDirectory) { into 'native-notices'; exclude '**/*.pem', '**/*.key' }
+    into runtimeAssets
+    doFirst {
+        def source = runtimeDirectory.get()
+        if (!nativeNoticesDirectory.isPresent() || !nativeNoticesDirectory.get().isDirectory() || nativeNoticesDirectory.get().listFiles().length == 0) {
+            throw new GradleException('The verified native runtime notices are required')
+        }
+        for (def name : ['tls-cert.pem', 'tls-key.pem']) {
+            if (!new File(testTlsDirectory.get(), name).isFile()) throw new GradleException('Owned TLS fixtures must be generated in ignored cache')
+        }
+        def manifest = new JsonSlurper().parse(new File(source, 'manifest.json'))
+        if (!manifest.built || !manifest.fullCodingAgent || manifest.commit != '973b74c55fcf096ad5976f8d8850c147ee2e62d4' || manifest.nodeVersion != '24.19.0') {
+            throw new GradleException('The complete pinned Pi runtime is required')
+        }
+        manifest.files.each { item ->
+            def artifact = new File(source, item.path)
+            if (!artifact.canonicalPath.startsWith(source.canonicalPath + File.separator) || !artifact.isFile()) throw new GradleException('Invalid runtime artifact')
+            def hash = MessageDigest.getInstance('SHA-256').digest(artifact.bytes).encodeHex().toString()
+            if (artifact.length() != item.bytes || hash != item.sha256) throw new GradleException("Runtime artifact changed: ${item.path}")
+        }
+        for (def name : ['libnode.so', 'liblishi_node_embed.so', 'libc++_shared.so', 'liblishi_pi_probe_gateway.so']) {
+            if (!new File(nativeDirectory.get(), "arm64-v8a/${name}").isFile()) throw new GradleException("Missing verified native runtime: ${name}")
+        }
+    }
+}
+
+android {
+    namespace 'io.timejump.chuanyue.piprobe'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+    defaultConfig {
+        applicationId 'io.timejump.chuanyue.piprobe'
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName '0.0.1-probe'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    sourceSets.main {
+        assets.srcDir runtimeAssets.get().asFile
+        jniLibs.srcDir nativeDirectory.get()
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packaging { jniLibs { useLegacyPackaging = true } }
+    buildTypes { debug { debuggable true; minifyEnabled false } }
+}
+tasks.named('preBuild').configure { dependsOn stageRuntime }
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }

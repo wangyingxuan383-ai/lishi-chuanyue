@@ -9,6 +9,7 @@ export type Route =
   | { name: "setup"; first?: boolean; profileId?: string }
   | { name: "newgame" }
   | { name: "play"; worldId: string }
+  | { name: "agent"; worldId: string; lineId: string; sessionId?: string; initialText?: string; skills?: string[]; target?: { nodeId: string; paragraph?: number; evidence?: import("../../engine/types").FactCitation[] } }
   | { name: "settings" }
   | { name: "guide" };
 

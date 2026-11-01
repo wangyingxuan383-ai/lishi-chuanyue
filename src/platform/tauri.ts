@@ -1,3 +1,4 @@
+import {assertSqlWritable,restoreWithFence} from "./sql-maintenance";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
 import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText } from "./types";
@@ -48,13 +49,22 @@ export async function createTauriPlatform(): Promise<Platform> {
   const name = info.platform === "android" || info.platform === "windows" ? info.platform : "other";
   return {
     name,
+    execution: {
+      agent: (request) => call("pi_agent_request", { request }),
+      settle: (state, record, options) => call("execution_settle", { state, record, options }),
+      context: (input) => call("execution_context", { input }),
+      start: (plan) => call("execution_start", { plan }),
+      snapshot: (id, after = 0) => call("execution_snapshot", { id, after }),
+      list: () => call("execution_list"),
+      stop: (id) => call("execution_stop", { id }),
+      resume: (id) => call("execution_resume", { id }),
+    },
     sql: {
       query: (sql, params = []) => call("sql_query", { sql, params }),
-      batch: (statements) =>
-        call("sql_batch", { statements: statements.map((s) => ({ sql: s.sql, params: s.params ?? [] })) }),
+      batch: (statements) => {assertSqlWritable();return call("sql_batch", { statements: statements.map((s) => ({ sql: s.sql, params: s.params ?? [] })) });},
       backup: (label) => call("sql_backup", { label }),
       listBackups: () => call("sql_list_backups"),
-      restore: (name) => call("sql_restore", { name }),
+      restore: (name) => restoreWithFence(()=>call("sql_restore", { name })),
     },
     secrets: {
       set: (slot, value, boundBaseUrl) => call("secret_set", { slot, value, boundBaseUrl }),
@@ -76,8 +86,13 @@ export async function createTauriPlatform(): Promise<Platform> {
       setNetwork: (config) => call("network_set", { config: { proxy: config.proxy, proxyUrl: config.proxyUrl ?? null } }),
     },
     files: {
+      grantAgentResource: (directory, writable) => call("file_grant_agent", { directory, writable }),
       exportText: (suggestedName, text) => call("file_export_text", { suggestedName, text }),
       importText: () => call("file_import_text"),
+      importSkillPackage: async () => {
+        const file = await call<{ name: string; data: string } | null>("file_import_skill");
+        return file && { name: file.name, bytes: Array.from(atob(file.data), (c) => c.charCodeAt(0)) };
+      },
       importBook: async (signal, onProgress) => {
         if (signal?.aborted) throw new DOMException("已取消", "AbortError");
         const requestId = crypto.randomUUID(), channel = new Channel<number>();

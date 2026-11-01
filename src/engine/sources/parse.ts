@@ -1,6 +1,6 @@
 import type { Platform } from "../../platform";
 import type { BookFormat, BookSection, SourceBook } from "./types";
-import { newId } from "../db/repo";
+import { newId } from "../db/ids";
 
 export type TextEncoding = "auto" | "utf-8" | "utf-16le" | "utf-16be" | "gb18030";
 export const checkCancelled = (signal?: AbortSignal) => { if (signal?.aborted) throw new DOMException("已取消", "AbortError"); };

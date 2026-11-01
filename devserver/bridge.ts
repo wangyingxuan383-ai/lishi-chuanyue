@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { isBound, maskSecret, relayStream } from "./relay.ts";
 import { extractBookPdf } from "./books.ts";
+import { HostBridge, hostRequest } from "./host.ts";
 
 interface SecretEntry {
   value: string;
@@ -52,7 +53,9 @@ function sendJson(res: ServerResponse, status: number, value: unknown) {
 }
 
 export function devBridge(options: { root: string; env: Record<string, string> }): Plugin {
-  const file = path.join(options.root, ".cache", "dev-secrets.json");
+  const isolatedSecrets = process.env.LISHI_DEV_SECRETS_FILE;
+  const file = isolatedSecrets ? path.resolve(isolatedSecrets) : path.join(options.root, ".cache", "dev-secrets.json");
+  const host = new HostBridge(options.root);
 
   const load = (): Secrets => {
     try {
@@ -68,6 +71,8 @@ export function devBridge(options: { root: string; env: Record<string, string> }
 
   // .env.local only pre-fills the "main" slot; the UI can overwrite it.
   const seed = () => {
+    // An isolated verification store must never inherit personal credentials.
+    if (isolatedSecrets) return;
     const { DEV_LLM_BASE_URL: base, DEV_LLM_KEY: key } = options.env;
     const secrets = load();
     if (base && key && !secrets.main) {
@@ -113,11 +118,13 @@ export function devBridge(options: { root: string; env: Record<string, string> }
     apply: "serve",
     configureServer(server) {
       seed();
+      server.httpServer?.once("close", () => host.close());
       server.middlewares.use("/__dev", (req, res) => {
         const remote = req.socket.remoteAddress ?? "";
         if (!/^(::1|127\.|::ffff:127\.)/.test(remote)) return sendJson(res, 403, { code: "forbidden", message: "仅限本机" });
         const route = req.url ?? "";
         const handle = async () => {
+          if (route.startsWith("/host/")) return hostRequest(host, route.slice("/host/".length).split("?")[0], req, res);
           if (route === "/book/pdf" && req.method === "POST") return extractBookPdf(options.root, req, res);
           if (route.startsWith("/llm/stream")) return stream(req, res);
           if (route.startsWith("/llm/get")) return get(req, res);
@@ -155,5 +162,6 @@ export function devBridge(options: { root: string; env: Record<string, string> }
         });
       });
     },
+    closeBundle() { host.close(); },
   };
 }

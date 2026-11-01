@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../.cache/pi-windows/agent/runtime/": "agent/runtime/",
+      "../.cache/pi-windows/agent/node/": "agent/node/"
+    },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi"
+      }
+    }
+  }
+}

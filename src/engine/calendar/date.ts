@@ -17,6 +17,10 @@ export interface GameDate {
   lunar: boolean;
 }
 
+/** A fictional year count is independent of the historical CE axis. */
+export const MAX_CUSTOM_ERA_YEAR = 999_999_999;
+const maxYear = (era: string) => era === "公元" || era === "公元前" ? 9999 : MAX_CUSTOM_ERA_YEAR;
+
 export interface EraName {
   name: string;
   startCe: number;
@@ -173,6 +177,31 @@ export function daysBetween(a: GameDate, b: GameDate): number | null {
   return years * yearDays + daysBeforeMonth(b.month, a.lunar) + b.day - (daysBeforeMonth(a.month, a.lunar) + a.day);
 }
 
+/** Signed date projection for a display anchor; the saved play duration is unchanged. */
+export function shiftDate(date: GameDate, days: number, rules?: CalendarRules): GameDate | null {
+  if (!Number.isSafeInteger(days)) return null;
+  const yearDays = daysBeforeMonth(13, date.lunar);
+  const originYear = date.ceYear == null ? date.year : toAstro(date.ceYear);
+  const serial = originYear * yearDays + daysBeforeMonth(date.month, date.lunar) + date.day - 1 + days;
+  const year = Math.floor(serial / yearDays);
+  let left = serial - year * yearDays;
+  let month = 1;
+  while (left >= monthDays({ month, lunar: date.lunar })) left -= monthDays({ month: month++, lunar: date.lunar });
+  const ceYear = date.ceYear == null ? null : fromAstro(year);
+  let projected: GameDate = { ...date, year: date.year + year - originYear, month, day: left + 1, ceYear };
+  if (date.era === "公元" || date.era === "公元前") {
+    const ce = ceYear ?? fromAstro(year);
+    projected = { ...projected, era: ce < 0 ? "公元前" : "公元", year: Math.abs(ce), ceYear: ce };
+  }
+  projected = withEra(projected, rules);
+  return Number.isSafeInteger(serial) && projected.year >= 1 && projected.year <= maxYear(projected.era) ? projected : null;
+}
+
+/** Fixed-calendar year boundaries, without walking arbitrarily large durations. */
+export function newYearsAfterDays(date: GameDate, days: number): number {
+  return Math.floor((daysBeforeMonth(date.month, date.lunar) + date.day - 1 + Math.max(0, Math.floor(days))) / daysBeforeMonth(13, date.lunar));
+}
+
 /** "天宝七载 冬月十七" / "公元前44年 3月14日" */
 export function formatDate(date: GameDate, rules?: CalendarRules): string {
   return `${yearLabel(date, rules)} ${monthDayLabel(date)}`;
@@ -204,7 +233,7 @@ export function coerceDate(raw: unknown, rules?: CalendarRules): GameDate | null
   const year = Number(v.year);
   const month = Number(v.month);
   const day = v.day === undefined || v.day === null ? 1 : Number(v.day);
-  if (!era || era.length > 12 || !Number.isInteger(year) || year < 1 || year > 9999) return null;
+  if (!era || era.length > 12 || !Number.isInteger(year) || year < 1 || year > maxYear(era)) return null;
   if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day) || day < 1 || day > 31) return null;
   const ce = Number(v.ceYear);
   const stated = Number.isInteger(ce) && ce !== 0 && ce > -5000 && ce < 2200 ? ce : null;
@@ -242,7 +271,7 @@ export function parseDateLabel(text: string | null | undefined, rules?: Calendar
   // "1665年4月": a bare year in digits is a CE year (the organizer writes western dates this way).
   if (!era && /^\d+$/.test(m[2])) era = "公元";
   const year = m[2] === "元" ? 1 : parseChineseNumber(m[2]);
-  if (!era || era.length > 8 || /\d/.test(era) || !year || year < 1) return null;
+  if (!era || era.length > 8 || /\d/.test(era) || !Number.isInteger(year) || !year || year < 1 || year > maxYear(era)) return null;
   let rest = m[3].replace(/^[，,、]/, "");
   let month = 1;
   let day = 1;

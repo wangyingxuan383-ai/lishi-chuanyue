@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 serde.workspace = true
 serde_json = "1"
 bytes = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 # fs/io-util: the update download writes its file (tauri already enables both).
 tokio = { version = "1", features = ["time", "sync", "macros", "rt", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -31,6 +31,7 @@ tempfile = "3"
 # SHA-256 of the update package (already in the tree through wry).
 sha2 = "0.10"
 book-pdf = { path = "../crates/book-pdf" }
+story-core = { path = "../crates/story-core" }
 base64 = "0.22"
 
 [dev-dependencies]
@@ -42,4 +43,8 @@ jni21 = { package = "jni", version = "=0.21.1", default-features = false }
 rustls-platform-verifier = "=0.7.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+wry = "=0.57.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+pi-host = { path = "../crates/pi-host" }

@@ -1,9 +1,9 @@
 [workspace]
-members = ["src-tauri", "crates/book-pdf"]
+members = ["src-tauri", "crates/book-pdf", "crates/story-core", "crates/dev-host", "crates/pi-host", "crates/android-agent-host"]
 resolver = "2"
 
 [workspace.package]
-version = "0.11.1"
+version = "0.11.16"
 edition = "2021"
 rust-version = "1.90"
 

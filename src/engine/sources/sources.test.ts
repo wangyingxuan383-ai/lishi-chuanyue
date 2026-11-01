@@ -5,7 +5,7 @@ import { Game } from "../game";
 import { sampleState } from "../testing/fixtures";
 import { fakeLlm, RECORD } from "../testing/fakeLlm";
 import { parseBook, decodeText } from "./parse";
-import { analysisJobs, deleteBook, fitReference, getBook, referenceBlock, referenceContext, saveBook } from "./library";
+import { analysisJobs, deleteBook, fitReference, getBook, referenceBlock, referenceContext, referenceEvidenceBlock, saveBook } from "./library";
 import { newBinding, type SourceBook } from "./types";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { buildTurnContext } from "../prompt/turn";
@@ -58,11 +58,12 @@ describe("external books", () => {
     expect(referenceBlock(context)).toContain("本局实际正文、当前事实和玩家行动优先");
     const state = sampleState(); state.source = binding;
     const prompt = buildTurnContext({ state, era: eraContext("tang-748", state), settings: DEFAULT_SETTINGS, protagonistName: "李安", history: [], mode: "do", text: "救下阿兰", reference: context, budgetChars: 12000 });
-    expect(prompt.layers.find((l) => l.key === "reference")!.chars).toBeLessThanOrEqual(3000);
-    const without = buildTurnContext({ state, era: eraContext("tang-748", state), settings: DEFAULT_SETTINGS, protagonistName: "李安", history: [], mode: "do", text: "救下阿兰", budgetChars: 500 });
+    expect(referenceEvidenceBlock(prompt.reference).length).toBeLessThanOrEqual(3000);
     const tight = buildTurnContext({ state, era: eraContext("tang-748", state), settings: DEFAULT_SETTINGS, protagonistName: "李安", history: [], mode: "do", text: "救下阿兰", budgetChars: 500, reference: context });
-    expect(tight.messages).toEqual(without.messages);
-    expect(fitReference(context, 100)).toBeUndefined();
+    expect(tight.messages.at(-1)!.content).toContain(binding.instructions);
+    expect(tight.reference?.status).toBe("insufficient");
+    expect(tight.budgetExceeded).toBe(true);
+    expect(fitReference(context, 0)?.binding.instructions).toBe(binding.instructions);
     expect(normalizeRecord({ time: "一刻", sourceSet: null })?.sourceSet).toBeUndefined();
   });
 
@@ -85,7 +86,7 @@ describe("external books", () => {
     await tree.redo(game.repo, await tree.cursor(game.repo, world.id));
     await game.bindSource(world.id, null);
     await expect(deleteBook(game.repo, book.id)).rejects.toThrow("历史路线");
-    const archive = await exportWorld(game.repo, world.id); expect(archive.version).toBe(3); expect(archiveProblems(archive)).toEqual([]);
+    const archive = await exportWorld(game.repo, world.id); expect(archive.version).toBe(4); expect(archiveProblems(archive)).toEqual([]);
     const copy = await importWorld(game.repo, archive, "new");
     const copyState = await game.repo.getState((await tree.cursor(game.repo, copy)).head.parentId!);
     expect(copyState.source?.bookId).not.toBe(book.id);

@@ -27,7 +27,7 @@ import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { Icon } from "../components/Icon";
 import { FORTUNE_MODES, FORTUNE_MODE_NOTE, fortuneMode } from "../../engine/fortune";
-import { adoptRewrite, assertWritingAnchor, STALE_WRITING, WritingError, writingError, type WritingAnchor } from "../../engine/writing/assist";
+import { adoptRewrite, adoptCanonCorrection, assertWritingAnchor, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview } from "../../engine/writing/assist";
 import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
 import { WritingDesk } from "../components/WritingDesk";
 import { NarrativePresets } from "../components/NarrativePresets";
@@ -97,6 +97,7 @@ function TurnView({ node, onMenu, pressed, watch, children }: { node: StoryNode;
   const { devMode } = useApp();
   // Developer mode: era words the local check found (R07-T002).
   const taboos = devMode ? ((node.meta.taboos as { term: string; instead: string | null }[] | undefined) ?? []) : [];
+  const referenceReview = node.meta.referenceReview as { findings?: { claim: string; status: string }[]; unresolved?: string[] } | undefined;
   // A summary already in the player's words (“你修改了剧本”) is shown as it is.
   if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" || node.actionText?.startsWith("你") ? node.actionText : `你修改了：${node.actionText}`}</div>;
   return (
@@ -113,12 +114,13 @@ function TurnView({ node, onMenu, pressed, watch, children }: { node: StoryNode;
       {node.rewritten && <span className="rewritten-mark">已改写</span>}
       {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
       <ChipRow chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
+      {referenceReview && <details className="muted"><summary>原著核对{referenceReview.unresolved?.length ? ` · ${referenceReview.unresolved.length}项待查` : ""}</summary>{referenceReview.findings?.map((f, i) => <p key={i}>{f.claim} · {f.status === "supported" ? "有原文依据" : f.status === "branch" ? "保留玩家分支" : "资料不足"}</p>)}{referenceReview.unresolved?.map((t, i) => <p key={`u${i}`}>{t}</p>)}</details>}
       {children}
     </div>
   );
 }
 
-export default function Play({ worldId }: { worldId: string }) {
+export default function Play({ worldId, active = true }: { worldId: string; active?: boolean }) {
   const { game, push, replace, toast, devMode, pop, profile, reading } = useApp();
   const [world, setWorld] = useState<World | null>(null);
   const [cursor, setCursor] = useState<tree.Cursor | null>(null);
@@ -137,7 +139,11 @@ export default function Play({ worldId }: { worldId: string }) {
   /** 连播 under way (旁观): which step of how many; between two steps nothing is generating, but the player still waits. */
   const [auto, setAuto] = useState<{ step: number; total: number } | null>(null);
   const autoHandle = useRef<AutoplayHandle | null>(null);
-  const busy = !!gen || !!auto;
+  const resumedAutoplay = useRef(false);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentFloor, setAgentFloor] = useState<number | undefined>();
+  const agentActive = useRef(false);
+  const busy = !!gen || !!auto || agentBusy;
   busyRef.current = busy;
   /** The state before the latest passage: an end card shows only on the passage where the script or challenge ended. */
   const [before, setBefore] = useState<WorldState | null>(null);
@@ -162,7 +168,7 @@ export default function Play({ worldId }: { worldId: string }) {
   const [writing, setWriting] = useState<WritingDraft | null>(null);
   const [desk, setDesk] = useState(false);
   const writingScope = useRef({ worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active: true });
-  writingScope.current = { worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active: true };
+  writingScope.current = { worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active };
   useEffect(() => () => { writingScope.current.active = false; }, []);
   useEffect(() => { setWriting(null); setDesk(false); }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
   const [noteOpen, setNoteOpen] = useState(false);
@@ -187,7 +193,25 @@ export default function Play({ worldId }: { worldId: string }) {
   const [typing, setTyping] = useState(false);
   const [notificationStart, setNotificationStart] = useState<(() => void) | null>(null);
   const handle = useRef<TurnHandle | null>(null);
+  const screenActive = useRef(true);
+  const recoveryNoticeVersion = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
+  const shownPage = useRef(active);
+  shownPage.current = active;
+  type ReadingAnchor = { nodeId: string; paragraph: number; offset: number; top: number; order: string[] };
+  const assistantAnchor = useRef<ReadingAnchor | null>(null);
+  const [returnAnchor, setReturnAnchor] = useState<ReadingAnchor | null>(null);
+  const captureReading = () => {
+    const el = scroller.current;
+    if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    const turns = [...el.querySelectorAll<HTMLElement>("[data-node-id]")];
+    const node = turns.find((item) => item.getBoundingClientRect().bottom > top + 1) ?? turns.at(-1);
+    if (!node?.dataset.nodeId) return;
+    const paragraphs = [...node.querySelectorAll<HTMLElement>(".story-text p")];
+    const p = paragraphs.find((item) => item.getBoundingClientRect().bottom > top + 1);
+    assistantAnchor.current = { nodeId: node.dataset.nodeId, paragraph: p ? paragraphs.indexOf(p) : -1, offset: (p ?? node).getBoundingClientRect().top - top, top: el.scrollTop, order: turns.map((item) => item.dataset.nodeId!) };
+  };
   const follow = useRef(reading.autoScroll);
   const initialScroll = useRef(true);
   const readingLoaded = useRef(false);
@@ -250,7 +274,6 @@ export default function Play({ worldId }: { worldId: string }) {
     setVariants(currentVariants);
   }, [game, worldId, pop]);
 
-  useEffect(() => { void refresh(); }, []);
   // No new words for 8 seconds while writing: say so, rather than a silent cursor (AUDIT 5.5).
   useEffect(() => {
     if (!gen) { setSlow(false); return; }
@@ -267,11 +290,41 @@ export default function Play({ worldId }: { worldId: string }) {
   };
   const [modePicker, setModePicker] = useState(false);
   // The AI filed new cards in the background: show its line and the new 设定集.
-  useEffect(() => game.subscribe((id) => { if (id === worldId) void refresh(); }), [game, worldId, refresh]);
+  useEffect(() => game.subscribe((id) => { if (id === worldId && shownPage.current) void refresh(); }), [game, worldId, refresh]);
+  // A story has one writer at a time, even while its assistant is on another page.
+  useEffect(() => {
+    let live = true;
+    const check = async () => {
+      try {
+        const rows = await game.platform.sql.query("SELECT id FROM execution_runs WHERE world_id=? AND status IN ('running','committing') AND json_extract(plan_json,'$.kind')='agent_task' LIMIT 1", [worldId]);
+        if (live) {
+          const running = !!rows.length;
+          if (running !== agentActive.current) {
+            setAgentFloor(running ? streamFloor() : undefined);
+            agentActive.current = running;
+          }
+          setAgentBusy(running);
+        }
+      } catch { /* An older host still reports conflicts when a run starts. */ }
+    };
+    void check();
+    const timer = setInterval(() => void check(), 750);
+    return () => { live = false; clearInterval(timer); };
+  }, [game, worldId]);
+  useEffect(() => {
+    if (!active) { captureReading(); follow.current = false; return; }
+    const anchor = assistantAnchor.current;
+    if (!anchor) return;
+    let live = true;
+    // Refresh once on return. Later background updates do not restore this anchor.
+    void refresh().then(() => { if (live) setReturnAnchor(anchor); });
+    return () => { live = false; };
+  }, [active, refresh]);
   useEffect(() => () => { if (readingTimer.current) clearTimeout(readingTimer.current); }, []);
 
   // The arrow reflects the viewport; following also requires the player's preference.
   const onScroll = () => {
+    if (!active) return;
     const el = scroller.current!;
     const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     follow.current = reading.autoScroll && bottom;
@@ -302,8 +355,25 @@ export default function Play({ worldId }: { worldId: string }) {
   };
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el || !nodes.length) return;
-    if (restoreReading.current) {
+    if (!active || !el || !nodes.length) return;
+    if (returnAnchor) {
+      const turns = [...el.querySelectorAll<HTMLElement>("[data-node-id]")];
+      let target = turns.find((item) => item.dataset.nodeId === returnAnchor.nodeId);
+      if (!target) {
+        const oldIndex = returnAnchor.order.indexOf(returnAnchor.nodeId);
+        target = turns.filter((item) => returnAnchor.order.includes(item.dataset.nodeId!)).sort((a, b) => Math.abs(returnAnchor.order.indexOf(a.dataset.nodeId!) - oldIndex) - Math.abs(returnAnchor.order.indexOf(b.dataset.nodeId!) - oldIndex))[0] ?? turns[Math.min(Math.max(0, oldIndex), turns.length - 1)];
+      }
+      const paragraphs = target ? [...target.querySelectorAll<HTMLElement>(".story-text p")] : [];
+      const paragraph = returnAnchor.paragraph < 0 ? target : paragraphs[Math.min(returnAnchor.paragraph, paragraphs.length - 1)] ?? target;
+      if (paragraph) el.scrollTop += paragraph.getBoundingClientRect().top - el.getBoundingClientRect().top - returnAnchor.offset;
+      else el.scrollTop = returnAnchor.top;
+      assistantAnchor.current = null;
+      restoreReading.current = null;
+      initialScroll.current = false;
+      follow.current = false;
+      setReturnAnchor(null);
+    } else if (assistantAnchor.current) return;
+    else if (restoreReading.current) {
       const target = el.querySelector<HTMLElement>(`[data-node-id="${restoreReading.current}"]`);
       if (target) el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top;
       restoreReading.current = null;
@@ -314,7 +384,7 @@ export default function Play({ worldId }: { worldId: string }) {
       initialScroll.current = false;
     } else if (reading.autoScroll && follow.current) toBottom();
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
-  }, [nodes, gen?.text, gen?.phase, notice, recap, reading.autoScroll]);
+  }, [active, returnAnchor, nodes, gen?.text, gen?.phase, notice, recap, reading.autoScroll]);
 
   // Page came back from the background: replay what the stream cached meanwhile.
   useEffect(() => {
@@ -333,7 +403,7 @@ export default function Play({ worldId }: { worldId: string }) {
       return true;
     }
     return false;
-  }, busy);
+  }, active && (!!gen || !!auto));
 
   // Install the saved passage in the same render that removes its stream. In particular,
   // do not temporarily shrink the scroll range while refresh is reading from SQLite.
@@ -349,23 +419,28 @@ export default function Play({ worldId }: { worldId: string }) {
     setGen(null);
   };
   const onEvent = (restore: { mode: ActionMode; text: string; note: string } | null) => (e: TurnEvent) => {
-    if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
+    if (!screenActive.current) return;
+    if (e.type === "step") { resumedAutoplay.current = true; setAuto({ step: e.index, total: e.total }); setGen({ phase: "starting", text: "", action: null, variant: false, minHeight: streamFloor() }); }
+    else if (e.type === "finished") { resumedAutoplay.current = false; setAuto(null); setGen(null); handle.current = null; void refresh(); }
+    else if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
     else if (e.type === "text") { lastWords.current = Date.now(); setSlow(false); setGen((g) => g && { ...g, phase: "writing", text: e.full }); }
     else if (e.type === "organizing") setGen((g) => g && { ...g, phase: "organizing" });
     else if (e.type === "done") {
       showSaved(e.node);
-      handle.current = null;
+      if (!resumedAutoplay.current) handle.current = null;
       failures.current = 0;
       void refresh();
       void countTurn();
     } else if (e.type === "failed") {
+      resumedAutoplay.current = false;
+      setAuto(null);
       handle.current = null;
       if (e.partialSaved) {
         if (e.node || e.cursor) showSaved(e.node ?? e.cursor!.head);
         else void refresh().then(() => setGen(null));
         // The interrupted passage shows its own 续写 / 重说; here only why it stopped.
         void refresh();
-        if (e.reason !== "cancelled") setNotice({ text: `${explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
+        if (e.reason !== "cancelled") setNotice({ text: `${e.detail ?? explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
       } else {
         setGen(null);
         if (restore) {
@@ -373,7 +448,7 @@ export default function Play({ worldId }: { worldId: string }) {
           setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === restore.mode)));
           if (restore.note) { setNote(restore.note); setNoteOpen(true); }
         }
-        if (e.reason === "cancelled") return;
+        if (e.reason === "cancelled") { void inspectSavedExecution(e.detail); return; }
         failures.current++;
         const actions: { label: string; run: () => void }[] = [];
         if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup", profileId: profile?.id }) });
@@ -381,10 +456,60 @@ export default function Play({ worldId }: { worldId: string }) {
           if (retry.current) { const again = retry.current; actions.push({ label: e.reason === "refused" ? "原样再试" : "再试一次", run: again }); }
           if (failures.current >= 2 || e.reason === "quota" || e.reason === "refused") actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
         }
-        setNotice({ text: explainFailure(e.reason, e.status), actions });
+        setNotice({ text: e.detail ?? explainFailure(e.reason, e.status), actions });
+        void inspectSavedExecution(e.detail);
       }
     }
   };
+
+  const resumeExecution = (id: string, resume = false) => {
+    if (!screenActive.current || busyRef.current || handle.current) return;
+    recoveryNoticeVersion.current++;
+    lastWords.current = Date.now();
+    setSlow(false);
+    setNotice(null);
+    setGen({ phase: "starting", text: "", action: null, variant: false, minHeight: streamFloor() });
+    retry.current = () => resumeExecution(id, true);
+    handle.current = game.followExecution(id, onEvent(null), resume);
+  };
+  const showSavedExecution = (run: { id: string; status: string; error: string | null; kind?: string; steps?: number; total?: number; hasText?: boolean }, fallback?: string) => {
+    const detail = run.error?.trim() || fallback?.trim() || (run.status === "paused" ? "上次生成已达到本次运行上限，进度已保存" : "");
+    const saved = run.kind === "autoplay" ? `连播已完成 ${run.steps ?? 0}/${run.total ?? 0} 段。` : "上次生成的进度已保存。";
+    const text = detail ? `${detail}${/[。！？]$/.test(detail) ? "" : "。"}${detail.includes("进度已保存") ? "" : ` ${saved}`}` : saved;
+    // A paused run retains its counters; opening this page never resets a
+    // reached budget or silently starts another request.
+    setNotice({ text, actions: run.status === "paused" ? [] : [{ label: run.kind === "autoplay" ? run.hasText ? "续写并继续连播" : "重试剩余连播" : "继续上次生成", run: () => resumeExecution(run.id, true) }] });
+  };
+  const inspectSavedExecution = async (fallback?: string) => {
+    const version = ++recoveryNoticeVersion.current;
+    try {
+      const run = await game.currentExecution(worldId);
+      if (!run || !screenActive.current || handle.current || version !== recoveryNoticeVersion.current) return;
+      if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run, fallback);
+    } catch { /* The existing failure notice remains available. */ }
+  };
+  useEffect(() => {
+    let disposed = false;
+    screenActive.current = true;
+    void (async () => {
+      await refresh();
+      const run = await game.currentExecution(worldId);
+      if (disposed || !run || handle.current || busyRef.current) return;
+      if (["running", "committing", "interrupted"].includes(run.status)) resumeExecution(run.id, run.status === "interrupted");
+      else if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run);
+    })().catch(() => {
+      if (!disposed) setNotice({ text: "暂时没能读取上次生成的进度，请稍后重新打开故事。", actions: [] });
+    });
+    return () => {
+      disposed = true;
+      screenActive.current = false;
+      recoveryNoticeVersion.current++;
+      handle.current?.detach?.();
+      autoHandle.current?.detach?.();
+      handle.current = null;
+      autoHandle.current = null;
+    };
+  }, [game, worldId, refresh]);
 
   // Asked once before the first passage on Android. Closing the sheet is not a no (it asks again next time);
   // a no is remembered, and Settings shows the state with a way to the system switch (ANDROID_COMPAT F1).
@@ -554,13 +679,19 @@ export default function Play({ worldId }: { worldId: string }) {
   };
   const openWriting = (kind: "rewrite" | "polish", node: StoryNode) => {
     if (!cursor || busy) return;
-    setWriting({ kind, text: kind === "rewrite" ? node.narrative : input, mode: currentMode.mode,
+    setWriting({ kind, text: kind === "rewrite" ? node.narrative : input, mode: currentMode.mode, source: state?.source,
       anchor: { worldId, lineId: cursor.line.id, headId: cursor.head.id, nodeId: node.id, original: node.narrative } });
   };
-  const adoptWriting = async (text: string) => {
+  const adoptWriting = async (text: string, correction?: CanonCorrectionPreview) => {
     if (!writing) return;
     const draft = writing;
     checkScope(draft.anchor);
+    if (correction) {
+      const revised = await adoptCanonCorrection(game, correction);
+      await refresh();
+      toast("已进入修订路线，原路线和后续剧情保留", { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, draft.anchor.lineId).then(() => refresh())) });
+      return;
+    }
     if (draft.kind === "rewrite") { await applyRewrite(draft.anchor, text); return; }
     await assertWritingAnchor(game, draft.anchor);
     checkScope(draft.anchor);
@@ -639,7 +770,7 @@ export default function Play({ worldId }: { worldId: string }) {
     "Alt+1": pick(0), "Alt+2": pick(1), "Alt+3": pick(2), "Alt+4": pick(3),
     "?": { run: keys },
     "Ctrl+/": { inInputs: true, run: keys },
-  }, mouse);
+  }, mouse && active);
 
   if (!world || !cursor || !state) return <div className="screen-body"><p className="muted">正在读取…</p></div>;
 
@@ -650,9 +781,9 @@ export default function Play({ worldId }: { worldId: string }) {
   const shown = gen?.variant ? nodes.slice(0, nodes.findIndex((n) => n.id === turn?.id)) : nodes;
   const mode = currentMode;
   const dead = state.protagonist.stats.health <= 0 && world.settings.difficulty !== "宽松";
-  const sendLabel = busy ? "停止" : input.trim() ? "发送" : "继续";
+  const sendLabel = agentBusy ? "等待" : busy ? "停止" : input.trim() ? "发送" : "继续";
   const showChoices = !busy && !dead && !(typing && (!mouse || input.trim())) && !!turn?.choices.length && turn.status !== "interrupted";
-  const stopOrSend = () => (auto ? autoHandle.current?.stop() : gen ? handle.current?.stop() : send());
+  const stopOrSend = () => { if (auto && autoHandle.current) autoHandle.current.stop(); else if (gen || auto) handle.current?.stop(); else send(); };
   // The end cards of a script played out or a challenge decided on the latest passage (not after death).
   const ends = turn && !dead && endSeen !== turn.id ? endsAt(state, before) : { challenge: false, script: false };
   const ending = challengeView(state);
@@ -693,7 +824,7 @@ export default function Play({ worldId }: { worldId: string }) {
     <PlayQualityEffects revision={`${head.id}:${gen?.phase ?? "idle"}:${writing?.kind ?? ""}:${sheet ?? ""}`} />
     <div className="play" data-daypart={daypart(now.hour)}>
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" title="返回（Esc）" onClick={() => (busy ? toast("正在写，先停止或等写完") : pop())}><Icon name="back" /></button>
+        <button className="icon-btn" aria-label="返回" title="返回（Esc）" onClick={() => (gen || auto ? toast("正在写，先停止或等写完") : pop())}><Icon name="back" /></button>
         <button className="title" aria-label="此时此地" title="此时此地" onClick={() => setSheet("time")}>
           <h1>{place}</h1>
           <div className="subtitle">{now.text}</div>
@@ -705,7 +836,7 @@ export default function Play({ worldId }: { worldId: string }) {
 
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
         <div className="story" ref={scroller} onScroll={onScroll}>
-          <div className="story-inner" style={gen?.minHeight === undefined ? undefined : { minHeight: gen.minHeight }}>
+          <div className="story-inner" style={(gen?.minHeight ?? agentFloor) === undefined ? undefined : { minHeight: gen?.minHeight ?? agentFloor }}>
             {hasMore && <button className="load-more ghost" onClick={loadMore}>加载更早的剧情</button>}
             {shown.map((node) => {
               const isHead = node.id === turn?.id && !busy;
@@ -805,7 +936,7 @@ export default function Play({ worldId }: { worldId: string }) {
           </div>
         )}
         <div className="inputbar">
-          <button className="mode-btn" aria-label={`输入方式：${mode.label}`} onClick={() => setModePicker(true)} disabled={busy}>{mode.label}</button>
+          <button className="mode-btn" aria-label={`输入方式：${mode.label}`} onClick={() => setModePicker(true)} disabled={!!gen || !!auto}>{mode.label}</button>
           <textarea
             ref={inputBox}
             rows={1}
@@ -826,7 +957,7 @@ export default function Play({ worldId }: { worldId: string }) {
               e.target.style.height = `${e.target.scrollHeight}px`;
             }}
           />
-          <button className={`send-btn ${busy ? "" : "primary"}`} title={mouse ? (busy ? "停止" : "Enter 发送，Shift+Enter 换行") : undefined} disabled={dead && !busy} onClick={stopOrSend}>{sendLabel}</button>
+          <button className={`send-btn ${busy ? "" : "primary"}`} title={agentBusy ? "Agent 助手正在执行，完成或停止后可继续游玩" : mouse ? (busy ? "停止" : "Enter 发送，Shift+Enter 换行") : undefined} disabled={agentBusy || (dead && !busy)} onClick={stopOrSend}>{sendLabel}</button>
         </div>
       </div>
 
@@ -911,6 +1042,7 @@ export default function Play({ worldId }: { worldId: string }) {
               </button>
             ))}
             {!watch && !noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b><Icon name="plus" size={16} />幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
+            <button className="mode-option" onClick={() => { captureReading(); setModePicker(false); push({ name: "agent", worldId, lineId: cursor.line.id }); }}><b>Agent 助手 ›</b><small>单独交谈、查资料或修改本局，完成后继续游玩</small></button>
           </div>
         </Sheet>
       )}

@@ -33,7 +33,8 @@ export function eraPack(id: string | null | undefined): EraPack | null {
 
 /** The start date of a world; old saves only have the label. */
 export function startDate(state: WorldState, rules: CalendarRules): GameDate | null {
-  if ((state.era.clockStyle ?? (state.era.mode === "free" ? "elapsed" : "era")) === "elapsed") return null;
+  // A legacy free-world label is not an implicit historical calendar.
+  if (state.era.mode === "free" && (state.era.clockStyle ?? "elapsed") === "elapsed") return state.time.date ?? null;
   return state.time.date !== undefined ? state.time.date : readDate(state.time.start, rules);
 }
 
@@ -51,10 +52,12 @@ export function eraContext(eraId: string | null, state?: WorldState | null): Era
   const rules: CalendarRules = state?.era.calendar ?? pack?.calendar ?? (mode === "free" ? { lunar: false } : {});
   const clock: GameClock = {
     mode, clockStyle,
-    date: clockStyle === "elapsed" ? null : state ? startDate(state, rules) : pack?.start.date ?? null,
+    date: state ? startDate(state, rules) : pack?.start.date ?? null,
     hour: state?.time.startHour ?? pack?.start.hour ?? 8,
     label: clockStyle === "elapsed" ? "" : state ? state.time.start : pack ? formatDate(pack.start.date, rules) : "",
     rules,
+    ...(state?.era.timeStyle ? { timeStyle: state.era.timeStyle } : {}),
+    ...(state?.time.anchor ? { anchor: state.time.anchor } : {}),
   };
   const stateCurrency = state?.era.currency?.units?.length ? (state.era.currency as Currency) : null;
   return {

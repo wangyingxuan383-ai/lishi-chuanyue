@@ -141,6 +141,7 @@ def main():
     parser.add_argument("--require-r8", action="store_true")
     parser.add_argument("--require-non-debuggable", action="store_true")
     parser.add_argument("--reference-apk", type=Path)
+    parser.add_argument("--pi-runtime", type=Path, help="Verified staged Pi runtime; requires every bundled library and asset to match")
     args = parser.parse_args()
     if args.output.resolve() in {path.resolve() for path in (args.apk, args.native, args.reference_apk) if path}:
         raise ValueError("report path must not overwrite an input artifact")
@@ -174,7 +175,58 @@ def main():
             raise ValueError("duplicate APK entries")
         libraries = [name for name in names if name.startswith("lib/") and name.endswith(".so")]
         expected = "lib/arm64-v8a/liblishi_app_lib.so"
-        if libraries != [expected] or archive.getinfo(expected).file_size > 512 * 1024 * 1024:
+        permitted = {expected}
+        pi_report = None
+        if args.pi_runtime:
+            staged = args.pi_runtime.resolve()
+            receipt = json.loads((staged / "receipt.json").read_text(encoding="utf-8"))
+            if not (receipt.get("ready") is True and receipt.get("commit") == "973b74c55fcf096ad5976f8d8850c147ee2e62d4"
+                    and receipt.get("nodeVersion") == "24.19.0" and receipt.get("minSdk") == 24
+                    and receipt.get("targetSdk") == 36 and receipt.get("pageSize") == 16384):
+                raise ValueError("Pi runtime receipt does not match the approved platform")
+            wanted = {"libnode.so", "liblishi_node_embed.so", "libc++_shared.so", "liblishi_agent_host.so"}
+            records = receipt.get("libraries", [])
+            if len(records) != 4 or {r.get("path") for r in records} != {"jniLibs/arm64-v8a/" + n for n in wanted}:
+                raise ValueError("Pi runtime must contain the four expected native libraries")
+            for record in records:
+                name = "lib/arm64-v8a/" + record["path"].split("/")[-1]
+                permitted.add(name)
+                if archive.getinfo(name).file_size != record["bytes"] or record["bytes"] > 512 * 1024 * 1024:
+                    raise ValueError("Pi library size differs from build receipt")
+                data = archive.read(name)
+                if hashlib.sha256(data).hexdigest() != record["sha256"] or digest(staged / record["path"]) != record["sha256"]:
+                    raise ValueError("Pi library differs from verified build artifact")
+                check_elf(data)
+            manifest_bytes = archive.read("assets/pi-runtime/manifest.json")
+            if hashlib.sha256(manifest_bytes).hexdigest() != receipt["manifestSha256"]:
+                raise ValueError("Pi runtime manifest differs from verified staging")
+            manifest = json.loads(manifest_bytes)
+            if not (manifest.get("built") is True and manifest.get("fullCodingAgent") is True
+                    and manifest.get("commit") == receipt["commit"] and manifest.get("nodeVersion") == receipt["nodeVersion"]):
+                raise ValueError("Pi runtime manifest is not the complete pinned SDK")
+            records = manifest.get("files", [])
+            paths = set()
+            for record in records:
+                relative = record["path"]
+                if not relative or "\\" in relative or relative.startswith("/") or any(p in ("", ".", "..") for p in relative.split("/")) or relative in paths:
+                    raise ValueError("Invalid or duplicate Pi asset path")
+                paths.add(relative)
+                name = "assets/pi-runtime/" + relative
+                if archive.getinfo(name).file_size != record["bytes"] or hashlib.sha256(archive.read(name)).hexdigest() != record["sha256"]:
+                    raise ValueError("Pi asset differs from verified manifest")
+            if not paths or {n.removeprefix("assets/pi-runtime/") for n in names if n.startswith("assets/pi-runtime/") and not n.endswith("/")} != paths | {"manifest.json"}:
+                raise ValueError("Unexpected or missing Pi runtime assets")
+            notices = json.loads((staged / "assets/native-notices/manifest.json").read_text(encoding="utf-8"))
+            if archive.read("assets/native-notices/manifest.json") != (staged / "assets/native-notices/manifest.json").read_bytes():
+                raise ValueError("Native notices manifest differs from staged sources")
+            for relative, record in notices["files"].items():
+                if "/" in relative or "\\" in relative or relative in ("", ".", ".."):
+                    raise ValueError("Invalid native notice name")
+                data = archive.read("assets/native-notices/" + relative)
+                if len(data) != record["bytes"] or hashlib.sha256(data).hexdigest() != record["sha256"]:
+                    raise ValueError("Native notice differs from pinned sources")
+            pi_report = {"commit": receipt["commit"], "nodeVersion": receipt["nodeVersion"], "files": len(paths), "libraries": 4, "manifestSha256": receipt["manifestSha256"]}
+        if set(libraries) != permitted or archive.getinfo(expected).file_size > 512 * 1024 * 1024:
             raise ValueError("unexpected/oversized native library")
         native = archive.read(expected)
         loads = check_elf(native)
@@ -206,6 +258,13 @@ def main():
             "Lio/timejump/chuanyue/DocumentPickerPlugin;": ["openDocument", "createDocument", "ensureIdle"],
             "Lio/timejump/chuanyue/UpdatePlugin;": ["installPackage", "canInstallPackages"],
         }
+        if args.pi_runtime:
+            required.update({
+                "Lio/timejump/chuanyue/AgentNative;": ["nativeInitialize", "nativeDispatch", "nativeRuntimeExited", "nativeShutdown", "onNativeReply", "onNativeActivity"],
+                "Lio/timejump/chuanyue/AgentHostService;": ["onStartCommand", "onTimeout"],
+                "Lio/timejump/chuanyue/AgentHostPlugin;": ["request"],
+                "Lio/timejump/pi/NodeRuntime;": ["createBridge", "run", "abortRuntime"],
+            })
         for owner, members in required.items():
             if owner not in defined or any((owner, member) not in methods for member in members):
                 raise ValueError("JNI/plugin entry removed or renamed: " + owner)
@@ -224,6 +283,29 @@ def main():
     code, manifest = run([tools / "aapt.exe", "dump", "badging", args.apk])
     if code or "package: name='io.timejump.chuanyue'" not in manifest:
         raise ValueError("unexpected APK application ID")
+    if args.pi_runtime:
+        if "sdkVersion:'24'" not in manifest or "targetSdkVersion:'36'" not in manifest:
+            raise ValueError("Pi APK Android target/minimum differs from the approved platform")
+        code, tree = run([tools / "aapt.exe", "dump", "xmltree", args.apk, "AndroidManifest.xml"])
+        services = re.split(r"E: service\b", tree)[1:]
+        if code or not any('AgentHostService' in item and '":agent"' in item for item in services):
+            raise ValueError("Dedicated Agent process is missing from APK manifest")
+    webview_http_policy = None
+    if args.pi_runtime:
+        code, resources = run([tools / "aapt.exe", "dump", "--values", "resources", args.apk])
+        resource = re.search(r"spec resource (0x[0-9a-f]+) [^\s]+:xml/agent_network_security_config:", resources)
+        if code or not resource or not re.search(r"android:networkSecurityConfig[^\n]*=" + re.escape("@" + resource.group(1)), tree):
+            raise ValueError("Agent browser network policy is shadowed by a library manifest")
+        # Release resource optimization may shorten XML paths. Follow the exact
+        # resource referenced by the manifest instead of assuming its source name.
+        policy_file = re.search(r"(?m)^\s*resource " + re.escape(resource.group(1))
+                                + r" [^\n]*\r?\n\s*\(string(?:8|16)?\) \"([^\"]+)\"", resources)
+        if not policy_file or policy_file.group(1) not in names:
+            raise ValueError("Packaged Agent browser network policy cannot be resolved")
+        code, policy = run([tools / "aapt.exe", "dump", "xmltree", args.apk, policy_file.group(1)])
+        if code or not re.search(r"cleartextTrafficPermitted[^\n]*0xffffffff", policy):
+            raise ValueError("Explicit HTTP reading capability is blocked by the packaged WebView policy")
+        webview_http_policy = "explicit-http-with-default-tls-trust"
     # The in-app update needs it to open the system installer (UpdatePlugin).
     if "uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'" not in manifest:
         raise ValueError("REQUEST_INSTALL_PACKAGES permission missing")
@@ -237,6 +319,7 @@ def main():
         "nativeComparison": comparison, "packedNativeSha256": packed_hash, "packedNativeBytes": len(native),
         "requiredJniClasses": len(required), "requiredJniMethodDefinitions": sum(map(len, required.values())), "rustlsDexClasses": rustls,
         "r8MappingVerified": args.require_r8, "deviceTestsExecuted": False, "modelRequestsExecuted": False,
+        "piRuntime": pi_report, "webviewHttpPolicy": webview_http_policy,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

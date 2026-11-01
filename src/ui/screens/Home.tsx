@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { TurnHandle } from "../../engine/game";
 import { archiveProblems, exportWorld, importWorld } from "../../engine/archive";
 import { exportStory } from "../../engine/book";
 import { eraContext } from "../../engine/era";
@@ -9,8 +10,7 @@ import { MenuSheet } from "../components/Sheet";
 import { useLongPress } from "../components/useLongPress";
 import { fromSetup } from "./openingDraft";
 import { Seal } from "../components/Seal";
-import { latestRelease, newer, type ReleaseInfo } from "../app/update";
-import { UpdateButton } from "../components/UpdateSheet";
+import { useUpdateNotice } from "../app/updateStore";
 import { Icon } from "../components/Icon";
 import { BookCover } from "../components/BookArt";
 import { BudgetReminder } from "../components/MonthlyBudget";
@@ -111,6 +111,8 @@ export default function Home() {
   const [cards, setCards] = useState<WorldCard[] | null>(null);
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
   const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
+  const [oldOpenings, setOldOpenings] = useState<{ id: string; status: string; title: string; error: string | null; requests: number }[]>([]);
+  const openingHandles = useRef(new Map<string, TurnHandle>());
 
   // R08-T001: a world as one file.
   const exportOne = async (card: WorldCard) => {
@@ -160,21 +162,34 @@ export default function Home() {
     await game.repo.purgeDeletedWorlds();
     setDeleted(await game.repo.deletedWorlds());
   };
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); return game.subscribe(() => { void load(); }); }, [game]);
+  useEffect(() => {
+    let live = true, previous = new Set<string>();
+    const read = async () => {
+      try {
+        const rows = await game.platform.sql.query("SELECT id,status,error,budget_json,json_extract(plan_json,'$.newWorld.title') AS title FROM execution_runs r WHERE json_extract(plan_json,'$.kind')='opening' AND json_extract(plan_json,'$.executionMode')='agent' AND status NOT IN ('committed','previewed','stale') AND NOT EXISTS(SELECT 1 FROM worlds w WHERE w.id=r.world_id) ORDER BY created_at DESC");
+        if (!live) return;
+        const next = rows.map((row) => ({ id: String(row.id), status: String(row.status), title: typeof row.title === "string" ? row.title : "未完成的故事", error: row.error ? String(row.error) : null, requests: Number(JSON.parse(String(row.budget_json)).modelRequests ?? 0) }));
+        if ([...previous].some((id) => !next.some((row) => row.id === id))) void load();
+        previous = new Set(next.map((row) => row.id)); setOldOpenings(next);
+      } catch { /* Historical runs are optional on older databases. */ }
+    };
+    void read(); const timer = setInterval(() => void read(), 1500);
+    return () => { live = false; clearInterval(timer); openingHandles.current.forEach((handle) => handle.detach?.()); openingHandles.current.clear(); };
+  }, [game]);
+  const continueOpening = (run: { id: string; status: string }) => {
+    if (openingHandles.current.has(run.id)) return;
+    const handle = game.followExecution(run.id, (event) => {
+      if (event.type === "done") { void load(); toast("上次的开场已完成"); }
+      else if (event.type === "failed") toast(event.detail ?? "进度已保存，稍后可以继续");
+    }, !["running", "committing"].includes(run.status));
+    openingHandles.current.set(run.id, handle);
+    void handle.done.finally(() => openingHandles.current.delete(run.id));
+  };
 
   // Once a day, if the player allows it: is there a newer release? (设置 → 关于与更新)
-  const [update, setUpdate] = useState<ReleaseInfo | null>(null);
-  useEffect(() => {
-    void (async () => {
-      if (!await game.repo.getSetting("autoUpdateCheck", true)) return;
-      const last = await game.repo.getSetting<number>("updateCheckedAt", 0);
-      const skipped = await game.repo.getSetting<string | null>("updateSkipped", null);
-      if (Date.now() - last < 86_400_000) return;
-      await game.repo.setSetting("updateCheckedAt", Date.now());
-      const latest = await latestRelease(game.platform).catch(() => null);
-      if (latest && newer(latest.version, __APP_VERSION__) && latest.version !== skipped) setUpdate(latest);
-    })();
-  }, []);
+  const { store: updates, unread } = useUpdateNotice(game);
+  useEffect(() => { void updates.check().catch(() => {}); }, [updates]);
 
   // Without a service, connecting leads straight on to the new story (AUDIT_V4_FUNCTION C4).
   const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup", first: true }));
@@ -188,25 +203,17 @@ export default function Home() {
   return (
     <div className="screen">
       <div className="topbar">
-        <div className="title"><h1>历史穿越</h1></div>
-        <button className="icon-btn" aria-label="设置" onClick={() => push({ name: "settings" })}><Icon name="settings" /></button>
+        <div className="title"><h1>穿越小说模拟</h1></div>
+        <button className="icon-btn update-mark" aria-label={unread ? "设置，有新版本" : "设置"} onClick={() => push({ name: "settings" })}><Icon name="settings" />{unread && <i className="update-dot" aria-hidden="true" />}</button>
       </div>
       <div className="screen-body stack">
         <BudgetReminder />
         <WhatsNewNotice />
-        {update && (
-          <div className="notice">
-            有新版本 {update.version}，覆盖安装即可，不要先卸载。
-            <div className="row">
-              <UpdateButton release={update} />
-              <button className="ghost" onClick={() => { void game.repo.setSetting("updateSkipped", update.version); setUpdate(null); }}>这版不提醒</button>
-            </div>
-          </div>
-        )}
+        {oldOpenings.map((run) => <div className="notice" key={run.id}><b>上次的开场还没写完</b><p className="muted">{run.title} · 已用 {run.requests} 次模型请求，沿用原来的任务和额度。</p>{run.error && <p className="muted">{run.error}</p>}<div className="row">{["running", "committing"].includes(run.status) ? <button onClick={() => void game.platform.execution?.stop(run.id).catch(() => toast("暂时没能停止"))}>停止开场</button> : <button disabled={run.status === "paused"} onClick={() => continueOpening(run)}>继续上次的开场</button>}</div></div>)}
         {cards && cards.length === 0 && (
           <div className="hero">
             <Seal />
-            <h1>历史穿越</h1>
+            <h1>穿越小说模拟</h1>
             <p className="muted">醒来时，你已在另一个时代。</p>
           </div>
         )}

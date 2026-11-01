@@ -72,13 +72,14 @@ private fun decodeUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder()
     .onUnmappableCharacter(CodingErrorAction.REPORT)
     .decode(ByteBuffer.wrap(bytes)).toString()
 
-/** Ciphertext-only storage. All instances share a lock, including JNI reads. */
+/** Ciphertext-only storage. Main and :agent share an OS lock, including JNI reads. */
 internal class AndroidSecretVault(
     context: Context,
     internal val namespace: String = DEFAULT_NAMESPACE,
     private val beforeCommit: (() -> Unit)? = null,
 ) {
     internal val directory = File(File(context.noBackupFilesDir, "lishi-secret-store-v1"), namespace)
+    private val lockFile = File(directory.parentFile, "$namespace.lock")
 
     init {
         require(namespace.matches(Regex("[A-Za-z0-9_.-]{1,100}")))
@@ -101,6 +102,11 @@ internal class AndroidSecretVault(
 
     private fun ensureDirectory() {
         if (!directory.isDirectory && !directory.mkdirs()) failure("io_error")
+    }
+
+    private fun <T> locked(action: () -> T): T = synchronized(LOCK) {
+        try { SecretVaultFileLock.withLock(lockFile) { action() } }
+        catch (_: IOException) { failure("io_error") }
     }
 
     private fun keyStore(): KeyStore = try {
@@ -135,12 +141,12 @@ internal class AndroidSecretVault(
 
     private fun aad(slot: String): ByteArray = "$namespace\u0000$slot\u00001".toByteArray(Charsets.UTF_8)
 
-    fun exists(slot: String): Boolean = synchronized(LOCK) {
+    fun exists(slot: String): Boolean = locked {
         val file = recordFile(slot)
         file.exists() || File(file.path + ".bak").exists()
     }
 
-    fun save(slot: String, secret: String) = synchronized(LOCK) {
+    fun save(slot: String, secret: String) = locked {
         validateSlot(slot)
         val plaintext = encodeSecret(secret)
         var createdKey = false
@@ -219,11 +225,11 @@ internal class AndroidSecretVault(
         }
     }
 
-    fun load(slot: String): String? = synchronized(LOCK) {
+    fun load(slot: String): String? = locked {
         validateSlot(slot)
-        if (!hasAnyRecord(slot)) return@synchronized null
+        if (!hasAnyRecord(slot)) return@locked null
         val key = existingKey(keyStore(), slot) ?: failure("key_unavailable")
-        val recordBytes = readRecord(slot) ?: return@synchronized null
+        val recordBytes = readRecord(slot) ?: return@locked null
         try {
             val record = JSONObject(decodeUtf8(recordBytes))
             if (record.length() != 3 || record.opt("version") != 1) failure("corrupted")
@@ -263,7 +269,7 @@ internal class AndroidSecretVault(
         }
     }
 
-    fun delete(slot: String) = synchronized(LOCK) {
+    fun delete(slot: String) = locked {
         validateSlot(slot)
         val store = keyStore()
         val atomic = AtomicFile(recordFile(slot))

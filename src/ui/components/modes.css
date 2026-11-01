@@ -182,7 +182,7 @@
 .autoplay-dots i.done { background: var(--accent); }
 .autoplay-dots i.now { background: var(--accent); animation: autoplay-pulse 1.2s ease-in-out infinite; }
 @keyframes autoplay-pulse { 50% { opacity: 0.35; } }
-.autoplay-pick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.autoplay-pick { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .autoplay-pick button { min-height: 64px; display: grid; gap: 2px; place-content: center; font-family: var(--serif); }
 .autoplay-pick b { font-size: 22px; font-weight: 600; color: var(--accent); line-height: 1.1; }
 .autoplay-pick small { font-size: 13px; color: var(--muted); }

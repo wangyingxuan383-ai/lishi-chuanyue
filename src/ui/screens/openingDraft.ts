@@ -6,7 +6,7 @@ import { templateName, type Arrival, type OpeningTemplate } from "../../content/
 import { challengeName, type ChallengeCard } from "../../content/challenges";
 import type { NewWorld } from "../../engine/game";
 import type { FortuneMode } from "../../engine/fortune";
-import { DEFAULT_SETTINGS, type Intensity, type Perspective, type WorldSettings } from "../../engine/types";
+import { DEFAULT_SETTINGS, type ExecutionMode, type Intensity, type Perspective, type WorldSettings } from "../../engine/types";
 import { validBinding, type SourceBinding } from "../../engine/sources/types";
 
 /**
@@ -20,6 +20,7 @@ export interface ChallengeDraft { goal: string; limit: string; failIf: string }
 export const MAX_BEATS = 12;
 
 export interface Draft {
+  executionMode: ExecutionMode;
   fanfic?: boolean;
   source?: SourceBinding | null;
   templateId: string | null;
@@ -55,6 +56,7 @@ export const EMPTY_SCRIPT: ScriptDraft = { line: "", beats: ["", "", ""], ending
 export const EMPTY_CHALLENGE: ChallengeDraft = { goal: "", limit: "", failIf: "" };
 
 export const EMPTY: Draft = {
+  executionMode: "classic",
   templateId: null, lockedGender: null, title: "", eraId: null, premise: "", name: "", gender: "男", age: "",
   identity: "", arrival: "魂穿", origin: "历史系研究生", openingMode: "ai", hint: "", openingText: "", organize: true,
   play: "plain", aiPilot: false, script: EMPTY_SCRIPT, challenge: EMPTY_CHALLENGE, challengeId: null, fortune: null,
@@ -122,12 +124,15 @@ export const filledBeats = (s: ScriptDraft) => s.beats.map((b) => b.trim()).filt
 export const draftPilot = (d: Pick<Draft, "play" | "aiPilot">) => (d.play === "watch" || ((d.play === "script" || d.play === "challenge") && d.aiPilot) ? "ai" as const : "player" as const);
 /** 运势 for the new world: the player's choice, else 有影响 for a challenge, else the play default. */
 export const draftFortune = (d: Pick<Draft, "play" | "fortune">, fallback: FortuneMode = DEFAULT_SETTINGS.fortune): FortuneMode => d.fortune ?? (d.play === "challenge" ? "on" : fallback);
+/** Retained only for reading old opening drafts. Ordinary play is always classic. */
+export const draftExecutionMode = (value: unknown): ExecutionMode => value === "agent" ? "agent" : "classic";
 
 export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints">>): NewWorld {
   const pilot = draftPilot(d);
   const fortune = d.fortune ?? (d.play === "challenge" ? "on" : null);
   const beats = filledBeats(d.script);
   return {
+    executionMode: "classic",
     title: d.title,
     source: d.source,
     eraId: d.settings.mode === "free" ? null : d.eraId,
@@ -153,6 +158,7 @@ export function fromSetup(setup: NewWorld): Draft {
   const gender = setup.protagonist.gender === "女" ? "女" : "男";
   return clean({
     ...EMPTY,
+    executionMode: setup.executionMode ?? "classic",
     source: setup.source,
     fanfic: setup.source?.fanfic,
     title: setup.title, eraId: setup.eraId, premise: s.premise ?? "",
@@ -189,7 +195,7 @@ export function shareText(d: Draft): string {
   const era = ERAS.find((e) => e.id === d.eraId)?.title ?? "按故事设定";
   const { templateId: _t, challengeId: _c, ...data } = d;
   return [
-    `【历史穿越 · 开局设定】${d.title || "未命名"}`,
+    `【穿越小说模拟 · 开局设定】${d.title || "未命名"}`,
     `${d.settings.mode === "free" ? "世界" : "时代"}：${d.settings.mode === "free" ? "自由世界" : era}`,
     playLine(d),
     d.premise && `故事设定：${cut(d.premise, 120)}`,
@@ -217,6 +223,7 @@ function clean(raw: Record<string, unknown>): Draft {
   const beats = Array.isArray(script.beats) ? script.beats.filter((b): b is string => typeof b === "string").slice(0, MAX_BEATS) : [];
   const challenge = (raw.challenge && typeof raw.challenge === "object" ? raw.challenge : {}) as Record<string, unknown>;
   return {
+    executionMode: draftExecutionMode(raw.executionMode),
     templateId: null,
     ...(raw.source !== undefined ? { source: validBinding(raw.source) ? raw.source : null } : {}),
     ...(raw.fanfic !== undefined ? { fanfic: raw.fanfic === true } : {}),

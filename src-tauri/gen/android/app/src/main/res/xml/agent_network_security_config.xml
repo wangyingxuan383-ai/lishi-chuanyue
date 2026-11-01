@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The reading tool explicitly supports HTTP pages. The verifier library's
+         CRL-only cleartext policy otherwise overrides usesCleartextTraffic.
+         Default system TLS trust remains unchanged; the browser rejects SSL errors. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

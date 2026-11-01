@@ -209,6 +209,9 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 :root[data-motion="off"] .play::before { display: none; }
 @media (prefers-reduced-motion: reduce) { .play::before { display: none; } }
 .play-layout { height: 100%; }
+.preserved-play { height: 100%; }
+/* Keep the reading viewport measurable while its independent assistant is shown. */
+.preserved-play[data-inactive="true"] { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
 /* Wide windows (R10-T001): story on the left, the character panel always open on the right. */
 .play-layout.wide { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 .play-layout.wide > .play { min-width: 0; min-height: 0; }
@@ -630,3 +633,8 @@ button.danger-text { color: var(--loss); }
 .my-template { position: relative; display: grid; }
 .my-template .template-card { padding-right: 36px; }
 .my-template-menu { position: absolute; top: 0; right: 0; min-height: var(--tap); min-width: 36px; border: none; background: transparent; color: var(--muted); }
+
+/* A quiet update reminder, using the existing cinnabar/theme colour. */
+.update-dot { display: inline-block; width: 7px; height: 7px; margin-left: 8px; border-radius: 50%; background: var(--loss); vertical-align: 2px; }
+.update-mark { position: relative; }
+.update-mark > .update-dot { position: absolute; top: 7px; right: 7px; margin: 0; }

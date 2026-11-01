@@ -12,6 +12,7 @@ import Home from "./screens/Home";
 import Setup, { sweepDraftKey } from "./screens/Setup";
 import NewGame from "./screens/NewGame";
 import Play from "./screens/Play";
+import AgentConversation from "./screens/AgentConversation";
 import Settings from "./screens/Settings";
 import Guide from "./screens/Guide";
 
@@ -221,18 +222,23 @@ export default function App() {
     return (
       <div className="boot" role="status" aria-label="正在打开">
         <Seal />
-        <p className="boot-name">历史穿越</p>
+        <p className="boot-name">穿越小说模拟</p>
         <p className="muted">正在打开…</p>
       </div>
     );
   }
   const route = value.route;
+  // Keep the player's ordinary draft, loaded passages and viewport alive
+  // while the separate assistant page is open.
+  const assistantRoute = [...stack].reverse().find((item) => item.name === "agent");
+  const storyId = route.name === "play" ? route.worldId : assistantRoute?.name === "agent" ? assistantRoute.worldId : null;
   return (
     <AppProvider value={value}>
       {route.name === "home" && <Home key={homeKey} />}
       {route.name === "setup" && <Setup first={route.first} profileId={route.profileId} />}
       {route.name === "newgame" && <NewGame />}
-      {route.name === "play" && <Play key={route.worldId} worldId={route.worldId} />}
+      {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} /></div>}
+      {route.name === "agent" && <AgentConversation key={`${route.worldId}:${route.lineId}`} route={route} />}
       {route.name === "settings" && <Settings />}
       {route.name === "guide" && <Guide />}
       {toastState && (

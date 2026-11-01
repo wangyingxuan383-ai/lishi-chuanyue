@@ -1,0 +1,6950 @@
+[
+  {
+    "name": "action default",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {},
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "missing record",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": null,
+    "options": {
+      "mode": "continue",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 30
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 2 刻",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [
+        "本回合没有记录"
+      ],
+      "minutes": 30
+    }
+  },
+  {
+    "name": "invalid duration",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "time": "太阳下山"
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [
+        "时间“太阳下山”无法识别，按 15 分钟计"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "short skip stops",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "time": "十几息",
+      "hour": 7
+    },
+    "options": {
+      "mode": "skip",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "asked": 43200
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 1
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "快进停在这里：有事要你拿主意",
+          "tone": "warn"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 1
+    }
+  },
+  {
+    "name": "skip aligns final hour",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "time": "两天",
+      "hour": 6
+    },
+    "options": {
+      "mode": "skip",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "asked": 2880
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 2760
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 23,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 2 天",
+          "tone": "info"
+        },
+        {
+          "text": "过年了，23 岁",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 2760
+    }
+  },
+  {
+    "name": "dated age and timeline",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": [],
+      "timeline": [
+        {
+          "id": "event1",
+          "date": "天宝八载正月",
+          "atMinute": 960,
+          "title": "改元",
+          "kind": "可变"
+        }
+      ]
+    },
+    "record": {
+      "time": "一天"
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 1440
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 23,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "timeline": [
+          {
+            "id": "event1",
+            "date": "天宝八载正月",
+            "atMinute": 960,
+            "title": "改元",
+            "kind": "可变"
+          }
+        ]
+      },
+      "chips": [
+        {
+          "text": "过了 1 天",
+          "tone": "info"
+        },
+        {
+          "text": "📜 按史书，此时应有：改元",
+          "tone": "info"
+        },
+        {
+          "text": "过年了，23 岁",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 1440
+    }
+  },
+  {
+    "name": "free world keeps history untouched",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748",
+        "mode": "free",
+        "calendar": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "deviations": []
+    },
+    "record": {
+      "time": "一年",
+      "deviation": "改史",
+      "timeline": [
+        {
+          "op": "add",
+          "date": "天宝九载",
+          "title": "不进入"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 525600
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 23,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748",
+          "mode": "free",
+          "calendar": {
+            "lunar": true,
+            "eras": [
+              {
+                "name": "天宝",
+                "startCe": 742,
+                "yearWord": "载"
+              },
+              {
+                "name": "至德",
+                "startCe": 756,
+                "startMonth": 7,
+                "yearWord": "载"
+              }
+            ]
+          }
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 年",
+          "tone": "info"
+        },
+        {
+          "text": "23 岁了",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 525600
+    }
+  },
+  {
+    "name": "history deviation dated",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "deviation": "天子亲征",
+      "time": "一天"
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 1440
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 23,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [
+          "天宝八载 正月初一：天子亲征"
+        ]
+      },
+      "chips": [
+        {
+          "text": "过了 1 天",
+          "tone": "info"
+        },
+        {
+          "text": "过年了，23 岁",
+          "tone": "info"
+        },
+        {
+          "text": "⚠ 历史偏离：天子亲征",
+          "tone": "warn"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 1440
+    }
+  },
+  {
+    "name": "timeline adds unknown and known",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "timeline": [
+        {
+          "op": "add",
+          "date": "至德元载七月",
+          "title": "新事",
+          "ceYear": 756
+        },
+        {
+          "op": "add",
+          "date": "某年",
+          "title": "未知"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "timeline": [
+          {
+            "id": "d8b3d2f037f642f7890c0dbf16793cdb",
+            "date": "至德元载 七月",
+            "atMinute": 3824160,
+            "title": "新事",
+            "kind": "可变",
+            "ceYear": 756,
+            "source": "玩家"
+          },
+          {
+            "id": "9954cf8dfdca4ad89668cee339665742",
+            "date": "某年",
+            "atMinute": null,
+            "title": "未知",
+            "kind": "可变",
+            "source": "玩家"
+          }
+        ]
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [
+        "大事“未知”的日期无法换算，只记录不提醒"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "fortune and place",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "place": "长安西市",
+      "risk": {
+        "what": "跃墙",
+        "result": "半成"
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "fortune": "顺"
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": "8d0fc3ab85c5479b940182c7bc7e0035",
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [
+          {
+            "id": "8d0fc3ab85c5479b940182c7bc7e0035",
+            "name": "长安西市",
+            "description": ""
+          }
+        ],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "签·顺 · 跃墙 · 成了一半",
+          "tone": "info"
+        },
+        {
+          "text": "到 长安西市",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "paid goods",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "money": -6,
+      "items": [
+        {
+          "name": "胡饼",
+          "delta": 2
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 294,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": [
+            {
+              "name": "胡饼",
+              "quantity": 2,
+              "unit": "",
+              "place": null,
+              "note": ""
+            }
+          ]
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "钱 −6 文",
+          "tone": "loss"
+        },
+        {
+          "text": "得 胡饼×2",
+          "tone": "gain"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "unpaid goods",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "money": -1000,
+      "items": [
+        {
+          "name": "胡饼",
+          "delta": 2
+        },
+        {
+          "name": "礼物",
+          "delta": 1
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "钱不够，这笔没付成，胡饼、礼物没到手",
+          "tone": "warn"
+        }
+      ],
+      "notes": [
+        "上回合主角只有 300 文，付不起 1 贯，这笔交易没有成交，记录里同时得到的胡饼、礼物也没有记上；请在叙述中自然交代，其中与这笔钱无关、确实到手的，本回合再记一次。"
+      ],
+      "log": [
+        "钱 -1000 超出余额 300，交易取消",
+        "钱不够，未获得 胡饼",
+        "钱不够，未获得 礼物"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "easy debt",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "money": -1000,
+      "items": [
+        {
+          "name": "胡饼",
+          "delta": 2
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "宽松",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 0,
+            "debt": 700,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": [
+            {
+              "name": "胡饼",
+              "quantity": 2,
+              "unit": "",
+              "place": null,
+              "note": ""
+            }
+          ]
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "钱不够，赊欠 700 文",
+          "tone": "warn"
+        },
+        {
+          "text": "得 胡饼×2",
+          "tone": "gain"
+        }
+      ],
+      "notes": [
+        "上回合钱不够，主角赊欠了 700 文，现在身上没有钱。"
+      ],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "duplicate currency",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "money": "三贯",
+      "items": [
+        {
+          "name": "开元通宝",
+          "delta": 3000
+        },
+        {
+          "name": "贯",
+          "delta": 3
+        },
+        {
+          "name": "通宝剑",
+          "delta": 1
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 3300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": [
+            {
+              "name": "通宝剑",
+              "quantity": 1,
+              "unit": "",
+              "place": null,
+              "note": ""
+            }
+          ]
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "钱 +3 贯",
+          "tone": "gain"
+        },
+        {
+          "text": "得 通宝剑",
+          "tone": "gain"
+        }
+      ],
+      "notes": [],
+      "log": [
+        "“开元通宝”的 3000 已记入钱数，不重复放进行囊",
+        "“贯”的 3 已记入钱数，不重复放进行囊"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "item subtraction and movement",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": [
+          {
+            "name": "旧书",
+            "quantity": 2,
+            "unit": "本",
+            "place": null,
+            "note": ""
+          },
+          {
+            "name": "布衣",
+            "quantity": 1,
+            "unit": "件",
+            "place": null,
+            "note": ""
+          }
+        ]
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "items": [
+        {
+          "name": "旧书",
+          "delta": -8
+        },
+        {
+          "name": "布衣",
+          "delta": 0,
+          "place": "家"
+        },
+        {
+          "name": "刀",
+          "delta": -1
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": [
+            {
+              "name": "布衣",
+              "quantity": 1,
+              "unit": "件",
+              "place": "家",
+              "note": ""
+            }
+          ]
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "失 旧书×2",
+          "tone": "loss"
+        }
+      ],
+      "notes": [
+        "主角身上并没有“刀”。"
+      ],
+      "log": [
+        "旧书 只有 2，按实际扣减",
+        "没有 刀，无法减少"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "stat cap and standard dying",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 10,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "stats": {
+        "health": -1000,
+        "energy": 41.5,
+        "fame": -8.5
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 1,
+            "energy": 100,
+            "fame": 2
+          },
+          "statuses": [
+            {
+              "name": "垂危",
+              "detail": "伤重濒死，再受重伤就会死",
+              "sinceMinute": 15
+            }
+          ],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "健康 ↓",
+          "tone": "loss"
+        },
+        {
+          "text": "精力 ↑",
+          "tone": "gain"
+        },
+        {
+          "text": "名望 ↓",
+          "tone": "loss"
+        },
+        {
+          "text": "垂危",
+          "tone": "warn"
+        }
+      ],
+      "notes": [
+        "主角伤重濒死、命悬一线：叙述里要写出来；在伤势好转之前再受重伤，就会死去。"
+      ],
+      "log": [
+        "健康变化 -1000 超出单回合上限，按 -40 计",
+        "精力变化 41.5 超出单回合上限，按 40 计",
+        "名望变化 -8.5 超出单回合上限，按 -8 计"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "dying hangs on",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 1,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [
+          {
+            "name": "垂危",
+            "detail": "伤",
+            "sinceMinute": 0
+          }
+        ],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "stats": {
+        "health": -100
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 1,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [
+            {
+              "name": "垂危",
+              "detail": "伤",
+              "sinceMinute": 0
+            }
+          ],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "伤上加伤",
+          "tone": "warn"
+        }
+      ],
+      "notes": [
+        "主角仍然垂危：再受重伤就会死去；真写到他死了，记录里写 died: true。"
+      ],
+      "log": [
+        "健康变化 -100 超出单回合上限，按 -40 计"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "dying written death",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 1,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [
+          {
+            "name": "垂危",
+            "detail": "伤",
+            "sinceMinute": 0
+          }
+        ],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "died": true
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 0,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [
+            {
+              "name": "垂危",
+              "detail": "伤",
+              "sinceMinute": 0
+            }
+          ],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "你死了",
+          "tone": "warn"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "easy ignores written death",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "died": true
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "宽松",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [
+            {
+              "name": "昏迷",
+              "detail": "伤重昏迷",
+              "sinceMinute": 15
+            }
+          ],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "昏迷",
+          "tone": "warn"
+        }
+      ],
+      "notes": [
+        "主角没有死，只是伤重昏了过去：下一段从他醒来写起。"
+      ],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "cruel death",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 10,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "stats": {
+        "health": -40
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "残酷",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 0,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "健康 ↓",
+          "tone": "loss"
+        },
+        {
+          "text": "你死了",
+          "tone": "warn"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "dying recovery",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 1,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [
+          {
+            "name": "垂危",
+            "detail": "伤",
+            "sinceMinute": 0
+          }
+        ],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "stats": {
+        "health": 40
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 41,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "健康 ↑",
+          "tone": "gain"
+        },
+        {
+          "text": "垂危 好了",
+          "tone": "gain"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "people aliases and origin",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [
+        {
+          "id": "p1",
+          "name": "货栈管事",
+          "aliases": [],
+          "role": "管事",
+          "attitude": "一般",
+          "alive": true,
+          "notes": "早年相救",
+          "lastSeenMinute": 0
+        },
+        {
+          "id": "p2",
+          "name": "孙管事",
+          "aliases": [],
+          "role": "管事",
+          "attitude": "一般",
+          "alive": true,
+          "notes": "",
+          "lastSeenMinute": 0
+        }
+      ],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "people": [
+        {
+          "name": "刘三郎",
+          "aliases": [
+            "货栈管事"
+          ],
+          "note": "暗中送粮",
+          "attitude": "友善"
+        },
+        {
+          "name": "孙掌柜",
+          "note": "相见"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [
+          {
+            "id": "p1",
+            "name": "刘三郎",
+            "aliases": [
+              "货栈管事"
+            ],
+            "role": "管事",
+            "attitude": "友善",
+            "alive": true,
+            "notes": "暗中送粮",
+            "lastSeenMinute": 15,
+            "origin": "早年相救"
+          },
+          {
+            "id": "p2",
+            "name": "孙管事",
+            "aliases": [],
+            "role": "管事",
+            "attitude": "一般",
+            "alive": true,
+            "notes": "",
+            "lastSeenMinute": 0
+          },
+          {
+            "id": "9a5d2f284b124bcf8d2fbf90d581937d",
+            "name": "孙掌柜",
+            "aliases": [],
+            "role": "",
+            "attitude": "一般",
+            "alive": true,
+            "notes": "相见",
+            "lastSeenMinute": 15
+          }
+        ],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "得知 货栈管事 名叫 刘三郎",
+          "tone": "info"
+        },
+        {
+          "text": "刘三郎：友善",
+          "tone": "gain"
+        },
+        {
+          "text": "结识 孙掌柜",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [
+        "新人物：孙掌柜"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "history dead cannot revive",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [
+        {
+          "id": "p1",
+          "name": "张三",
+          "aliases": [],
+          "role": "",
+          "attitude": "一般",
+          "alive": false,
+          "notes": "",
+          "lastSeenMinute": 0
+        }
+      ],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "people": [
+        {
+          "name": "张三",
+          "alive": true
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [
+          {
+            "id": "p1",
+            "name": "张三",
+            "aliases": [],
+            "role": "",
+            "attitude": "一般",
+            "alive": false,
+            "notes": "",
+            "lastSeenMinute": 15
+          }
+        ],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        }
+      ],
+      "notes": [
+        "张三 已经去世。"
+      ],
+      "log": [
+        "张三 已死亡，不能复活"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "status cap protects dying",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [
+          {
+            "name": "垂危",
+            "detail": "",
+            "sinceMinute": 0
+          },
+          {
+            "name": "旧状况1",
+            "detail": "",
+            "sinceMinute": 1
+          },
+          {
+            "name": "旧状况2",
+            "detail": "",
+            "sinceMinute": 2
+          },
+          {
+            "name": "旧状况3",
+            "detail": "",
+            "sinceMinute": 3
+          },
+          {
+            "name": "旧状况4",
+            "detail": "",
+            "sinceMinute": 4
+          },
+          {
+            "name": "旧状况5",
+            "detail": "",
+            "sinceMinute": 5
+          },
+          {
+            "name": "旧状况6",
+            "detail": "",
+            "sinceMinute": 6
+          },
+          {
+            "name": "旧状况7",
+            "detail": "",
+            "sinceMinute": 7
+          },
+          {
+            "name": "旧状况8",
+            "detail": "",
+            "sinceMinute": 8
+          },
+          {
+            "name": "旧状况9",
+            "detail": "",
+            "sinceMinute": 9
+          },
+          {
+            "name": "旧状况10",
+            "detail": "",
+            "sinceMinute": 10
+          },
+          {
+            "name": "旧状况11",
+            "detail": "",
+            "sinceMinute": 11
+          }
+        ],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "status": [
+        {
+          "op": "add",
+          "name": "淤伤",
+          "detail": "青紫"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [
+            {
+              "name": "旧状况1",
+              "detail": "",
+              "sinceMinute": 1
+            },
+            {
+              "name": "旧状况2",
+              "detail": "",
+              "sinceMinute": 2
+            },
+            {
+              "name": "旧状况3",
+              "detail": "",
+              "sinceMinute": 3
+            },
+            {
+              "name": "旧状况4",
+              "detail": "",
+              "sinceMinute": 4
+            },
+            {
+              "name": "旧状况5",
+              "detail": "",
+              "sinceMinute": 5
+            },
+            {
+              "name": "旧状况6",
+              "detail": "",
+              "sinceMinute": 6
+            },
+            {
+              "name": "旧状况7",
+              "detail": "",
+              "sinceMinute": 7
+            },
+            {
+              "name": "旧状况8",
+              "detail": "",
+              "sinceMinute": 8
+            },
+            {
+              "name": "旧状况9",
+              "detail": "",
+              "sinceMinute": 9
+            },
+            {
+              "name": "旧状况10",
+              "detail": "",
+              "sinceMinute": 10
+            },
+            {
+              "name": "旧状况11",
+              "detail": "",
+              "sinceMinute": 11
+            },
+            {
+              "name": "淤伤",
+              "detail": "青紫",
+              "sinceMinute": 15
+            }
+          ],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "垂危 好了",
+          "tone": "gain"
+        },
+        {
+          "text": "淤伤",
+          "tone": "warn"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "goals record steps",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [
+        {
+          "id": "g1",
+          "name": "还清三贯钱",
+          "kind": "支线",
+          "progress": "欠三贯",
+          "status": "进行中",
+          "steps": []
+        }
+      ],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "goals": [
+        {
+          "op": "done",
+          "name": "还清三贯钱的债",
+          "detail": "还清"
+        },
+        {
+          "op": "add",
+          "name": "安居",
+          "kind": "心愿",
+          "detail": "找屋"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [
+          {
+            "id": "g1",
+            "name": "还清三贯钱",
+            "kind": "支线",
+            "progress": "还清",
+            "status": "完成",
+            "steps": [
+              {
+                "minute": 15,
+                "text": "还清"
+              }
+            ],
+            "endedMinute": 15
+          },
+          {
+            "id": "a09584fe079a46bb9f897ae64e595e62",
+            "name": "安居",
+            "kind": "心愿",
+            "progress": "找屋",
+            "status": "进行中",
+            "startedMinute": 15,
+            "steps": [
+              {
+                "minute": 15,
+                "text": "找屋"
+              }
+            ]
+          }
+        ],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "完成：还清三贯钱",
+          "tone": "gain"
+        },
+        {
+          "text": "新心愿：安居",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "panel profile and items",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "profile": {
+        "name": "李平",
+        "age": 121,
+        "identity": "士子",
+        "panel": "保留\n原文"
+      },
+      "setStats": {
+        "money": 555,
+        "health": 110
+      },
+      "items": [
+        {
+          "name": "书",
+          "set": {
+            "name": "旧书",
+            "quantity": 2,
+            "unit": "卷",
+            "place": "家",
+            "note": "故物"
+          }
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李平",
+          "aliases": [
+            "李安"
+          ],
+          "age": 22,
+          "gender": "男",
+          "identity": "士子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 555,
+            "debt": 0,
+            "health": 100,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": [
+            {
+              "name": "旧书",
+              "quantity": 2,
+              "unit": "卷",
+              "place": "家",
+              "note": "故物"
+            }
+          ],
+          "panel": "保留\n原文"
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [],
+      "notes": [],
+      "log": [
+        "年龄 121 不在 1～120 之间，没有生效"
+      ],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "panel source and rename person",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [
+        {
+          "id": "p1",
+          "name": "张三",
+          "aliases": [],
+          "role": "旧友",
+          "attitude": "一般",
+          "alive": true,
+          "notes": "旧事",
+          "origin": "身世",
+          "lastSeenMinute": 0
+        }
+      ],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "sourceSet": {
+        "bookId": "book1",
+        "fanfic": true,
+        "plot": "canon",
+        "through": 2,
+        "position": 1,
+        "instructions": "核对原著",
+        "method": "search"
+      },
+      "people": [
+        {
+          "id": "p1",
+          "name": "张四",
+          "aliases": [
+            "张兄"
+          ],
+          "note": "近况",
+          "origin": "",
+          "attitude": "友善"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [
+          {
+            "id": "p1",
+            "name": "张四",
+            "aliases": [
+              "张兄",
+              "张三"
+            ],
+            "role": "旧友",
+            "attitude": "友善",
+            "alive": true,
+            "notes": "近况",
+            "lastSeenMinute": 0
+          }
+        ],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "source": {
+          "bookId": "book1",
+          "fanfic": true,
+          "plot": "canon",
+          "through": 2,
+          "position": 1,
+          "instructions": "核对原著",
+          "method": "search"
+        }
+      },
+      "chips": [],
+      "notes": [],
+      "log": [],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "rules currency and retime",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748",
+        "calendar": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "deviations": [],
+      "timeline": [
+        {
+          "id": "e1",
+          "date": "天宝十载三月",
+          "atMinute": 123,
+          "title": "史事",
+          "kind": "固定"
+        }
+      ]
+    },
+    "record": {
+      "rules": {
+        "currency": [
+          {
+            "name": "两",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "lunar": true,
+        "date": {
+          "era": "天宝",
+          "year": 9,
+          "month": 1,
+          "day": 1
+        }
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝九载 正月初一",
+          "elapsedMinutes": 0,
+          "date": {
+            "era": "天宝",
+            "year": 9,
+            "month": 1,
+            "day": 1,
+            "ceYear": 750,
+            "lunar": true
+          }
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748",
+          "calendar": {
+            "lunar": true,
+            "eras": [
+              {
+                "name": "天宝",
+                "startCe": 742,
+                "yearWord": "载"
+              },
+              {
+                "name": "至德",
+                "startCe": 756,
+                "startMonth": 7,
+                "yearWord": "载"
+              }
+            ]
+          },
+          "currency": {
+            "units": [
+              {
+                "name": "两",
+                "value": 1000
+              },
+              {
+                "name": "文",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "deviations": [],
+        "timeline": [
+          {
+            "id": "e1",
+            "date": "天宝十载三月",
+            "atMinute": 594240,
+            "title": "史事",
+            "kind": "固定"
+          }
+        ]
+      },
+      "chips": [],
+      "notes": [],
+      "log": [],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "invalid currency order",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "rules": {
+        "currency": [
+          {
+            "name": "文",
+            "value": 1
+          },
+          {
+            "name": "两",
+            "value": 1000
+          }
+        ]
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [],
+      "notes": [],
+      "log": [
+        "货币设置没有生效：单位要从大到小排列"
+      ],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "card edits",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [
+        {
+          "id": "c1",
+          "kind": "物品",
+          "name": "旧名",
+          "keys": [
+            "旧"
+          ],
+          "content": "旧内容"
+        },
+        {
+          "id": "c2",
+          "kind": "设定",
+          "name": "删去",
+          "keys": [],
+          "content": ""
+        }
+      ],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "cards": [
+        {
+          "op": "update",
+          "id": "c1",
+          "name": "新名",
+          "keys": [
+            "别称",
+            "新名"
+          ],
+          "content": " 新内容 "
+        },
+        {
+          "op": "remove",
+          "id": "c2"
+        },
+        {
+          "op": "add",
+          "kind": "势力",
+          "name": "帮会",
+          "keys": [
+            "帮",
+            "帮"
+          ],
+          "content": "势力"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [
+          {
+            "id": "c1",
+            "kind": "物品",
+            "name": "新名",
+            "keys": [
+              "别称",
+              "旧名"
+            ],
+            "content": "新内容"
+          },
+          {
+            "id": "79fbabb1094942049c4d6b5df5a3281b",
+            "kind": "势力",
+            "name": "帮会",
+            "keys": [
+              "帮"
+            ],
+            "content": "势力",
+            "source": "玩家"
+          }
+        ],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "dismissed": [
+          "删去"
+        ]
+      },
+      "chips": [],
+      "notes": [],
+      "log": [],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "place edits protect current",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": "home",
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [
+        {
+          "id": "home",
+          "name": "家",
+          "description": ""
+        },
+        {
+          "id": "other",
+          "name": "旧坊",
+          "description": ""
+        }
+      ],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "places": [
+        {
+          "op": "remove",
+          "id": "home"
+        },
+        {
+          "op": "update",
+          "id": "other",
+          "name": "新坊",
+          "aliases": [
+            "坊"
+          ],
+          "description": "新地"
+        },
+        {
+          "op": "add",
+          "name": "郊外"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": "home",
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [
+          {
+            "id": "home",
+            "name": "家",
+            "description": ""
+          },
+          {
+            "id": "other",
+            "name": "新坊",
+            "description": "新地",
+            "aliases": [
+              "坊",
+              "旧坊"
+            ]
+          },
+          {
+            "id": "e3f744f540e340068ebd0a25a4046f0f",
+            "name": "郊外",
+            "aliases": [],
+            "description": ""
+          }
+        ],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [],
+      "notes": [],
+      "log": [
+        "“家”是当前所在地，不能删除"
+      ],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "script and challenge advance",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": [],
+      "script": {
+        "line": "探案",
+        "beats": [
+          {
+            "id": "b1",
+            "text": "查访故人，寻找线索",
+            "status": "todo"
+          }
+        ],
+        "ending": "",
+        "steer": "gentle"
+      },
+      "challenge": {
+        "goal": "破案",
+        "limit": "一天",
+        "deadlineMinute": 1440,
+        "failIf": "",
+        "progress": "",
+        "status": "active",
+        "startedMinute": 0
+      }
+    },
+    "record": {
+      "beat": "done",
+      "challenge": {
+        "progress": "找到线索"
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "script": {
+          "line": "探案",
+          "beats": [
+            {
+              "id": "b1",
+              "text": "查访故人，寻找线索",
+              "status": "done",
+              "endedMinute": 15
+            }
+          ],
+          "ending": "",
+          "steer": "gentle"
+        },
+        "challenge": {
+          "goal": "破案",
+          "limit": "一天",
+          "deadlineMinute": 1440,
+          "failIf": "",
+          "progress": "找到线索",
+          "status": "active",
+          "startedMinute": 0,
+          "turns": 1
+        }
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        },
+        {
+          "text": "📜 第 1 幕演完：查访故人",
+          "tone": "info"
+        },
+        {
+          "text": "⚑ 挑战进展：找到线索",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "challenge win precedes deadline",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": [],
+      "challenge": {
+        "goal": "破案",
+        "limit": "一天",
+        "deadlineMinute": 1440,
+        "failIf": "",
+        "progress": "",
+        "status": "active",
+        "startedMinute": 0
+      }
+    },
+    "record": {
+      "time": 2000,
+      "challenge": {
+        "result": "won",
+        "why": "查明真相"
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 2000
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 23,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "challenge": {
+          "goal": "破案",
+          "limit": "一天",
+          "deadlineMinute": 1440,
+          "failIf": "",
+          "progress": "",
+          "status": "won",
+          "startedMinute": 0,
+          "turns": 1,
+          "endedMinute": 2000,
+          "outcome": "查明真相"
+        }
+      },
+      "chips": [
+        {
+          "text": "过了 1 天",
+          "tone": "info"
+        },
+        {
+          "text": "过年了，23 岁",
+          "tone": "info"
+        },
+        {
+          "text": "⚑ 挑战成功",
+          "tone": "gain"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 2000
+    }
+  },
+  {
+    "name": "challenge deadline program decides",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": [],
+      "challenge": {
+        "goal": "破案",
+        "limit": "一天",
+        "deadlineMinute": 1440,
+        "failIf": "",
+        "progress": "",
+        "status": "active",
+        "startedMinute": 0
+      }
+    },
+    "record": {
+      "time": 2000
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 2000
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 23,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "challenge": {
+          "goal": "破案",
+          "limit": "一天",
+          "deadlineMinute": 1440,
+          "failIf": "",
+          "progress": "",
+          "status": "lost",
+          "startedMinute": 0,
+          "turns": 1,
+          "endedMinute": 1440,
+          "outcome": "期限已到"
+        }
+      },
+      "chips": [
+        {
+          "text": "过了 1 天",
+          "tone": "info"
+        },
+        {
+          "text": "过年了，23 岁",
+          "tone": "info"
+        },
+        {
+          "text": "⚑ 挑战失败：期限已到",
+          "tone": "loss"
+        }
+      ],
+      "notes": [],
+      "log": [],
+      "minutes": 2000
+    }
+  },
+  {
+    "name": "mode editors validate",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "scriptSet": {
+        "line": "故事",
+        "beats": [
+          {
+            "id": "b1",
+            "text": "第一幕",
+            "status": "done"
+          }
+        ],
+        "ending": "归家",
+        "steer": "firm"
+      },
+      "challengeSet": {
+        "goal": "安顿",
+        "limit": "三天",
+        "deadlineMinute": 0,
+        "failIf": "破产",
+        "progress": "",
+        "status": "active",
+        "startedMinute": 0
+      }
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "script": {
+          "line": "故事",
+          "beats": [
+            {
+              "id": "b1",
+              "text": "第一幕",
+              "status": "done",
+              "endedMinute": 0
+            }
+          ],
+          "ending": "归家",
+          "steer": "firm"
+        },
+        "challenge": {
+          "goal": "安顿",
+          "limit": "三天",
+          "deadlineMinute": 4320,
+          "failIf": "破产",
+          "progress": "",
+          "status": "active",
+          "startedMinute": 0
+        }
+      },
+      "chips": [],
+      "notes": [],
+      "log": [],
+      "minutes": 0
+    }
+  },
+  {
+    "name": "panel fields model cannot replace",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "scriptSet": null,
+      "challengeSet": null,
+      "sourceSet": null,
+      "profile": {
+        "identity": "错误"
+      },
+      "items": [
+        {
+          "name": "书",
+          "set": {
+            "quantity": 9
+          }
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      }
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 15
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": []
+      },
+      "chips": [
+        {
+          "text": "过了 1 刻",
+          "tone": "info"
+        }
+      ],
+      "notes": [],
+      "log": [
+        "物品“书”的直接修改只能来自面板，已忽略",
+        "剧本只能在剧本页修改，记录里的修改已忽略",
+        "挑战只能在挑战页修改，记录里的修改已忽略"
+      ],
+      "minutes": 15
+    }
+  },
+  {
+    "name": "record 36",
+    "kind": "parse",
+    "input": "",
+    "expected": {
+      "record": null,
+      "issues": [
+        "没有记录块"
+      ]
+    }
+  },
+  {
+    "name": "record 37",
+    "kind": "parse",
+    "input": "<record>{time:'半个时辰',money:'二百文',items:[{name:'饼',delta:'+2个'}],choices:['1. 问路'],}</record>",
+    "expected": {
+      "record": {
+        "time": "半个时辰",
+        "money": "二百文",
+        "items": [
+          {
+            "name": "饼",
+            "delta": 2
+          }
+        ],
+        "people": [],
+        "status": [],
+        "goals": [],
+        "choices": [
+          "问路"
+        ]
+      },
+      "issues": []
+    }
+  },
+  {
+    "name": "record 38",
+    "kind": "parse",
+    "input": "{\"time\":15,\"items\":[{\"name\":\"纸\",\"delta\":1}],\"choices\":[\"说",
+    "expected": {
+      "record": {
+        "time": 15,
+        "items": [
+          {
+            "name": "纸",
+            "delta": 1
+          }
+        ],
+        "people": [],
+        "status": [],
+        "goals": [],
+        "choices": []
+      },
+      "issues": [
+        "缺少 choices"
+      ]
+    }
+  },
+  {
+    "name": "record 39",
+    "kind": "parse",
+    "input": "{time:15, choices:[\"继续\"],}",
+    "expected": {
+      "record": {
+        "time": 15,
+        "items": [],
+        "people": [],
+        "status": [],
+        "goals": [],
+        "choices": [
+          "继续"
+        ]
+      },
+      "issues": []
+    }
+  },
+  {
+    "name": "record 40",
+    "kind": "parse",
+    "input": "{“time”:30,“choices”:[“继续”]}",
+    "expected": {
+      "record": {
+        "time": 30,
+        "items": [],
+        "people": [],
+        "status": [],
+        "goals": [],
+        "choices": [
+          "继续"
+        ]
+      },
+      "issues": []
+    }
+  },
+  {
+    "name": "record 41",
+    "kind": "parse",
+    "input": "{\"time\":\"三日\",\"place\":3,\"stats\":{\"health\":\"4\",\"energy\":null,\"fame\":\"bad\"},\"items\":[\"纸+2\",{\"name\":\"钱\",\"change\":\"-3文\"},{\"name\":\"坏\",\"delta\":\"bad\"}],\"people\":[{\"name\":\"张三\",\"aliases\":[\"张兄\"],\"note\":\"好友\"},{}],\"status\":{\"name\":\"微伤\"},\"goals\":{\"name\":\"归家\"},\"hour\":null,\"date\":{\"era\":\"天宝\",\"year\":7,\"month\":1},\"died\":\"true\",\"currency\":[{\"name\":\"文\",\"value\":\"1\"}],\"log\":\"记事\",\"report\":{\"local\":\"无事\"},\"risk\":{\"what\":\"越墙\",\"result\":\"没成\"},\"beat\":\"DONE\",\"challenge\":{\"progress\":\"前进\",\"result\":\"WON\",\"why\":\"完成\"},\"choices\":[\"一、问路\",{\"text\":\"- 等待\"}]}",
+    "expected": {
+      "record": {
+        "time": "三日",
+        "place": "3",
+        "stats": {
+          "health": 4,
+          "energy": 0
+        },
+        "items": [
+          {
+            "name": "纸",
+            "delta": 2
+          },
+          {
+            "name": "钱",
+            "delta": -3
+          }
+        ],
+        "people": [
+          {
+            "name": "张三",
+            "note": "好友",
+            "aliases": [
+              "张兄"
+            ]
+          }
+        ],
+        "status": [
+          {
+            "op": "add",
+            "name": "微伤"
+          }
+        ],
+        "goals": [
+          {
+            "op": "progress",
+            "name": "归家"
+          }
+        ],
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 1
+        },
+        "hour": 0,
+        "died": true,
+        "currency": [
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "log": "记事",
+        "report": {
+          "local": "无事"
+        },
+        "risk": {
+          "what": "越墙",
+          "result": "败"
+        },
+        "beat": "done",
+        "challenge": {
+          "progress": "前进",
+          "result": "won",
+          "why": "完成"
+        },
+        "choices": [
+          "问路",
+          "等待"
+        ]
+      },
+      "issues": [
+        "物品无法理解：{\"name\":\"坏\",\"delta\":\"bad\"}",
+        "人物缺少名字：{}"
+      ]
+    }
+  },
+  {
+    "name": "duration 半个时辰",
+    "kind": "duration",
+    "input": "半个时辰",
+    "expected": 60
+  },
+  {
+    "name": "duration 二十余日",
+    "kind": "duration",
+    "input": "二十余日",
+    "expected": 28800
+  },
+  {
+    "name": "duration 数日",
+    "kind": "duration",
+    "input": "数日",
+    "expected": 4320
+  },
+  {
+    "name": "duration 十几息",
+    "kind": "duration",
+    "input": "十几息",
+    "expected": 1
+  },
+  {
+    "name": "duration 一阵子",
+    "kind": "duration",
+    "input": "一阵子",
+    "expected": 10
+  },
+  {
+    "name": "duration 日头",
+    "kind": "duration",
+    "input": "日头",
+    "expected": null
+  },
+  {
+    "name": "duration 月余",
+    "kind": "duration",
+    "input": "月余",
+    "expected": 43200
+  },
+  {
+    "name": "duration 二个半时辰",
+    "kind": "duration",
+    "input": "二个半时辰",
+    "expected": 300
+  },
+  {
+    "name": "duration 一盏茶",
+    "kind": "duration",
+    "input": "一盏茶",
+    "expected": 10
+  },
+  {
+    "name": "duration  90分钟",
+    "kind": "duration",
+    "input": " 90分钟",
+    "expected": 90
+  },
+  {
+    "name": "duration -1",
+    "kind": "duration",
+    "input": -1,
+    "expected": null
+  },
+  {
+    "name": "duration 2.5",
+    "kind": "duration",
+    "input": 2.5,
+    "expected": 3
+  },
+  {
+    "name": "date 天宝七载（戊子）冬月十七",
+    "kind": "date",
+    "input": "天宝七载（戊子）冬月十七",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "天宝",
+        "year": 7,
+        "month": 11,
+        "day": 17,
+        "ceYear": 748,
+        "lunar": true
+      },
+      "precision": "day"
+    }
+  },
+  {
+    "name": "date 大唐天宝十五载六月廿九",
+    "kind": "date",
+    "input": "大唐天宝十五载六月廿九",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "天宝",
+        "year": 15,
+        "month": 6,
+        "day": 29,
+        "ceYear": 756,
+        "lunar": true
+      },
+      "precision": "day"
+    }
+  },
+  {
+    "name": "date 中平元年秋",
+    "kind": "date",
+    "input": "中平元年秋",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "中平",
+        "year": 1,
+        "month": 7,
+        "day": 1,
+        "ceYear": null,
+        "lunar": true
+      },
+      "precision": "season"
+    }
+  },
+  {
+    "name": "date 宣和四年春二月初三",
+    "kind": "date",
+    "input": "宣和四年春二月初三",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "宣和",
+        "year": 4,
+        "month": 2,
+        "day": 3,
+        "ceYear": null,
+        "lunar": true
+      },
+      "precision": "day"
+    }
+  },
+  {
+    "name": "date 公元前44年3月14日",
+    "kind": "date",
+    "input": "公元前44年3月14日",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "公元前",
+        "year": 44,
+        "month": 3,
+        "day": 14,
+        "ceYear": -44,
+        "lunar": true
+      },
+      "precision": "day"
+    }
+  },
+  {
+    "name": "date 1665年4月",
+    "kind": "date",
+    "input": "1665年4月",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "公元",
+        "year": 1665,
+        "month": 4,
+        "day": 1,
+        "ceYear": 1665,
+        "lunar": true
+      },
+      "precision": "month"
+    }
+  },
+  {
+    "name": "date 秦王政二十六年正月",
+    "kind": "date",
+    "input": "秦王政二十六年正月",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "秦王政",
+        "year": 26,
+        "month": 1,
+        "day": 1,
+        "ceYear": null,
+        "lunar": true
+      },
+      "precision": "month"
+    }
+  },
+  {
+    "name": "date 崇祯元年闰腊月初十",
+    "kind": "date",
+    "input": "崇祯元年闰腊月初十",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": {
+      "date": {
+        "era": "崇祯",
+        "year": 1,
+        "month": 12,
+        "day": 10,
+        "ceYear": null,
+        "lunar": true
+      },
+      "precision": "day"
+    }
+  },
+  {
+    "name": "date 月余",
+    "kind": "date",
+    "input": "月余",
+    "rules": {
+      "lunar": true,
+      "eras": [
+        {
+          "name": "天宝",
+          "startCe": 742,
+          "yearWord": "载"
+        },
+        {
+          "name": "至德",
+          "startCe": 756,
+          "startMonth": 7,
+          "yearWord": "载"
+        }
+      ]
+    },
+    "expected": null
+  },
+  {
+    "name": "now 0",
+    "kind": "now",
+    "clock": {
+      "date": {
+        "era": "天宝",
+        "year": 7,
+        "month": 12,
+        "day": 29,
+        "ceYear": 748,
+        "lunar": true
+      },
+      "hour": 8,
+      "label": "",
+      "rules": {
+        "lunar": true,
+        "eras": [
+          {
+            "name": "天宝",
+            "startCe": 742,
+            "yearWord": "载"
+          },
+          {
+            "name": "至德",
+            "startCe": 756,
+            "startMonth": 7,
+            "yearWord": "载"
+          }
+        ]
+      }
+    },
+    "elapsed": 0,
+    "expected": {
+      "clockStyle": "era",
+      "day": 1,
+      "hour": 8,
+      "minute": 0,
+      "shichen": "辰",
+      "date": {
+        "era": "天宝",
+        "year": 7,
+        "month": 12,
+        "day": 29,
+        "ceYear": 748,
+        "lunar": true
+      },
+      "newYears": 0,
+      "text": "天宝七载 腊月廿九 · 辰时"
+    }
+  },
+  {
+    "name": "now 960",
+    "kind": "now",
+    "clock": {
+      "date": {
+        "era": "天宝",
+        "year": 7,
+        "month": 12,
+        "day": 29,
+        "ceYear": 748,
+        "lunar": true
+      },
+      "hour": 8,
+      "label": "",
+      "rules": {
+        "lunar": true,
+        "eras": [
+          {
+            "name": "天宝",
+            "startCe": 742,
+            "yearWord": "载"
+          },
+          {
+            "name": "至德",
+            "startCe": 756,
+            "startMonth": 7,
+            "yearWord": "载"
+          }
+        ]
+      }
+    },
+    "elapsed": 960,
+    "expected": {
+      "clockStyle": "era",
+      "day": 2,
+      "hour": 0,
+      "minute": 0,
+      "shichen": "子",
+      "date": {
+        "era": "天宝",
+        "year": 8,
+        "month": 1,
+        "day": 1,
+        "ceYear": 749,
+        "lunar": true
+      },
+      "newYears": 1,
+      "text": "天宝八载 正月初一 · 子时"
+    }
+  },
+  {
+    "name": "now 2000",
+    "kind": "now",
+    "clock": {
+      "date": {
+        "era": "天宝",
+        "year": 7,
+        "month": 12,
+        "day": 29,
+        "ceYear": 748,
+        "lunar": true
+      },
+      "hour": 8,
+      "label": "",
+      "rules": {
+        "lunar": true,
+        "eras": [
+          {
+            "name": "天宝",
+            "startCe": 742,
+            "yearWord": "载"
+          },
+          {
+            "name": "至德",
+            "startCe": 756,
+            "startMonth": 7,
+            "yearWord": "载"
+          }
+        ]
+      }
+    },
+    "elapsed": 2000,
+    "expected": {
+      "clockStyle": "era",
+      "day": 2,
+      "hour": 17,
+      "minute": 20,
+      "shichen": "酉",
+      "date": {
+        "era": "天宝",
+        "year": 8,
+        "month": 1,
+        "day": 1,
+        "ceYear": 749,
+        "lunar": true
+      },
+      "newYears": 1,
+      "text": "天宝八载 正月初一 · 酉时"
+    }
+  },
+  {
+    "name": "now 525600",
+    "kind": "now",
+    "clock": {
+      "date": {
+        "era": "天宝",
+        "year": 7,
+        "month": 12,
+        "day": 29,
+        "ceYear": 748,
+        "lunar": true
+      },
+      "hour": 8,
+      "label": "",
+      "rules": {
+        "lunar": true,
+        "eras": [
+          {
+            "name": "天宝",
+            "startCe": 742,
+            "yearWord": "载"
+          },
+          {
+            "name": "至德",
+            "startCe": 756,
+            "startMonth": 7,
+            "yearWord": "载"
+          }
+        ]
+      }
+    },
+    "elapsed": 525600,
+    "expected": {
+      "clockStyle": "era",
+      "day": 366,
+      "hour": 8,
+      "minute": 0,
+      "shichen": "辰",
+      "date": {
+        "era": "天宝",
+        "year": 9,
+        "month": 1,
+        "day": 11,
+        "ceYear": 750,
+        "lunar": true
+      },
+      "newYears": 2,
+      "text": "天宝九载 正月十一 · 辰时"
+    }
+  },
+  {
+    "name": "money 三贯二百文",
+    "kind": "money",
+    "input": "三贯二百文",
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": 3200
+  },
+  {
+    "name": "money 一贯半",
+    "kind": "money",
+    "input": "一贯半",
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": 1500
+  },
+  {
+    "name": "money −二百文",
+    "kind": "money",
+    "input": "−二百文",
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": -200
+  },
+  {
+    "name": "money ＋2,300文",
+    "kind": "money",
+    "input": "＋2,300文",
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": 2300
+  },
+  {
+    "name": "money 3.5",
+    "kind": "money",
+    "input": 3.5,
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": 4
+  },
+  {
+    "name": "money -1.5",
+    "kind": "money",
+    "input": -1.5,
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": -1
+  },
+  {
+    "name": "money 若干",
+    "kind": "money",
+    "input": "若干",
+    "currency": {
+      "units": [
+        {
+          "name": "贯",
+          "value": 1000
+        },
+        {
+          "name": "文",
+          "value": 1
+        }
+      ],
+      "aliases": {
+        "缗": "贯",
+        "钱": "文",
+        "枚": "文",
+        "个": "文"
+      }
+    },
+    "expected": null
+  }
+]

@@ -8,6 +8,7 @@ import path from "node:path";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { chromium } from "playwright-core";
+import { tsImport } from "tsx/esm/api";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const out = path.join(root, "output/playwright/app-update");
@@ -20,6 +21,12 @@ const checks = [];
 const errors = [];
 const outside = [];
 let variant = "digest";
+const isolated = fs.mkdtempSync(path.join(root, ".cache/update-ui-"));
+process.env.LISHI_DEV_DATABASE_DIR = isolated;
+process.env.LISHI_DEV_SECRETS_FILE = path.join(isolated, "fake-secrets.json");
+fs.writeFileSync(process.env.LISHI_DEV_SECRETS_FILE, "{}");
+const { HostBridge, hostRequest } = await tsImport("../../devserver/host.ts", import.meta.url);
+const host = new HostBridge(root);
 
 const notes = [
   "一个装在手机里的 AI 历史穿越互动小说。",
@@ -42,7 +49,9 @@ function releases() {
 const fake = {
   name: "update-local-fake",
   configureServer(server) {
+    server.httpServer?.once("close", () => host.close());
     server.middlewares.use("/__dev", async (req, res) => {
+      if (req.url.startsWith("/host/")) return hostRequest(host, req.url.slice(6).split("?")[0], req, res);
       for await (const _ of req) { /* drain */ }
       res.setHeader("Content-Type", "application/json");
       if (req.url.startsWith("/secret/has")) return res.end(JSON.stringify({ configured: false, boundBaseUrl: null }));
@@ -77,8 +86,12 @@ const oneLine = async (name) => {
   check(`${name}: panel lines fit one line (${wrapped.join(" / ")})`, wrapped.length === 0);
 };
 const sim = (options) => page.evaluate((o) => localStorage.setItem("lishi.devUpdateSim", o), options);
-// The harness saves its database to IndexedDB a second after the last change.
-const persisted = () => page.waitForTimeout(1600);
+const persisted = () => page.evaluate(() => window.__lishiFlush());
+const openUpdate = async () => {
+  await page.getByRole("button", { name: /^设置/ }).click();
+  await page.getByRole("button", { name: /关于与更新/ }).click();
+  await page.getByRole("button", { name: "去更新" }).click();
+};
 
 try {
   browser = await chromium.launch({ channel: "msedge" });
@@ -100,17 +113,17 @@ try {
   await page.evaluate(async (current) => {
     const { game } = window.__lishi;
     await game.repo.setSetting("welcomed", true);
-    // Only the update banner on Home, not the "这一版新增" notice.
+    // Keep the independent "这一版新增" notice out of this update check.
     await game.repo.setSetting("whatsNewSeen", current);
   }, version);
   await persisted();
 
-  // 1. The Home banner opens the sheet.
+  // 1. The Home settings dot leads to the existing update sheet.
   await page.reload({ waitUntil: "domcontentloaded" });
-  await page.getByText(`有新版本 ${next}`).waitFor({ timeout: 20000 });
-  await shot("01-home-banner");
+  await page.getByRole("button", { name: "设置，有新版本", exact: true }).waitFor({ timeout: 20000 });
+  await shot("01-home-dot");
   await noSideScroll("home");
-  await page.getByRole("button", { name: "去更新" }).click();
+  await openUpdate();
   await sheet().waitFor();
   check("sheet title names the version", await sheet().getByRole("heading", { name: `新版本 ${next}` }).isVisible());
   const meta = await sheet().locator(".update-meta").innerText();
@@ -172,6 +185,8 @@ try {
   }
   await theme("night");
   await sheet().getByRole("button", { name: "关闭" }).click();
+  await page.getByRole("button", { name: "返回" }).click();
+  await page.getByRole("button", { name: "返回" }).click();
   await page.waitForTimeout(300);
   await shot("10-home-night");
   await theme("paper");
@@ -234,6 +249,7 @@ try {
 } finally {
   await browser?.close();
   await server.close();
+  host.close();
   const failed = checks.filter((c) => !c.ok);
   fs.writeFileSync(path.join(out, "checks.json"), JSON.stringify({ checks, errors, outside }, null, 2));
   console.log(`${checks.length - failed.length}/${checks.length} checks passed`);

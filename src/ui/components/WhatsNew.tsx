@@ -8,9 +8,14 @@ import { Sheet } from "./Sheet";
 
 /** What this version adds, in the player's words: a name and one line each. Update with the version. */
 const NOTES: [string, string][] = [
-  ["长故事阅读位置", "修复生成完成时移除顶部旧回合导致的跳转，推荐选项保持原样。"],
+  ["穿越小说模拟", "应用更名，已有故事、阅读设置和更新方式继续保留。"],
+  ["连播与原著纠错", "连播可选1、3、5、10段；修复长故事装配超限。按原著纠错可在原弹窗预览选中段落，采用时保留范围外正文。"],
+  ["Agent 助手", "从输入菜单按需打开，核对资料、调整故事；支持补充要求、停止、继续和快捷换模型。"],
+  ["资料与工具", "查阅授权文件和动态网页，使用技能、受支持的 JavaScript 工具包及已配置的 MCP。当前模型联网无需重复填写配置。"],
+  ["对话更易读", "上下文用量动态显示，长输入与历史答复可折叠；过程区分失败、草稿和已采用。"],
+  ["故事与阅读", "完善原著出处、时间调整、路线校验和继续执行；普通游玩保留原有流程与阅读位置。"],
 ];
-const SUMMARY = "修复长故事生成结束时的跳转";
+const SUMMARY = "连播修复、长篇原著与局部纠错";
 
 export function WhatsNewSheet({ onClose }: { onClose: () => void }) {
   return (

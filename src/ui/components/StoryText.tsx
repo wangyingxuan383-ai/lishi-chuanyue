@@ -15,15 +15,16 @@ function Streamed({ text }: { text: string }) {
   return <>{sentences(text).map((s, i) => <span key={i} className="sent">{s}</span>)}</>;
 }
 
-export function StoryText({ text, streaming = false }: { text: string; streaming?: boolean }) {
+export function StoryText({ text, streaming = false, emphasizeDate = true }: { text: string; streaming?: boolean; emphasizeDate?: boolean }) {
   const paragraphs = text.split(/\n+/).filter((p) => p.trim());
   if (streaming && paragraphs.length === 0) paragraphs.push("");
   return (
     <div className={`story-text${streaming ? " streaming" : ""}`}>
       {paragraphs.map((p, i) => {
+        const dateLine = emphasizeDate && DATE_LINE(p);
         const last = streaming && i === paragraphs.length - 1 ? "cursor-blink" : undefined;
-        const body = streaming ? <Streamed text={DATE_LINE(p) ? p.trim() : p} /> : DATE_LINE(p) ? p.trim() : p;
-        return DATE_LINE(p)
+        const body = streaming ? <Streamed text={dateLine ? p.trim() : p} /> : dateLine ? p.trim() : p;
+        return dateLine
           ? <p key={i} className={["date-line", last].filter(Boolean).join(" ")}>{body}</p>
           : <p key={i} className={last}>{body}</p>;
       })}

@@ -1,151 +1,29 @@
-// Schema migrations, applied in order. Each entry is plain SQL run inside one
-// sql.batch transaction together with the version bump. Never edit a shipped
-// migration; append a new one. The same SQL runs on sql.js and native SQLite.
+import schema9 from "../../../crates/story-core/src/migrations/009.sql?raw";
+import schema11 from "../../../crates/story-core/src/migrations/011.sql?raw";
+import schema10 from "../../../crates/story-core/src/migrations/010.sql?raw";
+// The native host and browser apply these same versioned SQL sources.
+// Shipped migrations remain unchanged; append a new version.
+
+import schema1 from "../../../crates/story-core/src/migrations/001.sql?raw";
+import schema2 from "../../../crates/story-core/src/migrations/002.sql?raw";
+import schema3 from "../../../crates/story-core/src/migrations/003.sql?raw";
+import schema4 from "../../../crates/story-core/src/migrations/004.sql?raw";
+import schema6 from "../../../crates/story-core/src/migrations/006.sql?raw";
+import schema5 from "../../../crates/story-core/src/schema.sql?raw";
+import schema7 from "../../../crates/story-core/src/agent_schema.sql?raw";
+import schema8 from "../../../crates/story-core/src/pi_schema.sql?raw";
+import executionLeaseSchema from "../../../crates/story-core/src/execution_lease_schema.sql?raw";
 
 export const MIGRATIONS: { version: number; sql: string }[] = [
-  {
-    version: 1,
-    sql: `
-CREATE TABLE worlds (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  era_id TEXT NOT NULL,
-  current_line_id TEXT,
-  settings_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  played_at TEXT NOT NULL,
-  archived INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE nodes (
-  id TEXT PRIMARY KEY,
-  world_id TEXT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-  parent_id TEXT REFERENCES nodes(id),
-  last_child_id TEXT,
-  seq INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  action_mode TEXT,
-  action_text TEXT,
-  director_note TEXT,
-  narrative TEXT NOT NULL DEFAULT '',
-  record_json TEXT,
-  choices_json TEXT NOT NULL DEFAULT '[]',
-  status TEXT NOT NULL DEFAULT 'ok',
-  rewritten INTEGER NOT NULL DEFAULT 0,
-  fate TEXT,
-  meta_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL
-);
-CREATE INDEX nodes_parent ON nodes(parent_id);
-CREATE INDEX nodes_world ON nodes(world_id, seq);
-
-CREATE TABLE states (
-  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  state_json TEXT NOT NULL
-);
-
-CREATE TABLE lines (
-  id TEXT PRIMARY KEY,
-  world_id TEXT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  node_id TEXT NOT NULL REFERENCES nodes(id),
-  kind TEXT NOT NULL DEFAULT 'line',
-  auto_named INTEGER NOT NULL DEFAULT 0,
-  archived INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX lines_world ON lines(world_id);
-
-CREATE TABLE pins (
-  id TEXT PRIMARY KEY,
-  world_id TEXT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-  origin_node_id TEXT REFERENCES nodes(id),
-  text TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE chapters (
-  id TEXT PRIMARY KEY,
-  world_id TEXT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
-  first_node_id TEXT NOT NULL,
-  last_node_id TEXT NOT NULL,
-  summary TEXT NOT NULL,
-  model TEXT,
-  prompt_version TEXT,
-  edited INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE templates (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  name TEXT NOT NULL,
-  json TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE usage (
-  id TEXT PRIMARY KEY,
-  world_id TEXT,
-  node_id TEXT,
-  purpose TEXT NOT NULL,
-  profile_id TEXT,
-  model TEXT,
-  prompt_tokens INTEGER,
-  completion_tokens INTEGER,
-  estimated INTEGER NOT NULL DEFAULT 0,
-  first_token_ms INTEGER,
-  total_ms INTEGER,
-  outcome TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE INDEX usage_at ON usage(at);
-
-CREATE TABLE profiles (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  base_url TEXT NOT NULL,
-  main_model TEXT NOT NULL,
-  aux_model TEXT,
-  params_json TEXT NOT NULL DEFAULT '{}',
-  key_slot TEXT NOT NULL,
-  capabilities_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`,
-  },
-  {
-    // R04-T003: chapter titles and one-line gists.
-    version: 2,
-    sql: `
-ALTER TABLE chapters ADD COLUMN title TEXT NOT NULL DEFAULT '';
-ALTER TABLE chapters ADD COLUMN gist TEXT NOT NULL DEFAULT '';
-CREATE INDEX IF NOT EXISTS chapters_world ON chapters(world_id);
-`,
-  },
-  {
-    // R06-T001: deleted world lines wait in the trash for 30 days.
-    version: 3,
-    sql: `
-ALTER TABLE lines ADD COLUMN deleted_at TEXT;
-`,
-  },
-  {
-    version: 4,
-    sql: `
-CREATE TABLE source_books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,created_at TEXT NOT NULL,json TEXT NOT NULL);
-CREATE TABLE source_chunks(book_id TEXT NOT NULL REFERENCES source_books(id) ON DELETE CASCADE,ordinal INTEGER NOT NULL,section INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(book_id,ordinal));
-CREATE TABLE source_sections(book_id TEXT NOT NULL REFERENCES source_books(id) ON DELETE CASCADE,section INTEGER NOT NULL,title TEXT NOT NULL,page INTEGER,PRIMARY KEY(book_id,section));
-CREATE TABLE source_terms(book_id TEXT NOT NULL REFERENCES source_books(id) ON DELETE CASCADE,term TEXT NOT NULL,postings TEXT NOT NULL,PRIMARY KEY(book_id,term));
-CREATE TABLE source_jobs(id TEXT PRIMARY KEY,book_id TEXT NOT NULL REFERENCES source_books(id) ON DELETE CASCADE,json TEXT NOT NULL,created_at TEXT NOT NULL);
-CREATE TABLE source_analysis(job_id TEXT NOT NULL REFERENCES source_jobs(id) ON DELETE CASCADE,book_id TEXT NOT NULL REFERENCES source_books(id) ON DELETE CASCADE,ordinal INTEGER NOT NULL,section INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(job_id,ordinal));
-`,
-  },
+  { version: 1, sql: schema1 },
+  { version: 2, sql: schema2 },
+  { version: 3, sql: schema3 },
+  { version: 4, sql: schema4 },
+  { version: 5, sql: schema5 },
+  { version: 6, sql: schema6 },
+  { version: 7, sql: schema7 },
+  { version: 8, sql: executionLeaseSchema + "\n" + schema8 },
+  { version: 9, sql: schema9 },
+  { version: 10, sql: schema10 },
+  { version: 11, sql: schema11 },
 ];

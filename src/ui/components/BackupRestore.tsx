@@ -50,7 +50,7 @@ export function BackupRestore({ refresh = "" }: { refresh?: string | number }) {
       await game.settled();
       await platform.sql.restore(b.name);
       toast("已恢复，正在重新打开");
-      setTimeout(() => location.reload(), 600);
+      location.reload();
     } catch (error) {
       setBusy(false);
       const code = (error as { code?: string }).code;

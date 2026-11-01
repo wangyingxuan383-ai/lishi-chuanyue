@@ -19,6 +19,25 @@ pub struct BookFile {
     data: String,
 }
 static BOOK_IMPORTS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+#[tauri::command]
+pub async fn file_grant_agent(app:AppHandle,store:tauri::State<'_,Arc<crate::sql::SqlStore>>,directory:bool,writable:bool)->Result<Option<serde_json::Value>> {
+    let issued=store.generation();let owner=Arc::clone(store.inner());
+    let store=store.shared();
+    #[cfg(target_os="android")]
+    let selected=crate::document_picker::pick_agent_grant(&app,directory,writable).await.map_err(|_|PlatformError::new("file_grant_unavailable","未能取得资料授权，请重新选择文件或目录"))?;
+    #[cfg(not(target_os="android"))]
+    let selected={let handle=app.clone();blocking(move||{
+        let picked=if directory{handle.dialog().file().blocking_pick_folder()}else{handle.dialog().file().add_filter("资料",&["txt","md","json","epub","pdf","docx"]).blocking_pick_file()};
+        Ok(picked.map(|file|{let name=match &file{FilePath::Path(path)=>path.file_name().and_then(|s|s.to_str()).unwrap_or("资料").to_owned(),_=>"资料".into()};(file,name,writable)}))
+    }).await?};
+    let Some((file,name,actual_writable))=selected else{return Ok(None);};
+    let scope=match file{FilePath::Path(path)=>serde_json::json!({"path":path,"name":name,"directory":directory}),FilePath::Url(uri)=>serde_json::json!({"uri":uri.as_str(),"name":name,"directory":directory})};
+    blocking(move||{
+        if owner.generation()!=issued{return Err(PlatformError::new("file_grant_stale","选择资料期间存档已恢复，请重新选择"));}
+        story_core::pi_documents::register(&store,&scope,actual_writable).map(Some).map_err(|_|PlatformError::new("file_grant_failed","资料授权未保存，请重新选择"))
+    }).await
+}
 struct BookImport {
     id: String,
     cancelled: Arc<AtomicBool>,
@@ -185,6 +204,24 @@ pub async fn file_import_text(app: AppHandle) -> Result<Option<String>> {
         return Ok(None);
     };
     blocking(move || read_text(open_file(&app, selected, "r")?).map(Some)).await
+}
+
+#[tauri::command]
+pub async fn file_import_skill(app: AppHandle) -> Result<Option<BookFile>> {
+    #[cfg(target_os = "android")]
+    let selected = crate::document_picker::pick_import(&app).await.map_err(|_|io_error())?;
+    #[cfg(not(target_os = "android"))]
+    let selected = {
+        let handle=app.clone();
+        blocking(move ||Ok(handle.dialog().file().add_filter("技能与工具包",&["zip","md","json","toolpkg"]).blocking_pick_file())).await?
+    };
+    let Some(selected)=selected else{return Ok(None);};
+    blocking(move || {
+        let name=match &selected {FilePath::Path(path)=>path.file_name().and_then(|p|p.to_str()).unwrap_or("技能包").to_owned(),_=>"技能包".into()};
+        let mut bytes=Vec::new();open_file(&app,selected,"r")?.take(8*1024*1024+1).read_to_end(&mut bytes).map_err(|_|io_error())?;
+        if bytes.len()>8*1024*1024{return Err(PlatformError::new("file_too_large","技能包最多8MiB"));}
+        Ok(Some(BookFile{name,data:base64::engine::general_purpose::STANDARD.encode(bytes)}))
+    }).await
 }
 
 #[tauri::command]

@@ -119,7 +119,7 @@ export function AutoplaySheet({ onStart, onClose }: { onStart: (turns: number) =
     <Sheet title="连播几段？" onClose={onClose}>
       <div className="stack">
         <div className="autoplay-pick">
-          {[3, 5, 10].map((n) => (
+          {[1, 3, 5, 10].map((n) => (
             <button key={n} aria-label={`连播 ${n} 段`} onClick={() => onStart(n)}><b>{n}</b><small>段</small></button>
           ))}
         </div>

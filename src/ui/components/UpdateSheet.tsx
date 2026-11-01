@@ -5,6 +5,7 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react
 import { createPortal } from "react-dom";
 import { useApp } from "../app/context";
 import { androidPackage, openLink, plainNotes, type ReleaseInfo } from "../app/update";
+import { updateStore } from "../app/updateStore";
 import { installUpdate, pauseDownload, snapshot, startDownload, stepFor, subscribe, type FailReason } from "../app/updateFlow";
 import { Sheet } from "./Sheet";
 import "./update.css";
@@ -39,7 +40,8 @@ function Panel({ tone, children }: { tone?: "ok" | "bad"; children: ReactNode })
 }
 
 export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClose: () => void }) {
-  const { platform, toast } = useApp();
+  const { game, platform, toast } = useApp();
+  useEffect(() => { void updateStore(game.repo, platform).markRead(release.version).catch(() => {}); }, [game, platform, release.version]);
   const flow = useSyncExternalStore(subscribe, snapshot);
   const state = stepFor(flow, release.version);
   // Android installs by itself; the browser dev harness simulates that path.
@@ -143,9 +145,8 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
 }
 
 /**
- * Opens the update sheet: the Home banner and 设置 → 关于与更新 use it. The
- * sheet goes to <body>: an animated banner (.notice) would otherwise be the
- * containing block of its fixed layers and trap it inside the banner.
+ * Opens the update details from 设置 → 关于与更新. Keep its fixed layers in
+ * <body>, outside any screen animation's containing block.
  */
 export function UpdateButton({ release, label = "去更新" }: { release: ReleaseInfo; label?: string }) {
   const [open, setOpen] = useState(false);

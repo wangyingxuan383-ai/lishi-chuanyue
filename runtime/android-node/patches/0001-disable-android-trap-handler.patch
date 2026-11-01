@@ -1,0 +1,15 @@
+--- a/deps/v8/src/trap-handler/trap-handler.h
++++ b/deps/v8/src/trap-handler/trap-handler.h
+@@ -15,8 +15,11 @@
+ 
+ namespace v8::internal::trap_handler {
+ 
++// Android trap handlers are unsupported by the upstream Node Android port.
++#if V8_OS_ANDROID
++#define V8_TRAP_HANDLER_SUPPORTED false
+ // X64 on Linux, Windows, MacOS, FreeBSD.
+-#if V8_HOST_ARCH_X64 && V8_TARGET_ARCH_X64 &&                        \
++#elif V8_HOST_ARCH_X64 && V8_TARGET_ARCH_X64 &&                        \
+     ((V8_OS_LINUX && !V8_OS_ANDROID) || V8_OS_WIN || V8_OS_DARWIN || \
+      V8_OS_FREEBSD)
+ #define V8_TRAP_HANDLER_SUPPORTED true

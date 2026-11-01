@@ -3,6 +3,8 @@ import { eraContext } from "../era";
 import { sampleState } from "../testing/fixtures";
 import { DEFAULT_SETTINGS, type Chapter, type Person, type StoryNode } from "../types";
 import { assistMessages, buildTurnContext, continueMessages, extractMessages, openingExtractMessages, openingMessages, renderState, turnMessages, type OpeningInput, type TurnPromptInput } from "./turn";
+import { referenceEvidenceBlock } from "../sources/library";
+import { newBinding, type ReferenceContext } from "../sources/types";
 
 const person = (name: string, notes: string, lastSeenMinute: number, extra: Partial<Person> = {}): Person =>
   ({ id: name, name, aliases: [], role: "坊里的人", attitude: "一般", alive: true, notes, lastSeenMinute, ...extra });
@@ -147,13 +149,29 @@ describe("free mode prompt boundaries", () => {
     expect(promptText(turnMessages(input))).toContain("信件靠风帆送达。");
   });
 
-  it.each(["elapsed", "era"] as const)("uses elapsed days and HH:mm in free mode even with clockStyle=%s", (clockStyle) => {
+  it.each(["elapsed", "era"] as const)("ignores a stale historical clock when switching to free mode with clockStyle=%s", (clockStyle) => {
     const input = turnInput();
     input.era = { ...input.era, clock: { ...input.era.clock, hour: 23 } };
     input.state.time.elapsedMinutes = 90;
-    expect(renderState(input.state, input.era, undefined, { ...settings, clockStyle }).split("\n")[0]).toBe("【当前】第 2 天 00:30 · （未记录）");
+    expect(renderState(input.state, input.era, undefined, { ...settings, clockStyle }).split("\n")[0]).toBe("【当前】第 2 天 · 00:30 · （未记录）");
     expect(renderState(input.state, input.era)).toContain("天宝");
     expect(renderState(input.state, input.era, undefined, { clockStyle: "elapsed" })).not.toContain("天宝");
+  });
+
+  it("keeps an explicitly calibrated free-world era in ordinary writing and extraction", () => {
+    const input = turnInput({ settings });
+    input.state.era = { packId: null, mode: "free", clockStyle: "era", timeStyle: "shichen", calendar: { eras: [{ name: "青云历", startCe: 1 }], lunar: false } };
+    input.state.time.elapsedMinutes = 4054 * 1440;
+    input.state.time.anchor = { atElapsedMinutes: input.state.time.elapsedMinutes, minuteOfDay: 600, date: { era: "青云历", year: 306, month: 3, day: 9, ceYear: 306, lunar: false } };
+    input.era = eraContext(null, input.state);
+    const before = structuredClone(input);
+    for (const messages of [turnMessages(input), extractMessages({ ...input, action: input.text, narrative: "众人仍在书铺。" })]) {
+      const text = promptText(messages);
+      expect(text).toContain("青云历306年 3月9日");
+      expect(text).toContain("巳时");
+      expect(text).not.toMatch(/天宝|历史互动小说|【天下大事】|第 4055 天/);
+    }
+    expect(input).toEqual(before);
   });
 
   it("uses the free protocol for generated openings, authored openings and fallback extraction", () => {
@@ -275,5 +293,34 @@ describe("context budget", () => {
     for (const kept of ["【当前】", "王掌柜：坊里的人，对主角一般", "王掌柜其实是主角的舅舅", "漕帮答应三日后交货", "【叙事方针】节奏快一些", "去码头看看"]) expect(user).toContain(kept);
     expect(tight.messages[0].content).toContain("【写作要求】");
     expect(tight.messages[0].content).toContain("不要出现：");
+  });
+
+  it("reserves full source instructions and original evidence before long recent prose", () => {
+    const instructions = "保留本局已经救下的人。".repeat(300) + "最后一条：铜钥匙只有一把。";
+    const reference: ReferenceContext = { bookId: "book", title: "灯下书", binding: { ...newBinding("book", true), instructions }, passages: [
+      { section: 0, title: "第一章", chunk: 0, kind: "original", text: "原著证据：铜钥匙藏在灯座下。" + "雨".repeat(1400), start: 0, end: 1417 },
+    ] };
+    const input = turnInput({ reference, budgetChars: 12000, history: Array.from({ length: 3 }, (_, i) => ({ id: `long${i}`, kind: "turn", actionMode: "continue", actionText: "", narrative: "旧正文".repeat(1800) + `本段结尾${i}` } as StoryNode)) });
+    const context = buildTurnContext(input);
+    const text = promptText(context.messages);
+    expect(text).toContain(instructions);
+    expect(text).toContain("原著证据：铜钥匙藏在灯座下");
+    expect(text).toContain("本段结尾2");
+    expect(referenceEvidenceBlock(context.reference).length).toBeLessThanOrEqual(3000);
+    expect(context.chars).toBeLessThanOrEqual(input.budgetChars!);
+    expect(context.budgetExceeded).not.toBe(true);
+    expect(context.layers.find((l) => l.key === "history")!.note).toContain("先保留原著说明与证据");
+  });
+
+  it("reports a fixed-layer overflow without silently shortening a player's source instructions", () => {
+    const instructions = "完整的原著处理说明。".repeat(900);
+    const reference: ReferenceContext = { bookId: "book", title: "灯下书", binding: { ...newBinding("book", true), instructions }, passages: [
+      { section: 0, title: "第一章", chunk: 0, kind: "original", text: "铜钥匙藏在灯座下。" },
+    ] };
+    const context = buildTurnContext(turnInput({ reference, budgetChars: 3000 }));
+    expect(promptText(context.messages)).toContain(instructions);
+    expect(context.budgetExceeded).toBe(true);
+    expect(context.reference?.status).toBe("insufficient");
+    expect(context.layers.find((l) => l.key === "reference")!.note).toContain("不能视作已经查证");
   });
 });

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "nodeVersion": "24.19.0",
+  "repository": "https://github.com/earendil-works/pi",
+  "commit": "973b74c55fcf096ad5976f8d8850c147ee2e62d4",
+  "codingAgentVersion": "1.4.0",
+  "sourceDirectory": "earendil-works-pi-973b74c",
+  "archive": {
+    "url": "https://api.github.com/repos/earendil-works/pi/tarball/973b74c55fcf096ad5976f8d8850c147ee2e62d4",
+    "sha256": "96cecd364b3b51b6b7b22e75fb76544df51a467824426172c0cad7155c74defe"
+  },
+  "sourcePackageSha256": "f9c21f2fe252a5f988a19f6e4097bb058c411cb98e2eb60e39f85e88c54f05c9",
+  "sourceNpmLockSha256": "5acba9a5ff112c8dd4e62c5ac686199c3a0f99721b86302bb3bb0f35d640ecb1",
+  "modelCatalog": {
+    "url": "https://pi.dev/api/models/revisions/sha256-7fe1b41feaf43a7aad4bc832e6b306c7ced56e6d41bbc724b74e91eeacff6edf?types=chat,image,classifier",
+    "sha256": "7fe1b41feaf43a7aad4bc832e6b306c7ced56e6d41bbc724b74e91eeacff6edf"
+  },
+  "publishedPackage": {
+    "version": "1.4.0",
+    "sourceCommit": "4a080252f06caf63a525d7873c5d94d3c23887e0",
+    "usedAsRuntime": false,
+    "reason": "The published 1.4.0 package is a different commit; build all Pi workspace packages from the approved source instead."
+  }
+}

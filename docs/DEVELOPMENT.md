@@ -2,24 +2,26 @@
 
 写给想自己构建、修改或研究这个应用的人。只想玩的话，看 [README](../README.md) 就够了。
 
-日常开发主要在电脑的浏览器里进行（下面叫“浏览器开发台”）：界面和游戏逻辑与手机上的完全相同，存档放在浏览器里，AI 请求经本机的开发服务器转发，也可以接一个不花钱的本地模拟模型。要看真机效果时，再构建安卓或 Windows 版。
+日常开发主要在电脑的浏览器里进行（下面叫“浏览器开发台”）：使用手机同一套界面和 Rust 执行核心，存档保存在常驻本机宿主的 SQLite 中，也可以接一个不花钱的本地模拟模型。要看真机效果时，再构建安卓或 Windows 版。
 
 ## 代码在哪里
 
 | 目录 | 内容 |
 | --- | --- |
-| `src/engine/` | 游戏引擎（TypeScript）：回合与回合树、记账规则、记忆与上下文、提示词、纪年、玩法模式、存档的导入导出 |
+| `src/engine/` | TypeScript 游戏门面：上下文与提示词、资料检索、回合树、存档和界面操作；保留规则辅助与内存测试实现 |
 | `src/ui/` | 界面（React）：首页、开局、游玩页、设置和各种面板 |
-| `src/platform/` | 平台接口：原生版经 Tauri 调用 Rust，浏览器开发台用 sql.js 和开发服务器 |
+| `src/platform/` | 平台接口：原生版经 Tauri 调用 Rust，浏览器开发台经开发桥调用常驻 Rust 宿主 |
 | `src/content/` | 内置内容：唐天宝年间的卡组、开局灵感、挑战卡 |
 | `src-tauri/` | Tauri 2 外壳和 Rust 平台服务：SQLite、系统加密存储、流式请求、文件、通知、窗口状态、更新下载 |
 | `src-tauri/gen/android/` | 安卓工程，含 Kotlin 写的系统桥接：文件选择、加密存储、后台生成、通知、安装更新 |
 | `devserver/` | 浏览器开发台的 Vite 中间件：保管开发用的 Key、转发模型请求 |
 | `crates/book-pdf/` | 原生版与开发桥共用的 PDF 文字提取核心 |
+| `crates/story-core/` | 两种执行方式共用的规则、模型工具调度、内置技能、持久步骤与事务提交 |
+| `crates/dev-host/` | 浏览器开发台的常驻宿主，通过标准输入输出通信，共用同一 SQLite 连接 |
 | `scripts/` | 本地模拟模型、界面检查、打包与检查脚本 |
 | `assets/` | 图标的源文件 |
 
-游戏规则、提示词和模型输出的解析都在 TypeScript 里；Rust 只做平台服务，不含游戏逻辑。
+故事运行和状态结算由共享 Rust 核心负责；前端通过现有 Game 门面启动、补读进度和停止。内置 MCP 服务使用进程内传输，不另开工具端口。提示词由门面准备，执行时加入技能与工具资料。
 
 ## 需要的工具
 
@@ -27,13 +29,14 @@
 | --- | --- | --- |
 | Node.js | 24 | 前端与脚本 |
 | pnpm | 11.25（`package.json` 里固定，经 corepack 使用） | 依赖管理 |
-| Rust | 1.99（`rust-toolchain.toml` 固定，含两个安卓 target） | 平台服务 |
+| Rust | 1.99（`rust-toolchain.toml` 固定，含两个安卓 target） | 共享执行核心、开发宿主与平台服务 |
 | Microsoft Edge | 新版即可 | 界面检查脚本（`playwright-core` 不自带浏览器，用本机的 Edge） |
 | Visual Studio 2022 生成工具（C++ 桌面开发） | 17.14 | Windows 版 |
 | JDK | 17 | 安卓版 |
 | Android SDK | API 36、Build Tools 36.0.0、NDK 28.2.13676358 | 安卓版 |
+| libclang | 与NDK头文件兼容的版本 | Android受控JavaScript解释器的绑定生成，使用`LIBCLANG_PATH`定位 |
 
-前端主要用 React 19、TypeScript 7、Vite 8、sql.js、vitest 和 Tauri 2；安卓工程用 Gradle wrapper 9.6.1 与 AGP 9.3.3。
+前端主要用 React 19、TypeScript 7、Vite 8、vitest 和 Tauri 2，内存测试使用 sql.js；安卓工程用 Gradle wrapper 9.6.1 与 AGP 9.3.3。
 
 在 PowerShell 里先执行一次 `. .\scripts\Enter-Dev.ps1`。它只为当前进程设置 `JAVA_HOME`、`ANDROID_HOME`、`NDK_HOME` 和 `PATH`（含 `adb`），`pnpm` 不在 `PATH` 里时用 corepack 垫一个。JDK 和 SDK 的位置按这个顺序找：参数 `-JavaHome`、`-AndroidHome`；环境变量；项目里不入 Git 的 `.private/toolchain.json`（`{"javaHome": "…", "androidHome": "…"}`，可选 `javaProxyHost`、`javaProxyPort` 让 Gradle 走代理）；最后是 `%LOCALAPPDATA%\Android\Sdk`。
 
@@ -55,11 +58,13 @@ cargo test --workspace      # Rust 平台服务的测试，只连本机的测试
 
 ## 浏览器开发台
 
-1. `pnpm dev`，用浏览器打开 `http://127.0.0.1:1420`，开发者工具切到手机尺寸（如 393×852 或 360×800）。
+1. 激活开发工具后运行 `pnpm dev`，用浏览器打开 `http://127.0.0.1:1420`，开发者工具切到手机尺寸（如 393×852 或 360×800）。第一次访问会增量构建并启动 `story-dev-host`，因此也需要 Rust 工具链；可提前运行 `cargo build -p story-dev-host`。
 2. 第一次打开会进入“连接 AI 服务”。Key 由开发服务器保存在本机、不入 Git 的 `.cache/dev-secrets.json` 里，页面本身拿不到；模型请求经开发服务器转发，它只接受本机的访问。
 3. 可选：把 `.env.example` 复制成 `.env.local`（不入 Git），预先填好服务地址和模型。
 
-存档在浏览器里（sql.js），和原生版互不相干。开发模式下页面上有 `window.__lishi`，脚本可以借它直接读写引擎；正式构建里没有。
+宿主默认将存档写入 `.cache/dev-host/game.sqlite`，与安装版互不相干。旧浏览器 IndexedDB 数据只在宿主数据库为空时导入一次，原数据和备份保留；之后的读写都使用宿主。关掉页面仅停止订阅，宿主仍可完成运行；关掉开发服务器会取消并保存进度，重新启动可恢复完成步骤。
+
+验证时须同时设置 `LISHI_DEV_DATABASE_DIR`（独立数据库目录）和 `LISHI_DEV_SECRETS_FILE`（独立凭据文件绝对路径），避免使用个人存档与 Key。隔离凭据不会从 `.env.local` 自动复制 Key。开发模式下页面有 `window.__lishi`，脚本可以借它直接读写引擎；正式构建里没有。
 
 导入书籍的 TXT、EPUB 和 DOCX 在本地按需解析。PDF 使用 Rust 的同一套按页提取核心；浏览器开发前先运行 `cargo build -p book-pdf`，开发桥会调用生成的本机程序，原生版直接调用库。扫描 PDF 不做 OCR，某些未提供字形映射的中文字体编码暂不支持。导入只使用系统选定文件，不申请整个存储空间权限。
 
@@ -85,6 +90,12 @@ node scripts/fake-llm.mjs            # 默认端口 18800，可用 --port 改
 | `fake-plain` | 只有正文、没有记录（用来试补记） |
 
 `GET /debug/last-request` 返回最近一次聊天请求，测试可以用它检查发出去的内容。
+
+这些普通模拟模型用于原有游玩流程，开局无需选择执行方式。按需 Agent 的隔离对话、修改策略、工具调用与阅读位置可用 `node --import tsx scripts/ui/agent-chat.mjs` 独立验证；脚本自带本机模拟服务、独立数据库与假凭据，截图写入 `output/playwright/agent-chat-r17/`。原 `agent.mjs` 默认转到该脚本；`--preview-only` 只检查具体改稿预览和采用。
+
+Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固定，普通游玩的服务不会被临时覆盖。默认每次30次模型请求、100次工具调用、15分钟，可在助手执行设置中调整；继续累计原用量。工具说明按需发现，大资料分页读取；每次请求将工具参数说明一并计入现有上下文输入预算。模型原生搜索、Tavily及远程Streamable HTTP MCP由玩家配置，密钥只存系统槽；不会自动安装工具。网页及原文必须实际进入模型请求才能记作已读。
+
+世界文件保存独立的助手对话及完结任务摘要，导入后作为只读历史；执行连接、未完运行及本机任务恢复点不导出，小说导出只包含正式剧情。预览采用和任务撤回会检查故事是否已有新变化，避免覆盖后续进展。
 
 玩法模式另有触发词。“段数”按请求里已有的 AI 回复数算（开场算第 1 段）；“本回合行动”是用户消息里最后一个以“【”开头的段落（玩家行动、幕后指点或继续）。
 
@@ -131,13 +142,15 @@ node scripts/fake-llm.mjs            # 默认端口 18800，可用 --port 改
 
 ### 安卓
 
+开发中的 Pi 助手需要把完整运行环境随包携带。先按 [Node 构建说明](../runtime/android-node/README.md)准备固定版本的 Node/JNI 产物及声明，再用 `scripts/Build-PiAndroidHost.ps1` 构建独立故事宿主。使用 `node scripts/pi-host/prepare-android-app.mjs --native <ARM64原生库目录> --jni <liblishi_agent_host.so> --notices <声明目录> --readelf <llvm-readelf> --output <新装配目录>` 校验和装配，参数中的路径均为绝对路径；命令不会安装应用。构建前将 `ORG_GRADLE_PROJECT_piAppRuntimeDirectory` 环境变量指向装配目录，Gradle会重新核对资源与库的哈希。没有完整产物时停止组包，不在手机首次启动时下载补齐，也不忽略共享库冲突。
+
 ```powershell
 . .\scripts\Enter-Dev.ps1
 pnpm tauri android build --debug --target aarch64 --apk --ci   # 调试包
 pnpm tauri android build --target aarch64 --apk --ci           # 发行包（未签名）
 ```
 
-调试包是 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`（约 220 MB，带调试信息），发行包是旁边的 `universal/release/app-universal-release-unsigned.apk`，签名后才能安装：
+调试包是 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`（包含调试信息与内嵌运行环境，体积较大），发行包是旁边的 `universal/release/app-universal-release-unsigned.apk`，签名后才能安装：
 
 ```powershell
 $env:LISHI_SIGNING_STORE_PASSWORD = 'android'   # 安卓调试证书的默认密码，只放在本次进程里
@@ -148,7 +161,7 @@ $env:LISHI_SIGNING_STORE_PASSWORD = 'android'   # 安卓调试证书的默认密
   -OutputPath .cache/release/chuanyue-<版本>.apk
 ```
 
-`scripts/Verify-AndroidPackage.ps1 -ApkPath <apk> [-Profile debug] [-ReferenceApk <apk>]` 不连手机地检查一个安装包：应用 ID、发行包不可调试、v2 签名且证书与参考包一致、ZIP 与原生库的 16 KB 对齐、包里的 ARM64 原生库与刚编译的一致、Rust 用到的系统桥接类都在、声明了安装更新所需的权限。从别的目录运行时，`-ApkPath`、`-OutputPath` 请写绝对路径。
+`scripts/Verify-AndroidPackage.ps1 -ApkPath <apk> [-Profile debug] [-ReferenceApk <apk>] [-PiRuntimeDirectory <运行资源目录>]` 不连手机地检查一个安装包：应用 ID、发行包不可调试、v2 签名且证书与参考包一致、ZIP 与原生库的 16 KB 对齐、包里的 ARM64 原生库与刚编译的一致、Rust 用到的系统桥接类都在、声明了安装更新所需的权限。从别的目录运行时，`-ApkPath`、`-OutputPath` 请写绝对路径。 包含内嵌 Pi 的包需提供构建时使用的运行资源目录（也可由 `ORG_GRADLE_PROJECT_piAppRuntimeDirectory` 传入），额外核对 Node、独立服务原生库、运行资源和许可清单的完整哈希及服务进程声明；未提供时仍检查普通包。包检查不替代真机运行验证。
 
 **签名与覆盖安装**：安卓只允许用同一个证书签名的新包覆盖旧包。发布页上的安装包用作者电脑上的安卓调试证书签名，这样调试包和发行包能互相覆盖、保留存档。你自己构建的包用的是你电脑上的调试证书，和发布页的包签名不同，系统不会让两者互相覆盖。想换成自己构建的版本，先在首页把每个世界导出成文件，卸载、安装之后再导入：卸载会删掉所有的世界。
 
@@ -156,14 +169,22 @@ $env:LISHI_SIGNING_STORE_PASSWORD = 'android'   # 安卓调试证书的默认密
 
 ### Windows
 
+Agent 助手的发行包同时携带固定版本的 Node 与完整 Pi 资源。先按上方说明准备 `agent-host/.cache/runtime`，从 Node 官方同版本目录取得 `node-v24.19.0-win-x64.zip` 与 `SHASUMS256.txt`，运行：
+
+```powershell
+node scripts/pi-host/prepare-windows-app.mjs --node-archive <官方ZIP绝对路径> --checksums <校验表绝对路径>
+```
+
+装配脚本校验归档、运行版本、许可证与完整资源清单，默认写入 `.cache/pi-windows`，拒绝覆盖已有装配目录。平台构建配置将其放入安装目录的 `agent` 子目录。便携包必须同时包含 `lishi-app.exe` 和该 `agent` 目录，不能只压缩一个EXE。
+
 ```powershell
 . .\scripts\Enter-Dev.ps1
 pnpm tauri build --debug --no-bundle   # 调试版：target\debug\lishi-app.exe
 pnpm tauri build                       # 安装包和单个程序
 ```
 
-- 安装包是 `target\release\bundle\nsis\历史穿越_<版本>_x64-setup.exe`：只装给当前用户，不需要管理员，装到 `%LOCALAPPDATA%\历史穿越`；安装界面是简体中文，自动建开始菜单快捷方式，完成页可以勾选桌面快捷方式。卸载时“删除应用程序数据”默认不勾，不勾就不会删掉世界。WebView2 用在线引导安装（Windows 10、11 一般已经自带）。
-- 单个程序是 `target\release\lishi-app.exe`，打成 zip 就是免安装版。它不是“数据放在旁边”的便携版：数据和安装版一样放在 `%APPDATA%\io.timejump.chuanyue`，两者共用同一份存档。
+- 安装包是 `target\release\bundle\nsis\穿越小说模拟_<版本>_x64-setup.exe`：只装给当前用户，不需要管理员，展示名为“穿越小说模拟”，沿用旧安装标识，默认目录保持 `%LOCALAPPDATA%\历史穿越`；安装界面是简体中文，自动建开始菜单快捷方式，完成页可以勾选桌面快捷方式。卸载时“删除应用程序数据”默认不勾，不勾就不会删掉世界。WebView2 用在线引导安装（Windows 10、11 一般已经自带）。
+- 主程序是 `target\release\lishi-app.exe`；将它和装配后的完整 `agent` 目录一起打成 zip，得到免安装版。它不是“数据放在旁边”的便携版：数据和安装版一样放在 `%APPDATA%\io.timejump.chuanyue`，两者共用同一份存档。
 - 第一次打安装包时，Tauri 会从 GitHub 下载 NSIS 并缓存到 `%LOCALAPPDATA%\tauri\NSIS`，以后离线也能打包；打不开 GitHub 时只能先用 `--no-bundle` 出单个程序。
 - 程序和安装包都没有代码签名，第一次运行时 SmartScreen 可能提示“Windows 已保护你的电脑”，点“更多信息 → 仍要运行”。
 
@@ -207,7 +228,7 @@ pnpm tauri build                       # 安装包和单个程序
    adb -s <设备> install -r src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk
    ```
 
-2. 准备一个当作“新版本”的安装包：必须用同一个证书签名，内部版本号不低于手机上的包。用自己签名的发行包最快（约 23 MB）；直接用刚才的调试包也行，但约 220 MB，传得慢。
+2. 准备一个当作“新版本”的安装包：必须用同一个证书签名，内部版本号不低于手机上的包。可用签名后的发行包；调试包包含额外调试信息，传输体积通常更大。
 3. 启动测试服务并转发端口：
 
    ```powershell
@@ -253,6 +274,6 @@ pnpm tauri build                       # 安装包和单个程序
 
 - **安卓**：应用的私有目录，卸载即删除。Key 用系统 Keystore 加密保存。
 - **Windows**：`%APPDATA%\io.timejump.chuanyue`，里面有数据库 `game.sqlite`、每日备份 `backups/`（保留最近 20 份）和 `window-state.json`。Key 用当前 Windows 用户的 DPAPI 加密保存，换一台电脑或换一个用户就读不出来。
-- **浏览器开发台**：存档在浏览器里，开发用的 Key 在 `.cache/dev-secrets.json`。
+- **浏览器开发台**：存档在 `.cache/dev-host/` 的宿主数据库，开发用的 Key 默认在 `.cache/dev-secrets.json`；旧浏览器库保留作一次导入来源。
 
 不要把 Key、令牌或私人的服务地址写进代码、文档、日志和提交；`.cache/`、`.env.local`、`.private/` 都已经被 Git 忽略。

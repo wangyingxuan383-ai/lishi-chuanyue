@@ -119,3 +119,4 @@ dependencies {
 }
 
 apply(from = file("tauri.build.gradle.kts"))
+apply(from = file("pi-runtime.gradle.kts"))

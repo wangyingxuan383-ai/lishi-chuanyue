@@ -76,7 +76,7 @@ async fn server(
 fn service() -> (tempfile::TempDir, Arc<Streams>) {
     let dir = tempfile::tempdir().unwrap();
     let mut service = Streams::open(dir.path().into()).unwrap();
-    service.keep_alive = Arc::new(KeepAlive::new(|_| {}));
+    service.keep_alive = Arc::new(KeepAlive::new(|_, _| {}));
     let service = Arc::new(service);
     (dir, service)
 }
@@ -653,7 +653,7 @@ async fn concurrent_done_error_cancel_and_ack_share_one_service_lease() {
     let transitions = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&transitions);
     let mut streams = Streams::open(dir.path().into()).unwrap();
-    streams.keep_alive = Arc::new(KeepAlive::new(move |on| recorded.lock().unwrap().push(on)));
+    streams.keep_alive = Arc::new(KeepAlive::new(move |on, _| recorded.lock().unwrap().push(on)));
     let service = Arc::new(streams);
     let (url, done_gate, done_task) = gated_server(200, "data: [DONE]\n").await;
     let (done_id, done_rx) = start(&service, url, timeouts()).await;

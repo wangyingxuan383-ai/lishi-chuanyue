@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory=$true)][string]$ApkPath,
     [ValidateSet('debug','release')][string]$Profile='release',
     [string]$ReferenceApk,
+    [string]$PiRuntimeDirectory = $env:ORG_GRADLE_PROJECT_piAppRuntimeDirectory,
     [switch]$AllowUnsigned,
     [switch]$RequireR8,
     [string]$OutputPath
@@ -13,6 +14,7 @@ $packageProjectRoot=[IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
 if (!$OutputPath) { $OutputPath=Join-Path $packageProjectRoot ('.cache\validation\apk-'+[DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')+'.json') }
 $packageArguments=@((Join-Path $PSScriptRoot 'check-android-package.py'),'--apk',[IO.Path]::GetFullPath($ApkPath),'--native',(Join-Path $packageProjectRoot "target\aarch64-linux-android\$Profile\liblishi_app_lib.so"),'--output',[IO.Path]::GetFullPath($OutputPath))
 if ($ReferenceApk) { $packageArguments+=@('--reference-apk',[IO.Path]::GetFullPath($ReferenceApk)) }
+if ($PiRuntimeDirectory) { $packageArguments+=@('--pi-runtime',[IO.Path]::GetFullPath($PiRuntimeDirectory)) }
 if ($AllowUnsigned) { $packageArguments+='--allow-unsigned' }
 if ($RequireR8) { $packageArguments+='--require-r8' }
 if ($Profile -eq 'release') { $packageArguments+='--require-non-debuggable' }

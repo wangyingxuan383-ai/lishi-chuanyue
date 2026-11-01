@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Platform, StreamEvent, StreamRequest } from "../../platform";
-import { ChatError, chatCompletionsUrl, parseChunk, serviceBase, streamChat } from "./chat";
+import { ChatError, chatCompletionsUrl, parseChunk, serviceBase, streamChat, type ChatMessage, type ChatToolDefinition } from "./chat";
 
 function fakePlatform(events: StreamEvent[]): Platform {
   return {
@@ -38,6 +38,18 @@ describe("parseChunk", () => {
     expect(parseChunk(JSON.stringify({ choices: [{ message: { content: "全文" } }] }))?.content).toBe("全文");
   });
 
+  it("reads a non-streamed tool message with positional indexes", async () => {
+    const event = data({ choices: [{ message: { content: null, tool_calls: [
+      { id: "call_read", type: "function", function: { name: "read_world", arguments: "{}" } },
+    ] }, finish_reason: "tool_calls" }] });
+    const result = await streamChat(fakePlatform([event, { type: "done" }]), {
+      slot: "main", url: "https://x/v1/chat/completions", model: "m", messages: [],
+    }).result;
+    expect(result.text).toBe("");
+    expect(result.toolCalls).toEqual([{ id: "call_read", type: "function", function: { name: "read_world", arguments: "{}" } }]);
+    expect(result.finishReason).toBe("tool_calls");
+  });
+
   it("returns null for non-JSON lines", () => {
     expect(parseChunk("not json")).toBeNull();
   });
@@ -70,10 +82,78 @@ describe("streamChat", () => {
     ]), request, { onThinking: () => thinking++, onText: (_d, full) => seen.push(full) });
     const result = await handle.result;
     expect(result.text).toBe("西市清晨");
+    expect(result.toolCalls).toEqual([]);
     expect(result.usage).toEqual({ promptTokens: 3, completionTokens: 2 });
     expect(result.finishReason).toBe("stop");
     expect(thinking).toBe(1);
     expect(seen).toEqual(["西市", "西市清晨"]);
+  });
+
+  it("assembles interleaved tool names and argument fragments without requiring story text", async () => {
+    const result = await streamChat(fakePlatform([
+      data({ choices: [{ delta: { tool_calls: [
+        { index: 1, id: "find", type: "function", function: { name: "search_original", arguments: '{"query":"' } },
+        { index: 0, id: "read", type: "function", function: { name: "read_", arguments: '{"section":' } },
+      ] } }] }),
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "original", arguments: "3," } }] } }] }),
+      data({ choices: [{ delta: { tool_calls: [
+        { index: 1, function: { arguments: '真实身份"}' } },
+        { index: 0, function: { arguments: '"chunk":7}' } },
+      ] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 20, completion_tokens: 12 } }),
+      { type: "done" },
+    ]), request).result;
+    expect(result.toolCalls).toEqual([
+      { id: "read", type: "function", function: { name: "read_original", arguments: '{"section":3,"chunk":7}' } },
+      { id: "find", type: "function", function: { name: "search_original", arguments: '{"query":"真实身份"}' } },
+    ]);
+    expect(result.text).toBe("");
+    expect(result.usage).toEqual({ promptTokens: 20, completionTokens: 12 });
+    expect(result.firstTokenMs).not.toBeNull();
+    expect(result.totalMs).toBeGreaterThanOrEqual(result.firstTokenMs!);
+  });
+
+  it("sends tool definitions, an explicit choice and prior tool result messages unchanged", async () => {
+    const messages: ChatMessage[] = [
+      { role: "assistant", content: "", tool_calls: [{ id: "read", type: "function", function: { name: "read_world", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "read", content: '{"place":"书铺"}' },
+    ];
+    const tools: ChatToolDefinition[] = [{ type: "function", function: { name: "read_world", parameters: { type: "object", properties: {} } } }];
+    const platform = fakePlatform([data({ choices: [{ delta: { content: "书铺里亮着灯。" } }] }), { type: "done" }]);
+    const original = platform.llm.stream;
+    let body: any;
+    platform.llm.stream = (sent, onEvent) => { body = sent.body; return original(sent, onEvent); };
+    await streamChat(platform, { ...request, messages, tools, toolChoice: { type: "function", function: { name: "read_world" } } }).result;
+    expect(body.messages).toEqual(messages);
+    expect(body.tools).toEqual(tools);
+    expect(body.tool_choice).toEqual({ type: "function", function: { name: "read_world" } });
+    await streamChat(platform, request).result;
+    expect(body).not.toHaveProperty("tools");
+    expect(body).not.toHaveProperty("tool_choice");
+  });
+
+  it("replays missed tool fragments once when returning from the background", async () => {
+    const events: StreamEvent[] = [
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, id: "read", function: { name: "read_original", arguments: '{"section":' } }] } }] }),
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "2}" } }] }, finish_reason: "tool_calls" }] }),
+      { type: "done" },
+    ];
+    let deliver!: (event: StreamEvent) => void;
+    const platform = { llm: {
+      async stream(_request: StreamRequest, onEvent: (event: StreamEvent) => void) { deliver = onEvent; onEvent(events[0]); return "read"; },
+      async resume() { return { events, active: false }; },
+    } } as unknown as Platform;
+    const handle = streamChat(platform, request);
+    await handle.catchUp();
+    deliver(events[1]); deliver(events[2]);
+    expect((await handle.result).toolCalls?.[0].function.arguments).toBe('{"section":2}');
+  });
+
+  it("rejects an incomplete tool call instead of executing a nameless call", async () => {
+    const handle = streamChat(fakePlatform([
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, id: "incomplete", function: { arguments: "{}" } }] } }] }),
+      { type: "done" },
+    ]), request);
+    await expect(handle.result).rejects.toMatchObject({ kind: "empty", message: "工具调用不完整，请重试" });
   });
 
   it("fails with the partial text when the stream errors", async () => {

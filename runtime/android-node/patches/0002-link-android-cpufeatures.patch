@@ -1,0 +1,12 @@
+--- a/deps/zlib/zlib.gyp
++++ b/deps/zlib/zlib.gyp
+@@ -185,6 +185,9 @@
+             'include_dirs': [ '<(ZLIB_ROOT)' ],
+           },
+           'conditions': [
++            ['OS=="android" and _toolset=="target"', {
++              'sources': [ '<(ZLIB_ROOT)/lishi_android_cpu_features.c' ],
++            }],
+             ['OS!="win"', {
+               'cflags!': [ '-ansi' ],
+               'cflags': [ '-Wno-implicit-fallthrough' ],

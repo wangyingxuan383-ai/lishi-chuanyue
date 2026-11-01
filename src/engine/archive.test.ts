@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
 import { archiveProblems, exportWorld, importWorld } from "./archive";
 import { migrate } from "./db/migrate";
+import { MIGRATIONS } from "./db/migrations";
 import { Repo } from "./db/repo";
 import { newChallenge, newScript } from "./modes";
 import { sampleState } from "./testing/fixtures";
@@ -40,18 +41,80 @@ async function content(repo: Repo, worldId: string) {
 }
 
 describe("world archive", () => {
-  it("exports version three and continues to read version-one/two historical archives", async () => {
+  it("upgrades an existing version-six database without changing stories or old task snapshots", async () => {
+    const platform = await createMemoryPlatform();
+    await platform.sql.batch([{ sql: "CREATE TABLE schema_version(version INTEGER NOT NULL)" }]);
+    for (const migration of MIGRATIONS.filter((item) => item.version <= 6)) await platform.sql.batch([{ sql: migration.sql }, { sql: "INSERT INTO schema_version(version) VALUES(?)", params: [migration.version] }]);
+    const repo = new Repo(platform), { worldId } = await richWorld(repo), cursor = await tree.cursor(repo, worldId), time = new Date().toISOString();
+    await platform.sql.batch([
+      { sql: "INSERT INTO agent_sessions VALUES(?,?,?,?,?,?)", params: ["old-session", worldId, cursor.line.id, "原有任务", time, time] },
+      { sql: "INSERT INTO agent_tasks(id,session_id,run_id,text,policy,status,base_json,created_at,updated_at) VALUES(?,?,?,?,?,'failed',?,?,?)", params: ["old-task", "old-session", "old-run", "未完成的查证", "auto-reversible", '{"permissions":"original-snapshot"}', time, time] },
+    ]);
+    const before = await content(repo, worldId), oldTasks = await platform.sql.query("SELECT * FROM agent_tasks");
+    expect(await migrate(platform)).toBe(MIGRATIONS.at(-1)!.version);
+    expect(await content(repo, worldId)).toEqual(before);
+    expect(await platform.sql.query("SELECT * FROM agent_tasks")).toEqual(oldTasks);
+    expect(await platform.sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('agent_control','agent_inputs','agent_session_links','agent_subtasks')")).toHaveLength(4);
+    expect(await platform.sql.listBackups()).toHaveLength(1);
+    expect(await migrate(platform)).toBe(MIGRATIONS.at(-1)!.version);
+    expect(await platform.sql.listBackups()).toHaveLength(1);
+  });
+
+  it("exports version seven and continues to read earlier formal stories", async () => {
     const repo = await emptyRepo();
     const { worldId } = await richWorld(repo);
     const file = await exportWorld(repo, worldId);
-    expect(file.version).toBe(3);
+    expect(file.version).toBe(7);
     const old = { ...file, version: 1 };
     const copy = await importWorld(repo, old, "new");
     expect(await content(repo, copy)).toEqual(await content(repo, worldId));
     const copyTwo = await importWorld(repo, { ...file, version: 2 }, "new");
     expect(await content(repo, copyTwo)).toEqual(await content(repo, worldId));
+    const copyThree = await importWorld(repo, { ...file, version: 3 }, "new");
+    expect(await content(repo, copyThree)).toEqual(await content(repo, worldId));
+    const copyFour = await importWorld(repo, { ...file, version: 4 }, "new");
+    expect(await content(repo, copyFour)).toEqual(await content(repo, worldId));
+    const copyFive = await importWorld(repo, { ...file, version: 5 }, "new");
+    expect(await content(repo, copyFive)).toEqual(await content(repo, worldId));
     expect(archiveProblems({ ...file, version: 0 })).toEqual(["存档格式版本无效"]);
   });
+  it("preserves readable Pi history and formal sources across format-seven import and re-export", async () => {
+    const repo=await emptyRepo(), {worldId}=await richWorld(repo), cursor=await tree.cursor(repo,worldId), at=new Date().toISOString();
+    const hidden="private-credential-marker";
+    const history={messages:[{id:"reply",role:"assistant",content:"已核对"}],steps:[],plan:[{id:"p",title:"核对",status:"completed"}],sources:[],result:{status:"committed",summary:"已采用",apiKey:hidden}};
+    await repo.platform.sql.batch([
+      {sql:"INSERT INTO pi_sessions(id,world_id,line_id,title,session_file,created_at,updated_at) VALUES('ps',?,?,?,? ,?,?)",params:[worldId,cursor.line.id,"Pi记录",hidden,at,at]},
+      {sql:"INSERT INTO pi_tasks(id,session_id,world_id,line_id,text,status,policy,base_json,base_world_version,result_json,created_at,updated_at) VALUES('pt','ps',?,?,?,'archived','auto-reversible','{}','',?,?,?)",params:[worldId,cursor.line.id,"核对日期",JSON.stringify({history}),at,at]},
+      {sql:"INSERT INTO story_fact_sources VALUES('source',?,?,?,'state',?,'batch','pt','local_consistency','日期校准',?,?)",params:[worldId,cursor.line.id,cursor.head.id,cursor.head.id,JSON.stringify({findingId:"f",references:[{quote:"玩家原句",location:{nodeId:cursor.head.id,lineId:cursor.line.id},apiKey:hidden}],authorization:hidden}),at]},
+    ]);
+    const external={sourceClaim:"网页确实记载青桥旧称",contentHash:"sha256:page",readAt:"2026-11-01",revisionDecision:{summary:"补充地名",reason:"与本局位置一致",appliesTo:"world_rule",localReferences:[{quote:"本局青桥",location:{nodeId:cursor.head.id},authorization:hidden}]},references:[{quote:"青桥旧称",sourceKind:"external",location:{url:"https://example.invalid/page?id=2&token="+hidden+"#secret",contentHash:"sha256:page",readAt:"2026-11-01",grantId:hidden},apiKey:hidden}],grantId:hidden,packageCode:hidden};
+    await repo.platform.sql.batch([{sql:"INSERT INTO story_fact_sources VALUES('web-source',?,?,?,'state',?,'batch','pt','external','地名依据',?,?)",params:[worldId,cursor.line.id,cursor.head.id,cursor.head.id,JSON.stringify(external),at]}]);
+    const file=await exportWorld(repo,worldId);
+    expect(file.version).toBe(7);expect(archiveProblems(file)).toEqual([]);expect(file.pi?.tasks).toHaveLength(1);
+    expect(JSON.stringify(file)).not.toContain(hidden);
+    const copy=await importWorld(repo,file,"new");
+    const [task]=await repo.platform.sql.query("SELECT * FROM pi_tasks WHERE world_id=?",[copy]);
+    expect(task.status).toBe("archived");expect(task.base_json).toBe("{}");expect(task.workspace_json).toBe("{}");
+    const [session]=await repo.platform.sql.query("SELECT * FROM pi_sessions WHERE world_id=?",[copy]);expect(session.session_file).toBeNull();
+    const [source]=await repo.platform.sql.query("SELECT * FROM story_fact_sources WHERE world_id=? AND basis='local_consistency'",[copy]);
+    expect(source.node_id).not.toBe(cursor.head.id);expect(JSON.parse(String(source.source_json)).references[0].location.nodeId).toBe(source.node_id);
+    const again=await exportWorld(repo,copy);expect(again.pi?.tasks[0].history).toMatchObject({messages:[{role:"assistant",content:"已核对"}]});expect(again.factSources).toHaveLength(2);
+    const web=again.factSources!.find(row=>row.basis==="external")!;
+    const evidence=JSON.parse(String(web.source_json));
+    expect(evidence.sourceClaim).toBe(external.sourceClaim);expect(evidence.revisionDecision).toMatchObject({summary:"补充地名",appliesTo:"world_rule"});
+    expect(evidence.references[0].location).toEqual({url:"https://example.invalid/page?id=2",contentHash:"sha256:page",readAt:"2026-11-01"});
+    expect(JSON.stringify(again)).not.toContain(hidden);
+    for(const table of ["agent_capability_grants","agent_tool_packages","pi_resource_snapshots"]) expect(await repo.platform.sql.query(`SELECT * FROM ${table}`)).toHaveLength(0);
+  });
+  it("ignores disabled pre-Pi agent payloads in old world formats",async()=>{
+    const repo=await emptyRepo(),{worldId}=await richWorld(repo),file=await exportWorld(repo,worldId);
+    for(const version of [1,2,3,4,5,6]){
+      const copy=await importWorld(repo,{...file,version,agent:{sessions:[{broken:"legacy-context"}],tasks:[],messages:[]}},"new");
+      expect(await content(repo,copy)).toEqual(await content(repo,worldId));
+      expect(await repo.platform.sql.query("SELECT * FROM agent_sessions WHERE world_id=?",[copy])).toHaveLength(0);
+    }
+  });
+
   it("round-trips a world to another device unchanged, ids included", async () => {
     const a = await emptyRepo();
     const { worldId } = await richWorld(a);

@@ -1,33 +1,64 @@
 //! A process-wide lease for the Android generation foreground service.
-use std::sync::{Arc, Mutex, OnceLock};
+use std::{
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+
+struct Held {
+    count: usize,
+    until: Instant,
+}
 
 pub struct KeepAlive {
-    count: Mutex<usize>,
-    transition: Box<dyn Fn(bool) + Send + Sync>,
+    held: Mutex<Held>,
+    transition: Box<dyn Fn(bool, u64) + Send + Sync>,
 }
 
 impl KeepAlive {
-    pub fn new(transition: impl Fn(bool) + Send + Sync + 'static) -> Self {
+    pub fn new(transition: impl Fn(bool, u64) + Send + Sync + 'static) -> Self {
         Self {
-            count: Mutex::new(0),
+            held: Mutex::new(Held {
+                count: 0,
+                until: Instant::now(),
+            }),
             transition: Box::new(transition),
         }
     }
 
     pub fn acquire(self: &Arc<Self>) -> Lease {
-        let mut count = self.count.lock().unwrap_or_else(|e| e.into_inner());
-        *count += 1;
-        if *count == 1 {
-            self.notify(true);
+        self.acquire_for(300_000)
+    }
+
+    pub fn acquire_for(self: &Arc<Self>, duration_ms: u64) -> Lease {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let until = now + Duration::from_millis(duration_ms.clamp(1, 7_200_000) + 5_000);
+        held.until = if held.count == 0 {
+            until
+        } else {
+            held.until.max(until)
+        };
+        held.count += 1;
+        let remaining = held.until.saturating_duration_since(now).as_millis() as u64;
+        if held.count == 1 {
+            self.notify(true, remaining);
+        } else {
+            // A later run can outlive the first run's bounded wake lock.
+            // Android's idempotent start refreshes it without restarting the
+            // service; only the final lease still sends stop.
+            #[cfg(target_os = "android")]
+            android::transition(true, remaining);
         }
         Lease(Arc::clone(self))
     }
 
-    fn notify(&self, running: bool) {
+    fn notify(&self, running: bool, remaining: u64) {
         // Serialize the callback with count changes: an old stop must never
         // overtake the next start. Even a failed platform callback owns a lease.
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.transition)(running)))
-            .is_err()
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.transition)(running, remaining)
+        }))
+        .is_err()
         {
             eprintln!("generation service callback failed");
         }
@@ -35,7 +66,7 @@ impl KeepAlive {
 
     #[cfg(test)]
     pub fn count(&self) -> usize {
-        *self.count.lock().unwrap_or_else(|e| e.into_inner())
+        self.held.lock().unwrap_or_else(|e| e.into_inner()).count
     }
 }
 
@@ -43,10 +74,10 @@ pub struct Lease(Arc<KeepAlive>);
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let mut count = self.0.count.lock().unwrap_or_else(|e| e.into_inner());
-        *count -= 1;
-        if *count == 0 {
-            self.0.notify(false);
+        let mut held = self.0.held.lock().unwrap_or_else(|e| e.into_inner());
+        held.count -= 1;
+        if held.count == 0 {
+            self.0.notify(false, 0);
         }
     }
 }
@@ -56,11 +87,27 @@ pub fn shared() -> Arc<KeepAlive> {
     Arc::clone(SHARED.get_or_init(|| Arc::new(KeepAlive::new(platform_transition))))
 }
 
-fn platform_transition(running: bool) {
+static ON_TIMEOUT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+pub fn set_timeout_handler(handler: impl Fn() + Send + Sync + 'static) {
+    let _ = ON_TIMEOUT.set(Box::new(handler));
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_timejump_chuanyue_GenerationService_nativeTimeout(
+    _env: jni21::JNIEnv<'_>,
+    _class: jni21::objects::JClass<'_>,
+) {
+    if let Some(handler) = ON_TIMEOUT.get() {
+        handler();
+    }
+}
+
+fn platform_transition(running: bool, remaining: u64) {
     #[cfg(target_os = "android")]
-    android::transition(running);
+    android::transition(running, remaining);
     #[cfg(not(target_os = "android"))]
-    let _ = running;
+    let _ = (running, remaining);
 }
 
 #[cfg(target_os = "android")]
@@ -151,7 +198,7 @@ mod android {
         }
     }
 
-    pub fn transition(running: bool) {
+    pub fn transition(running: bool, remaining: u64) {
         let Some(bridge) = BRIDGE.get() else {
             warn(c"generation service: JNI bridge unavailable");
             return;
@@ -160,15 +207,22 @@ mod android {
             warn(c"generation service: JNI attachment failed");
             return;
         };
-        if env
-            .call_static_method(
+        let result = if running {
+            env.call_static_method(
                 &bridge.class,
-                if running { "start" } else { "stop" },
+                "start",
+                "(Landroid/content/Context;J)V",
+                &[bridge.context.as_obj().into(), (remaining as i64).into()],
+            )
+        } else {
+            env.call_static_method(
+                &bridge.class,
+                "stop",
                 "(Landroid/content/Context;)V",
                 &[bridge.context.as_obj().into()],
             )
-            .is_err()
-        {
+        };
+        if result.is_err() {
             let _ = env.exception_clear();
             warn(c"generation service: JNI call failed");
         }
@@ -184,7 +238,9 @@ mod tests {
     fn concurrent_leases_start_once_and_stop_only_after_last_release() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&events);
-        let keep_alive = Arc::new(KeepAlive::new(move |on| recorded.lock().unwrap().push(on)));
+        let keep_alive = Arc::new(KeepAlive::new(move |on, _| {
+            recorded.lock().unwrap().push(on)
+        }));
         let barrier = Arc::new(Barrier::new(9));
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -207,7 +263,7 @@ mod tests {
 
     #[test]
     fn unwind_and_callback_failure_still_release_the_lease() {
-        let keep_alive = Arc::new(KeepAlive::new(|_| panic!("simulated platform failure")));
+        let keep_alive = Arc::new(KeepAlive::new(|_, _| panic!("simulated platform failure")));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _lease = keep_alive.acquire();
             panic!("simulated task panic");
@@ -215,6 +271,19 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(keep_alive.count(), 0);
         drop(keep_alive.acquire());
+        assert_eq!(keep_alive.count(), 0);
+    }
+
+    #[test]
+    fn a_short_stream_cannot_shorten_the_whole_task_deadline() {
+        let keep_alive = Arc::new(KeepAlive::new(|_, _| {}));
+        let task = keep_alive.acquire_for(900_000);
+        let deadline = keep_alive.held.lock().unwrap().until;
+        let stream = keep_alive.acquire_for(30_000);
+        assert!(keep_alive.held.lock().unwrap().until >= deadline);
+        drop(task);
+        assert_eq!(keep_alive.count(), 1);
+        drop(stream);
         assert_eq!(keep_alive.count(), 0);
     }
 }

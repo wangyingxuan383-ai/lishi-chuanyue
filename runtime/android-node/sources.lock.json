@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "node": {
+    "version": "24.19.0",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0.tar.xz",
+    "checksumsUrl": "https://nodejs.org/dist/v24.19.0/SHASUMS256.txt",
+    "file": "node-v24.19.0.tar.xz",
+    "sha256": "f6d95e10a0431ee1067fc6aabe9f762908b4716dd35324e1ddb4b1466b76659f",
+    "sourceRoot": "node-v24.19.0"
+  },
+  "ndk": {
+    "version": "28.2.13676358",
+    "url": "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip",
+    "metadataUrl": "https://dl.google.com/android/repository/repository2-3.xml",
+    "file": "android-ndk-r28c-linux.zip",
+    "sha1": "a7b54a5de87fecd125a17d54f73c446199e72a64",
+    "sha256": "dfb20d396df28ca02a8c708314b814a4d961dc9074f9a161932746f815aa552f",
+    "cpuFeaturesCsha256": "1b8a88eb7d3a5437d17e12475539398d3e1c5eef13d85941679841254af0a8f5",
+    "cpuFeaturesHsha256": "f4989fabece7ea538e3c1272dca47f8a9a4423a87c79a1344a2611e884cb7319",
+    "arm64LibcxxSha256": "ab4e6c71b96b851de45a8a9bd86369e7dbc2130a44b3b4520564be94847910f2",
+    "bytes": 722261334,
+    "sourceRoot": "android-ndk-r28c"
+  },
+  "android": {
+    "api": 24,
+    "abi": "arm64-v8a",
+    "cpu": "arm64",
+    "triple": "aarch64-linux-android",
+    "pageSize": 16384
+  },
+  "patches": {
+    "linuxHostTrapSources": {
+      "file": "tools/v8_gypfiles/v8.gyp",
+      "patch": "0003-include-linux-host-trap-sources.patch",
+      "sourceUrl": "https://github.com/nodejs/node/blob/v24.19.0/tools/v8_gypfiles/v8.gyp",
+      "originalSha256": "6c4c283d60818b58c7b9719bc9b3eedb2948e1e43c29e13addf286822f9752b0",
+      "patchedSha256": "668659202153b8d93b9909d80af44f109581357b6f00e1e0cc59a830180135ad",
+      "patchSha256": "264432c37653767d727870ae4a01db6ccc9a3f53bef1e39f337909ea8f55196e"
+    }
+  },
+  "notices": {
+    "Node-LICENSE.txt": {
+      "source": "node",
+      "path": "LICENSE",
+      "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"
+    },
+    "Android-NDK-NOTICE.txt": {
+      "source": "ndk",
+      "path": "NOTICE",
+      "sha256": "faf0dc52cf6ce9ab09a04b0c074a378dd2565ee1ed9bc1179d83793bcdba012e"
+    },
+    "Android-NDK-toolchain-NOTICE.txt": {
+      "source": "ndk",
+      "path": "NOTICE.toolchain",
+      "sha256": "789714a9076571c580cf531bdcebec776a4d889c12c3c1108adafc6e4338710a"
+    },
+    "LLVM-NOTICE.txt": {
+      "source": "ndk",
+      "path": "toolchains/llvm/prebuilt/linux-x86_64/NOTICE",
+      "sha256": "f96f763beb66a7ba7a667647fc64c0226ace875e590c831fdd9579ec1c1d91e1"
+    },
+    "Android-NDK-sysroot-NOTICE.txt": {
+      "source": "ndk",
+      "path": "toolchains/llvm/prebuilt/linux-x86_64/sysroot/NOTICE",
+      "sha256": "2905ac5c59628352af990c748a8f4c3675a04f36eca7914612e3068661d2c6a6"
+    },
+    "Android-cpufeatures-NOTICE.txt": {
+      "source": "ndk",
+      "path": "sources/android/cpufeatures/NOTICE",
+      "sha256": "c870d52f42a8f93023b99a85fe68d02637d6b04e5f35bbcd7f98759adb4e4d49"
+    }
+  }
+}

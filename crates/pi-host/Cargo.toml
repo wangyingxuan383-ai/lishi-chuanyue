@@ -1,0 +1,20 @@
+[package]
+name = "pi-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10.9"
+tokio = { version = "1", features = ["io-util", "sync", "rt", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tokio = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "io-util"] }

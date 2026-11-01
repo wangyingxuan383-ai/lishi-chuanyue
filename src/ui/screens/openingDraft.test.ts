@@ -8,6 +8,24 @@ import { EMPTY, fromChallenge, fromSetup, fromTemplate, parseShare, shareText, t
 const daughter = TEMPLATES.find((t) => t.id === "tang-chancellor-daughter")!;
 
 describe("opening drafts", () => {
+  it("keeps ordinary play classic while accepting legacy Agent preferences", () => {
+    expect(EMPTY.executionMode).toBe("classic");
+    expect(toNewWorld(fromTemplate(daughter, EMPTY)).executionMode).toBe("classic");
+    const draft = { ...fromTemplate(daughter, EMPTY), executionMode: "agent" as const };
+    expect(parseShare(shareText(draft))?.executionMode).toBe("agent");
+    expect(toNewWorld(draft).executionMode).toBe("classic");
+    expect(fromSetup(toNewWorld(draft)).executionMode).toBe("classic");
+    expect(toNewWorld(draft).settings).not.toHaveProperty("executionMode");
+    expect(shareText(draft)).not.toContain("执行方式：");
+  });
+
+  it("uses classic for missing or unknown legacy opening preferences", () => {
+    const setup = { ...toNewWorld(fromTemplate(daughter, EMPTY)), executionMode: undefined };
+    expect(fromSetup(setup).executionMode).toBe("classic");
+    expect(parseShare(JSON.stringify({ premise: "汉末" }))?.executionMode).toBe("classic");
+    expect(parseShare(JSON.stringify({ premise: "汉末", executionMode: "unknown" }))?.executionMode).toBe("classic");
+  });
+
   it("keeps free worlds, custom notes and long-lived protagonists through sharing and replay", () => {
     const draft = fromTemplate(FREE_TEMPLATES[1], EMPTY);
     draft.age = "1200";
@@ -34,7 +52,7 @@ describe("opening drafts", () => {
   it("round-trips through shared text", () => {
     const draft = { ...fromTemplate(daughter, EMPTY), settings: { ...EMPTY.settings, rules: "多写对话", choiceCount: 4 } };
     const text = shareText(draft);
-    expect(text).toContain("【历史穿越 · 开局设定】相府庶女");
+    expect(text).toContain("【穿越小说模拟 · 开局设定】相府庶女");
     expect(text).toContain("时代：唐 · 天宝七载 · 长安");
     expect(parseShare(`朋友发来：\n${text}\n（转发）`)).toEqual({ ...draft, templateId: null });
   });

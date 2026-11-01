@@ -12,8 +12,41 @@ export interface SourceBinding {
   method: "search" | "analysis";
   analysisId?: string;
 }
-export interface ReferencePassage { section: number; title: string; page?: number; chunk: number; text: string; kind: "original" | "analysis" }
-export interface ReferenceContext { bookId: string; title: string; binding: SourceBinding; passages: ReferencePassage[] }
+export interface ReferencePassage {
+  section: number; title: string; page?: number; chunk: number; text: string; kind: "original" | "analysis";
+  /** Offsets inside the immutable chunk; old references may omit them. */
+  start?: number; end?: number;
+  /** Query focus in the same chunk coordinates, used when fitting a smaller budget. */
+  focus?: number;
+  /** A verified locator; its quotation must still occur in an original passage. */
+  fact?: SourceFactData;
+}
+export type SourceFactKind = "person" | "relation" | "event" | "rule";
+export interface SourceFactData {
+  kind: SourceFactKind; subject: string; aliases: string[]; statement: string; quote: string;
+  /** Section indices, not dates; omitted start means the chapter supplying the evidence. */
+  validFrom?: number; validThrough?: number;
+}
+export interface SourceFact extends SourceFactData {
+  id: string; bookId: string; jobId: string; section: number; chunk: number;
+}
+export interface StructuredSourceAnalysis {
+  version: "source-3"; summary: string; facts: SourceFactData[];
+}
+export interface ReferenceContext {
+  bookId: string; title: string; binding: SourceBinding; passages: ReferencePassage[];
+  status?: "ready" | "insufficient";
+  reason?: "budget" | "no_match";
+}
+/** Keep the immediate request separate from background so long history cannot hide it. */
+export interface ReferenceQuery {
+  text: string;
+  rewriteHint?: string | null;
+  directorNote?: string | null;
+  recent?: string;
+  entities?: { name: string; aliases?: string[] }[];
+  place?: string;
+}
 export interface AnalysisJob {
   id: string; bookId: string; instructions: string; through: number | null;
   status: "paused" | "running" | "failed" | "done"; error?: string;

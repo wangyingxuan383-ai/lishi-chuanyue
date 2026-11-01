@@ -1,0 +1,12 @@
+{
+  "name": "lishi-pi-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.19.0" },
+  "scripts": {
+    "prepare:upstream": "node ../scripts/pi-host/prepare-upstream.mjs --build",
+    "test:smoke": "node --test test/host.test.mjs",
+    "start": "node src/entry.mjs"
+  }
+}

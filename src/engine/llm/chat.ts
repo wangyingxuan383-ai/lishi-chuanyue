@@ -4,8 +4,31 @@
 import type { Json, Platform, StreamErrorKind, StreamEvent } from "../../platform";
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
+  /** A tool-only assistant message uses an empty string. */
   content: string;
+  tool_call_id?: string;
+  tool_calls?: ChatToolCall[];
+}
+
+export interface ChatToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export interface ChatToolDefinition {
+  type: "function";
+  function: { name: string; description?: string; parameters: Record<string, Json>; strict?: boolean };
+}
+
+export type ChatToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  name?: string;
+  arguments?: string;
 }
 
 export interface ChatUsage {
@@ -18,6 +41,8 @@ export interface ChunkDelta {
   reasoning: string;
   finishReason: string | null;
   usage: ChatUsage | null;
+  /** Present only when this payload includes supported tool-call fragments. */
+  toolCalls?: ToolCallDelta[];
 }
 
 /** Extracts what we need from one `data:` payload; null when it is not JSON. */
@@ -39,11 +64,23 @@ export function parseChunk(data: string): ChunkDelta | null {
         completionTokens: tokens(value.usage.completion_tokens),
       }
     : null;
+  const toolCalls: ToolCallDelta[] = Array.isArray(part.tool_calls) ? part.tool_calls.flatMap((call: unknown, position: number) => {
+    if (!call || typeof call !== "object" || Array.isArray(call)) return [];
+    const c = call as Record<string, unknown>;
+    if (c.type !== undefined && c.type !== "function") return [];
+    const index = c.index === undefined ? position : c.index;
+    if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0) return [];
+    const fn = c.function && typeof c.function === "object" && !Array.isArray(c.function) ? c.function as Record<string, unknown> : {};
+    return [{ index, ...(typeof c.id === "string" ? { id: c.id } : {}),
+      ...(typeof fn.name === "string" ? { name: fn.name } : {}),
+      ...(typeof fn.arguments === "string" ? { arguments: fn.arguments } : {}) }];
+  }) : [];
   return {
     content: text(part.content),
     reasoning: text(part.reasoning_content) || text(part.reasoning),
     finishReason: typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
     usage,
+    ...(toolCalls.length ? { toolCalls } : {}),
   };
 }
 
@@ -55,6 +92,8 @@ export interface ChatCallbacks {
 
 export interface ChatResult {
   text: string;
+  /** Actual calls return an array; optional so existing saved/test results remain valid. */
+  toolCalls?: ChatToolCall[];
   finishReason: string | null;
   usage: ChatUsage | null;
   firstTokenMs: number | null;
@@ -83,6 +122,8 @@ export interface ChatRequest {
   includeUsage?: boolean;
   timeouts?: { firstByteMs: number; idleMs: number; totalMs: number };
   extra?: Record<string, Json>;
+  tools?: ChatToolDefinition[];
+  toolChoice?: ChatToolChoice;
 }
 
 export const DEFAULT_TIMEOUTS = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 180_000 };
@@ -102,6 +143,7 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
   let usage: ChatUsage | null = null;
   let firstTokenMs: number | null = null;
   let thinking = false;
+  const calls = new Map<number, ChatToolCall>();
   let settle!: (result: ChatResult) => void;
   let fail!: (error: ChatError) => void;
   const result = new Promise<ChatResult>((resolve, reject) => {
@@ -132,14 +174,24 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
         text += chunk.content;
         callbacks.onText?.(chunk.content, text);
       }
+      for (const delta of chunk.toolCalls ?? []) {
+        firstTokenMs ??= performance.now() - started;
+        const call = calls.get(delta.index) ?? { id: "", type: "function" as const, function: { name: "", arguments: "" } };
+        if (delta.id) call.id = delta.id;
+        call.function.name += delta.name ?? "";
+        call.function.arguments += delta.arguments ?? "";
+        calls.set(delta.index, call);
+      }
       finishReason = chunk.finishReason ?? finishReason;
       if (chunk.usage) usage = {
         promptTokens: chunk.usage.promptTokens ?? usage?.promptTokens ?? null,
         completionTokens: chunk.usage.completionTokens ?? usage?.completionTokens ?? null,
       };
     } else if (event.type === "done") {
-      if (!text) fail(new ChatError("empty", undefined, "", finishReason ?? undefined));
-      else settle({ text, finishReason, usage, firstTokenMs, totalMs: performance.now() - started });
+      const toolCalls = [...calls].sort(([a], [b]) => a - b).map(([, call]) => call);
+      if (toolCalls.some((call) => !call.id || !call.function.name)) fail(new ChatError("empty", undefined, text, "工具调用不完整，请重试"));
+      else if (!text && !toolCalls.length) fail(new ChatError("empty", undefined, "", finishReason ?? undefined));
+      else settle({ text, toolCalls, finishReason, usage, firstTokenMs, totalMs: performance.now() - started });
     } else if (event.type === "error") {
       fail(new ChatError(event.kind, event.status, text, event.message));
     }
@@ -153,6 +205,8 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.includeUsage ? { stream_options: { include_usage: true } } : {}),
     ...request.extra,
+    ...(request.tools !== undefined ? { tools: request.tools as unknown as Json } : {}),
+    ...(request.toolChoice !== undefined ? { tool_choice: request.toolChoice as Json } : {}),
   };
   const streamId = platform.llm.stream(
     { slot: request.slot, url: request.url, body, timeouts: request.timeouts ?? DEFAULT_TIMEOUTS },

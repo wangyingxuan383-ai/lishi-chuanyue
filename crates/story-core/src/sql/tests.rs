@@ -171,9 +171,7 @@ fn app_store(directory: &std::path::Path) -> SqlStore {
     let store = SqlStore::open(directory.into()).unwrap();
     store
         .batch(vec![statement(
-            "CREATE TABLE schema_version (version INTEGER NOT NULL);
-             INSERT INTO schema_version VALUES (1);
-             CREATE TABLE t(x);",
+            "CREATE TABLE t(x);",
             vec![],
         )])
         .unwrap();
@@ -268,4 +266,27 @@ fn restore_rejects_foreign_corrupt_newer_and_unsafe_names() {
         .unwrap()
         .iter()
         .any(|b| b.name.contains("before-restore")));
+}
+
+#[test]
+fn restore_fence_rejects_old_queued_save_and_preserves_matching_pi_context() {
+    let directory=tempfile::tempdir().unwrap();let store=app_store(directory.path());
+    let session_dir=directory.path().join("agent-sessions").join("s");fs::create_dir_all(&session_dir).unwrap();
+    let session_file=session_dir.join("test.jsonl");fs::write(&session_file,"old transcript\n").unwrap();
+    store.query("INSERT INTO worlds(id,title,era_id,settings_json,created_at,updated_at,played_at) VALUES('w','独立','free','{}','','','')",vec![]).unwrap();
+    store.query("INSERT INTO pi_sessions(id,world_id,line_id,title,session_file,created_at,updated_at) VALUES('s','w','l','测试',?,'','')",vec![json!(session_file.to_str().unwrap())]).unwrap();
+    let backup=store.backup("context").unwrap();
+    fs::write(&session_file,"new transcript must survive\n").unwrap();
+    let issued=store.generation();let ticket=crate::maintenance::begin(&store.shared()).unwrap();
+    assert!(store.query("INSERT INTO t VALUES(9)",vec![]).is_err());
+    store.restore_managed(&backup,&ticket).unwrap();crate::maintenance::end(&store.shared(),&ticket).unwrap();
+    assert!(store.batch_at(issued,vec![statement("INSERT INTO t VALUES(7)",vec![])]).is_err());
+    let file=store.query("SELECT session_file FROM pi_sessions WHERE id='s'",vec![]).unwrap()[0]["session_file"].as_str().unwrap().to_owned();
+    assert_ne!(file,session_file.to_str().unwrap());assert_eq!(fs::read_to_string(file).unwrap(),"old transcript\n");
+    assert_eq!(fs::read_to_string(&session_file).unwrap(),"new transcript must survive\n");
+    assert!(values(&store).is_empty());
+    // Corrupt matching sidecar must fail before touching the live database.
+    fs::write(directory.path().join("backups").join(&backup).with_extension("pi").join("manifest.json"),"{\"version\":1,\"databaseSha256\":\"wrong\",\"files\":[]}").unwrap();
+    store.query("INSERT INTO t VALUES(5)",vec![]).unwrap();
+    assert!(store.restore(&backup).is_err());assert_eq!(values(&store),vec![json!(5)]);
 }

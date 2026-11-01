@@ -1,7 +1,7 @@
 // Prompts for opening, turns, the extraction fallback and the setup assistant.
 // Changes are logged in ./CHANGES.md together with eval results.
 import type { ChatMessage } from "../llm/chat";
-import { nowOf, timeOfDay } from "../calendar/clock";
+import { nowOf } from "../calendar/clock";
 import { formatDate } from "../calendar/date";
 import type { EraContext } from "../era";
 import { ERA_CARD_LIMIT, activeCardLines } from "../memory/cards";
@@ -14,9 +14,9 @@ import { tabooReminder, type TabooHit } from "../era/taboo";
 import { RECALL_BUDGET, recallBlock } from "../memory/recall";
 import { beatTitle, challengeView } from "../modes";
 
-import { fitReference, referenceBlock } from "../sources/library";
+import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-20";
+export const PROMPT_VERSION = "turn-23";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -30,7 +30,7 @@ type PromptSettings = WorldSettings & PromptOptions;
 const isFree = (settings: PromptOptions) => settings.mode === "free";
 /** 旁观 (R14): the AI plays the protagonist and the player directs. */
 const aiPilot = (settings: PromptOptions) => settings.pilot === "ai";
-const elapsedClock = (settings: PromptOptions) => isFree(settings) || settings.clockStyle === "elapsed";
+const elapsedClock = (settings: PromptOptions) => (settings.clockStyle ?? (isFree(settings) ? "elapsed" : "era")) === "elapsed";
 
 function heroPanelBlock(settings: PromptOptions, panel?: string): string {
   return settings.heroPanelEnabled && panel?.trim()
@@ -101,7 +101,7 @@ const OPENING_EXTRA = `开场的记录块另有要求：
 - "currency"：这个时代的货币单位，从大到小，如 [{"name":"贯","value":1000},{"name":"文","value":1}] 或 [{"name":"两","value":1000},{"name":"钱","value":100},{"name":"文","value":1}] 或 [{"name":"denarius","value":16},{"name":"as","value":1}]；
 - goals 只记玩家已明确的目标，没有就省略；people 写出开场出现或与主角密切相关的人物；items 写出主角随身真正有的东西；place 写出当前地点。`;
 
-function recordFields(settings: PromptOptions = {}, modes: ModeContext = {}): string {
+export function recordFields(settings: PromptOptions = {}, modes: ModeContext = {}): string {
   let fields = RECORD_FIELDS;
   if (elapsedClock(settings)) fields = fields.replace("一刻 / 半个时辰 / 两个时辰 / 一夜 / 三天", "十分钟 / 半小时 / 两小时 / 一夜 / 三天");
   if (isFree(settings)) fields = fields.split("\n").filter((line) => !line.trimStart().startsWith('"deviation":')).join("\n");
@@ -113,7 +113,7 @@ function recordFields(settings: PromptOptions = {}, modes: ModeContext = {}): st
   return fields;
 }
 
-function openingExtra(settings: PromptOptions): string {
+export function openingExtra(settings: PromptOptions): string {
   const lines = OPENING_EXTRA.split("\n");
   return lines.map((line) => {
     if (elapsedClock(settings) && line.startsWith('- "date"')) return '- "date"：省略日期，按开局后的第几天记时；';
@@ -194,7 +194,11 @@ function personNotes(p: WorldState["people"][number]): string {
  */
 export function renderState(state: WorldState, era: EraContext, present?: Set<string>, settings: PromptOptions = {}): string {
   const me = state.protagonist;
-  const now = nowOf(era.clock, state.time.elapsedMinutes);
+  const staleHistory = isFree(settings) && era.clock.mode !== "free";
+  const clock = staleHistory
+    ? { ...era.clock, mode: "free" as const, clockStyle: "elapsed" as const, timeStyle: "24h" as const, anchor: null, date: null, label: "" }
+    : { ...era.clock, clockStyle: state.era.clockStyle ?? settings.clockStyle ?? era.clock.clockStyle };
+  const now = nowOf(clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name ?? "（未记录）";
   const items = me.items.map((i) => `${i.name}×${i.quantity}${i.unit}${i.place ? `（放在${i.place}）` : ""}`).join("、") || "无";
   const statuses = me.statuses.map((s) => `${s.name}${s.detail ? `：${s.detail}` : ""}`).join("；") || "无";
@@ -209,11 +213,7 @@ export function renderState(state: WorldState, era: EraContext, present?: Set<st
   ].join("\n") || "无";
   const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `【${g.kind}】${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
   const smallest = era.currency.units[era.currency.units.length - 1].name;
-  const when = now.date ? formatDate(now.date, era.clock.rules) : `${era.clock.label ? `${era.clock.label}起 ` : ""}第 ${now.day} 日`;
-  const clock = elapsedClock(settings)
-    ? `第 ${now.day} 天 ${String(now.hour).padStart(2, "0")}:${String(now.minute).padStart(2, "0")}`
-    : `${when} ${timeOfDay(now)}`;
-  return `【当前】${clock} · ${place}
+  return `【当前】${now.text} · ${place}
 主角：${me.name}，${me.gender}${me.age != null ? `，${me.age}岁` : ""}，${me.identity}${me.origin ? `（穿越前是${me.origin}）` : ""}
 可用的钱：${formatMoney(me.stats.money, era.currency)}（共 ${me.stats.money} ${smallest}）${me.stats.debt ? `；欠债 ${formatMoney(me.stats.debt, era.currency)}` : ""}
 身体：健康${level(me.stats.health, ["康健", "微恙", "带伤", "重伤", "垂危"])}，精力${level(me.stats.energy, ["充沛", "尚可", "疲惫", "力竭"])}
@@ -305,7 +305,7 @@ export interface TurnPromptInput extends StoryContext {
 }
 
 /** Recent turns as chat history, newest kept first until the budget runs out (minimum three); `ids` are the turns it kept. */
-function historyWindow(history: StoryNode[], budget: number, settings: PromptOptions): { messages: ChatMessage[]; ids: Set<string> } {
+function historyWindow(history: StoryNode[], budget: number, settings: PromptOptions, strict = false): { messages: ChatMessage[]; ids: Set<string> } {
   const pairs: ChatMessage[][] = [];
   const ids = new Set<string>();
   let used = 0;
@@ -314,7 +314,17 @@ function historyWindow(history: StoryNode[], budget: number, settings: PromptOpt
     const n = turns[i];
     const action = n.kind === "opening" ? "（开场）" : n.actionMode && n.actionText != null ? actionLine(n.actionMode, n.actionText, settings) : "（继续）";
     const cost = action.length + n.narrative.length;
-    if (pairs.length >= 3 && used + cost > budget) break;
+    if (used + cost > budget && (strict || pairs.length >= 3)) {
+      // Bound worlds keep source evidence before older prose. If the newest passage
+      // alone is too long, its ending still anchors the continuation without an overflow.
+      const marker = "（这一回合较早的正文已省略）\n";
+      const room = Math.floor(budget - used - action.length - marker.length);
+      if (strict && !pairs.length && room >= 80) {
+        ids.add(n.id);
+        pairs.unshift([{ role: "user", content: action }, { role: "assistant", content: marker + n.narrative.slice(-room) }]);
+      }
+      break;
+    }
     used += cost;
     ids.add(n.id);
     pairs.unshift([{ role: "user", content: action }, { role: "assistant", content: n.narrative }]);
@@ -344,7 +354,7 @@ function presentPeople(state: WorldState, recent: string): Set<string> {
 
 /** One layer of a turn's context, for the developer context viewer (PLAN §5.3). */
 export interface ContextLayer {
-  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "recall" | "directive" | "modes" | "notes" | "action" | "spec" | "reference";
+  key: "rules" | "premise" | "era" | "recap" | "history" | "state" | "essentials" | "world" | "cards" | "recall" | "directive" | "modes" | "notes" | "action" | "spec" | "reference" | "referenceRules" | "tools";
   label: string;
   chars: number;
   /** Why it is in, and what was left out. */
@@ -359,6 +369,8 @@ export interface TurnContext {
   /** Characters sent, and the target they were fitted to. */
   chars: number;
   budgetChars: number;
+  /** Fixed player instructions/current facts cannot be silently trimmed to fit. */
+  budgetExceeded?: boolean;
 }
 
 const DEFAULT_BUDGET_CHARS = 12000;
@@ -367,10 +379,21 @@ const DEFAULT_BUDGET_CHARS = 12000;
  * The turn request, layer by layer (PLAN §5.3, R04-T004). Rules, premise, the
  * current state with people, 要点, the 方针 and the action are never trimmed;
  * the era card, cards and recap have their own limits; the raw-text window
- * takes what is left (at least three turns). Over the hard cap (7/6 of the
+ * takes what is left (at least three turns when no source is bound). Source
+ * instructions and original evidence are reserved before that window. Over the hard cap (7/6 of the
  * target) the recap shrinks to gists, then cards go, least recently mentioned first.
  */
+/** Static writing rules stay in one existing template; native code owns selection. */
+export function writingContextTemplate(input: TurnPromptInput) {
+  const parts = systemParts(input, snapshotPanel(input.state), input.state);
+  const old = buildTurnContext(input);
+  return { ...parts, notes: old.layers.find(l => l.key === "notes")?.content ?? "", action: old.layers.find(l => l.key === "action")?.content ?? "" };
+}
+
 export function buildTurnContext(input: TurnPromptInput): TurnContext {
+  if (input.state.era.clockStyle && (input.state.era.mode ?? "history") === (input.settings.mode ?? "history")) {
+    input = { ...input, settings: { ...input.settings, clockStyle: input.state.era.clockStyle } };
+  }
   const parts = systemParts(input, snapshotPanel(input.state), input.state);
   const recent = recentText(input);
   const present = presentPeople(input.state, recent);
@@ -389,28 +412,33 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
   const action = `\n\n${actionLine(input.mode, input.text, input.settings)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
   const target = input.budgetChars ?? DEFAULT_BUDGET_CHARS;
-  const hardCap = Math.round((target * 7) / 6);
+  const hardCap = input.reference ? target : Math.round((target * 7) / 6);
   const chapters = input.chapters ?? [];
   // What the player wrote this turn also finds cards and old sentences it describes without the exact name.
   const query = input.mode === "continue" || input.mode === "skip" ? "" : [input.text, input.directorNote ?? ""].join("\n");
   const allCards = activeCardLines(input.state, recent, undefined, query);
   let cardLines = allCards;
-  const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + modes.length + notes.length + action.length;
+  const referenceRules = referenceInstructionsBlock(input.reference);
+  const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + modes.length + notes.length + action.length + referenceRules.length + (input.reference ? 6 : 0);
+  const usedReference = fitReference(input.reference, Math.max(0, Math.min(Math.floor(target / 4), target - fixed)));
+  const referenceEvidence = referenceEvidenceBlock(usedReference);
+  const reference = referenceRules + referenceEvidence;
+  const referenceChars = referenceEvidence.length;
   // Turns that left the window, numbered from the opening (0), for 【相关旧事】.
   const story = (input.allTurns ?? input.history).filter((n) => n.kind !== "edit");
   const older = (ids: Set<string>) => story.map((node, turn) => ({ node, turn })).filter(({ node }) => !ids.has(node.id));
   // First pass reserves room for the recap and recall; the second gives the window whatever they left.
   const reserve = (chapters.length ? RECAP_BUDGET : 0) + (story.length > 3 ? RECALL_BUDGET : 0);
-  let window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - reserve, input.settings);
+  let window = historyWindow(input.history, target - fixed - referenceChars - cardsBlock(cardLines).length - reserve, input.settings, !!input.reference);
   let recap = recapBlock(chapters, (id) => window.ids.has(id));
   let recall = recallBlock(input.state, recent, older(window.ids), RECALL_BUDGET, query);
   if (reserve) {
-    window = historyWindow(input.history, target - fixed - cardsBlock(cardLines).length - recap.length - recall.length, input.settings);
+    window = historyWindow(input.history, target - fixed - referenceChars - cardsBlock(cardLines).length - recap.length - recall.length, input.settings, !!input.reference);
     recap = recapBlock(chapters, (id) => window.ids.has(id));
     recall = recallBlock(input.state, recent, older(window.ids), RECALL_BUDGET, query);
   }
-  const historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
-  const total = () => fixed + cardsBlock(cardLines).length + recap.length + recall.length + historyChars;
+  let historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
+  const total = () => fixed + referenceChars + cardsBlock(cardLines).length + recap.length + recall.length + historyChars;
   // Over the hard cap: recall goes first, then the recap shrinks to gists, then cards.
   const recallDropped = total() > hardCap && !!recall;
   if (recallDropped) recall = "";
@@ -420,11 +448,13 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
     gistsOnly = true;
   }
   while (total() > hardCap && cardLines.length) cardLines = cardLines.slice(0, -1);
+  if (input.reference && total() > target) {
+    if (fixed + referenceChars + recap.length > target) recap = "";
+    window = historyWindow(input.history, target - fixed - referenceChars - cardsBlock(cardLines).length - recap.length - recall.length, input.settings, true);
+    historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
+  }
 
   const cards = cardsBlock(cardLines);
-  // References only use spare room, after the current facts and recent story.
-  const usedReference = fitReference(input.reference, Math.max(0, Math.min(Math.floor(target / 4), target - total())));
-  const reference = referenceBlock(usedReference);
   const system = joinSystem(parts, recap);
   const user = `${state}${essentials}${world}${cards}${recall}${reference}${directive}${modes}${notes}${action}`;
   const messages: ChatMessage[] = [{ role: "system", content: system }, ...window.messages, { role: "user", content: user }];
@@ -443,7 +473,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
     },
     {
       key: "history", label: "最近原文", content: window.messages.map((m) => `${m.role === "user" ? "▶" : ""}${m.content}`).join("\n\n"),
-      note: `最近 ${turnsIn} 段（预算剩下的部分，至少 3 段）${turnsOut ? `；更早的 ${turnsOut}${input.history.length >= 40 ? " 段以上" : " 段"}不在原文里` : ""}`,
+      note: `最近 ${turnsIn} 段（${input.reference ? "先保留原著说明与证据，再用余量；过长段落只留结尾" : "预算剩下的部分，至少 3 段"}）${turnsOut ? `；更早的 ${turnsOut}${input.history.length >= 40 ? " 段以上" : " 段"}不在原文里` : ""}`,
     },
     { key: "state", label: "当前状态与人物", content: state, note: `每回合都有，不裁剪；人物 ${input.state.people.length} 人，最近提到的 ${present.size} 人带备注` },
     { key: "world", label: "天下大事与历史偏离", content: world, note: isFree(input.settings) ? "异世界不用历史年表与偏离" : world ? "只带近来已到时间的大事和已经改变的历史，不预告未来；不裁剪" : "近来没有大事或历史偏离" },
@@ -456,12 +486,13 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
     { key: "directive", label: "叙事方针", content: directive, note: directive ? "玩家写的，每回合都有" : "没写" },
     // Listed only in worlds that have them, so ordinary worlds keep their layers.
     ...(modes ? [{ key: "modes", label: "剧本与挑战", content: modes, note: "玩家定的剧本和挑战，每回合都有，不裁剪" }] : []),
-    ...(input.reference ? [{ key: "reference", label: "参考书籍", content: reference, note: "只用预算余量，最多四分之一；原文和整理均限所选章节" }] : []),
+    ...(input.reference ? [{ key: "reference", label: "参考书籍", content: reference, note: `使用说明完整保留；证据先于旧正文，最多四分之一；原文和整理均限所选章节${usedReference?.status === "insufficient" ? "；本次原文资料不足，不能视作已经查证" : ""}` }] : []),
     { key: "notes", label: "程序提示", content: notes, note: notes ? `${input.notes?.length ? "上回合程序修正过的变化；" : ""}${luck ? `本回合运势：${input.fortune}（${luckMode === "on" ? "有影响" : "只作参考"}）` : ""}` : "没有" },
     { key: "action", label: "玩家行动", content: action, note: "本回合的行动与幕后要求" },
     { key: "spec", label: "输出格式", content: parts.spec, note: "每回合都有，不裁剪" },
   ] as Omit<ContextLayer, "chars">[]).map((l) => ({ ...l, chars: l.content.length }));
-  return { messages, layers, reference: usedReference, chars: messages.reduce((n, m) => n + m.content.length, 0), budgetChars: target };
+  const chars = messages.reduce((n, m) => n + m.content.length, 0);
+  return { messages, layers, reference: usedReference, chars, budgetChars: target, ...(input.reference && chars > target ? { budgetExceeded: true } : {}) };
 }
 
 export function turnMessages(input: TurnPromptInput): ChatMessage[] {
@@ -539,6 +570,9 @@ time 写 "0"。只输出 JSON，不要输出其他文字。`,
 // ---------- extraction fallback (补记) ----------
 
 export function extractMessages(input: { era: EraContext; state: WorldState; action: string; narrative: string; settings?: PromptOptions }): ChatMessage[] {
+  if (input.state.era.clockStyle && (input.state.era.mode ?? "history") === (input.settings?.mode ?? "history")) {
+    input = { ...input, settings: { ...input.settings, clockStyle: input.state.era.clockStyle } };
+  }
   return [
     {
       role: "system",

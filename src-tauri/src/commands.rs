@@ -16,13 +16,15 @@ pub async fn sql_query(
     params: Vec<Value>,
 ) -> Result<Vec<Map<String, Value>>> {
     let store = Arc::clone(store.inner());
-    blocking(move || store.query(&sql, params)).await
+    let issued=store.generation();
+    blocking(move || store.query_at(issued,&sql, params)).await
 }
 
 #[tauri::command]
 pub async fn sql_batch(store: State<'_, Arc<SqlStore>>, statements: Vec<Statement>) -> Result<()> {
     let store = Arc::clone(store.inner());
-    blocking(move || store.batch(statements)).await
+    let issued=store.generation();
+    blocking(move || store.batch_at(issued,statements)).await
 }
 
 #[tauri::command]
@@ -39,9 +41,22 @@ pub async fn sql_list_backups(store: State<'_, Arc<SqlStore>>) -> Result<Vec<Bac
 
 /// Replaces the live database with a backup; returns the before-restore backup's name.
 #[tauri::command]
-pub async fn sql_restore(store: State<'_, Arc<SqlStore>>, name: String) -> Result<String> {
-    let store = Arc::clone(store.inner());
-    blocking(move || store.restore(&name)).await
+pub async fn sql_restore<R:tauri::Runtime>(app:tauri::AppHandle<R>,store:State<'_,Arc<SqlStore>>,engine:State<'_,Arc<story_core::runtime::Engine>>,name:String)->Result<String> {
+    let store=Arc::clone(store.inner());let shared=store.shared();
+    let failed=||crate::error::PlatformError::new("sql_restore_busy","存档恢复尚未开始：执行收尾或维护检查未完成");
+    store.fence_writes();
+    let ticket=story_core::maintenance::begin(&shared).map_err(|_|failed())?;
+    let result=async {
+        for request in story_core::maintenance::pending_stops(&shared).map_err(|_|failed())? {crate::pi_agent::pi_agent_request(app.clone(),request).await.map_err(|_|failed())?;}
+        engine.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(30),async {
+            loop{if story_core::maintenance::drained(&shared).map_err(|_|failed())? {break;}tokio::time::sleep(std::time::Duration::from_millis(50)).await;}Ok::<_,crate::error::PlatformError>(())
+        }).await.map_err(|_|failed())??;
+        crate::pi_agent::retire(&app).await.map_err(|_|failed())?;
+        let target=store.clone();let token=ticket.clone();blocking(move||target.restore_managed(&name,&token)).await
+    }.await;
+    let _=story_core::maintenance::end(&shared,&ticket);
+    result
 }
 
 #[tauri::command]

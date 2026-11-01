@@ -411,6 +411,9 @@ fn proxy_error() -> PlatformError {
 
 /// Also used by the update download (`updates`), so it follows the same proxy choice.
 pub(crate) fn client() -> std::result::Result<Client, StreamEvent> {
+    client_builder()?.build().map_err(|_|StreamEvent::error("network"))
+}
+pub(crate) fn client_builder()->std::result::Result<reqwest::ClientBuilder,StreamEvent> {
     #[cfg(target_os = "android")]
     if !crate::android_tls::is_ready() {
         return Err(StreamEvent::error("network"));
@@ -432,7 +435,7 @@ pub(crate) fn client() -> std::result::Result<Client, StreamEvent> {
         },
         _ => builder.no_proxy(),
     };
-    builder.build().map_err(|_| StreamEvent::error("network"))
+    Ok(builder)
 }
 
 struct Budget {

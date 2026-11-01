@@ -1,0 +1,20 @@
+[package]
+name = "story-dev-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+story-core = { path = "../story-core" }
+book-pdf = { path = "../book-pdf" }
+sha2 = "0.10.9"
+uuid = { version = "1", features = ["v4"] }
+pi-host = { path = "../pi-host" }
+serde.workspace = true
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "hooks"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time", "fs"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "socks", "system-proxy"] }
+base64 = "0.22"
+tokio-util = { version = "0.7", features = ["rt"] }

@@ -9,7 +9,8 @@ import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
 import type { Row } from "../../platform";
 import { useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
-import { REPO_URL, latestRelease, openLink, newer, plainNotes, type ReleaseInfo } from "../app/update";
+import { REPO_URL, openLink, newer, plainNotes } from "../app/update";
+import { useUpdateNotice } from "../app/updateStore";
 import { exportWorld } from "../../engine/archive";
 import { PURPOSES } from "../components/Usage";
 import { Seal } from "../components/Seal";
@@ -32,6 +33,7 @@ const SIZES: [number, string][] = [[16, "小"], [18, "中"], [20, "大"], [22, "
 
 export default function Settings() {
   const { game, pop, push, profile, reading, devMode } = useApp();
+  const { unread } = useUpdateNotice(game);
   const [page, setPage] = useState<Page>("home");
   const [defaults, setDefaults] = useState<PlayDefaults>(BUILTIN_DEFAULTS);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -83,8 +85,8 @@ export default function Settings() {
             <h2>{g.group}</h2>
             <div className="settings-list">
               {g.items.filter((i) => !i.hidden).map((i) => (
-                <button key={i.page} className="settings-entry" onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : setPage(i.page))}>
-                  <span><b>{i.label}</b><small>{i.state}</small></span><span aria-hidden="true">›</span>
+                <button key={i.page} className="settings-entry" aria-label={i.page === "about" && unread ? `${i.label}，有新版本` : undefined} onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : setPage(i.page))}>
+                  <span><b>{i.label}{i.page === "about" && unread && <i className="update-dot" aria-hidden="true" />}</b><small>{i.state}</small></span><span aria-hidden="true">›</span>
                 </button>
               ))}
             </div>
@@ -268,11 +270,11 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
         </div>}
       </div>
       <h3 className="settings-sub">在后台被系统停掉？</h3>
-      <Note>小米、华为等手机为了省电，可能在后台停掉应用，故事写到一半就断了。可以在系统设置里给“历史穿越”放行：</Note>
+      <Note>小米、华为等手机为了省电，可能在后台停掉应用，故事写到一半就断了。可以在系统设置里给“穿越小说模拟”放行：</Note>
       <ol className="steps">
         <li>省电策略选“无限制”（应用信息 → 省电策略）。</li>
         <li>打开“自启动”。</li>
-        <li>在最近任务里下拉锁定“历史穿越”。</li>
+        <li>在最近任务里下拉锁定“穿越小说模拟”。</li>
       </ol>
       <button onClick={() => void game.platform.system.openSystemSettings("app")}>打开应用信息</button>
     </>
@@ -355,28 +357,25 @@ function NetworkPage({ value, onChange }: { value: { proxy: "none" | "system" | 
 
 function AboutPage() {
   const { game, toast } = useApp();
-  const [checking, setChecking] = useState(false);
-  const [latest, setLatest] = useState<ReleaseInfo | null | "error">(null);
+  const { store: updates, state: { release: latest, checking, failed }, unread } = useUpdateNotice(game);
   const [autoCheck, setAutoCheck] = useState(true);
   const [whatsNew, setWhatsNew] = useState(false);
   useEffect(() => { void game.repo.getSetting("autoUpdateCheck", true).then(setAutoCheck); }, []);
-  const check = async () => {
-    setChecking(true);
-    try { setLatest(await latestRelease(game.platform)); } catch { setLatest("error"); } finally { setChecking(false); }
-  };
-  const hasNew = latest && latest !== "error" && newer(latest.version, __APP_VERSION__);
+  const check = () => updates.check(true);
+  const hasNew = latest && newer(latest.version, __APP_VERSION__);
   return (
     <>
       <div className="about-head">
         <Seal />
-        <div><h2>历史穿越</h2><p className="muted">版本 {__APP_VERSION__}</p></div>
+        <div><h2>穿越小说模拟</h2><p className="muted">版本 {__APP_VERSION__}</p></div>
       </div>
       <div className="status-card">
-        <b>{checking ? "正在检查…" : latest === "error" ? "没连上 GitHub" : hasNew ? `有新版本：${latest!.version}` : latest ? "已经是最新版本" : "检查更新"}</b>
-        {latest && latest !== "error" && hasNew && <small className="release-notes">{plainNotes(latest.notes, 4, 160)}</small>}
-        {latest === "error" && <small>可能是网络问题，或者 GitHub 暂时访问不了；需要的话可以在“网络与代理”里设置代理。</small>}
+        <b>{checking ? "正在检查…" : failed ? "没连上 GitHub" : hasNew ? `有新版本：${latest!.version}` : latest ? "已经是最新版本" : "检查更新"}{unread && <i className="update-dot" aria-hidden="true" />}</b>
+        {latest && hasNew && <small className="release-notes">{plainNotes(latest.notes, 4, 160)}</small>}
+        {failed && <small>可能是网络问题，或者 GitHub 暂时访问不了；需要的话可以在“网络与代理”里设置代理。</small>}
         <div className="row">
-          {hasNew ? <UpdateButton release={latest as ReleaseInfo} /> : <button disabled={checking} onClick={() => void check()}>检查更新</button>}
+          {hasNew && latest && <UpdateButton release={latest} />}
+          <button className={hasNew ? "ghost" : undefined} disabled={checking} onClick={() => void check()}>检查更新</button>
           <button className="ghost" onClick={() => void openLink(game.platform, toast, `${REPO_URL}/releases`)}>全部版本</button>
         </div>
         <small>安卓更新时下载新的安装包直接覆盖安装，不要先卸载（卸载会删掉所有世界）。</small>

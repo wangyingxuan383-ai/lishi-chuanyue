@@ -9,6 +9,12 @@
 # GenerationService itself exposes @JvmStatic start/stop to Rust through JNI.
 -keep class io.timejump.chuanyue.GenerationService { *; }
 -keep class io.timejump.chuanyue.GenerationService$Companion { *; }
+# Dedicated Pi service uses fixed JNI class/method names and native callbacks.
+-keep class io.timejump.chuanyue.AgentNative { *; }
+-keep class io.timejump.chuanyue.AgentHostBridge { *; }
+-keep class io.timejump.chuanyue.AgentHostPlugin { *; }
+-keep class io.timejump.chuanyue.AgentHostArgs { *; }
+-keep class io.timejump.pi.NodeRuntime { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #

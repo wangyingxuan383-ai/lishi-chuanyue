@@ -32,6 +32,19 @@ if (Test-Path -LiteralPath $AndroidHome) {
     $newPaths += Join-Path $AndroidHome 'platform-tools'
     $newPaths += Join-Path $AndroidHome 'cmdline-tools\latest\bin'
 }
+# Android QuickJS bindings must use this NDK's headers. A local libclang cache
+# is optional; fresh machines can provide LIBCLANG_PATH themselves.
+$agentClangCache = Join-Path $projectRoot '.cache\toolchain\libclang'
+if (!$env:LIBCLANG_PATH -and (Test-Path -LiteralPath (Join-Path $agentClangCache 'libclang.dll'))) {
+    $env:LIBCLANG_PATH = $agentClangCache
+}
+if (!$env:BINDGEN_EXTRA_CLANG_ARGS -and $env:NDK_HOME) {
+    $agentNdkRoot = $env:NDK_HOME.Replace('\', '/')
+    $agentClangResource = "$agentNdkRoot/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/19"
+    if (Test-Path -LiteralPath $agentClangResource) {
+        $env:BINDGEN_EXTRA_CLANG_ARGS = "--target=aarch64-linux-android24 --sysroot=$agentNdkRoot/toolchains/llvm/prebuilt/windows-x86_64/sysroot -resource-dir=$agentClangResource"
+    }
+}
 $env:PATH = ($newPaths -join ';') + ';' + $env:PATH
 # Tauri's beforeBuildCommand calls `pnpm`; provide a corepack shim when it is not on PATH.
 if (!(Get-Command pnpm -ErrorAction SilentlyContinue)) {

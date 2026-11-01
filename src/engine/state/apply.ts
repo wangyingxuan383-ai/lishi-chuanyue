@@ -1,7 +1,7 @@
 // Applies a model's turn record to the world state, change by change
 // (D104, D113). Invalid changes are corrected or dropped, never fatal; the
 // player sees what actually happened as chips, and the next prompt gets notes.
-import { newYearsBetween, nowOf, playYears, type GameClock } from "../calendar/clock";
+import { clockOffsetMinutes, newYearsBetween, nowOf, playYears, type GameClock } from "../calendar/clock";
 import { coerceDate, formatDate } from "../calendar/date";
 import { parseDurationMinutes } from "../calendar/duration";
 import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
@@ -20,6 +20,8 @@ import { matchName } from "./names";
 export interface TurnRecord {
   /** Player edits only; never parsed from the model's record. */
   sourceSet?: SourceBinding | null;
+  /** Trusted player setting, never parsed from a model record. */
+  executionSet?: import("../types").ExecutionMode;
   time?: string | number | null;
   place?: string | null;
   money?: number | string | null;
@@ -164,7 +166,7 @@ const MAX_STATUSES = 12;
  */
 function endingAt(minutes: number, hour: number | null | undefined, elapsed: number, clock?: GameClock): number {
   if (typeof hour !== "number" || !clock || minutes < 1440) return minutes;
-  const startOfDay = clock.hour * 60;
+  const startOfDay = clockOffsetMinutes(clock);
   const end = startOfDay + elapsed + minutes;
   const adjusted = Math.floor(end / 1440) * 1440 + hour * 60 - startOfDay - elapsed;
   return adjusted > 0 ? adjusted : minutes;
@@ -191,6 +193,7 @@ export function applyRecord(
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
   if (opts?.advanceTime === false && record?.sourceSet !== undefined && (record.sourceSet === null || validBinding(record.sourceSet))) s.source = structuredClone(record.sourceSet);
+  if (opts?.advanceTime === false && (record?.executionSet === "agent" || record?.executionSet === "classic")) s.executionMode = record.executionSet;
   const free = s.era.mode === "free";
   const chips: Chip[] = [];
   const notes: string[] = [];

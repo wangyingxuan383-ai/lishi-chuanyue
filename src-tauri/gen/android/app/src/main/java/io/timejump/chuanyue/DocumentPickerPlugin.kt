@@ -2,6 +2,9 @@ package io.timejump.chuanyue
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.result.ActivityResult
@@ -63,6 +66,7 @@ internal class DocumentPickerReplyGate(private val reply: (JSObject) -> Unit) {
         private set
 
     fun paused() { hasPaused = true }
+    fun isResolved() = resolved
 
     fun finish(value: JSObject): Boolean {
         if (resolved) return false
@@ -104,7 +108,7 @@ internal class DocumentPickerRequestSlot<T : Any> {
 @TauriPlugin
 class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     private val handler = Handler(Looper.getMainLooper())
-    private class Pending(val invoke: Invoke, val gate: DocumentPickerReplyGate) {
+    private class Pending(val invoke: Invoke, val gate: DocumentPickerReplyGate, val grant: Boolean = false, val writable: Boolean = false, val directory: Boolean = false) {
         lateinit var timeout: Runnable
     }
     private val requests = DocumentPickerRequestSlot<Pending>()
@@ -137,7 +141,18 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
         launchPicker(invoke, buildExportDocumentIntent(name))
     }
 
-    private fun launchPicker(invoke: Invoke, intent: Intent) {
+    @Command
+    fun grantDocument(invoke: Invoke) {
+        val args = invoke.getArgs()
+        val directory = args.optBoolean("directory", false)
+        val writable = args.optBoolean("writable", false)
+        val intent = if (directory) Intent(Intent.ACTION_OPEN_DOCUMENT_TREE) else buildImportDocumentIntent()
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        if (writable) intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        launchPicker(invoke, intent, true, writable, directory)
+    }
+
+    private fun launchPicker(invoke: Invoke, intent: Intent, grant: Boolean = false, writable: Boolean = false, directory: Boolean = false) {
         handler.post {
             if (pending != null) {
                 invoke.resolve(documentPickerFailure("file_busy"))
@@ -148,7 +163,7 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
                     invoke.resolve(documentPickerFailure("file_unavailable"))
                     return@post
                 }
-                val current = Pending(invoke, DocumentPickerReplyGate { invoke.resolve(it) })
+                val current = Pending(invoke, DocumentPickerReplyGate { invoke.resolve(it) }, grant, writable, directory)
                 current.timeout = Runnable {
                     if (pending === current) {
                         current.gate.timedOut()
@@ -181,7 +196,24 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
         handler.post {
             val current = pending ?: return@post
             if (current.invoke !== invoke) return@post
-            val reply = try { decodeDocumentPickerResult(result) }
+            val reply = try {
+                val decoded = decodeDocumentPickerResult(result)
+                if (current.grant && !current.gate.isResolved() && decoded.optString("status") == "selected") {
+                    val uri = Uri.parse(decoded.getString("uri"))
+                    val requestedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (current.writable) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0
+                    val flags = (result.data?.flags ?: 0) and requestedFlags
+                    if (flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) throw SecurityException("read grant missing")
+                    ownerActivity.contentResolver.takePersistableUriPermission(uri, flags)
+                    val document = if (current.directory) DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri)) else uri
+                    var name = if (current.directory) "资料目录" else "资料文件"
+                    ownerActivity.contentResolver.query(document, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) name = cursor.getString(0)?.take(512) ?: name
+                    }
+                    decoded.put("name", name)
+                    decoded.put("writable", current.writable && (flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0)
+                }
+                decoded
+            }
                 catch (_: Exception) { documentPickerFailure("file_unavailable") }
             finish(current, reply)
         }

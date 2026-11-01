@@ -13,10 +13,28 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 
 /** Rust-only JNI entry; no mobile plugin command or notification permission prompt. */
 class GenerationService : Service() {
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    private fun holdWakeLock() {
+        val manager = getSystemService(PowerManager::class.java) ?: return
+        val held = wakeLock ?: manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chuanyue:story-run").also {
+            it.setReferenceCounted(false)
+            wakeLock = it
+        }
+        // The native lease supplies the task's remaining deadline. A stream
+        // inside a longer task must not shorten that task's platform lease.
+        held.acquire((wakeUntil - android.os.SystemClock.elapsedRealtime()).coerceIn(1L, 7_205_000L))
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
     override fun onCreate() {
         super.onCreate()
         synchronized(lock) { current = this }
@@ -35,12 +53,16 @@ class GenerationService : Service() {
                 }
                 // A short stream can finish before Android delivers this start.
                 // Fulfil the foreground-start deadline, then immediately stop.
-                if (!requested) stopGeneration()
+                if (!requested) stopGeneration() else holdWakeLock()
             } catch (error: Exception) {
                 // Includes ForegroundServiceStartNotAllowedException,
                 // SecurityException and invalid/missing foreground-service type.
                 warn("promotion", error)
-                stopGeneration()
+                try {
+                    stopNativeRuns()
+                } finally {
+                    stopGeneration()
+                }
             }
         }
         // A restarted process has no Rust streams to keep alive.
@@ -50,22 +72,39 @@ class GenerationService : Service() {
     override fun onTimeout(startId: Int, fgsType: Int) {
         // Android 15+ dataSync time budget: stop promptly to avoid an ANR.
         Log.w(TAG, "Generation foreground service time budget exhausted")
-        synchronized(lock) { stopGeneration() }
+        synchronized(lock) {
+            try {
+                stopNativeRuns()
+            } finally {
+                stopGeneration()
+            }
+        }
     }
 
     override fun onDestroy() {
         synchronized(lock) {
+            releaseWakeLock()
+            // An unexpected service destruction must not leave the Rust run
+            // waiting without its foreground/wake-lock protection.
+            if (current === this && requested) stopNativeRuns()
             if (current === this) current = null
         }
         super.onDestroy()
     }
 
     private fun stopGeneration() {
+        releaseWakeLock()
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (error: Exception) {
             warn("notification removal", error)
         } finally {
+            // A new lease must start the service again rather than refreshing
+            // this instance after stopSelf has already been requested.
+            if (current === this) {
+                current = null
+                requested = false
+            }
             stopSelf()
         }
     }
@@ -96,7 +135,7 @@ class GenerationService : Service() {
         }
         builder
             .setSmallIcon(R.drawable.ic_stat_seal)
-            .setContentTitle("历史穿越")
+            .setContentTitle("穿越小说模拟")
             .setContentText("正在写下一段…")
             .setContentIntent(openApp)
             .setOngoing(true)
@@ -117,18 +156,26 @@ class GenerationService : Service() {
         /** Default importance so it shows in the drawer and on the lock screen (the progress channel is silent). */
         private const val DONE_CHANNEL_ID = "story_ready"
         private const val DONE_NOTIFICATION_ID = 1002
-        /**
-         * A turn can make two requests (the story, then a short record fill-in);
-         * the service stays up a little after one ends so the second is still
-         * covered in the background (ANDROID_COMPAT F3).
-         */
-        private const val STOP_DELAY_MS = 8000L
+        /** The Rust whole-run lease covers model gaps and settlement. */
+        private const val STOP_DELAY_MS = 0L
+        @JvmStatic private external fun nativeTimeout()
         private val lock = Any()
         private val main = Handler(Looper.getMainLooper())
         private var requested = false
+        private var wakeUntil = 0L
         private var current: GenerationService? = null
         private var pendingStop: Runnable? = null
         private val committed = LinkedHashSet<String>()
+
+        private fun stopNativeRuns() {
+            try {
+                nativeTimeout()
+            } catch (error: LinkageError) {
+                // Still release the Android service if native initialization
+                // failed. Never let a missing JNI entry turn timeout into ANR.
+                Log.w(TAG, "Generation native cancellation unavailable: ${error.javaClass.simpleName}")
+            }
+        }
 
         /** Called only after the selected passage was saved, never by the stream timer. */
         fun storyCommitted(context: Context, completionId: String) {
@@ -167,7 +214,7 @@ class GenerationService : Service() {
                 manager.notify(
                     DONE_NOTIFICATION_ID,
                     builder.setSmallIcon(R.drawable.ic_stat_seal)
-                        .setContentTitle("历史穿越")
+                        .setContentTitle("穿越小说模拟")
                         .setContentText("下一段有结果了，回来看看")
                         .setContentIntent(open)
                         .setAutoCancel(true)
@@ -195,12 +242,17 @@ class GenerationService : Service() {
         }
 
         @JvmStatic
-        fun start(context: Context) {
+        fun start(context: Context, remainingMs: Long) {
             synchronized(lock) {
+                val deadline = android.os.SystemClock.elapsedRealtime() + remainingMs.coerceIn(1L, 7_205_000L)
+                wakeUntil = if (requested) maxOf(wakeUntil, deadline) else deadline
                 pendingStop?.let { main.removeCallbacks(it) }
                 pendingStop = null
                 // Already up (a second request of the same turn): nothing to start.
-                if (requested && current != null) return
+                if (requested && current != null) {
+                    current?.holdWakeLock()
+                    return
+                }
                 requested = true
                 try {
                     val app = context.applicationContext
@@ -215,6 +267,7 @@ class GenerationService : Service() {
                 } catch (error: Exception) {
                     requested = false
                     warn("start", error)
+                    stopNativeRuns()
                 }
             }
         }

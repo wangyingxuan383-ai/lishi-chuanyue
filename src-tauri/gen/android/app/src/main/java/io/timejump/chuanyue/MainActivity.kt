@@ -8,9 +8,11 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
+  private var agentBrowser: AgentBrowserHost? = null
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    agentBrowser = AgentBrowserHost(this)
 
     // Required for IME insets on older Android versions; the content listener
     // also keeps the WebView above the keyboard with enforced edge-to-edge.
@@ -43,6 +45,11 @@ class MainActivity : TauriActivity() {
     content.post { ViewCompat.requestApplyInsets(content) }
     // Bars in the app's theme from the first frame (the page sets them again once loaded).
     SystemBars.restore(this)
+  }
+
+  override fun onDestroy() {
+    agentBrowser?.destroy(); agentBrowser = null
+    super.onDestroy()
   }
 
   override fun onResume() {

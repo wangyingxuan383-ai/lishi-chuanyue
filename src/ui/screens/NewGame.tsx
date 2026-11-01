@@ -17,7 +17,7 @@ import { StoryText } from "../components/StoryText";
 import { useLongPress } from "../components/useLongPress";
 import { loadPlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import {
-  ARRIVALS, EMPTY, MAX_BEATS, ORIGINS, OPENING_TEXT_LIMIT, draftFortune, filledBeats, fromChallenge, fromTemplate, parseShare, shareText, toNewWorld,
+  ARRIVALS, EMPTY, MAX_BEATS, ORIGINS, OPENING_TEXT_LIMIT, draftExecutionMode, draftFortune, filledBeats, fromChallenge, fromTemplate, parseShare, shareText, toNewWorld,
   type Draft, type PlayStyle,
 } from "./openingDraft";
 import { Icon } from "../components/Icon";
@@ -120,7 +120,7 @@ export default function NewGame() {
       const d = await loadPlayDefaults(game.repo);
       setDefaults(d);
       const base = fresh(d);
-      const restored = stored ? { ...base, ...saved, settings: { ...base.settings, ...saved.settings } } : base;
+      const restored = stored ? { ...base, ...saved, executionMode: draftExecutionMode(saved.executionMode), settings: { ...base.settings, ...saved.settings } } : base;
       const pendingSource = await game.repo.getSetting<SourceBinding | null>("source:pending", null);
       if (pendingSource) { restored.source = pendingSource; restored.fanfic = pendingSource.fanfic; if (pendingSource.fanfic) { restored.settings.mode = "free"; restored.settings.clockStyle = "elapsed"; } await game.repo.setSetting("source:pending", null); setStep("setup"); }
       draftRef.current = restored;
@@ -131,7 +131,10 @@ export default function NewGame() {
       if (!live) return;
       if (autostart) await game.repo.setSetting("newgameAutostart", false);
       const rows = await game.platform.sql.query("SELECT id, name, json FROM templates WHERE kind = 'opening' ORDER BY created_at DESC");
-      setMine(rows.map((r) => ({ id: r.id as string, name: r.name as string, draft: JSON.parse(r.json as string) })));
+      setMine(rows.map((r) => {
+        const saved = JSON.parse(r.json as string) as Draft;
+        return { id: r.id as string, name: r.name as string, draft: { ...saved, executionMode: draftExecutionMode(saved.executionMode) } };
+      }));
       setLoaded(true);
       if (autostart && stored && saved.name && saved.identity) void start(restored, d);
     })();
@@ -172,7 +175,7 @@ export default function NewGame() {
     setGroup("全部");
     setAllTemplates(false);
   };
-  const blank = () => ({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: { ...fresh().settings, mode: draft.settings.mode, clockStyle: free ? "elapsed" as const : "era" as const }, ...(free ? { origin: "", arrival: "不穿越" as const } : {}) });
+  const blank = () => ({ ...fresh(), executionMode: draft.executionMode, fanfic: draft.fanfic, source: draft.source, settings: { ...fresh().settings, mode: draft.settings.mode, clockStyle: free ? "elapsed" as const : "era" as const }, ...(free ? { origin: "", arrival: "不穿越" as const } : {}) });
 
   useBack(() => phase !== "form", phase !== "form");
   useEffect(() => () => { assistTicket.current++; draftTicket.current++; }, []);
@@ -304,7 +307,7 @@ export default function NewGame() {
 
   const randomStart = () => {
     const t = pickRandom(templates);
-    const d = fromTemplate(t, { ...EMPTY, settings: draft.settings }, pickRandom(["男", "女"] as const));
+    const d = fromTemplate(t, { ...EMPTY, executionMode: draft.executionMode, settings: draft.settings }, pickRandom(["男", "女"] as const));
     d.origin = pickRandom(ORIGINS);
     void start(d);
   };
@@ -395,7 +398,7 @@ export default function NewGame() {
               const before = draft;
               const beforeIdea = idea;
               // The words go; how the story is played and written stays.
-              setDraft({ ...fresh(), settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
+              setDraft({ ...fresh(), executionMode: draft.executionMode, settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
               setIdea("");
               toast("已清空", { label: "撤销", run: () => { setDraft(before); setIdea(beforeIdea); } });
             } },

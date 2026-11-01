@@ -1,4 +1,12 @@
 fn main() {
+    // Cargo examples do not link the main application's resource manifest.
+    // The isolated WebView probe still requires Common Controls v6.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref()==Ok("windows") {
+        let manifest=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/agent-browser.manifest");
+        println!("cargo:rerun-if-changed={}",manifest.display());
+        println!("cargo:rustc-link-arg-examples=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-examples=/MANIFESTINPUT:{}",manifest.display());
+    }
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .plugin(
