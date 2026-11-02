@@ -115,6 +115,7 @@ pub fn run() {
             execution::execution_stop,
             execution::execution_resume,
             files::file_export_text,
+            files::file_export_world,
             files::file_import_text,
             files::file_import_skill,
             files::file_grant_agent,

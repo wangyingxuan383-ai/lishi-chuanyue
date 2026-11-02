@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 struct ModelFixture {
     requests: Mutex<Vec<Value>>,
     challenge: bool,
+    omit_record: std::sync::atomic::AtomicBool,
 }
 impl Model for ModelFixture {
     fn complete(
@@ -29,17 +30,21 @@ impl Model for ModelFixture {
         _: CancellationToken,
         text: TextSink,
     ) -> BoxFuture<Result<Completion>> {
+        let extracting=body.to_string().contains("提取本回合记录");
+        let naming=body.to_string().contains("storyTitle");
         self.requests.lock().unwrap().push(body);
         let number = self.requests.lock().unwrap().len();
         let challenge = self.challenge;
+        let omit=self.omit_record.load(Ordering::SeqCst);
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            let record = if challenge {
+            let mut record = if challenge {
                 json!({"time":5,"money":-1,"challenge":{"result":"won","progress":"达成目标","why":"任务完成"}})
             } else {
                 json!({"time":5,"money":-1})
             };
-            let prose = format!("第{number}段，主角付出一文。<record>{record}</record>");
+            if naming{record["storyTitle"]="行旅札记".into();}
+            let prose=if extracting{record.to_string()}else if omit&&number==1{"第1段，主角付出一文。".into()}else{format!("第{number}段，主角付出一文。<record>{record}</record>")};
             text(prose.clone());
             Ok(Completion {
                 text: prose,
@@ -262,4 +267,32 @@ async fn new_sequence_keeps_cumulative_usage_beyond_one_passage_limit(){
     f.engine.start(plan).unwrap();let saved=f.settled().await;
     assert_eq!(saved.status,"committed","{:?}",saved.error);assert_eq!(saved.result.as_ref().unwrap()["steps"],12);
     assert_eq!(saved.budget.model_requests,12);assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"),12);assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"),13);
+}
+
+#[tokio::test]
+async fn temporary_ai_sequence_keeps_player_settings_and_bounded_extraction() {
+    let f=Fixture::new(false);
+    f.model.omit_record.store(true,Ordering::SeqCst);
+    let mut plan=f.plan(2);
+    plan.meta["autoplayPilot"]="temporary-ai".into();plan.meta["autoplayBudgetVersion"]="per-passage-1".into();plan.meta["budgetChars"]=14545.into();
+    plan.settings["pilot"]="player".into();
+    f.engine.store.lock().unwrap().execute("UPDATE worlds SET settings_json=? WHERE id='w'",[plan.settings.to_string()]).unwrap();
+    plan.state["facts"]=json!((0..300).map(|i|json!({"id":i,"origin":"player","detail":"旧事".repeat(100)})).collect::<Vec<_>>());
+    f.engine.store.lock().unwrap().execute("UPDATE states SET state_json=? WHERE node_id='h'",[plan.state.to_string()]).unwrap();
+    f.engine.start(plan).unwrap();let saved=f.settled().await;
+    assert_eq!(saved.status,"committed","{:?}",saved.error);assert_eq!(saved.result.unwrap()["steps"],2);
+    let settings:String=f.engine.store.lock().unwrap().query_row("SELECT settings_json FROM worlds WHERE id='w'",[],|r|r.get(0)).unwrap();assert_eq!(serde_json::from_str::<Value>(&settings).unwrap()["pilot"],"player");
+    let requests=f.model.requests.lock().unwrap();assert_eq!(requests.len(),3);
+    assert!(requests.iter().all(|r|r.to_string().encode_utf16().count()<=14545));
+    assert!(!requests[1].to_string().contains("旧事旧事"));
+}
+#[tokio::test]
+async fn opening_name_is_metadata_and_manual_name_wins() {
+ for manual in [false,true]{
+    let f=Fixture::new(false);let mut p=f.plan(1);p.id="new-opening".into();p.world_id="new-world".into();p.line_id="new-line".into();p.head_id=String::new();p.base_id=None;p.kind="opening".into();p.messages=vec![json!({"role":"system","content":"开场请额外返回storyTitle"})];p.new_world=Some(json!({"title":"手写书名","eraId":"free"}));p.meta["titlePolicy"]=if manual{"manual"}else{"auto"}.into();
+    f.engine.start(p).unwrap();
+    let saved=tokio::time::timeout(Duration::from_secs(5),async{loop{let s=f.engine.snapshot("new-opening",0).unwrap();if s.status!="running"{break s;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();assert_eq!(saved.status,"committed","{:?}",saved.error);
+    let db=f.engine.store.lock().unwrap();let title:String=db.query_row("SELECT title FROM worlds WHERE id='new-world'",[],|r|r.get(0)).unwrap();assert_eq!(title,if manual{"手写书名"}else{"行旅札记"});
+    let raw:String=db.query_row("SELECT record_json FROM nodes WHERE world_id='new-world' LIMIT 1",[],|r|r.get(0)).unwrap();assert!(!raw.contains("storyTitle"));
+ }
 }

@@ -256,7 +256,7 @@ describe("Game", () => {
     expect(state.protagonist.stats.money).toBe(200000);
     expect(state.time).toMatchObject({ start: "宣和四年 二月初一", date: { era: "宣和", year: 4, month: 2, day: 1, ceYear: null }, startHour: 9, elapsedMinutes: 0 });
     expect(state.era.currency?.units[0].name).toBe("两");
-    expect((await game.repo.getWorld(worldId))!.title).toBe("赵某的故事");
+    expect((await game.repo.getWorld(worldId))!.title).toBe("未命名故事");
     expect(JSON.stringify(llm.calls[0].body)).toContain("北宋宣和年间，汴京。");
   });
 

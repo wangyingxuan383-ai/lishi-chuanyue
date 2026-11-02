@@ -86,6 +86,7 @@ export async function createTauriPlatform(): Promise<Platform> {
       setNetwork: (config) => call("network_set", { config: { proxy: config.proxy, proxyUrl: config.proxyUrl ?? null } }),
     },
     files: {
+      exportWorld: (worldId, suggestedName) => call("file_export_world", { worldId, suggestedName }),
       grantAgentResource: (directory, writable) => call("file_grant_agent", { directory, writable }),
       exportText: (suggestedName, text) => call("file_export_text", { suggestedName, text }),
       importText: () => call("file_import_text"),

@@ -28,7 +28,7 @@ export function cleanReadablePi(raw: PiReadableArchive): PiReadableArchive {
     sessions: raw.sessions.map(s => fields(s, ["id", "worldId", "lineId", "title", "createdAt", "updatedAt"])),
     tasks: raw.tasks.map(t => {
       const h: any = t.history;
-      return { ...fields(t, ["id", "sessionId", "text", "policy", "createdAt", "updatedAt"]), status: "archived", history: {
+      return { ...fields(t, ["id", "sessionId", "lineId", "text", "policy", "createdAt", "updatedAt"]), status: "archived", history: {
         messages: Array.isArray(h?.messages) ? h.messages.slice(0, 500).filter((m: any) => ["user", "assistant"].includes(m?.role)).map((m: any) => fields(m, ["id", "role", "content", "at"])) : [],
         steps: Array.isArray(h?.steps) ? h.steps.slice(0, 1000).map((s: any) => ({ ...fields(s, ["id", "tool", "action", "object", "status", "outcome", "summary", "resultText"]), ...(Number.isSafeInteger(s.seq) ? { seq: s.seq } : {}) })) : [],
         plan: Array.isArray(h?.plan) ? h.plan.slice(0, 1000).map((s: any) => fields(s, ["id", "title", "status"])) : [],

@@ -187,6 +187,7 @@ impl Engine {
         if let (Some(settings), Some(raw)) = (settings.as_object_mut(), raw_settings.as_object()) {
             settings.extend(raw.clone());
         }
+        if plan.meta["autoplayPilot"]=="temporary-ai" {settings["pilot"]="ai".into();}
         let state: String = tx.query_row(
             "SELECT state_json FROM states WHERE node_id=?",
             [&plan.head_id],
@@ -387,7 +388,7 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
         .unwrap_or("");
     plan.extract_messages = vec![
         json!({"role":"system","content":extract}),
-        json!({"role":"user","content":format!("【当前状态】{}\n【本回合行动】继续\n【本回合正文】\n{{{{NARRATIVE}}}}",plan.state)}),
+        json!({"role":"user","content":format!("【当前状态】{}\n【本回合行动】继续\n【本回合正文】\n{{{{NARRATIVE}}}}",crate::stage_context::state(&plan.state,"",(cap as usize/5).min(3000)))}),
     ];
     Ok(())
 }
@@ -409,7 +410,7 @@ fn prepare_organization(plan: &mut RunPlan, history: &[Value], chapters: &[Value
                 .map(|n| n["narrative"].as_str().unwrap_or(""))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            plan.meta["upkeepMessages"] = json!([{"role":"system","content":system},{"role":"user","content":format!("【故事设定】{}\n【当前资料、人物、主角状态及玩家删去的项目】{}\n【最近剧情】{}\n{{{{NARRATIVE}}}}",plan.settings["premise"],plan.state,turns)}]);
+            plan.meta["upkeepMessages"] = json!([{"role":"system","content":system},{"role":"user","content":format!("【故事设定】{}\n【当前资料、人物、主角状态及玩家删去的项目】{}\n【最近剧情】{}\n{{{{NARRATIVE}}}}",plan.settings["premise"],crate::stage_context::state(&plan.state,&turns,3000),crate::stage_context::excerpt(&turns,"",4500))}]);
         }
     }
     let last = chapters.last().map(|c| c["lastNodeId"].clone());

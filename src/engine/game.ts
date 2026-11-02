@@ -32,7 +32,7 @@ import { challengeInputOf, newChallenge, newScript, scriptInputOf, scriptProgres
 import { draftChallengeMessages, draftScriptMessages, parseChallengeDraft, parseScriptDraft, type DraftInput } from "./prompt/draft";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS, type ActionMode, type Chapter, type StoryNode, type WorldSettings, type WorldState } from "./types";
-import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenceBlock, referenceContext, referenceInstructionsBlock, saveJob, SOURCE_PROMPT_VERSION } from "./sources/library";
+import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenceBlock, referenceContext, referenceEvidenceBlock, referenceInstructionsBlock, saveJob, SOURCE_PROMPT_VERSION } from "./sources/library";
 import { sourceAnalysisMessages, sourceAnalysisResult } from "./sources/analysis";
 import { validBinding, type SourceBinding, type AnalysisJob, type ReferenceContext } from "./sources/types";
 import { asJson, startRun, type RunPlan } from "./execution";
@@ -66,7 +66,27 @@ export interface ContextPreview {
   calibrated: boolean;
 }
 
+export function openingStoryTitle(text: string): string | null {
+  const value = lenientJson(text.includes("<record>") ? text.slice(text.lastIndexOf("<record>")) : text) as { storyTitle?: unknown } | null;
+  const title = typeof value?.storyTitle === "string" ? value.storyTitle.trim().replace(/^[《“"]+|[》”"]+$/g, "") : "";
+  return title && !/[\r\n<>]/.test(title) && [...title].length <= 24 ? title : null;
+}
+
 export type FailReason = "network" | "timeout" | "http" | "auth" | "quota" | "empty" | "refused" | "cancelled" | "config" | "no_record";
+
+export function nativeFailReason(status: string, message: string | null): FailReason {
+  if (status === "cancelled") return "cancelled";
+  const text = message ?? "";
+  if (/拒绝|refus|safety|blocked/i.test(text)) return "refused";
+  if (/timeout|timed out|超时|流空闲/i.test(text)) return "timeout";
+  if (/\b40[13]\b|密钥|凭据|认证/i.test(text)) return "auth";
+  if (/\b(?:402|429)\b|余额不足|限流/i.test(text)) return "quota";
+  if (/上限|预算|装配|超出|超过/.test(text)) return "config";
+  if (/记录.*不完整|没有记录|记录块/.test(text)) return "no_record";
+  if (/network|connection|connect error|网络|连接中断/i.test(text)) return "network";
+  if (/\bHTTP\b|status.?[45]\d\d/i.test(text)) return "http";
+  return "config";
+}
 
 export type TurnEvent =
   | { type: "step"; index: number; total: number }
@@ -75,12 +95,13 @@ export type TurnEvent =
   | { type: "text"; delta: string; full: string }
   | { type: "organizing" }
   | { type: "done"; cursor: tree.Cursor; node: StoryNode; chips: Chip[] }
-  | { type: "failed"; reason: FailReason; status?: number; detail?: string; partialSaved: boolean; cursor?: tree.Cursor; node?: StoryNode };
+  | { type: "failed"; reason: FailReason; status?: number; detail?: string; partialSaved: boolean; runId?: string; cursor?: tree.Cursor; node?: StoryNode };
 
 export interface NewWorld {
   executionMode?: import("./types").ExecutionMode;
   source?: SourceBinding | null;
   title: string;
+  titlePolicy?: "auto" | "manual";
   eraId: string | null;
   /** premise, essentials, rules, perspective and the usual play settings. */
   settings: Partial<WorldSettings>;
@@ -394,7 +415,7 @@ export class Game {
   /** Expands a rough idea into a full setup; fields the player filled are kept. */
   async assist(idea: string, current: Partial<SetupDraft>): Promise<Partial<SetupDraft> | null> {
     try {
-      const result = await this.call(assistMessages(idea, current), { usage: { worldId: null, nodeId: null, purpose: "assist" }, aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
+      const result = await this.call(await this.withOpeningSources(assistMessages(idea, current), current, idea), { usage: { worldId: null, nodeId: null, purpose: "assist" }, aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
       const value = lenientJson(result.text) as Partial<SetupDraft> | null;
       await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
@@ -405,12 +426,22 @@ export class Game {
 
   /** “AI 帮我拟大纲” (R14): an outline from the opening filled in so far; null when it fails or gives no beat. */
   draftScript(current: DraftInput): Promise<ScriptInput | null> {
-    return this.draft(draftScriptMessages(current), "outline", parseScriptDraft);
+    return this.withOpeningSources(draftScriptMessages(current), current, current.script?.line ?? "").then((messages) => this.draft(messages, "outline", parseScriptDraft));
   }
 
   /** “AI 帮我出题” (R14): a challenge that suits the opening; null when it fails or gives no goal. */
   draftChallenge(current: DraftInput): Promise<ChallengeInput | null> {
-    return this.draft(draftChallengeMessages(current), "challenge", parseChallengeDraft);
+    return this.withOpeningSources(draftChallengeMessages(current), current, current.challenge?.goal ?? "").then((messages) => this.draft(messages, "challenge", parseChallengeDraft));
+  }
+
+  /** The same scoped local reference retrieval as ordinary writing. No extra AI probe. */
+  private async withOpeningSources(messages: ChatMessage[], current: Partial<SetupDraft>, idea: string): Promise<ChatMessage[]> {
+    if (!current.source) return messages;
+    const budget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
+    const context = await referenceContext(this.repo, current.source, [idea, current.premise, current.identity, current.hint].filter(Boolean).join("\n"), Math.min(2400, Math.floor(budget / 4)));
+    const instructions = referenceInstructionsBlock(context);
+    const evidence = referenceEvidenceBlock(context);
+    return [...messages, { role: "user", content: `【本次开局参考】保留选定作品、起点和参考范围。以下原文只用于核对世界设定；不得将模型印象冒充原著。资料不足写在设定中待确认，不杜撰原著细节。${instructions}${evidence}` }];
   }
 
   private async draft<T>(messages: ChatMessage[], purpose: string, parse: (value: unknown) => T | null): Promise<T | null> {
@@ -506,20 +537,22 @@ export class Game {
     const openingBaseChars = openingMessages({ ...opening, reference: undefined }).reduce((n, m) => n + m.content.length, 0) + referenceInstructionsBlock(opening.reference).length;
     if (openingBaseChars > inputBudget) { onEvent({ type: "failed", reason: "config", detail: "原著用法和本局固定资料超过上下文，请增大输入预算或缩短用法后重试", partialSaved: false }); return null; }
     opening.reference = fitReference(opening.reference, Math.max(0, Math.min(inputBudget / 4, inputBudget - openingBaseChars)));
+    const titlePolicy = input.titlePolicy ?? (input.title.trim() ? "manual" : "auto");
+    const nameOpening = (messages: ChatMessage[]): ChatMessage[] => titlePolicy === "auto" ? [...messages, { role: "system", content: "本次是新故事开场。请结合本段实际开场拟一个自然、贴合题材的小说书名（2～24字），避免‘某某的故事’等固定套法。将书名写在本次记录对象额外字段 storyTitle 中；书名不属于剧情、人物状态或 log，不写进正文。" }] : messages;
     const openingSeed = structuredClone(initial);
     if (this.platform.execution) {
       const worldId = newId(), lineId = newId();
       const plan: RunPlan = {
         id: newId(), worldId, lineId, headId: "", baseId: null, kind: "opening",
         executionMode: "classic", model: this.requireLlm(),
-        messages: input.opening.mode === "player" ? openingExtractMessages({ ...opening, text: input.opening.text.trim() }) : openingMessages(opening),
-        extractMessages: openingExtractMessages({ ...opening, text: "{{NARRATIVE}}" }),
+        messages: nameOpening(input.opening.mode === "player" ? openingExtractMessages({ ...opening, text: input.opening.text.trim() }) : openingMessages(opening)),
+        extractMessages: nameOpening(openingExtractMessages({ ...opening, text: "{{NARRATIVE}}" })),
         state: initial, settings,
         options: { mode: "do", difficulty: settings.difficulty, currency: era.currency, clock: era.clock },
         action: { mode: "continue", text: "" }, reference: opening.reference,
-        newWorld: { title: input.title.trim() || `${p.name || "无名"}的故事`, eraId: pack?.id ?? "free" },
+        newWorld: { title: titlePolicy === "manual" ? input.title.trim() || "未命名故事" : "未命名故事", eraId: pack?.id ?? "free" },
         meta: {
-          promptVersion: PROMPT_VERSION, referenceReviewVersion: "reference-review-1", budgetChars: inputBudget, startMoney: pack?.startMoney ?? 0,
+          promptVersion: PROMPT_VERSION, titlePolicy, referenceReviewVersion: "reference-review-2", budgetChars: inputBudget, startMoney: pack?.startMoney ?? 0,
           playerWritten: input.opening.mode === "player", ...(input.opening.mode === "player" ? { playerNarrative: input.opening.text.trim() } : {}),
           setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "", organize: !pack && input.organize === true && !initial.source },
           ...(pack ? { openingTimeline: packTimeline(pack.timeline, era.clock).map((e) => ({ id: newId(), ...e })) } : {}),
@@ -529,7 +562,7 @@ export class Game {
       const handle = startRun(this.platform, plan, (event) => this.nativeEvent(event, onEvent));
       try {
         const snapshot = await handle.done;
-        if (snapshot.status !== "committed") { onEvent({ type: "failed", reason: snapshot.status === "cancelled" ? "cancelled" : "config", detail: snapshot.error ?? "开场尚未完成，进度已保存", partialSaved: false }); return null; }
+        if (snapshot.status !== "committed") { onEvent({ type: "failed", reason: nativeFailReason(snapshot.status, snapshot.error), runId: snapshot.id, detail: snapshot.error ?? "开场尚未完成，进度已保存", partialSaved: false }); return null; }
         const result = snapshot.result as { nodeId?: string };
         const node = result.nodeId ? await this.repo.getNode(result.nodeId) : null;
         if (!node) throw new Error("开场提交结果不完整");
@@ -564,7 +597,7 @@ export class Game {
       narrative = input.opening.text.trim();
       onEvent({ type: "organizing" });
       try {
-        result = await this.call(openingExtractMessages({ ...opening, text: narrative }), { usage: openingUsage, aux: true, timeouts: EXTRACT_TIMEOUT });
+        result = await this.call(nameOpening(openingExtractMessages({ ...opening, text: narrative })), { usage: openingUsage, aux: true, timeouts: EXTRACT_TIMEOUT });
         record = parseRecord(`<record>${result.text}`).record;
       } catch (error) {
         onEvent({ type: "failed", ...failReason(error), partialSaved: false });
@@ -575,7 +608,7 @@ export class Game {
       let shown = "";
       let sent = 0;
       try {
-        result = await this.call(openingMessages(opening), {
+        result = await this.call(nameOpening(openingMessages(opening)), {
           usage: openingUsage,
           onThinking: () => onEvent({ type: "thinking" }),
           onText: (delta) => {
@@ -661,7 +694,7 @@ export class Game {
 
     const model = this.llm?.model ?? "";
     const { world, node } = await this.repo.createWorld({
-      title: input.title.trim() || `${p.name || "无名"}的故事`, eraId: pack?.id ?? "free", settings,
+      title: titlePolicy === "manual" ? input.title.trim() || "未命名故事" : openingStoryTitle(result?.text ?? "") || "未命名故事", eraId: pack?.id ?? "free", settings,
       opening: {
         parentId: null, kind: "opening", narrative, record, choices: record.choices ?? [], state: applied.state,
         meta: {
@@ -779,7 +812,7 @@ export class Game {
         const snapshot = await active.done;
         await deliveries;
         if (snapshot.status !== "committed") {
-          if (!detached) onEvent({ type: "failed", reason: snapshot.status === "cancelled" ? "cancelled" : "config", detail: snapshot.error ?? "进度已保存", partialSaved: false });
+          if (!detached) onEvent({ type: "failed", reason: nativeFailReason(snapshot.status, snapshot.error), runId: snapshot.id, detail: snapshot.error ?? "进度已保存", partialSaved: false });
           return;
         }
         const result = snapshot.result as { nodeId?: string }, node = result.nodeId ? await this.repo.getNode(result.nodeId) : null;
@@ -825,6 +858,7 @@ export class Game {
         const state = await this.repo.getState(base.id), era = eraContext(world.eraId, state);
         const fortune = luckApplies(action.mode, world.settings) ? await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果") : undefined;
         const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, headState.source);
+        if (batch) input.settings = { ...input.settings, pilot: "ai" };
         const template = writingContextTemplate(input);
         const context = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, history: input.history.map(({ id, kind, actionMode, actionText, narrative }) => ({ id, kind, actionMode, actionText, narrative })), template })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
         if (context.budgetExceeded) throw new Error(`本次上下文约${context.chars}字符，超过${context.budgetChars}字符预算，请检查必要状态与玩家要求或调整输入预算。`);
@@ -845,10 +879,10 @@ export class Game {
           carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ record, actionText }) => ({ record, actionText }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
             ...(await this.nativeGuard(worldId, current.head.id)),
-            promptVersion: PROMPT_VERSION, referenceReviewVersion: "reference-review-1", budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
+            promptVersion: PROMPT_VERSION, referenceReviewVersion: "reference-review-2", budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
             ...(batch ? {
-              autoplayCount: batch.turns, autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
+              autoplayCount: batch.turns, autoplayPilot: "temporary-ai", autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
               upkeepVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION,
               chapterVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
               autoplayTurnSystem: context.messages.find((m) => m.role === "system")?.content ?? "",
@@ -880,12 +914,12 @@ export class Game {
         if (batch) {
           const result = snapshot.result as { steps?: number; reason?: AutoplayStop } | null;
           const draft = snapshot.draft as { steps?: number } | null;
-          if (snapshot.status !== "committed" && !detached) onEvent({ type: "failed", reason: snapshot.status === "cancelled" ? "cancelled" : "config", detail: snapshot.error ?? "连播进度已保存", partialSaved: false });
+          if (snapshot.status !== "committed" && !detached) onEvent({ type: "failed", reason: nativeFailReason(snapshot.status, snapshot.error), runId: snapshot.id, detail: snapshot.error ?? "连播进度已保存", partialSaved: false });
           batch.onFinished(result?.steps ?? draft?.steps ?? 0, result?.reason ?? (stopped ? "stopped" : "failed"));
           for (const fn of this.listeners) fn(worldId);
           return;
         }
-        if (snapshot.status !== "committed") { onEvent({ type: "failed", reason: snapshot.status === "cancelled" ? "cancelled" : "config", detail: snapshot.error ?? "进度已保存，可以稍后恢复", partialSaved: false }); return; }
+        if (snapshot.status !== "committed") { onEvent({ type: "failed", reason: nativeFailReason(snapshot.status, snapshot.error), runId: snapshot.id, detail: snapshot.error ?? "进度已保存，可以稍后恢复", partialSaved: false }); return; }
         const result = snapshot.result as { nodeId?: string };
         const node = result.nodeId ? await this.repo.getNode(result.nodeId) : null;
         if (!node) throw new Error("生成提交结果不完整");

@@ -16,7 +16,7 @@ import { beatTitle, challengeView } from "../modes";
 
 import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-23";
+export const PROMPT_VERSION = "turn-24";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -597,6 +597,9 @@ export function continueMessages(base: ChatMessage[], partial: string): ChatMess
 // ---------- setup assistant ----------
 
 export interface SetupDraft {
+  source?: import("../sources/types").SourceBinding | null;
+  fanfic?: boolean;
+  rules?: string;
   mode?: "history" | "free";
   title: string;
   premise: string;
@@ -613,7 +616,7 @@ export interface SetupDraft {
 /** Turns a rough idea (and whatever the player already filled in) into a complete setup. */
 export function assistMessages(idea: string, current: Partial<SetupDraft>): ChatMessage[] {
   const free = isFree(current);
-  const filled = Object.entries(current).filter(([, v]) => v !== undefined && v !== null && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join("\n");
+  const filled = Object.entries(current).filter(([, v]) => (typeof v === "string" || typeof v === "number") && String(v).trim()).map(([k, v]) => `${k}: ${v}`).join("\n");
   return [
     {
       role: "system",

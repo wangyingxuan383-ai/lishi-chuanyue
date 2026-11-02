@@ -3,7 +3,7 @@ import { TEMPLATES } from "../../content/templates";
 import { FREE_TEMPLATES } from "../../content/freeTemplates";
 import { CHALLENGES } from "../../content/challenges";
 import { deadlineOf } from "../../engine/modes";
-import { EMPTY, fromChallenge, fromSetup, fromTemplate, parseShare, shareText, toNewWorld } from "./openingDraft";
+import { EMPTY, fromChallenge, fromSetup, fromTemplate, normalizeOpeningDraft, parseShare, shareText, toNewWorld } from "./openingDraft";
 
 const daughter = TEMPLATES.find((t) => t.id === "tang-chancellor-daughter")!;
 
@@ -50,7 +50,7 @@ describe("opening drafts", () => {
     expect(FREE_TEMPLATES.every((t) => fromTemplate(t, EMPTY, "女").gender === "女")).toBe(true);
   });
   it("round-trips through shared text", () => {
-    const draft = { ...fromTemplate(daughter, EMPTY), settings: { ...EMPTY.settings, rules: "多写对话", choiceCount: 4 } };
+    const draft = { ...fromTemplate(daughter, EMPTY), title: "相府庶女", titlePolicy: "manual" as const, settings: { ...EMPTY.settings, rules: "多写对话", choiceCount: 4 } };
     const text = shareText(draft);
     expect(text).toContain("【穿越小说模拟 · 开局设定】相府庶女");
     expect(text).toContain("时代：唐 · 天宝七载 · 长安");
@@ -62,6 +62,15 @@ describe("opening drafts", () => {
     expect(draft).toMatchObject({ premise: "汉末", eraId: null, gender: "男", arrival: "魂穿", age: "", templateId: null });
     expect(draft?.settings).toMatchObject({ choiceCount: 3, intensity: { violence: "浓烈", romance: "写实" } });
     expect(parseShare(JSON.stringify({ premise: "x".repeat(5000), identity: "y" }))?.premise).toHaveLength(5000);
+  });
+
+  it("new inspirations use auto naming while old saved names and fanfic bindings survive", () => {
+    const auto = fromTemplate(daughter, EMPTY);
+    expect(toNewWorld(auto)).toMatchObject({ title: "", titlePolicy: "auto" });
+    const source = { bookId: "book", fanfic: true, plot: "rewrite", position: 12, through: 18, instructions: "保留原著关系", method: "search" };
+    const saved = normalizeOpeningDraft({ name: "旅人", identity: "主角", title: "手写书名", source, fanfic: true, settings: { mode: "free" } });
+    expect(saved).toMatchObject({ titlePolicy: "manual", source, fanfic: true });
+    expect(toNewWorld(parseShare(shareText(saved))!)).toMatchObject({ title: "手写书名", source });
   });
 
   it("rejects text without a setup", () => {

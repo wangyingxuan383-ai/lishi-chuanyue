@@ -34,8 +34,20 @@ export function bookStatements(book: SourceBook): SqlStatement[] {
     ...chunks.map((chunk) => (
       { sql: "INSERT INTO source_chunks(book_id,ordinal,section,text) VALUES(?,?,?,?)", params: [book.id, chunk.ordinal, chunk.section, chunk.text] }
     )),
-    ...[...index].map(([term, postings]) => ({ sql: "INSERT INTO source_terms(book_id,term,postings) VALUES(?,?,?)", params: [book.id, term, JSON.stringify(postings)] })),
+    ...termStatements(book.id, index),
   ];
+}
+function termStatements(bookId: string, index: Map<string, number[]>): SqlStatement[] {
+  const result: SqlStatement[] = [];
+  let values: string[] = [], params: SqlStatement["params"] = [];
+  const flush = () => { if (values.length) result.push({ sql: `INSERT INTO source_terms(book_id,term,postings) VALUES ${values.join(",")}`, params }); values = []; params = []; };
+  // Stay below the oldest supported SQLite parameter limit. Combining rows
+  // avoids repeating a complete SQL statement for every term in a long book.
+  for (const [term, postings] of index) {
+    values.push("(?,?,?)"); params!.push(bookId, term, JSON.stringify(postings));
+    if (values.length === 200) flush();
+  }
+  flush(); return result;
 }
 export async function saveBook(repo: Repo, book: SourceBook, signal?: AbortSignal) {
   checkCancelled(signal);

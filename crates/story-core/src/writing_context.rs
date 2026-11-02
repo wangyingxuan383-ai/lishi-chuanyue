@@ -43,6 +43,8 @@ fn mentioned(v: &Value, recent: &str) -> bool {
 }
 
 pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
+    let projected = crate::stage_context::state(state, recent, 3000);
+    let state = &projected;
     let me = &state["protagonist"];
     let currency = &era["currency"];
     let now = rules::calendar::now_of(

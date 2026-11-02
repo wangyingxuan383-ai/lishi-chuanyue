@@ -258,6 +258,38 @@ pub async fn file_export_text(
     .await
 }
 
+/// Serialize a consistent native snapshot directly into an app-private file.
+/// Only a small status or a structured error crosses the WebView boundary.
+#[tauri::command]
+pub async fn file_export_world(
+    app:AppHandle,store:tauri::State<'_,Arc<crate::sql::SqlStore>>,world_id:String,suggested_name:String,
+)->std::result::Result<bool,serde_json::Value>{
+    use tauri::Manager;
+    let failure=|phase:&str,message:String|serde_json::json!({"code":"archive_export_failed","phase":phase,"message":format!("{}：{}",match phase {"prepare"=>"准备存档失败","select"=>"未能选择保存位置",_=>"保存文件失败"},message)});
+    let directory=app.path().app_cache_dir().map_err(|e|failure("prepare",e.to_string()))?.join("archive-export");
+    let path=directory.join(format!("{}.json",uuid::Uuid::new_v4()));
+    struct Temporary(std::path::PathBuf);
+    impl Drop for Temporary{fn drop(&mut self){let _=std::fs::remove_file(&self.0);}}
+    let temporary=Temporary(path.clone());let snapshot=store.shared();let copy=path.clone();
+    tauri::async_runtime::spawn_blocking(move||->std::result::Result<(),String>{
+        std::fs::create_dir_all(directory).map_err(|e|e.to_string())?;
+        let archive=story_core::world_archive::export(&snapshot,&world_id).map_err(|e|e.to_string())?;
+        let mut writer=std::io::BufWriter::new(std::fs::File::create(copy).map_err(|e|e.to_string())?);
+        serde_json::to_writer(&mut writer,&archive).map_err(|e|e.to_string())?;writer.flush().map_err(|e|e.to_string())
+    }).await.map_err(|e|failure("prepare",e.to_string()))?.map_err(|e|failure("prepare",e))?;
+    // Keep the existing 64MiB import boundary symmetrical. Never report success
+    // for an archive the application would reject when importing it again.
+    if std::fs::metadata(&path).map_err(|e|failure("prepare",e.to_string()))?.len()>MAX_IMPORT{
+        return Err(failure("prepare","完整存档超过当前64MiB导入上限，未写出不可导入的文件。".into()));
+    }
+    #[cfg(target_os="android")]
+    let selected=crate::document_picker::pick_export(&app,&suggested_name).await.map_err(|e|failure("select",e.to_string()))?;
+    #[cfg(not(target_os="android"))]
+    let selected={let handle=app.clone();blocking(move||Ok(handle.dialog().file().set_file_name(suggested_name).blocking_save_file())).await.map_err(|e|failure("select",e.message.into()))?};
+    let Some(selected)=selected else{return Ok(false);};
+    blocking(move||{let mut source=std::fs::File::open(&temporary.0).map_err(|_|io_error())?;let mut destination=open_file(&app,selected,"wt")?;std::io::copy(&mut source,&mut destination).map_err(|_|io_error())?;destination.flush().map_err(|_|io_error())?;Ok(true)}).await.map_err(|e|failure("write",e.message.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

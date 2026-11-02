@@ -3,6 +3,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { gunzipSync } from "node:zlib";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const NORMAL_BODY = 1024 * 1024;
@@ -159,7 +160,14 @@ export async function hostRequest(host: HostBridge, method: string, req: Incomin
     return reply(res, 413, { code: "dev_host_too_large", message: "请求内容超过开发宿主上限" });
   }
   try {
-    const body = await readBody(req, limit);
+    let body = await readBody(req, limit);
+    if (req.headers["content-encoding"]) {
+      if (method !== "sqlBatch" || req.headers["content-encoding"] !== "gzip") return reply(res, 415, { code: "dev_host_encoding", message: "此接口不支持压缩请求" });
+      // A <=64MiB archive expands into SQL plus a rebuilt search index. The
+      // compressed wire limit stays 64MiB; cap expansion independently.
+      try { body = gunzipSync(body, { maxOutputLength: 256 * 1024 * 1024 }); }
+      catch { return reply(res, 413, { code: "dev_host_encoding", message: "大事务压缩内容无效或展开后超过256MiB" }); }
+    }
     let params: unknown;
     try { params = JSON.parse(body.toString("utf8") || "{}"); }
     catch { return reply(res, 400, { code: "dev_host_json", message: "请求格式无效" }); }

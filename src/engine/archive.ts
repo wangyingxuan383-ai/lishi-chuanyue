@@ -17,6 +17,14 @@ export const ARCHIVE_FORMAT = "lishi-world";
 // stay on the device that owns the execution.
 // Old readers reject newer versions rather than silently losing their meaning.
 export const ARCHIVE_VERSION = 7;
+
+/** Export cancellation stays distinct from preparation/selection/write errors. */
+export async function exportWorldFile(repo: Repo, worldId: string, title: string): Promise<boolean> {
+  const name = `${title}.lishi.json`;
+  if (repo.platform.files.exportWorld) return repo.platform.files.exportWorld(worldId, name);
+  const archive = await exportWorld(repo, worldId);
+  return repo.platform.files.exportText(name, JSON.stringify(archive));
+}
 export interface AgentHistory {
   plan?: { id?: string; title: string; status: string }[];
   context?: { summary?: string; compactions?: number; inputTokens?: number; estimatedChars?: number; modelRequests?: number; toolCalls?: number };
@@ -37,7 +45,7 @@ export interface BookBundle { book: SourceBook; jobs: AnalysisJob[]; analysis: {
 export interface PiReadableArchive {
   engine: "pi"; version: 1; readOnly: true;
   sessions: { id: string; worldId: string; lineId: string; title: string; createdAt: string; updatedAt: string }[];
-  tasks: { id: string; sessionId: string; text: string; status: string; policy: string; createdAt: string; updatedAt: string; history: Json }[];
+  tasks: { id: string; sessionId: string; lineId?: string; text: string; status: string; policy: string; createdAt: string; updatedAt: string; history: Json }[];
 }
 export interface WorldArchive {
   format: typeof ARCHIVE_FORMAT;
@@ -115,7 +123,7 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
     pi.sessions.push({id:String(row.id),worldId,lineId:String(row.line_id),title:String(row.title),createdAt:String(row.created_at),updatedAt:String(row.updated_at)});
     for(const task of tasks) {
       const result=parseJson(task.result_json);
-      pi.tasks.push({id:String(task.id),sessionId:String(row.id),text:String(task.text),status:"archived",policy:String(task.policy),createdAt:String(task.created_at),updatedAt:String(task.updated_at),history:result.history??{messages:[],steps:[],plan:[],sources:[],result:{status:task.status,summary:result.summary??""},truncated:true}});
+      pi.tasks.push({id:String(task.id),sessionId:String(row.id),lineId:String(task.line_id),text:String(task.text),status:"archived",policy:String(task.policy),createdAt:String(task.created_at),updatedAt:String(task.updated_at),history:result.history??{messages:[],steps:[],plan:[],sources:[],result:{status:task.status,summary:result.summary??""},truncated:true}});
     }
   }
   const readable=cleanReadablePi(pi);
@@ -236,7 +244,7 @@ export function archiveProblems(raw: unknown): string[] {
       else {
         const sessions=new Map(pi.sessions.map(item=>[item?.id,item]));
         if(sessions.size!==pi.sessions.length || pi.sessions.some(item=>!item || typeof item.id!=="string" || item.worldId!==a.world!.id || !lines.has(item.lineId) || typeof item.title!=="string")) problems.push("助手会话不属于本故事或路线");
-        if(new Set(pi.tasks.map(item=>item?.id)).size!==pi.tasks.length || pi.tasks.some(item=>!item || typeof item.id!=="string" || !sessions.has(item.sessionId) || !["completed","committed","undone","archived"].includes(item.status) || !item.history || typeof item.history!=="object"))problems.push("助手历史含有无效或未完成任务");
+        if(new Set(pi.tasks.map(item=>item?.id)).size!==pi.tasks.length || pi.tasks.some(item=>!item || typeof item.id!=="string" || !sessions.has(item.sessionId) || item.lineId !== undefined && !lines.has(item.lineId) || !["completed","committed","undone","archived"].includes(item.status) || !item.history || typeof item.history!=="object"))problems.push("助手历史含有无效或未完成任务");
       }
     }
     if(a.factSources!==undefined && (!Array.isArray(a.factSources) || a.factSources.some(item=>!item || item.world_id!==a.world!.id || !lines.has(item.line_id) || item.node_id!=null&&!nodes.has(item.node_id as string) || !["original","player_setting","player_choice","local_custom","local_consistency","external","insufficient","legacyUnknown"].includes(String(item.basis)) || typeof item.claim!=="string" || typeof item.source_json!=="string")))problems.push("正式事实来源损坏或属于其他故事");
@@ -270,7 +278,7 @@ function remap(a: WorldArchive): WorldArchive {
     lines: a.lines.map((l) => ({ ...l, id: id(l.id), world_id: worldId, node_id: id(l.node_id) })),
     pins: a.pins.map((p) => ({ ...p, id: id(p.id), world_id: worldId, origin_node_id: id(p.origin_node_id) })),
     chapters: a.chapters.map((c) => ({ ...c, id: id(c.id), world_id: worldId, first_node_id: id(c.first_node_id), last_node_id: id(c.last_node_id) })),
-    ...(a.pi ? {pi:{...a.pi,sessions:a.pi.sessions.map(item=>({...item,id:id(item.id)!,worldId:worldId!,lineId:id(item.lineId)!})),tasks:a.pi.tasks.map(item=>({...item,id:id(item.id)!,sessionId:id(item.sessionId)!,history:sourceIds(item.history)}))}} : {}),
+    ...(a.pi ? {pi:{...a.pi,sessions:a.pi.sessions.map(item=>({...item,id:id(item.id)!,worldId:worldId!,lineId:id(item.lineId)!})),tasks:a.pi.tasks.map(item=>({...item,id:id(item.id)!,sessionId:id(item.sessionId)!,...(item.lineId ? {lineId:id(item.lineId)!} : {}),history:sourceIds(item.history)}))}} : {}),
     ...(a.factSources ? {factSources:a.factSources.map(item=>({...item,id:id(item.id),world_id:worldId,line_id:id(item.line_id),node_id:id(item.node_id),task_id:id(item.task_id),batch_id:id(item.batch_id),source_json:JSON.stringify(sourceIds(JSON.parse(String(item.source_json)))),resource_id:["node","state","people","protagonist","places","cards","goals","facts"].includes(String(item.resource_kind))&&item.resource_id ? id(item.resource_id):item.resource_id}))} : {}),
     ...(a.factCorrections ? {factCorrections:a.factCorrections.map(item=>({...item,id:id(item.id),world_id:worldId,node_id:id(item.node_id),original_node_id:id(item.original_node_id)}))} : {}),
     ...(a.version >= 5 && a.agent ? { agent: {
@@ -359,7 +367,9 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
   };
   for (const bundle of archive.books ?? []) {
     const bookId = bookIds.get(bundle.book.id)!;
-    statements.push(...bookStatements({ ...bundle.book, id: bookId }));
+    // A long novel can produce hundreds of thousands of index rows. Keep the
+    // single import transaction without passing each row as a JS argument.
+    for (const statement of bookStatements({ ...bundle.book, id: bookId })) statements.push(statement);
     for (const job of bundle.jobs) {
       const mapped = { ...job, id: jobIds.get(job.id)!, bookId, status: job.status === "running" ? "paused" : job.status };
       statements.push({ sql: "INSERT INTO source_jobs(id,book_id,json,created_at) VALUES(?,?,?,?)", params: [mapped.id, bookId, JSON.stringify(mapped), new Date().toISOString()] });
@@ -369,7 +379,8 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
       const job = bundle.jobs.find((j) => j.id === part.jobId)!;
       const mappedJob = { ...job, id: jobIds.get(job.id)!, bookId };
       const result = sourceAnalysisResult(part.text, book, chunks[part.ordinal], mappedJob);
-      statements.push({ sql: "INSERT INTO source_analysis(job_id,book_id,ordinal,section,text) VALUES(?,?,?,?,?)", params: [mappedJob.id, bookId, part.ordinal, part.section, result.text] }, ...result.statements);
+      statements.push({ sql: "INSERT INTO source_analysis(job_id,book_id,ordinal,section,text) VALUES(?,?,?,?,?)", params: [mappedJob.id, bookId, part.ordinal, part.section, result.text] });
+      for (const statement of result.statements) statements.push(statement);
     }
   }
   if (mode === "replace") {
@@ -383,17 +394,16 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
       { sql: "DELETE FROM worlds WHERE id = ?", params: [worldId] },
     );
   }
-  statements.push(
-    insert("worlds", WORLD_FIELDS, { ...archive.world, current_line_id: null }),
-    ...nodes.map((n) => insert("nodes", NODE_FIELDS, { ...n, last_child_id: null, record_json: mapJson(n.record_json, "sourceSet"), meta_json: mapMeta(n.meta_json) })),
-    // Redo pointers, only where the node they point to came along.
-    ...nodes.filter((n) => n.last_child_id != null && nodes.some((x) => x.id === n.last_child_id)).map((n) => ({ sql: "UPDATE nodes SET last_child_id = ? WHERE id = ?", params: [n.last_child_id as Json, n.id as Json] })),
-    ...archive.states.map((s) => insert("states", ["node_id", "state_json"], { ...s, state_json: mapJson(s.state_json, "source") })),
-    ...archive.lines.map((l) => insert("lines", LINE_FIELDS, l)),
-    ...archive.pins.map((p) => insert("pins", PIN_FIELDS, p)),
-    ...archive.chapters.map((c) => insert("chapters", CHAPTER_FIELDS, c)),
-    { sql: "UPDATE worlds SET current_line_id = ? WHERE id = ?", params: [archive.world.current_line_id as Json, worldId] },
-  );
+  statements.push(insert("worlds", WORLD_FIELDS, { ...archive.world, current_line_id: null }));
+  for (const n of nodes) statements.push(insert("nodes", NODE_FIELDS, { ...n, last_child_id: null, record_json: mapJson(n.record_json, "sourceSet"), meta_json: mapMeta(n.meta_json) }));
+  // Redo pointers, only where the node they point to came along.
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  for (const n of nodes) if (n.last_child_id != null && nodeIds.has(n.last_child_id)) statements.push({ sql: "UPDATE nodes SET last_child_id = ? WHERE id = ?", params: [n.last_child_id as Json, n.id as Json] });
+  for (const s of archive.states) statements.push(insert("states", ["node_id", "state_json"], { ...s, state_json: mapJson(s.state_json, "source") }));
+  for (const l of archive.lines) statements.push(insert("lines", LINE_FIELDS, l));
+  for (const p of archive.pins) statements.push(insert("pins", PIN_FIELDS, p));
+  for (const c of archive.chapters) statements.push(insert("chapters", CHAPTER_FIELDS, c));
+  statements.push({ sql: "UPDATE worlds SET current_line_id = ? WHERE id = ?", params: [archive.world.current_line_id as Json, worldId] });
   const mapBooksDeep=(value:any):any=>Array.isArray(value)?value.map(mapBooksDeep):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,k==="bookId"&&typeof v==="string"?bookIds.get(v)??v:mapBooksDeep(v)])):value;
   if(archive.version>=7 && archive.pi) {
     let pi=repo.platform.execution?.agent ? archive.pi : cleanReadablePi(archive.pi);
@@ -401,7 +411,7 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
     for(const session of pi.sessions) statements.push({sql:"INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",params:[session.id,worldId,session.lineId,session.title,session.createdAt,session.updatedAt]});
     for(const task of pi.tasks) {
       const session=pi.sessions.find(item=>item.id===task.sessionId)!;
-      statements.push({sql:"INSERT INTO pi_tasks(id,session_id,world_id,line_id,text,status,policy,base_json,base_world_version,result_json,created_at,updated_at) VALUES(?,?,?,?,?,'archived',?,'{}','',?,?,?)",params:[task.id,task.sessionId,worldId,session.lineId,task.text,task.policy,JSON.stringify({history:mapBooksDeep(task.history),summary:"导入的只读助手历史"}),task.createdAt,task.updatedAt]});
+      statements.push({sql:"INSERT INTO pi_tasks(id,session_id,world_id,line_id,text,status,policy,base_json,base_world_version,result_json,created_at,updated_at) VALUES(?,?,?,?,?,'archived',?,'{}','',?,?,?)",params:[task.id,task.sessionId,worldId,task.lineId ?? session.lineId,task.text,task.policy,JSON.stringify({history:mapBooksDeep(task.history),summary:"导入的只读助手历史"}),task.createdAt,task.updatedAt]});
     }
   }
   for(const source of archive.factSources??[]) statements.push(insert("story_fact_sources",["id","world_id","line_id","node_id","resource_kind","resource_id","batch_id","task_id","basis","claim","source_json","created_at"],{...source,source_json:JSON.stringify(mapBooksDeep(cleanSource(JSON.parse(String(source.source_json)))))}));

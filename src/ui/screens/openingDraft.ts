@@ -26,6 +26,7 @@ export interface Draft {
   templateId: string | null;
   lockedGender: "男" | "女" | null;
   title: string;
+  titlePolicy?: "auto" | "manual";
   eraId: string | null;
   premise: string;
   name: string;
@@ -57,7 +58,7 @@ export const EMPTY_CHALLENGE: ChallengeDraft = { goal: "", limit: "", failIf: ""
 
 export const EMPTY: Draft = {
   executionMode: "classic",
-  templateId: null, lockedGender: null, title: "", eraId: null, premise: "", name: "", gender: "男", age: "",
+  templateId: null, lockedGender: null, title: "", titlePolicy: "auto", eraId: null, premise: "", name: "", gender: "男", age: "",
   identity: "", arrival: "魂穿", origin: "历史系研究生", openingMode: "ai", hint: "", openingText: "", organize: true,
   play: "plain", aiPilot: false, script: EMPTY_SCRIPT, challenge: EMPTY_CHALLENGE, challengeId: null, fortune: null,
   settings: {
@@ -77,7 +78,7 @@ export function fromTemplate(t: OpeningTemplate, keep: Draft, gender?: "男" | "
     templateId: t.id,
     challengeId: null,
     lockedGender: t.gender,
-    title: t.title,
+    title: "", titlePolicy: "auto",
     eraId: t.eraId,
     premise: t.premise,
     name: templateName(t, g),
@@ -100,7 +101,7 @@ export function fromChallenge(c: ChallengeCard, keep: Draft): Draft {
     templateId: null,
     challengeId: c.id,
     lockedGender: c.gender,
-    title: c.title,
+    title: "", titlePolicy: "auto",
     eraId: c.eraId,
     premise: c.premise,
     name: challengeName(c, gender),
@@ -134,6 +135,7 @@ export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "dif
   return {
     executionMode: "classic",
     title: d.title,
+    titlePolicy: d.titlePolicy ?? (d.title.trim() ? "manual" : "auto"),
     source: d.source,
     eraId: d.settings.mode === "free" ? null : d.eraId,
     settings: {
@@ -156,12 +158,12 @@ export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "dif
 export function fromSetup(setup: NewWorld): Draft {
   const s = setup.settings;
   const gender = setup.protagonist.gender === "女" ? "女" : "男";
-  return clean({
+  return normalizeOpeningDraft({
     ...EMPTY,
     executionMode: setup.executionMode ?? "classic",
     source: setup.source,
     fanfic: setup.source?.fanfic,
-    title: setup.title, eraId: setup.eraId, premise: s.premise ?? "",
+    title: setup.title, titlePolicy: "manual", eraId: setup.eraId, premise: s.premise ?? "",
     name: setup.protagonist.name, gender, lockedGender: gender, age: setup.protagonist.age ? String(setup.protagonist.age) : "",
     identity: setup.protagonist.identity, arrival: setup.arrival, origin: setup.origin || EMPTY.origin,
     openingMode: setup.opening.mode, hint: setup.opening.mode === "ai" ? setup.opening.hint : "",
@@ -213,7 +215,7 @@ export const OPENING_TEXT_LIMIT = 4 * 1024 * 1024;
 const oneOf = <T extends string | number>(v: unknown, options: readonly T[], fallback: T): T => (options.includes(v as T) ? (v as T) : fallback);
 
 /** Unknown options fall back; authored text is preserved, never silently truncated. */
-function clean(raw: Record<string, unknown>): Draft {
+export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
   const s = (raw.settings && typeof raw.settings === "object" ? raw.settings : {}) as Record<string, unknown>;
   const intensity = (s.intensity && typeof s.intensity === "object" ? s.intensity : {}) as Record<string, unknown>;
   const levels: Intensity[] = ["含蓄", "写实", "浓烈"];
@@ -235,6 +237,7 @@ function clean(raw: Record<string, unknown>): Draft {
     fortune: raw.fortune === "on" || raw.fortune === "hint" || raw.fortune === "off" ? raw.fortune : null,
     lockedGender: locked,
     title: str(raw.title),
+    titlePolicy: raw.titlePolicy === "auto" ? "auto" : str(raw.title).trim() ? "manual" : "auto",
     eraId: ERAS.some((e) => e.id === raw.eraId) ? (raw.eraId as string) : null,
     premise: str(raw.premise),
     name: str(raw.name),
@@ -276,7 +279,7 @@ export function parseShare(text: string): Draft | null {
   try {
     const raw = JSON.parse(body.trim()) as unknown;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    const draft = clean(raw as Record<string, unknown>);
+    const draft = normalizeOpeningDraft(raw as Record<string, unknown>);
     return draft.premise.trim() || draft.identity.trim() || draft.openingText.trim() ? draft : null;
   } catch {
     return null;

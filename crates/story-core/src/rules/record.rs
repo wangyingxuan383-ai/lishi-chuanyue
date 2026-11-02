@@ -337,5 +337,6 @@ pub fn parse_record(text: &str) -> Result<Value, String> {
     if record["choices"].as_array().is_none_or(Vec::is_empty) {
         issues.push("缺少 choices".into());
     }
-    Ok(json!({"record":record,"issues":issues}))
+    let title=value["storyTitle"].as_str().map(str::trim).filter(|s|!s.is_empty()&&s.chars().count()<=24&&!s.contains(['\n','\r','<','>']));
+    Ok(json!({"record":record,"issues":issues,"openingTitle":title}))
 }

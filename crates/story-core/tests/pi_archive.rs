@@ -94,6 +94,19 @@ fn requires_the_callers_read_only_transaction() {
 }
 
 #[test]
+fn adopted_conversation_keeps_finished_tasks_on_their_original_lines() {
+    let mut db = Connection::open_in_memory().unwrap();
+    fixture(&mut db);
+    db.execute_batch("INSERT INTO lines(id,world_id,name,node_id,kind,created_at) VALUES('revision','world','修订路线','n','line','test'); UPDATE pi_sessions SET line_id='revision' WHERE id='session';").unwrap();
+    let value = snapshot(&db);
+    assert_eq!(value["sessions"][0]["lineId"],"revision");
+    assert_eq!(value["tasks"][0]["lineId"],"line");
+    let mut foreign=value.clone();foreign["tasks"][0]["lineId"]="foreign-line".into();
+    assert!(validate_readable(&foreign,"world",&["line".into(),"revision".into()]).is_err());
+    assert_eq!(db.query_row("SELECT line_id FROM pi_tasks WHERE id='finished'",[],|r|r.get::<_,String>(0)).unwrap(),"line");
+}
+
+#[test]
 fn exports_only_completed_visible_history_without_runtime_or_replay_state() {
     let mut db = Connection::open_in_memory().unwrap();
     fixture(&mut db);

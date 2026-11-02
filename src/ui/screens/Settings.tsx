@@ -2,7 +2,7 @@
 // a home list in three groups — AI, 游戏, 应用 — each entry a page of its own,
 // with the current state on the entry. What used to be one long page is split
 // so each part can grow without the whole getting noisy.
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../engine/llm/providers";
 import type { Intensity, Perspective } from "../../engine/types";
 import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
@@ -11,7 +11,7 @@ import { useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { REPO_URL, openLink, newer, plainNotes } from "../app/update";
 import { useUpdateNotice } from "../app/updateStore";
-import { exportWorld } from "../../engine/archive";
+import { exportWorldFile } from "../../engine/archive";
 import { PURPOSES } from "../components/Usage";
 import { Seal } from "../components/Seal";
 import { BackupRestore } from "../components/BackupRestore";
@@ -286,19 +286,26 @@ function DataPage() {
   const [sources, setSources] = useState(false);
   const [backups, setBackups] = useState<{ name: string; at: string; bytes?: number }[]>([]);
   const [worldCount, setWorldCount] = useState<number | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const exportBusy = useRef(false);
   const load = () => {
     void game.platform.sql.listBackups().then((b) => setBackups([...b].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)))).catch(() => setBackups([]));
     void game.platform.sql.query("SELECT COUNT(*) AS worlds FROM worlds WHERE archived < 2").then((r) => setWorldCount(Number(r[0].worlds)));
   };
   useEffect(load, []);
   const exportAll = async () => {
+    if (exportBusy.current) return;
+    exportBusy.current = true; setExporting(true);
+    try {
     const worlds = await game.repo.listWorlds();
     let done = 0;
     for (const w of worlds) {
-      const archive = await exportWorld(game.repo, w.id);
-      if (await game.platform.files.exportText(`${w.title}.lishi.json`, JSON.stringify(archive)).catch(() => false)) done++;
+      try { if (await exportWorldFile(game.repo, w.id, w.title)) done++; else break; }
+      catch (error) { toast(error instanceof Error ? error.message : "准备完整存档失败"); return; }
     }
     toast(done ? `已导出 ${done} 个世界` : "没有导出");
+    } catch (error) { toast(error instanceof Error ? error.message : "准备完整存档失败"); }
+    finally { exportBusy.current = false; setExporting(false); }
   };
   const fmt = (iso: string) => new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).replaceAll("/", "-");
   return (
@@ -318,7 +325,7 @@ function DataPage() {
       {sources && <SourceLibrary onClose={() => setSources(false)} />}
       <h3 className="settings-sub">导出</h3>
       <Note>导出的文件，在另一台手机或电脑的首页用“从文件导入世界…”打开。只导出一个世界：点首页卡片上的“⋯”。</Note>
-      <button onClick={() => void exportAll()}>导出全部世界{worldCount !== null ? `（${worldCount} 个）` : ""}</button>
+      <button disabled={exporting} onClick={() => void exportAll()}>{exporting ? "正在准备导出…" : `导出全部世界${worldCount !== null ? `（${worldCount} 个）` : ""}`}</button>
     </>
   );
 }

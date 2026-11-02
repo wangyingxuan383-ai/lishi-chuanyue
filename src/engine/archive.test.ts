@@ -115,6 +115,22 @@ describe("world archive", () => {
     }
   });
 
+  it("preserves a finished task's original route after its conversation moves to a revision", async () => {
+    const repo = await emptyRepo(), { worldId, side } = await richWorld(repo), c = await tree.cursor(repo, worldId), time = "test";
+    await repo.platform.sql.batch([
+      { sql: "INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES('moving',?,?,'修订对话',?,?)", params: [worldId, side.id, time, time] },
+      { sql: "INSERT INTO pi_tasks(id,session_id,world_id,line_id,text,status,policy,base_json,base_world_version,result_json,created_at,updated_at) VALUES('finished','moving',?,?,'改稿','archived','auto','{}','',?,?,?)", params: [worldId, c.line.id, JSON.stringify({history:{messages:[],steps:[],plan:[],sources:[],result:{summary:"已采用"}}}), time, time] },
+    ]);
+    const file = await exportWorld(repo, worldId);
+    expect(file.pi!.tasks[0].lineId).toBe(c.line.id);
+    const copy = await importWorld(repo, file, "new"), again = await exportWorld(repo, copy);
+    expect(archiveProblems(again)).toEqual([]);
+    expect(again.pi!.tasks[0].lineId).not.toBe(again.pi!.sessions[0].lineId);
+    expect(again.lines.some(l => l.id === again.pi!.tasks[0].lineId)).toBe(true);
+    const broken = structuredClone(file); broken.pi!.tasks[0].lineId = "foreign";
+    expect(archiveProblems(broken)).toContain("助手历史含有无效或未完成任务");
+  });
+
   it("round-trips a world to another device unchanged, ids included", async () => {
     const a = await emptyRepo();
     const { worldId } = await richWorld(a);
@@ -124,6 +140,22 @@ describe("world archive", () => {
     expect(await content(b, worldId)).toEqual(await content(a, worldId));
     expect((await b.getWorld(worldId))!.title).toBe("长安");
   });
+
+  it("imports and re-exports a book whose search index exceeds the JS argument limit", async () => {
+    const repo = await emptyRepo(), { worldId } = await richWorld(repo);
+    const file = await exportWorld(repo, worldId);
+    // Fixed-width words keep the 2400-character chunk boundaries on spaces.
+    const text = Array.from({ length: 140000 }, (_, i) => `w${String(i).padStart(6, "0")} `).join("");
+    file.books = [{ book: { id: "large-book", title: "长篇资料", format: "txt", createdAt: "test", sections: [{ title: "正文", text }] }, jobs: [], analysis: [] }];
+    const binding = { bookId: "large-book", fanfic: true, plot: "rewrite", through: null, position: 0, instructions: "按原文核对", method: "search" };
+    for (const state of file.states) state.state_json = JSON.stringify({ ...JSON.parse(String(state.state_json)), source: binding });
+    const copy = await importWorld(repo, file, "new");
+    const again = await exportWorld(repo, copy), book = again.books![0].book;
+    expect(book.sections[0].text).toBe(text);
+    expect((await repo.platform.sql.query("SELECT COUNT(*) AS n FROM source_terms WHERE book_id=?", [book.id]))[0].n).toBeGreaterThanOrEqual(140000);
+    expect((await repo.platform.sql.query("SELECT postings FROM source_terms WHERE book_id=? AND term='w139999'", [book.id]))).toHaveLength(1);
+    expect(archiveProblems(again)).toEqual([]);
+  }, 30000);
 
   it("keeps the old world and saves the import under new ids, or replaces it", async () => {
     const repo = await emptyRepo();

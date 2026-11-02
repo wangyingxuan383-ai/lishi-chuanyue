@@ -17,13 +17,13 @@ import { StoryText } from "../components/StoryText";
 import { useLongPress } from "../components/useLongPress";
 import { loadPlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import {
-  ARRIVALS, EMPTY, MAX_BEATS, ORIGINS, OPENING_TEXT_LIMIT, draftExecutionMode, draftFortune, filledBeats, fromChallenge, fromTemplate, parseShare, shareText, toNewWorld,
+  ARRIVALS, EMPTY, MAX_BEATS, ORIGINS, OPENING_TEXT_LIMIT, draftExecutionMode, draftFortune, filledBeats, fromChallenge, fromTemplate, normalizeOpeningDraft, parseShare, shareText, toNewWorld,
   type Draft, type PlayStyle,
 } from "./openingDraft";
 import { Icon } from "../components/Icon";
 import { ChallengeSetup, PlayStyles, ScriptOutline } from "../components/ModeSetup";
-import { SourceSetup } from "../components/Sources";
-import type { SourceBinding } from "../../engine/sources/types";
+import { SourceLibrary, SourceSetup } from "../components/Sources";
+import { newBinding, type SourceBinding } from "../../engine/sources/types";
 import { getBook } from "../../engine/sources/library";
 
 /** "唐 · 天宝七载" → "唐" */
@@ -77,7 +77,10 @@ export default function NewGame() {
   const [templateMenu, setTemplateMenu] = useState<UserTemplate | null>(null);
   const [allTemplates, setAllTemplates] = useState(false);
   const [group, setGroup] = useState("全部");
-  const [sheet, setSheet] = useState<"menu" | "import" | null>(null);
+  const [sheet, setSheet] = useState<"menu" | "import" | "ideas" | "mine" | null>(null);
+  const [mineFilter, setMineFilter] = useState("全部");
+  const [sourceLibrary, setSourceLibrary] = useState(false);
+  const revision = useRef(0);
   const [pasted, setPasted] = useState("");
   const [assisting, setAssisting] = useState(false);
   const assistTicket = useRef(0);
@@ -89,8 +92,6 @@ export default function NewGame() {
   const [pointed, setPointed] = useState<string | null>(null);
   const goalBox = useRef<HTMLTextAreaElement>(null);
   const [phase, setPhase] = useState<"form" | "loading" | "thinking" | "writing" | "organizing">("form");
-  /** "pick": choose a way in (随便穿, an inspiration, a line of your own); "setup": the fields. */
-  const [step, setStep] = useState<"pick" | "setup">("pick");
   /** Folded parts of the setup; a part opens when tapped or when something is missing there. */
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
@@ -120,12 +121,12 @@ export default function NewGame() {
       const d = await loadPlayDefaults(game.repo);
       setDefaults(d);
       const base = fresh(d);
-      const restored = stored ? { ...base, ...saved, executionMode: draftExecutionMode(saved.executionMode), settings: { ...base.settings, ...saved.settings } } : base;
+      const restored = stored ? normalizeOpeningDraft({ ...base, ...saved, settings: { ...base.settings, ...saved.settings } }) : base;
       const pendingSource = await game.repo.getSetting<SourceBinding | null>("source:pending", null);
-      if (pendingSource) { restored.source = pendingSource; restored.fanfic = pendingSource.fanfic; if (pendingSource.fanfic) { restored.settings.mode = "free"; restored.settings.clockStyle = "elapsed"; } await game.repo.setSetting("source:pending", null); setStep("setup"); }
+      if (pendingSource) { restored.source = pendingSource; restored.fanfic = pendingSource.fanfic; if (pendingSource.fanfic) { restored.settings.mode = "free"; restored.settings.clockStyle = "elapsed"; } await game.repo.setSetting("source:pending", null); setSheet(null); }
       draftRef.current = restored;
       setDraftState(restored);
-      if (stored && (saved.name || saved.premise || saved.identity || saved.source || saved.fanfic)) setStep("setup");
+      if (stored && (saved.name || saved.premise || saved.identity || saved.source || saved.fanfic)) setSheet(null);
       // 再挑战一次: the same opening starts at once, as a game's retry does.
       const autostart = await game.repo.getSetting<boolean>("newgameAutostart", false);
       if (!live) return;
@@ -133,7 +134,7 @@ export default function NewGame() {
       const rows = await game.platform.sql.query("SELECT id, name, json FROM templates WHERE kind = 'opening' ORDER BY created_at DESC");
       setMine(rows.map((r) => {
         const saved = JSON.parse(r.json as string) as Draft;
-        return { id: r.id as string, name: r.name as string, draft: { ...saved, executionMode: draftExecutionMode(saved.executionMode) } };
+        return { id: r.id as string, name: r.name as string, draft: normalizeOpeningDraft(saved as unknown as Record<string, unknown>) };
       }));
       setLoaded(true);
       if (autostart && stored && saved.name && saved.identity) void start(restored, d);
@@ -147,6 +148,7 @@ export default function NewGame() {
   const setDraft = (next: Draft | ((d: Draft) => Draft)) => {
     setDraftState((current) => {
       const value = typeof next === "function" ? next(current) : next;
+      revision.current++;
       draftRef.current = value;
       persist();
       return value;
@@ -171,7 +173,7 @@ export default function NewGame() {
   const switchMode = (choice: "history" | "free" | "fanfic") => {
     const mode = choice === "fanfic" ? "free" : choice;
     setDraft((d) => ({ ...d, fanfic: choice === "fanfic", source: d.source ? { ...d.source, fanfic: choice === "fanfic" } : null, templateId: null, eraId: null, settings: { ...d.settings, mode, clockStyle: mode === "free" ? "elapsed" : "era" } }));
-    if (choice === "fanfic") setStep("setup");
+    if (choice === "fanfic") setSheet(null);
     setGroup("全部");
     setAllTemplates(false);
   };
@@ -183,48 +185,50 @@ export default function NewGame() {
   const useTemplate = (t: OpeningTemplate) => {
     setDraft((d) => fromTemplate(t, d));
     setError(null);
-    setStep("setup");
+    setSheet(null);
     window.scrollTo?.(0, 0);
   };
 
   /** What the AI helpers are told the player has filled in so far. */
   const setupSoFar = (d: Draft) => ({
     mode: d.settings.mode === "free" ? "free" as const : "history" as const,
-    title: d.title, premise: d.premise, name: d.name, gender: d.lockedGender ?? (d.name ? d.gender : ""),
+    title: d.titlePolicy === "auto" ? "" : d.title, premise: d.premise, name: d.name, gender: d.lockedGender ?? (d.name ? d.gender : ""),
     age: d.age ? Number(d.age) : null, identity: d.identity, arrival: d.arrival, origin: d.origin,
-    hint: d.hint, essentials: d.settings.essentials,
+    hint: d.hint, essentials: d.settings.essentials, source: d.source, fanfic: !!d.fanfic, rules: d.settings.rules,
   });
 
   const assist = async () => {
     if (!game.llm) { toast("先连接 AI 服务"); return; }
     if (assisting) return;
     const ticket = ++assistTicket.current;
-    const sourceMode = draftRef.current.settings.mode;
+    const sourceMode = JSON.stringify([draftRef.current.settings.mode, draftRef.current.fanfic, draftRef.current.source]);
     const sourceIdea = ideaRef.current;
+    const before = draftRef.current;
+    if (draftRef.current.fanfic && !draftRef.current.source) { setSourceLibrary(true); return; }
     setAssisting(true);
     const result = await game.assist(free ? `自由世界，按玩家的设定创作，不套用真实历史。${idea}` : idea, setupSoFar(draftRef.current));
     if (ticket !== assistTicket.current) return;
     setAssisting(false);
     // Only a changed idea or world kind makes the result stale; fields typed meanwhile are kept below.
-    if (sourceIdea !== ideaRef.current || sourceMode !== draftRef.current.settings.mode) {
+    if (sourceIdea !== ideaRef.current || sourceMode !== JSON.stringify([draftRef.current.settings.mode, draftRef.current.fanfic, draftRef.current.source])) {
       toast("想法改过了，这次的补全没有用上，可以再点一次。");
       return;
     }
     if (!result) { toast("没能生成，再试一次？"); return; }
-    setStep("setup");
+    setSheet(null);
     const fill = (mineValue: string, theirs: unknown) => (mineValue.trim() ? mineValue : typeof theirs === "string" ? theirs : mineValue);
     setDraft((d) => {
-      const gender = d.lockedGender ?? (result.gender === "女" ? "女" : result.gender === "男" ? "男" : d.gender);
+      const gender = d.lockedGender ?? (d.gender !== before.gender ? d.gender : result.gender === "女" ? "女" : result.gender === "男" ? "男" : d.gender);
       return {
         ...d,
-        title: fill(d.title, result.title),
+        title: d.title,
         premise: fill(d.premise, result.premise),
         name: fill(d.name, result.name),
         gender,
         lockedGender: d.lockedGender ?? (result.gender === "女" || result.gender === "男" ? gender : null),
         age: d.age || (result.age ? String(result.age) : ""),
         identity: fill(d.identity, result.identity),
-        arrival: ARRIVALS.includes(result.arrival as Arrival) && !d.templateId ? (result.arrival as Arrival) : d.arrival,
+        arrival: ARRIVALS.includes(result.arrival as Arrival) && !d.templateId && d.arrival === before.arrival ? (result.arrival as Arrival) : d.arrival,
         origin: fill(d.origin, result.origin),
         hint: fill(d.hint, result.hint),
         settings: { ...d.settings, essentials: fill(d.settings.essentials, result.essentials) },
@@ -252,12 +256,13 @@ export default function NewGame() {
       : d.challenge.goal.trim() && d.challenge.limit.trim() && d.challenge.failIf.trim();
     if (full) { toast(kind === "script" ? "大纲都写好了，没有空着的地方" : "挑战都写好了，没有空着的地方"); return; }
     const ticket = ++draftTicket.current;
+    const sourceRevision = revision.current;
     setDrafting(kind);
     try {
       const keep = (mine: string, theirs: unknown) => (mine.trim() ? mine : typeof theirs === "string" ? theirs.trim() : mine);
       if (kind === "script") {
         const result = await game.draftScript({ ...setupSoFar(d), script: { line: d.script.line, beats: filledBeats(d.script), ending: d.script.ending } });
-        if (ticket !== draftTicket.current) return;
+        if (ticket !== draftTicket.current || sourceRevision !== revision.current) return;
         const beats = (result?.beats ?? []).map((b) => String(b).trim()).filter(Boolean).slice(0, MAX_BEATS);
         if (!result || !beats.length) { toast("没能拟出大纲，再试一次？"); return; }
         setDraft((x) => {
@@ -271,7 +276,7 @@ export default function NewGame() {
         toast("已拟好大纲，都可以改");
       } else {
         const result = await game.draftChallenge({ ...setupSoFar(d), challenge: d.challenge });
-        if (ticket !== draftTicket.current) return;
+        if (ticket !== draftTicket.current || sourceRevision !== revision.current) return;
         if (!result || !String(result.goal ?? "").trim()) { toast("没能出好题，再试一次？"); return; }
         setDraft((x) => ({ ...x, challenge: { goal: keep(x.challenge.goal, result.goal), limit: keep(x.challenge.limit, result.limit), failIf: keep(x.challenge.failIf, result.failIf) } }));
         toast("已出好题，都可以改");
@@ -305,15 +310,30 @@ export default function NewGame() {
     }
   };
 
-  const randomStart = () => {
-    const t = pickRandom(templates);
-    const d = fromTemplate(t, { ...EMPTY, executionMode: draft.executionMode, settings: draft.settings }, pickRandom(["男", "女"] as const));
-    d.origin = pickRandom(ORIGINS);
-    void start(d);
+  const randomStart = async () => {
+    if (assisting) return;
+    const before = draftRef.current;
+    if (before.fanfic) {
+      if (!before.source) { setSourceLibrary(true); return; }
+      if (!game.llm) { toast("先连接 AI 服务"); return; }
+      const version = revision.current; const ticket = ++assistTicket.current;
+      setAssisting(true);
+      try {
+        const result = await game.assist("在选定原著起点附近随机构思一个可游玩的开局，遵守参考范围与用法；不可擅自更换作品。", setupSoFar({ ...blank(), source: before.source, fanfic: true }));
+        if (ticket !== assistTicket.current || version !== revision.current) return;
+        if (!result) { toast("没能构思，再试一次？"); return; }
+        setDraft({ ...before, templateId: null, title: "", titlePolicy: "auto", premise: result.premise ?? "", name: result.name ?? "", gender: result.gender === "女" ? "女" : "男", lockedGender: null, age: result.age ? String(result.age) : "", identity: result.identity ?? "", hint: result.hint ?? "", openingMode: "ai", openingText: "" });
+      } finally { if (ticket === assistTicket.current) setAssisting(false); }
+    } else {
+      const t = pickRandom(templates);
+      const next = fromTemplate(t, before, pickRandom(["男", "女"] as const));
+      next.origin = pickRandom(ORIGINS); setDraft(next);
+    }
+    toast("已填入随机开局，可以改后再开始", { label: "撤销", run: () => setDraft(before) });
   };
 
   const saveTemplate = async () => {
-    const name = await askName({ title: "存为我的开局", initial: draft.title || "我的开局", placeholder: "给这个开局起个名字" });
+    const name = await askName({ title: "存为我的开局", initial: draft.title || (draft.name ? `${draft.name}的开局` : "我的开局"), placeholder: "开局名称，方便下次选择" });
     if (!name) return;
     const id = newId();
     await game.platform.sql.query("INSERT INTO templates (id, kind, name, json, created_at) VALUES (?, 'opening', ?, ?, ?)", [id, name.trim(), JSON.stringify(draft), new Date().toISOString()]);
@@ -398,7 +418,7 @@ export default function NewGame() {
               const before = draft;
               const beforeIdea = idea;
               // The words go; how the story is played and written stays.
-              setDraft({ ...fresh(), executionMode: draft.executionMode, settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
+              setDraft({ ...fresh(), executionMode: draft.executionMode, fanfic: draft.fanfic, source: draft.source, settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
               setIdea("");
               toast("已清空", { label: "撤销", run: () => { setDraft(before); setIdea(beforeIdea); } });
             } },
@@ -410,7 +430,7 @@ export default function NewGame() {
           title={templateMenu.name}
           onClose={() => setTemplateMenu(null)}
           items={[
-            { label: "用这个开局", onSelect: () => { setDraft({ ...fresh(), ...templateMenu.draft }); setStep("setup"); } },
+            { label: "用这个开局", onSelect: () => { setDraft(normalizeOpeningDraft(templateMenu.draft as unknown as Record<string, unknown>)); setSheet(null); } },
             { label: "改名", onSelect: () => void renameTemplate(templateMenu) },
             { label: "删除", danger: true, onSelect: () => void deleteTemplate(templateMenu) },
           ]}
@@ -437,7 +457,8 @@ export default function NewGame() {
     if (!missing) { void start(draft); return; }
     setPointed(missing);
     // A grey button that does nothing is a dead end: take the player to what is missing (AUDIT_V4 3.7).
-    if (missing === "名字") nameBox.current?.focus();
+    if (missing === "原著书籍") setSourceLibrary(true);
+    else if (missing === "名字") nameBox.current?.focus();
     else if (missing === "年龄") ageBox.current?.focus();
     else if (missing === "身份") identityBox.current?.focus();
     else if (missing === "剧本") beatBox.current?.focus();
@@ -446,68 +467,26 @@ export default function NewGame() {
     toast(missing === "名字" && nameLength > NAME_MAX ? `名字最多 ${NAME_MAX} 个字` : missing === "年龄" ? ageProblem(draft.age, free)! : `还差${missing}`);
   };
 
-  if (step === "pick") {
-    return (
-      <div className="screen">
-        <div className="topbar">
-          <button className="icon-btn" aria-label="返回" onClick={pop}><Icon name="back" /></button>
-          <div className="title"><h1>新的故事</h1></div>
-          <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}><Icon name="more" /></button>
-        </div>
-        <div className="screen-body stack">
-          {error && <div className="notice">{error}</div>}
-          <div className="segmented" role="group" aria-label="故事模式">
-            <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
-            <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
-            <button aria-pressed={!!draft.fanfic} onClick={() => switchMode("fanfic")}>同人</button>
-          </div>
-          <p className="muted" style={{ margin: 0 }}>{free ? "仙侠、奇幻、科幻，或你喜欢的作品里的世界，都由你来定义。" : "从真实历史出发，也可以自由改写。"}</p>
-          <button className="random-card" onClick={randomStart}>
-            <span className="seal small" aria-hidden="true"><span>随</span><span>缘</span></span>
-            <span><b>随便穿</b><small>{free ? "抽一个原创世界和身份，马上开始" : "让命运替你选一个时代和身份，马上开始"}</small></span>
-          </button>
-
-          <section className="stack" style={{ gap: 8 }}>
-            <h2 className="section-title">一句话，AI 帮你补全</h2>
-            <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} aria-label="一句话想法" placeholder={free ? "比如：我是经营星际书店的精灵，今天想遇见一位有趣的客人" : "比如：靖康之变前一年，我是汴京的一个小吏，想办法救下更多的人"} />
-            <button className={idea.trim() ? "primary" : ""} onClick={assist} disabled={assisting || !idea.trim()}>{assisting ? "构思中…" : "补全设定"}</button>
-          </section>
-
-          <section className="stack" style={{ gap: 8 }}>
-            <h2 className="section-title">从灵感开始</h2>
-            {/* A filter with only 全部 in it filters nothing: shown once there is a choice. */}
-            {filters.length > 1 && <div className="segmented" role="group" aria-label="灵感分类">
-              {filters.map((g) => <button key={g} aria-pressed={group === g} onClick={() => setGroup(g)}>{g}</button>)}
-            </div>}
-            <div className="template-row">
-              {(group === "全部" || group === "我的") && mine.map((m) => (
-                <MyTemplateCard key={m.id} t={m} onUse={() => { setDraft({ ...fresh(), ...m.draft }); setStep("setup"); }} onMenu={() => setTemplateMenu(m)} />
-              ))}
-              {shownTemplates.map((t) => (
-                <button key={t.id} className={`template-card${draft.templateId === t.id ? " selected" : ""}`} onClick={() => useTemplate(t)}>
-                  <b>{t.title}</b><small>{t.era}</small><span className="hook">{t.openingHint}</span>
-                </button>
-              ))}
-            </div>
-            {group === "全部" && !allTemplates && <button className="ghost" onClick={() => setAllTemplates(true)}>查看全部 {templates.length} 个灵感</button>}
-          </section>
-
-          <div className="pick-more">
-            <button className="ghost" onClick={() => { setDraft(blank()); setStep("setup"); }}>什么都不选，自己从头写<span aria-hidden="true"> ›</span></button>
-            {/* An authored world starts from three prompts in the premise instead of a long toast. */}
-            {free && <button className="ghost" onClick={() => { setDraft({ ...blank(), premise: WORK_PREMISE }); setIdea(""); setStep("setup"); }}>写一个作品里的世界<span aria-hidden="true"> ›</span></button>}
-          </div>
-        </div>
-        {menuSheets}
-      </div>
-    );
-  }
+  const mineShown = mine.filter((m) => mineFilter === "全部" || (mineFilter === "同人" ? m.draft.fanfic || m.draft.source?.fanfic : mineFilter === "自由" ? m.draft.settings.mode === "free" && !m.draft.fanfic && !m.draft.source?.fanfic : m.draft.settings.mode !== "free" && !m.draft.fanfic));
+  const librarySheet = (sheet === "mine" || sheet === "ideas") && <Sheet title={sheet === "mine" ? "我的开局" : "开局灵感"} onClose={() => setSheet(null)}>
+    <div className="stack">
+      {sheet === "mine" ? <>
+        <div className="segmented" role="group" aria-label="我的开局分类">{["全部", "历史", "自由", "同人"].map((name) => <button key={name} aria-pressed={mineFilter === name} onClick={() => setMineFilter(name)}>{name}</button>)}</div>
+        {!mineShown.length && <p className="muted">这里还没有保存的开局。填好后点“存为我的开局”，以后可以直接选用。</p>}
+        {mineShown.map((m) => <MyTemplateCard key={m.id} t={m} onUse={() => { setDraft(normalizeOpeningDraft(m.draft as unknown as Record<string, unknown>)); setSheet(null); setError(null); void (async () => { if (m.draft.source && !await getBook(game.repo, m.draft.source.bookId)) toast("这个开局的参考书籍不在本机，其他设定已保留，请重新绑定书籍。"); })(); }} onMenu={() => setTemplateMenu(m)} />)}
+      </> : <>
+        {filters.length > 1 && <div className="segmented" role="group" aria-label="灵感分类">{filters.filter((g) => g !== "我的").map((g) => <button key={g} aria-pressed={group === g} onClick={() => setGroup(g)}>{g}</button>)}</div>}
+        {shownTemplates.map((t) => <button key={t.id} className="template-card" onClick={() => { useTemplate(t); setSheet(null); }}><b>{t.title}</b><small>{t.era}</small><span className="hook">{t.openingHint}</span></button>)}
+        {group === "全部" && !allTemplates && <button className="ghost" onClick={() => setAllTemplates(true)}>查看全部 {templates.length} 个灵感</button>}
+      </>}
+    </div>
+  </Sheet>;
 
   return (
     <div className="screen">
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" onClick={() => setStep("pick")}><Icon name="back" /></button>
-        <div className="title"><h1>{draft.title || "开局设定"}</h1></div>
+        <button className="icon-btn" aria-label="返回" onClick={pop}><Icon name="back" /></button>
+        <div className="title"><h1>新的故事</h1></div>
         <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}><Icon name="more" /></button>
       </div>
       <div className="screen-body stack setup-form">
@@ -517,11 +496,19 @@ export default function NewGame() {
           <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
           <button aria-pressed={!!draft.fanfic} onClick={() => switchMode("fanfic")}>同人</button>
         </div>
-        <p className="muted" style={{ margin: 0 }}>都可以改。名字和身份填好就能开始，其余有默认。</p>
-        <details open={draft.fanfic || undefined}><summary>{draft.fanfic ? "原著与用法" : "参考书籍（可选）"}</summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
+        <div className="row" style={{ flexWrap: "wrap" }}>
+          <button disabled={assisting} onClick={() => void randomStart()}>随便穿</button>
+          <button onClick={() => setSheet("mine")}>我的开局</button>
+          {!draft.fanfic && <button className="ghost" onClick={() => setSheet("ideas")}>开局灵感</button>}
+        </div>
+        <section className="stack" style={{ gap: 8 }}>
+          <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} aria-label="一句话想法" placeholder={draft.fanfic ? "想在原著中怎样开始？也可以先选书，让 AI 帮你构思。" : "写一句想法，或直接填写下面的设定"} />
+          <button disabled={assisting} onClick={() => void assist()}>{assisting ? "构思中…" : "AI 补全空着的设定"}</button>
+        </section>
+        <details><summary>{draft.fanfic ? "原著与用法" : "参考书籍（可选）"}</summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
 
         <label className="field">故事设定
-          <textarea aria-label="故事设定" rows={5} value={draft.premise} onChange={(e) => set("premise", e.target.value)} placeholder={free ? "世界、作品或题材，故事从哪里开始，你想保留或改变什么。都可以自己写。" : "时代、地点、时局，你想讲的故事。比如：北宋宣和年间，汴京……"} />
+          <textarea aria-label="故事设定" rows={4} value={draft.premise} onChange={(e) => set("premise", e.target.value)} placeholder={free ? "世界、作品或题材，故事从哪里开始，你想保留或改变什么。都可以自己写。" : "时代、地点、时局，你想讲的故事。比如：北宋宣和年间，汴京……"} />
         </label>
 
         <section className="stack" style={{ gap: 8 }}>
@@ -611,7 +598,7 @@ export default function NewGame() {
         </Fold>
 
         <Fold open={open} onToggle={toggle} id="more" title="更多" summary={`${draft.title ? `故事名“${draft.title}” · ` : ""}${draft.eraId ? "内置时代资料" : draft.organize ? `AI 整理${free ? "世界设定" : "时代资料"}` : `不准备${free ? "世界设定" : "时代资料"}`}${fortune !== (defaults?.fortune ?? fortune) ? ` · 运势${FORTUNE_MODES.find(([v]) => v === fortune)?.[1]}` : ""}${draft.settings.essentials.trim() ? " · 有要点" : ""}`}>
-          <label className="field">故事名<input value={draft.title} onChange={(e) => set("title", e.target.value)} placeholder="不填则用主角名字" /></label>
+          <label className="field">故事名<input value={draft.title} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value, titlePolicy: e.target.value.trim() ? "manual" : "auto" }))} placeholder="留空，由 AI 根据开场取名" /></label>
           <span className="muted">运势</span>
           <div className="segmented" role="group" aria-label="运势">
             {FORTUNE_MODES.map(([v, l]) => <button key={v} aria-pressed={fortune === v} onClick={() => set("fortune", v)}>{l}</button>)}
@@ -635,6 +622,8 @@ export default function NewGame() {
           <button className={`primary grow${missing ? " soft" : ""}`} onClick={startOrPoint}>{missing ? `还差${missing}` : "开始"}</button>
         </div>
       </div>
+      {librarySheet}
+      {sourceLibrary && <SourceLibrary onClose={() => setSourceLibrary(false)} onSelect={(book) => { setDraft((d) => ({ ...d, source: newBinding(book.id, true), fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } })); setSourceLibrary(false); }} />}
       {menuSheets}
     </div>
   );

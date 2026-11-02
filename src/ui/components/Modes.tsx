@@ -114,7 +114,7 @@ export function ModesSettings({ state, pilot, onPilot, onScript, onChallenge, bu
 }
 
 /** 连播: how many passages in a row. */
-export function AutoplaySheet({ onStart, onClose }: { onStart: (turns: number) => void; onClose: () => void }) {
+export function AutoplaySheet({ onStart, onClose, temporary = false }: { onStart: (turns: number) => void; onClose: () => void; temporary?: boolean }) {
   return (
     <Sheet title="连播几段？" onClose={onClose}>
       <div className="stack">
@@ -123,7 +123,7 @@ export function AutoplaySheet({ onStart, onClose }: { onStart: (turns: number) =
             <button key={n} aria-label={`连播 ${n} 段`} onClick={() => onStart(n)}><b>{n}</b><small>段</small></button>
           ))}
         </div>
-        <p className="muted" style={{ margin: 0 }}>一段接一段往下演，每段照常调用 AI。随时可以停。</p>
+        <p className="muted" style={{ margin: 0 }}>{temporary ? "这几段暂由 AI 扮演主角，播完或停止后恢复原来的操作。" : "一段接一段往下演。"}每段照常调用 AI，随时可以停。</p>
       </div>
     </Sheet>
   );

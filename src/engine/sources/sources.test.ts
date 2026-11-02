@@ -86,7 +86,7 @@ describe("external books", () => {
     await tree.redo(game.repo, await tree.cursor(game.repo, world.id));
     await game.bindSource(world.id, null);
     await expect(deleteBook(game.repo, book.id)).rejects.toThrow("历史路线");
-    const archive = await exportWorld(game.repo, world.id); expect(archive.version).toBe(4); expect(archiveProblems(archive)).toEqual([]);
+    const archive = await exportWorld(game.repo, world.id); expect(archive.version).toBe(7); expect(archiveProblems(archive)).toEqual([]);
     const copy = await importWorld(game.repo, archive, "new");
     const copyState = await game.repo.getState((await tree.cursor(game.repo, copy)).head.parentId!);
     expect(copyState.source?.bookId).not.toBe(book.id);

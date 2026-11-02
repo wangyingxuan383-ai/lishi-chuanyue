@@ -5,6 +5,7 @@ use crate::{
     rules, Error, ExecutionMode, Result, RunBudget, RunPlan, RunSnapshot, Store,
 };
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{
@@ -352,18 +353,18 @@ impl Engine {
     ) -> Result<Completion> {
         self.check(shared)?;
         let plan = shared.lock().map_err(|_| Error::Cancelled)?.plan.clone();
-        // Completed pure model work is reusable after a process restart.
+        // Cache identity includes the actual task inputs, model and source scope.
+        // A resumed, reassembled stage must never consume another request's result.
+        let fingerprint=format!("{:x}",Sha256::digest(json!({"purpose":purpose,"model":plan.model,"messages":messages,"tools":tools,"state":plan.state,"base":plan.base_id,"source":plan.reference}).to_string()));
         let cached: Option<(String,String)> = self.store.lock()?.query_row("SELECT input_json,output_json FROM execution_steps WHERE run_id=? AND kind=? AND status='done' ORDER BY rowid DESC LIMIT 1", params![plan.id,purpose], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((input, cached)) = cached {
-            let input: Value = serde_json::from_str(&input)?;
-            self.note_reading(
-                shared,
-                input["request"]["messages"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-            return Ok(serde_json::from_str(&cached)?);
+        if let Some((input,cached))=cached {
+            let input:Value=serde_json::from_str(&input)?;
+            let same=input["fingerprint"]==fingerprint || (input.get("fingerprint").is_none() && {
+                let mut old=input["request"]["messages"].as_array().cloned().unwrap_or_default();
+                old.retain(|m|!m["content"].as_str().unwrap_or("").starts_with("【本次执行剩余额度】"));
+                old==messages && input["request"]["tools"].as_array().map(Vec::as_slice).unwrap_or(&[])==tools.as_slice()
+            });
+            if same {self.note_reading(shared,input["request"]["messages"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;return Ok(serde_json::from_str(&cached)?);}
         }
         let request_limit = plan.meta["modelRequestLimit"]
             .as_u64()
@@ -388,7 +389,17 @@ impl Engine {
                 messages.insert(0,json!({"role":"system","content":format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次（内部写作、校核也计数）；工具还可调用{}次；尚余约{}秒。此前已实际读取原文{originals}段。独立查证可同批调用，优先使用已获得的原文和本批工具结果，不重复查询相同证据。额度不足时停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；Agent用commit_turn，原著改稿返回要求的完整JSON。",24u32.saturating_sub(local_used.tool_calls),300_000u64.saturating_sub(local_used.active_ms)/1000)}));
             }
         }
-        let messages = crate::context::bound_context(&plan, messages, &tools)?;
+        let before=crate::stage_context::report(&plan,purpose,&messages,&tools);
+        let bounded=crate::context::bound_context(&plan,messages,&tools);
+        let mut report=match &bounded {Ok(messages)=>crate::stage_context::report(&plan,purpose,messages,&tools),Err(_)=>before.clone()};
+        report["beforeChars"]=before["chars"].clone();report["status"]=if bounded.is_ok(){"ready"}else{"budget-error"}.into();
+        {
+            let mut c=shared.lock().map_err(|_|Error::Cancelled)?;
+            if !c.draft["contextReports"].is_object(){c.draft["contextReports"]=json!({});}
+            c.draft["contextReports"][purpose]=report.clone();c.draft["phase"]=purpose.into();
+        }
+        self.checkpoint(shared)?;self.store.run_event(&plan,json!({"type":"request-context","report":report}))?;
+        let messages=bounded.map_err(|e|Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),e)))?;
         let body = chat::request(&plan.model, &messages, &tools, aux);
         let delivered_messages = messages;
         let (key, token, remaining) = {
@@ -409,7 +420,7 @@ impl Engine {
             )
         };
         self.checkpoint(shared)?;
-        self.store.lock()?.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
+        self.store.lock()?.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
         self.store.run_event(&plan, json!({"type":"thinking"}))?;
         let store = self.store.clone();
         let id = plan.id.clone();
@@ -454,7 +465,7 @@ impl Engine {
             }
             Err(error) => {
                 self.store.lock()?.execute("UPDATE execution_steps SET status='failed',output_json=? WHERE run_id=? AND step_key=?", params![json!({"error":error.to_string()}).to_string(),plan.id,key])?;
-                Err(error)
+                match error {Error::Cancelled|Error::Limit(_)=>Err(error),other=>Err(Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),other)))}
             }
         }
     }
@@ -479,6 +490,10 @@ impl Engine {
                     }
                 }
             }
+        }
+        let plan=shared.lock().map_err(|_|Error::Cancelled)?.plan.clone();
+        for passage in plan.reference.as_ref().and_then(|r|r["passages"].as_array()).into_iter().flatten(){
+            if passage["kind"]=="original" && passage["text"].as_str().filter(|s|!s.is_empty()).is_some_and(|body|messages.iter().any(|m|m["content"].as_str().is_some_and(|s|s.contains(body)))){passages.push(passage.clone());}
         }
         for message in messages.iter().filter(|m| m["role"] == "tool") {
             let Some(content) = message["content"]
@@ -561,7 +576,7 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["referenceReviewVersion"]=="reference-review-1";
+        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"));
         let support = if modern {
             self.cached_tool_support(&plan)?.unwrap_or(true)
         } else if agent || has_book {
@@ -736,6 +751,7 @@ impl Engine {
             )
         };
         let parsed = rules::parse_record(&raw).map_err(Error::Invalid)?;
+        if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
         let mut record = if staged["record"].is_object() {
             rules::record::normalize_record(&staged["record"], &mut vec![]).unwrap_or(Value::Null)
         } else {
@@ -778,17 +794,13 @@ impl Engine {
                 && record["choices"].as_array().is_none_or(Vec::is_empty))
         {
             self.store.run_event(&plan, json!({"type":"organizing"}))?;
-            let mut extraction = plan.extract_messages.clone();
-            for message in &mut extraction {
-                if let Some(content) = message["content"].as_str() {
-                    message["content"] = content.replace("{{NARRATIVE}}", &narrative).into();
-                }
-            }
+            let extraction=crate::stage_context::extraction(&plan,&narrative);
             let extracted = self
                 .complete(&shared, "extract", extraction, vec![], true)
                 .await?;
             let parsed = rules::parse_record(&format!("<record>{}", extracted.text))
                 .map_err(Error::Invalid)?;
+            if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
             if record.is_null() {
                 record = parsed["record"].clone();
             } else if let Some(choices) = parsed["record"].get("choices") {
@@ -800,7 +812,7 @@ impl Engine {
                 "正文已保存为草稿，整理结果不完整，可恢复重试".into(),
             ));
         }
-        if has_book && plan.meta["referenceReviewVersion"]=="reference-review-1" && !plan.meta["playerNarrative"].is_string() {
+        if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2")) && !plan.meta["playerNarrative"].is_string() {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
@@ -872,7 +884,7 @@ impl Engine {
         }
         if !agent {
             if let Some(messages) = plan.meta["upkeepMessages"].as_array() {
-                let messages = replace_narrative(messages, &narrative);
+                let messages = crate::stage_context::organization(&plan, messages, &narrative);
                 if let Some(response) = self.optional_complete(&shared, "upkeep", messages).await? {
                     if let Some(patch) =
                         crate::organize::upkeep_patch(&response.text, &applied["state"])
@@ -884,7 +896,7 @@ impl Engine {
                 }
             }
             if let Some(messages) = plan.meta["chapterMessages"].as_array() {
-                let mut messages = replace_narrative(messages, &narrative);
+                let (mut messages, groups) = crate::stage_context::chapter(messages, &narrative, plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize);
                 if state["era"]["mode"] == "free" {
                     for message in &mut messages {
                         if message["role"] == "system" {
@@ -896,7 +908,19 @@ impl Engine {
                         }
                     }
                 }
-                if let Some(response) = self.optional_complete(&shared, "chapter", messages).await?
+                let mut summaries=vec![];let mut complete=true;
+                if groups.len()>1 {
+                    for (index, group) in groups.iter().enumerate(){
+                        let mut request=messages.clone();let content=request.last_mut().ok_or_else(||Error::Invalid("章节上下文缺失".into()))?;
+                        content["content"]=format!("{}\n【本章剧情·第{}/{}组】\n{}\n仅总结本组实际发生的事，后续将合并整章。",content["content"].as_str().unwrap_or(""),index+1,groups.len(),group).into();
+                        if let Some(response)=self.optional_complete(&shared,&format!("chapter:part:{index}"),request).await? {
+                            if let Some(chapter)=crate::organize::parse_chapter(&response.text){summaries.push(chapter);}else{complete=false;break;}
+                        }else{complete=false;break;}
+                    }
+                }
+                let content=messages.last_mut().ok_or_else(||Error::Invalid("章节上下文缺失".into()))?;
+                content["content"]=format!("{}\n【本章剧情】\n{}",content["content"].as_str().unwrap_or(""),if groups.len()>1{format!("以下为按原文顺序核实的分组摘要，请合并整章，不能新增事实：\n{}",json!(summaries))}else{groups.first().cloned().unwrap_or_default()}).into();
+                if let Some(response) = if complete {self.optional_complete(&shared, "chapter", messages).await?} else {None}
                 {
                     if let Some(chapter) = crate::organize::parse_chapter(&response.text) {
                         shared.lock().map_err(|_| Error::Cancelled)?.draft["chapter"] = chapter;
@@ -916,26 +940,39 @@ impl Engine {
     }
 
     async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
+        let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
+        let parts=crate::stage_context::parts(narrative,(cap/6).clamp(256,2400));
+        let mut body=String::new();let mut current=record.clone();let mut findings=vec![];let mut unresolved=vec![];
+        for (index,part) in parts.iter().enumerate(){
+            self.check(shared)?;
+            let reviewed=self.review_reference_part(shared,plan,mcp,tools,part,&current,index).await?;
+            body.push_str(reviewed["narrative"].as_str().unwrap_or(part));current=reviewed["record"].clone();
+            findings.extend(reviewed["report"]["findings"].as_array().cloned().unwrap_or_default());
+            unresolved.extend(reviewed["report"]["unresolved"].as_array().cloned().unwrap_or_default());
+        }
+        Ok(json!({"narrative":body,"record":current,"report":{"version":"reference-review-2","parts":parts.len(),"findings":findings,"unresolved":unresolved,"status":if unresolved.is_empty(){"reviewed"}else{"partial"}}}))
+    }
+    async fn review_reference_part(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value,part:usize)->Result<Value>{
         self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
-        let compact=crate::writing_context::project_state(&plan.state,&json!({"currency":plan.options["currency"],"clock":plan.options["clock"]}),narrative);
+        let compact=crate::stage_context::state(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/10).min(1500)).to_string();
         let mut reference=plan.reference.clone().unwrap_or(Value::Null);
         let mut left=(plan.meta["budgetChars"].as_u64().unwrap_or(12000)/4) as usize;
         let mut evidence=vec![];
         for p in reference["passages"].as_array().into_iter().flatten().filter(|p|p["kind"]=="original") {let cost=p.to_string().encode_utf16().count();if cost<=left{left-=cost;evidence.push(p.clone());}}
         reference["passages"]=evidence.into();
-        let mut messages=vec![json!({"role":"system","content":r#"核对尚未保存草稿中新引入的关键身份、关系、称谓、能力、物品、时间和事件。保留玩家明确分支，AI自行写错不算玩家改写。先用已提供原文，需要时批量定位具体主张，再read_original读原文与邻文，不扫描整本书。只纠正有依据的细节，不替玩家作决定，不补回已经改变的命运。缺少原文依据的具体值保留不确定性；确实影响当前关键情节且必须玩家决定时填写needsPlayer。最后只返回JSON：{"replacement":"完整核对后的本段正文","recordPatch":{仅受改稿影响的记录字段},"findings":[{"claim":"具体主张","status":"supported/branch/uncertain","playerFactId":"branch时对应的玩家事实ID","playerQuote":"当前是玩家写入正文时也可引用其准确原句；来源不明的旧事实标uncertain","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}],"unresolved":["资料不足"],"needsPlayer":"必要问题，可省略"}。没有新关键事实时findings可为空；核对说明不进入正文。"#}),json!({"role":"user","content":format!("【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【已提供原文】{}\n【待核对正文】{}\n【原回合记录】{}",plan.action,plan.state["source"],compact,plan.state["facts"].as_array().into_iter().flatten().filter(|f|["player","branch"].contains(&f["origin"].as_str().unwrap_or(""))).map(Value::to_string).collect::<Vec<_>>().join("\n"),reference,narrative,record)})];
+        let mut messages=vec![json!({"role":"system","content":r#"核对尚未保存草稿中新引入的关键身份、关系、称谓、能力、物品、时间和事件。保留玩家明确分支，AI自行写错不算玩家改写。先用已提供原文，需要时批量定位具体主张，再read_original读原文与邻文，不扫描整本书。只纠正有依据的细节，不替玩家作决定，不补回已经改变的命运。缺少原文依据的具体值保留不确定性；确实影响当前关键情节且必须玩家决定时填写needsPlayer。最后只返回JSON：{"replacement":"完整核对后的本段正文","recordPatch":{仅受改稿影响的记录字段},"findings":[{"claim":"具体主张","status":"supported/branch/uncertain","playerFactId":"branch时对应的玩家事实ID","playerQuote":"当前是玩家写入正文时也可引用其准确原句；来源不明的旧事实标uncertain","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}],"unresolved":["资料不足"],"needsPlayer":"必要问题，可省略"}。没有新关键事实时findings可为空；核对说明不进入正文。"#}),json!({"role":"user","content":format!("【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【已提供原文】{}\n【待核对正文】{}\n【原回合记录】{}",plan.action,plan.state["source"],compact,crate::stage_context::facts(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/12).min(1400)),reference,narrative,record)})];
         for round in 0..2 {
             let final_round=round==1;
             messages.push(json!({"role":"system","content":if final_round {"这是本段核对的收尾请求，不再调用工具。根据实际已读材料输出完整JSON，保留玩家分支；不能核实的项目标uncertain并写入unresolved，不能把候选或推测当原著。确实必须玩家决定的关键矛盾填needsPlayer。不延长检索，不把无法核实说成已核实。".to_owned()} else {format!("本段核对第{}轮，最多再有{}轮查证，然后必须返回JSON结论。只检查草稿新引入的具体细节；复用当前已有原句，候选够用后read_original，不再次用相同人物名泛搜；互不依赖的问题同批查证。",round+1,1-round)}}));
-            let review_tools=if final_round{vec![]}else{tools.iter().filter(|t|["search_original","read_original","prepare_reference_check","locate_original_event","read_canon_facts","read_history","read_skill"].contains(&t["function"]["name"].as_str().unwrap_or(""))).cloned().collect()};
-            let result=self.complete(shared,&format!("reference-review:{round}"),messages.clone(),review_tools,false).await?;
+            let review_tools=if final_round{vec![]}else{tools.iter().filter(|t|["read_original","prepare_reference_check","read_canon_facts","read_history","read_characters"].contains(&t["function"]["name"].as_str().unwrap_or(""))).cloned().collect()};
+            let result=self.complete(shared,&format!("reference-review:{part}:{round}"),messages.clone(),review_tools,false).await?;
             if !result.tool_calls.is_empty(){
                 messages.push(chat::assistant_message(&result));
                 for call in &result.tool_calls {
                     let name=call["function"]["name"].as_str().unwrap_or("");
                     if !is_read_tool(name){return Err(Error::Invalid("原著核对只允许读取与预演".into()));}
                     let args:Value=serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}"))?;
-                    let key=format!("reference-tool:{round}:{}",call["id"].as_str().unwrap_or(""));
+                    let key=format!("reference-tool:{part}:{round}:{}",call["id"].as_str().unwrap_or(""));
                     let cached=self.store.lock()?.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done'",params![plan.id,key],|r|r.get::<_,String>(0)).optional()?;
                     let value=if let Some(cached)=cached {serde_json::from_str(&cached)?} else {
                         shared.lock().map_err(|_|Error::Cancelled)?.charge_tool()?; self.checkpoint(shared)?;
@@ -951,8 +988,7 @@ impl Engine {
                 if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":"请按要求返回完整JSON核对结果；资料不足标uncertain，不再展开查证。"}));continue;}
                 return Err(Error::Invalid("原著核对未返回完整结果，正文草稿已保留，可继续重试".into()));
             }};
-            let mut provided=reference["passages"].as_array().cloned().unwrap_or_default();
-            provided.extend(shared.lock().map_err(|_|Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default());
+            let provided=shared.lock().map_err(|_|Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
             if let Err(error)=crate::writing_context::validate_findings(&report,&provided,&plan.state,&plan.action){
                 if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":format!("核对格式或依据未通过：{}。保留有效结果，补查或标明uncertain；不要把不明来源旧状态当玩家分支。",error)}));continue;}
                 // Unverified evidence does not become a protected branch or a
@@ -1053,8 +1089,13 @@ impl Engine {
         self.store.run_event(&plan, json!({"type":"organizing"}))?;
         match self.complete(shared, purpose, messages, vec![], true).await {
             Ok(result) => Ok(Some(result)),
+            Err(Error::Limit(reason)) if purpose=="upkeep" || purpose.starts_with("chapter") => {
+                let mut c=shared.lock().map_err(|_|Error::Cancelled)?;
+                if !c.draft["deferredStages"].is_object(){c.draft["deferredStages"]=json!({});}
+                c.draft["deferredStages"][purpose]=reason.into();drop(c);self.checkpoint(shared)?;Ok(None)
+            },
             Err(error @ (Error::Cancelled | Error::Limit(_))) => Err(error),
-            Err(_) => Ok(None),
+            Err(error) => {self.store.run_event(&plan,json!({"type":"optional-stage-deferred","phase":purpose,"reason":error.to_string()}))?;Ok(None)},
         }
     }
 
@@ -1136,7 +1177,7 @@ impl Engine {
         execution_lease::guard_plan(&tx, plan)?;
         let time = Utc::now().to_rfc3339();
         if let Some(world) = &plan.new_world {
-            tx.execute("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES(?,?,?,?,?,?,?,?)",params![plan.world_id,world["title"].as_str().unwrap_or("新故事"),world["eraId"].as_str().unwrap_or(""),plan.line_id,plan.settings.to_string(),time,time,time])?;
+            tx.execute("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES(?,?,?,?,?,?,?,?)",params![plan.world_id,if plan.meta["titlePolicy"]=="auto" {c.draft["openingTitle"].as_str().unwrap_or("未命名故事")}else{world["title"].as_str().unwrap_or("未命名故事")},world["eraId"].as_str().unwrap_or(""),plan.line_id,plan.settings.to_string(),time,time,time])?;
         } else {
             Store::guard(&tx, plan)?;
         }
@@ -1160,6 +1201,8 @@ impl Engine {
         meta["model"] = plan.model.model.clone().into();
         meta["nativeRun"] = plan.id.clone().into();
         meta["referenceReview"] = c.draft["referenceReview"].clone();
+        meta["contextReports"]=c.draft["contextReports"].clone();
+        meta["deferredStages"]=c.draft["deferredStages"].clone();
         meta["usage"] = completion.usage.clone().unwrap_or(Value::Null);
         meta["firstTokenMs"] = completion.first_token_ms.into();
         meta["totalMs"] = completion.total_ms.into();
@@ -1648,18 +1691,6 @@ fn history_excerpts(plan: &RunPlan, turns: Vec<Value>, chapters: Vec<Value>, que
     json!({"turns":turns,"chapters":chapters,"truncated":truncated,"note":"仅当前路线的历史摘录；可缩小关键词或减少 limit 补查，摘录不代表完整回合记录。"})
 }
 
-fn replace_narrative(messages: &[Value], narrative: &str) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|message| {
-            let mut message = message.clone();
-            if let Some(text) = message["content"].as_str() {
-                message["content"] = text.replace("{{NARRATIVE}}", narrative).into();
-            }
-            message
-        })
-        .collect()
-}
 fn compact_locator_schema(schema:&mut Value){
     match schema {
         Value::Object(fields)=>{if fields.get("maximum").and_then(Value::as_u64)==Some(9_007_199_254_740_991){fields.remove("maximum");}for value in fields.values_mut(){compact_locator_schema(value);}},

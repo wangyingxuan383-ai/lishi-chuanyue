@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { TurnHandle } from "../../engine/game";
-import { archiveProblems, exportWorld, importWorld } from "../../engine/archive";
+import { archiveProblems, exportWorldFile, importWorld } from "../../engine/archive";
 import { exportStory } from "../../engine/book";
 import { eraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
@@ -110,14 +110,23 @@ export default function Home() {
   const [deleted, setDeleted] = useState<World[]>([]);
   const [cards, setCards] = useState<WorldCard[] | null>(null);
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
+  const exporting = useRef(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
   const [oldOpenings, setOldOpenings] = useState<{ id: string; status: string; title: string; error: string | null; requests: number }[]>([]);
   const openingHandles = useRef(new Map<string, TurnHandle>());
 
   // R08-T001: a world as one file.
   const exportOne = async (card: WorldCard) => {
-    const archive = await exportWorld(game.repo, card.world.id);
-    if (await game.platform.files.exportText(`${card.world.title}.lishi.json`, JSON.stringify(archive)).catch(() => false)) toast("已导出");
+    if (exporting.current) return;
+    exporting.current = true; setExportStatus("正在准备完整存档…");
+    try {
+      const saved = await exportWorldFile(game.repo, card.world.id, card.world.title);
+      setExportStatus(null); if (saved) toast("已导出");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String(error.message) : "导出失败，请稍后重试";
+      setExportStatus(message);
+    } finally { exporting.current = false; }
   };
   const importOne = async () => {
     const text = await game.platform.files.importText().catch(() => null);
@@ -207,6 +216,7 @@ export default function Home() {
         <button className="icon-btn update-mark" aria-label={unread ? "设置，有新版本" : "设置"} onClick={() => push({ name: "settings" })}><Icon name="settings" />{unread && <i className="update-dot" aria-hidden="true" />}</button>
       </div>
       <div className="screen-body stack">
+        {exportStatus && <div className="notice" role="status">{exportStatus}</div>}
         <BudgetReminder />
         <WhatsNewNotice />
         {oldOpenings.map((run) => <div className="notice" key={run.id}><b>上次的开场还没写完</b><p className="muted">{run.title} · 已用 {run.requests} 次模型请求，沿用原来的任务和额度。</p>{run.error && <p className="muted">{run.error}</p>}<div className="row">{["running", "committing"].includes(run.status) ? <button onClick={() => void game.platform.execution?.stop(run.id).catch(() => toast("暂时没能停止"))}>停止开场</button> : <button disabled={run.status === "paused"} onClick={() => continueOpening(run)}>继续上次的开场</button>}</div></div>)}

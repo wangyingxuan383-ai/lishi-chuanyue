@@ -32,10 +32,19 @@ async function idbGet<T>(key: string): Promise<T | undefined> {
 }
 
 async function bridge<T>(path: string, body: unknown): Promise<T> {
+  const json = JSON.stringify(body);
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  let request: BodyInit = json;
+  // Expanded book indexes and historical snapshots repeat substantial text.
+  // Preserve one atomic batch while keeping the loopback transfer bounded.
+  if (path === "host/sqlBatch" && json.length > 8 * 1024 * 1024 && typeof CompressionStream !== "undefined") {
+    const compressed = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
+    request = await new Response(compressed).blob(); headers["Content-Encoding"] = "gzip";
+  }
   const response = await fetch(`/__dev/${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers,
+    body: request,
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {

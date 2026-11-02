@@ -169,6 +169,8 @@ export interface Platform {
     setNetwork(config: { proxy: "none" | "system" | "custom"; proxyUrl?: string | null }): Promise<void>;
   };
   files: {
+    /** Native snapshot-to-file path; the full archive never passes through the WebView. */
+    exportWorld?(worldId: string, suggestedName: string): Promise<boolean>;
     exportText(suggestedName: string, text: string): Promise<boolean>;
     importText(): Promise<string | null>;
     importSkillPackage?(): Promise<{ name: string; bytes: number[] } | null>;

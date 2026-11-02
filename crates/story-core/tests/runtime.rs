@@ -219,6 +219,26 @@ fn written() -> Completion {
         record()
     ))
 }
+
+#[tokio::test]
+async fn oversized_chapter_is_grouped_and_only_the_complete_summary_is_saved() {
+    let summary = prose(r#"{"title":"青桥旧事","gist":"行旅买纸","summary":"行旅买纸后，接到了渡江口信。"}"#);
+    let mut steps = vec![Step::Reply(written())];
+    steps.extend((0..8).map(|_| Step::Reply(summary.clone())));
+    let fixture = Fixture::new(steps);
+    let mut plan = fixture.plan("chapter-groups", ExecutionMode::Classic);
+    plan.meta = json!({"budgetChars":6000,"chapterFirstId":"n0","chapterVersion":"chapter-1","chapterMessages":[{"role":"system","content":"记录本章全部实际剧情，返回title/gist/summary的JSON。"},{"role":"user","content":format!("【前几章梗概】{}\n【本章剧情】\n{}结尾唯一事件：接到渡江口信。\n{{{{NARRATIVE}}}}","过去的摘要".repeat(1000),"行旅询问旧事。\n".repeat(1000))}]});
+    fixture.engine.start(plan).unwrap();
+    let done = fixture.settled("chapter-groups").await;
+    assert_eq!(done.status,"committed");
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM chapters"),1);
+    assert!(fixture.text("SELECT summary FROM chapters").contains("渡江口信"));
+    let requests = fixture.model.requests.lock().unwrap();
+    assert!(requests.len()>2);
+    assert!(requests.iter().skip(1).all(|r| r["messages"].to_string().encode_utf16().count()<6000));
+    assert!(requests.iter().any(|r|r.to_string().contains("结尾唯一事件")));
+    assert!(requests.last().unwrap().to_string().contains("分组摘要"));
+}
 fn calls(calls: Vec<(&str, &str, Value)>) -> Completion {
     Completion { tool_calls: calls.into_iter().map(|(id,name,args)| json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})).collect(), finish_reason: Some("tool_calls".into()), usage: Some(json!({"prompt_tokens":10,"completion_tokens":6})), ..Default::default() }
 }

@@ -314,6 +314,7 @@ pub fn validate_readable(raw: &Value, world: &str, line_ids: &[String]) -> Resul
             &[
                 "id",
                 "sessionId",
+                "lineId",
                 "text",
                 "status",
                 "policy",
@@ -322,6 +323,9 @@ pub fn validate_readable(raw: &Value, world: &str, line_ids: &[String]) -> Resul
             ],
             MAX_FIELD,
         );
+        if item.get("lineId").is_some() && !lines.contains(text(item,"lineId")) {
+            return Err(invalid("助手只读任务不属于本局路线"));
+        }
         task["history"] = history(&item["history"])?;
         clean["tasks"].as_array_mut().unwrap().push(task);
     }
@@ -368,14 +372,16 @@ pub fn export_readable(db: &Connection, world: &str) -> Result<Value> {
             tasks.push(json!({"id":format!("history:{id}"),"sessionId":id,"text":"另起对话时保留的记录","status":"archived","policy":"auto","createdAt":session["createdAt"],"updatedAt":session["createdAt"],"history":readable}));
         }
         for row in ws::rows(db,"SELECT id,session_id,world_id,line_id,text,status,policy,plan_json,result_json,created_at,updated_at FROM pi_tasks WHERE session_id=? AND status IN ('completed','committed','undone','archived') AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$._nativeHostActive'),0)=0 ELSE 0 END ORDER BY created_at,id",&[&id])? {
-            if text(&row,"world_id")!=world || text(&row,"line_id")!=text(session,"lineId") {return Err(invalid("助手任务属于其他故事或路线"));}
+            // Adoption/undo moves the live conversation to the resulting line.
+            // Earlier finished tasks retain their original line in this world.
+            if text(&row,"world_id")!=world || !lines.iter().any(|line|line==text(&row,"line_id")) {return Err(invalid("助手任务属于其他故事或路线"));}
             let task=text(&row,"id");
             let stored_result=parsed(&row["result_json"]);
             if row["status"]=="archived" && stored_result["history"].is_object() {
                 // Dedicated imported history is readable data, never a Pi
                 // file or event replay. Re-export it through the same whitelist.
                 let readable=history(&stored_result["history"])?;
-                tasks.push(json!({"id":row["id"],"sessionId":row["session_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable}));
+                tasks.push(json!({"id":row["id"],"sessionId":row["session_id"],"lineId":row["line_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable}));
                 continue;
             }
             let mut event_rows=ws::rows(db,"SELECT seq,substr(event_json,1,524289) AS event_json FROM pi_events WHERE task_id=? ORDER BY seq DESC LIMIT 20001",&[&task])?;
@@ -404,7 +410,7 @@ pub fn export_readable(db: &Connection, world: &str) -> Result<Value> {
             let messages=projection::messages(&row,&events,&inputs).into_iter().filter(|message|!text(message,"content").is_empty()).collect::<Vec<_>>();
             truncated|=messages.iter().any(|message|message["truncated"]==true);
             let readable=history(&json!({"messages":messages,"steps":projection::steps(&events,&call_rows),"plan":parsed(&row["plan_json"]),"sources":source_refs,"result":parsed(&row["result_json"]),"truncated":truncated}))?;
-            tasks.push(json!({"id":row["id"],"sessionId":row["session_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable}));
+            tasks.push(json!({"id":row["id"],"sessionId":row["session_id"],"lineId":row["line_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable}));
         }
     }
     validate_readable(

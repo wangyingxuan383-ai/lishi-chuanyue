@@ -448,7 +448,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === restore.mode)));
           if (restore.note) { setNote(restore.note); setNoteOpen(true); }
         }
-        if (e.reason === "cancelled") { void inspectSavedExecution(e.detail); return; }
+        if (e.reason === "cancelled") { if (e.runId) void inspectSavedExecution(e.detail, e.runId); return; }
         failures.current++;
         const actions: { label: string; run: () => void }[] = [];
         if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup", profileId: profile?.id }) });
@@ -457,7 +457,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           if (failures.current >= 2 || e.reason === "quota" || e.reason === "refused") actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
         }
         setNotice({ text: e.detail ?? explainFailure(e.reason, e.status), actions });
-        void inspectSavedExecution(e.detail);
+        if (e.runId) void inspectSavedExecution(e.detail, e.runId);
       }
     }
   };
@@ -480,11 +480,11 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     // reached budget or silently starts another request.
     setNotice({ text, actions: run.status === "paused" ? [] : [{ label: run.kind === "autoplay" ? run.hasText ? "续写并继续连播" : "重试剩余连播" : "继续上次生成", run: () => resumeExecution(run.id, true) }] });
   };
-  const inspectSavedExecution = async (fallback?: string) => {
+  const inspectSavedExecution = async (fallback?: string, expectedId?: string) => {
     const version = ++recoveryNoticeVersion.current;
     try {
       const run = await game.currentExecution(worldId);
-      if (!run || !screenActive.current || handle.current || version !== recoveryNoticeVersion.current) return;
+      if (!run || (expectedId && run.id !== expectedId) || !screenActive.current || handle.current || version !== recoveryNoticeVersion.current) return;
       if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run, fallback);
     } catch { /* The existing failure notice remains available. */ }
   };
@@ -903,7 +903,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       <div className="dock">
         {!dead && state.protagonist.statuses.some((x) => x.name === "垂危") && <p className="dying-note">你伤重垂危：再受重伤就会死去，先设法疗伤。</p>}
         {/* 旁观: one row for 连播 (or its progress) and, while typing, the big box; the suggestions under it are directions. */}
-        {!dead && watch && (
+        {!dead && (watch || auto) && (
           <div className="dock-tools">
             {auto ? (
               <span className="autoplay-state" role="status">连播 {Math.max(1, auto.step)}/{auto.total}
@@ -1065,6 +1065,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           items={[
             { label: mouse ? "撤销（Ctrl+Z）" : "撤销", hidden: !head.parentId || busy, onSelect: () => void undo() },
             { label: mouse ? "重做（Ctrl+Y）" : "重做", hidden: !tree.canRedo(cursor) || busy, onSelect: () => void redo() },
+            { label: "连播", hidden: busy || dead, onSelect: () => setSheet("autoplay") },
             { label: "过些日子", hidden: busy, onSelect: () => setSheet("skip") },
             { label: mouse ? "查一查（Ctrl+F）" : "查一查", hidden: busy, onSelect: () => setSheet("ask") },
             { label: "幕后要求", hidden: noteOpen || watch, onSelect: () => setNoteOpen(true) },
@@ -1112,7 +1113,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
         onSave={(script: Script | null, summary) => saveMode({ scriptSet: script }, summary)} />}
       {sheet === "challenge" && <ChallengeSheet state={state} busy={busy} onClose={() => setSheet(null)}
         onSave={(challenge: Challenge | null, summary) => saveMode({ challengeSet: challenge }, summary)} />}
-      {sheet === "autoplay" && <AutoplaySheet onClose={() => setSheet(null)} onStart={(n) => { setSheet(null); startAutoplay(n); }} />}
+      {sheet === "autoplay" && <AutoplaySheet temporary={!watch} onClose={() => setSheet(null)} onStart={(n) => { setSheet(null); startAutoplay(n); }} />}
       {panel && !wide && <Panel {...panelProps} />}
       {notificationStart && <Sheet title="写好了提醒你？" onClose={() => void answerNotifications("later")}>
         <p className="muted" style={{ marginTop: 0 }}>切到别的应用时，故事会在后台接着写。打开通知，写好了会提醒你回来看。</p>
