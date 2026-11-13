@@ -2,6 +2,7 @@
 // any story. Choosing one only fills the two boxes below it — the sheet's own
 // 保存 applies it — and can be taken back.
 import { useEffect, useState } from "react";
+import { BUILTIN_NARRATIVE_PRESETS, copyNarrativePreset } from "../../content/writingPresets";
 import { loadPresets, savePreset, PRESETS_KEY, type NarrativePreset } from "../../engine/writing/library";
 import { useApp } from "../app/context";
 import { Icon } from "./Icon";
@@ -62,6 +63,16 @@ export function NarrativePresets({ directive, rules, onApply }: { directive: str
       <summary>我的要求组{presets.length ? ` · ${presets.length}` : ""}</summary>
       <div className="writing-library">
         {!presets.length && <p className="muted">把下面的叙事方针和额外规则存成一组，别的故事也能选用。</p>}
+        <details>
+          <summary>内置写作要求 · {BUILTIN_NARRATIVE_PRESETS.length}</summary>
+          <div className="stack gap-0">
+            <p className="muted">选用只填入下方，可继续修改；保存后才用于这局，不会覆盖我的要求组。</p>
+            {BUILTIN_NARRATIVE_PRESETS.map((preset) => <div key={preset.id} className="writing-preset">
+              <div className="writing-preset-text"><b>{preset.name}</b><p>{[preset.directive, preset.rules].join("；")}</p><details><summary className="muted">查看完整要求</summary><div className="codex-text">{[preset.directive, preset.rules].join("\n")}</div></details></div>
+              <button aria-label={`选用内置要求“${preset.name}”`} disabled={busy} onClick={() => { setUndo({ directive, rules }); onApply(copyNarrativePreset(preset)); }}>选用</button>
+            </div>)}
+          </div>
+        </details>
         {presets.map((p) => (
           <div key={p.id} className="writing-preset">
             <div className="writing-preset-text">

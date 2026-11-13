@@ -131,7 +131,7 @@ describe("canon correction revisions", () => {
     const s = await setup();
     s.preview.record = { ...s.preview.record, sourceSet: null, executionSet: "agent", setStats: { money: 999999 } } as TurnRecord;
     const revised = await adoptCanonCorrection(s.game, s.preview), state = await s.game.repo.getState(revised.head.id);
-    expect(state.executionMode).toBe("classic");
+    expect(state).not.toHaveProperty("executionMode");
     expect(state.source?.bookId).toBe(s.book.id);
     expect(state.protagonist.stats.money).toBe(90);
     expect(revised.head.record).not.toHaveProperty("executionSet");
@@ -170,7 +170,7 @@ describe("canon correction revisions", () => {
     expect(revision.nodeId).not.toBe(s.target.id);
     expect((await s.game.repo.getNode(revision.nodeId))!.worldId).toBe(copy);
     expect((await s.game.repo.getLine(revision.lineId))!.worldId).toBe(copy);
-    expect(state.executionMode).toBe("classic");
+    expect(state).not.toHaveProperty("executionMode");
     expect(state.facts?.[0].nodeId).toBe(current.head.id);
     expect(state.facts?.[0].citations[0].bookId).toBe(state.source?.bookId);
     expect(revision.corrections[0].citations[0].bookId).toBe(state.source?.bookId);

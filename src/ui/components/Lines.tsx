@@ -86,7 +86,7 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
         <summary className="muted">回收站 {trash.length}（30 天后自动清除）</summary>
         <div className="list">{trash.map((r) => card(r, () => setMenu(r)))}</div>
       </details>}
-      <button className="ghost" style={{ alignSelf: "flex-start" }} onClick={() => setShowTree(true)}>看回合树 ›</button>
+      <button className="ghost start" onClick={() => setShowTree(true)}>看回合树 ›</button>
       <p className="muted">长按任意一段，可以“回到这里”开出新路线，或者“加书签”。</p>
       {menu && <MenuSheet
         title={menu.line.name}

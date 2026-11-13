@@ -575,8 +575,34 @@ pub fn read_clock_anchor(raw: &Value, rules: &Value) -> Option<ClockAnchor> {
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElapsedAnchor {
+    pub at_elapsed_minutes: f64,
+    pub day: f64,
+    pub minute_of_day: f64,
+}
+
+/// A day-number calibration is independent of an era date or actual elapsed time.
+pub fn read_elapsed_anchor(raw: &Value) -> Option<ElapsedAnchor> {
+    Some(ElapsedAnchor {
+        at_elapsed_minutes: super::safe_integer(&raw["atElapsedMinutes"]).filter(|n| *n >= 0.0)?,
+        day: super::safe_integer(&raw["day"]).filter(|n| *n >= 1.0)?,
+        minute_of_day: super::safe_integer(&raw["minuteOfDay"]).filter(|n| (0.0..1440.0).contains(n))?,
+    })
+}
+
+fn elapsed_style(clock: &Value) -> bool {
+    clock["clockStyle"].as_str().unwrap_or(if clock["mode"] == "free" { "elapsed" } else { "era" }) == "elapsed"
+}
+
 /// Day/time display offset; does not change the story's elapsed-time axis.
 pub fn clock_offset_minutes(clock: &Value) -> f64 {
+    if elapsed_style(clock) {
+        if let Some(anchor) = read_elapsed_anchor(&clock["elapsedAnchor"]) {
+            return anchor.minute_of_day - anchor.at_elapsed_minutes;
+        }
+    }
     if let Some(anchor) = read_clock_anchor(&clock["anchor"], &clock["rules"]) {
         anchor.minute_of_day - anchor.at_elapsed_minutes
     } else {
@@ -609,6 +635,9 @@ pub fn now_of(clock: &Value, elapsed: f64) -> Value {
         .unwrap_or(if style == "elapsed" { "24h" } else { "shichen" });
     let days = ((num(&clock["hour"]) * 60.0 + elapsed.max(0.0)) / 1440.0).floor();
     let total = clock_offset_minutes(clock) + elapsed.max(0.0);
+    let display_day = if style == "elapsed" {
+        read_elapsed_anchor(&clock["elapsedAnchor"]).map(|anchor| anchor.day + (total / 1440.0).floor()).unwrap_or(days + 1.0)
+    } else { days + 1.0 };
     let in_day = total.rem_euclid(1440.0);
     let hour = (in_day / 60.0).floor();
     let shichen = [
@@ -634,7 +663,7 @@ pub fn now_of(clock: &Value, elapsed: f64) -> Value {
         format!("{}时", shichen)
     };
     let label = if style == "elapsed" {
-        format!("第 {} 天 · {}", days + 1.0, time)
+        format!("第 {} 天 · {}", display_day, time)
     } else if let Some(date) = &date {
         format!("{} · {}", format_date(date, &clock["rules"]), time)
     } else {
@@ -657,7 +686,7 @@ pub fn now_of(clock: &Value, elapsed: f64) -> Value {
     } else {
         0.0
     };
-    json!({"clockStyle":style,"timeStyle":time_style,"day":days+1.0,"hour":hour,"minute":in_day%60.0,"shichen":shichen,"date":date,"newYears":new_years,"text":label})
+    json!({"clockStyle":style,"timeStyle":time_style,"day":days+1.0,"displayDay":display_day,"hour":hour,"minute":in_day%60.0,"shichen":shichen,"date":date,"newYears":new_years,"text":label})
 }
 pub fn play_years(from: f64, to: f64) -> f64 {
     if to <= from {

@@ -30,7 +30,7 @@
 | Node.js | 24 | 前端与脚本 |
 | pnpm | 11.25（`package.json` 里固定，经 corepack 使用） | 依赖管理 |
 | Rust | 1.99（`rust-toolchain.toml` 固定，含两个安卓 target） | 共享执行核心、开发宿主与平台服务 |
-| Microsoft Edge | 新版即可 | 界面检查脚本（`playwright-core` 不自带浏览器，用本机的 Edge） |
+| Microsoft Edge 或 Chromium | 新版即可 | 界面检查脚本（`playwright-core` 不自带浏览器；默认用本机的 Edge，设 `LISHI_BROWSER` 为 Chromium 的路径则用它） |
 | Visual Studio 2022 生成工具（C++ 桌面开发） | 17.14 | Windows 版 |
 | JDK | 17 | 安卓版 |
 | Android SDK | API 36、Build Tools 36.0.0、NDK 28.2.13676358 | 安卓版 |
@@ -112,6 +112,16 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 
 “过些日子”的模拟回复固定过一个月、不写挑战进展，可以用来试“期限已到”：期限写“十日”时，过一次就失败。要试主角死亡，可以在主角面板里把健康改成 0（难度不是“宽松”时就算死去）。
 
+### 在 Linux 上开发
+
+前端、Rust 核心和浏览器开发台都能在 Linux 上跑；安卓和 Windows 安装包仍要在装了 JDK、Android SDK 或 Visual Studio 生成工具的机器上打。
+
+- `rust-toolchain.toml` 要求两个安卓 target，没有安卓工具时 rustup 会尝试下载它们。只做前端、核心和开发台时，可以先设 `RUSTUP_TOOLCHAIN=1.99.0`，直接用已装好的工具链。
+- 仓库放在网络挂载的目录（如 sshfs）上时，把编译产物放到本地盘：`CARGO_TARGET_DIR=~/lishi-target`。开发台和检查脚本都会按这个变量找 `story-dev-host`。
+- 内存小的机器：`CARGO_BUILD_JOBS=2`、`CARGO_PROFILE_DEV_DEBUG=0` 能明显降低编译时的内存占用；前端测试可用 `pnpm exec vitest run --maxWorkers=1`，避免超时。
+- 界面检查用 Chromium：`LISHI_BROWSER=/usr/bin/chromium`。冷启动慢时用 `LISHI_UI_TIMEOUT_MS=45000` 放宽等待时间。
+- 浏览器开发台里的助手需要固定版本的 Node 与 SDK（`LISHI_PI_NODE`），没准备时助手页会提示运行环境未准备；其他功能不受影响。
+
 ### 界面检查脚本
 
 这些脚本都在浏览器里、用本地模拟模型跑，不发真实请求；它们证明不了真实模型的效果，也代替不了手机上的试玩。
@@ -131,6 +141,7 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 
 | 命令 | 检查什么 |
 | --- | --- |
+| `node scripts/ui/dev-isolated.mjs --fresh` 后 `node scripts/ui/play-check.mjs` | 前者在 1421 端口启动只用 `.cache/ui-isolated` 的开发台（不碰你的存档和 Key，只许访问本机）；后者配合 `node scripts/fake-llm.mjs` 检查首次启动、三种开局、游玩页菜单、长按、助手页、主题与大字号、流式生成；报告和截图在 `output/playwright/play-check/` |
 | `node scripts/ui/readme-shots.mjs` | 生成 README 里的截图（`docs/images/readme/`）；端口用 `--port`、`--fake-port` 改 |
 | `node scripts/ui/r13-writing.mjs` | 写作工具：展开输入、常用行动、润色行动、AI 改写段落与恢复原文 |
 | `node scripts/ui/app-update.mjs` | 更新面板的各种状态（360 宽、三套主题），截图在 `output/playwright/app-update/` |

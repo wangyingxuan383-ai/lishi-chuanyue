@@ -1,0 +1,26 @@
+{
+  "kind": "original-fiction-fixture",
+  "notice": "独立原创示例，不是当前故事，不可当作玩家授权或资料证据。",
+  "scene": [
+    {
+      "node": "sample-1",
+      "narrative": "旅人答应明日交还密信。"
+    },
+    {
+      "node": "sample-2",
+      "player": "暂时别提醒这封信。"
+    },
+    {
+      "node": "branch-a",
+      "parent": "sample-2",
+      "narrative": "旅人将密信交回甲手中。"
+    }
+  ],
+  "request": "分别回顾sample-2和branch-a的约定",
+  "expect": [
+    "sample-2仍未兑现，recall=false",
+    "branch-a才可记resolved",
+    "另一条停在sample-2的路线仍open",
+    "不自动替主角补写归还"
+  ]
+}

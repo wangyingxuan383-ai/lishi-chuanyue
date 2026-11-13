@@ -86,6 +86,7 @@ fn host_error(error: HostError) -> Error {
     // Provider error payloads can echo URLs or authentication values. Do not
     // persist them as diagnostics. The UI can use Pi's bounded budget details.
     match error {
+        HostError::Host { code, .. } if code == "model_context_window" => Error::ContextWindow,
         HostError::Host { code, .. } => invalid(&format!("Pi宿主未完成请求（{code}）")),
         _ => invalid("Pi宿主连接已结束，任务进度已保留"),
     }
@@ -661,7 +662,9 @@ async fn run_prompt(state: &Arc<State>, value: &str) -> Result<Value> {
         }
     };
     let task = state.gateway.0.task(&state.permit.task_id)?;
-    if active(text(&task, "status")) {
+    let finished_by_reply = active(text(&task, "status"))
+        && state.gateway.finish_readonly_reply(&state.permit, answer["text"].as_str().unwrap_or(""))?;
+    if !finished_by_reply && active(text(&state.gateway.0.task(&state.permit.task_id)?, "status")) {
         state.gateway.interrupt(
             &state.permit,
             "Pi已结束本次输出，尚无正式完成回执，草稿与要求已保留",

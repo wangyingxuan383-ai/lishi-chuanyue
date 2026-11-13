@@ -77,7 +77,7 @@ impl SqlStore {
     /// Used only by the browser's one-time IndexedDB handoff. System run tables
     /// do not make a fresh host a user database; any actual application row does.
     pub fn is_empty(&self) -> Result<bool> {
-        let connection = self.connection.lock().map_err(|_| io_error())?;
+        let connection = crate::store::lock_connection(&self.connection);
         empty_database(&connection)
     }
 
@@ -88,7 +88,7 @@ impl SqlStore {
                 "旧开发台数据库不是有效的 SQLite 文件",
             ));
         }
-        let mut connection = self.connection.lock().map_err(|_| io_error())?;
+        let mut connection = crate::store::lock_connection(&self.connection);
         if !empty_database(&connection)? {
             return Ok(false);
         }
@@ -149,7 +149,7 @@ impl SqlStore {
     }
     pub fn query_at(&self,issued:u64,sql:&str,params:Vec<Value>)->Result<Vec<Map<String,Value>>> {
         let params = parameters(params)?;
-        let connection = self.connection.lock().map_err(|_| io_error())?;
+        let connection = crate::store::lock_connection(&self.connection);
         let mut statement = connection.prepare(sql).map_err(sql_error)?;
         let read_only = statement.readonly();
         if !read_only {self.check_generation(issued)?;crate::maintenance::guard(&connection).map_err(|_|PlatformError::new("sql_maintenance","正在维护或恢复存档，请等待完成"))?;}
@@ -194,7 +194,7 @@ impl SqlStore {
 
     pub fn batch(&self, statements: Vec<Statement>) -> Result<()> {self.batch_at(self.generation(),statements)}
     pub fn batch_at(&self,issued:u64,statements:Vec<Statement>)->Result<()> {
-        let mut connection = self.connection.lock().map_err(|_| io_error())?;
+        let mut connection = crate::store::lock_connection(&self.connection);
         self.check_generation(issued)?;
         crate::maintenance::guard(&connection).map_err(|_|PlatformError::new("sql_maintenance","正在维护或恢复存档，请等待完成"))?;
         let transaction = connection.transaction().map_err(sql_error)?;
@@ -239,7 +239,7 @@ impl SqlStore {
     }
 
     pub fn backup(&self, label: &str) -> Result<String> {
-        let connection = self.connection.lock().map_err(|_| io_error())?;
+        let connection = crate::store::lock_connection(&self.connection);
         self.backup_locked(&connection, label, None)
     }
 
@@ -263,7 +263,7 @@ impl SqlStore {
             return Err(missing());
         }
         let version = backup_schema_version(&path)?;
-        let mut connection = self.connection.lock().map_err(|_| io_error())?;
+        let mut connection = crate::store::lock_connection(&self.connection);
         if let Some(ticket)=ticket {crate::maintenance::verify(&connection,ticket).map_err(|_|PlatformError::new("sql_maintenance","存档维护批次失效，尚未恢复"))?;}else{crate::maintenance::guard(&connection).map_err(|_|PlatformError::new("sql_maintenance","正在恢复存档，请等待完成"))?;}
 
         let has_runs: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_runs')", [], |r| r.get(0)).map_err(sql_error)?;

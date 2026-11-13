@@ -1,0 +1,22 @@
+{
+  "kind": "original-fiction-fixture",
+  "notice": "独立原创示例，不是当前故事，不可当作玩家授权或资料证据。",
+  "scene": [
+    {
+      "node": "sample-1",
+      "narrative": "旅人在桥边答应明日交还密信。"
+    },
+    {
+      "node": "sample-2",
+      "action": "我打算明天去城里。",
+      "narrative": "旅人仍站在桥边，看见甲从城门走来。"
+    }
+  ],
+  "request": "回顾现在的处境",
+  "expect": [
+    "现在仍在桥边",
+    "明日归还密信是未兑现约定",
+    "打算去城里不是已经进城",
+    "来源限定sample-1/sample-2"
+  ]
+}

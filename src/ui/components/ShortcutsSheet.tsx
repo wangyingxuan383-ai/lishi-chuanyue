@@ -31,7 +31,7 @@ export function ShortcutsSheet({ onClose }: { onClose: () => void }) {
           </div>
         ))}
       </dl>
-      <p className="muted" style={{ margin: 0 }}>在输入框里打字时，只有带 Ctrl、Alt 的组合键和 F1 起作用。</p>
+      <p className="muted m-0">在输入框里打字时，只有带 Ctrl、Alt 的组合键和 F1 起作用。</p>
     </Sheet>
   );
 }

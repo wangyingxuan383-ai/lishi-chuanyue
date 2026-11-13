@@ -11,6 +11,7 @@ import { matchName } from "../../engine/state/names";
 import type { Attitude, Person, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
+import { KnowledgeRecords } from "./Continuity";
 import { PersonAvatar } from "./BookArt";
 
 const ATTITUDES: Attitude[] = ["仇视", "敌意", "冷淡", "一般", "友善", "亲近", "生死之交"];
@@ -21,8 +22,8 @@ export function attitudeClass(a: Attitude): string {
   return a === "仇视" || a === "敌意" ? "att-hostile" : a === "冷淡" ? "att-cold" : a === "友善" ? "att-friendly" : a === "亲近" || a === "生死之交" ? "att-close" : "att-plain";
 }
 
-function Editor({ person, state, era, onClose, onSave }: {
-  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
+function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = false, onContinuitySaved }: {
+  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>; worldId?: string; headId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { ask, toast } = useApp();
   const [name, setName] = useState(person?.name ?? "");
@@ -54,7 +55,7 @@ function Editor({ person, state, era, onClose, onSave }: {
 
   return (
     <Sheet title={person ? person.name : "添加人物"} onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
+      <div className="stack gap-10">
         {person && (
           <div className="person-head">
             <PersonAvatar name={name || person.name} dead={!alive} />
@@ -73,9 +74,10 @@ function Editor({ person, state, era, onClose, onSave }: {
         <label>近况（随剧情更新）
           <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="和你的过节、答应过的事……" />
         </label>
-        <p className="muted" style={{ margin: 0 }}>这个人出场或被提到时，AI 会看到来历和近况。</p>
-        <label className="row"><input type="checkbox" style={{ width: 20, minHeight: 20 }} checked={!alive} onChange={(e) => setAlive(!e.target.checked)} />已故</label>
-        {clash && <p className="notice" style={{ margin: 0 }}>人物表里已经有“{clash.name}”了，点开它修改即可。</p>}
+        <p className="muted m-0">这个人出场或被提到时，AI 会看到来历和近况。</p>
+        {person && worldId && headId && <KnowledgeRecords worldId={worldId} headId={headId} person={person} busy={busy || saving} onSaved={onContinuitySaved} />}
+        <label className="row"><input type="checkbox" className="check-20" checked={!alive} onChange={(e) => setAlive(!e.target.checked)} />已故</label>
+        {clash && <p className="notice m-0">人物表里已经有“{clash.name}”了，点开它修改即可。</p>}
         <div className="row">
           {person && <button className="danger-text" disabled={saving} onClick={remove}>删除</button>}
           <button className="primary grow" disabled={saving || !clean || !!clash} onClick={save}>保存</button>
@@ -85,8 +87,8 @@ function Editor({ person, state, era, onClose, onSave }: {
   );
 }
 
-export function People({ state, era, busy, onSave }: {
-  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string) => Promise<void>;
+export function People({ state, era, busy, onSave, worldId, headId, onContinuitySaved }: {
+  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string) => Promise<void>; worldId?: string; headId?: string; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const [editing, setEditing] = useState<{ person: Person | null } | null>(null);
   const people = [...state.people].sort((a, b) => Number(b.alive) - Number(a.alive) || (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1));
@@ -94,7 +96,7 @@ export function People({ state, era, busy, onSave }: {
 
   return (
     <div className="stack">
-      <div className="row" style={{ justifyContent: "space-between" }}>
+      <div className="row between">
         <b>人物{people.length ? ` ${people.length}` : ""}</b>
         <button className="ghost" aria-label="添加人物" disabled={busy} onClick={() => setEditing({ person: null })}><Icon name="plus" size={18} />添加</button>
       </div>
@@ -112,7 +114,7 @@ export function People({ state, era, busy, onSave }: {
           </div>
         </button>
       )) : <p className="muted">还没有结识什么人。</p>}
-      {editing && <Editor person={editing.person} state={state} era={era} onClose={() => setEditing(null)} onSave={onSave} />}
+      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={headId} busy={busy} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onSave={onSave} />}
     </div>
   );
 }

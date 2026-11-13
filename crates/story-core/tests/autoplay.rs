@@ -12,7 +12,7 @@ use std::{
 use story_core::{
     chat::{BoxFuture, Completion, Model, TextSink},
     runtime::Engine,
-    ExecutionMode, ModelConfig, Result, RunPlan, RunSnapshot, Store,
+    ModelConfig, Result, RunPlan, RunSnapshot, Store,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -116,7 +116,6 @@ impl Fixture {
             head_id: "h".into(),
             base_id: Some("h".into()),
             kind: "autoplay".into(),
-            execution_mode: ExecutionMode::Classic,
             model: ModelConfig {
                 slot: "fixture".into(),
                 url: "https://never.invalid".into(),

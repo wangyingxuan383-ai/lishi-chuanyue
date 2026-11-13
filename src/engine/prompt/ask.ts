@@ -53,6 +53,8 @@ export function askMessages(input: AskInput): ChatMessage[] {
   const section = (title: string, lines: string[]) => (lines.length ? `\n\n【${title}】\n${lines.join("\n")}` : "");
   const panel = input.settings.heroPanelEnabled && state.protagonist.panel?.trim()
     ? section("主角面板（玩家自记）", [state.protagonist.panel.trim()]) : "";
+  const current = `${renderState(state, input.era)}${since ? `\n开局：${since}` : ""}${input.settings.premise.trim() ? `\n\n【故事设定】\n${input.settings.premise.trim()}` : ""}`;
+  const required = `${section("要点", essentials)}\n\n${panel}\n【玩家的问题】${input.question.trim()}`;
   return [
     {
       role: "system",
@@ -64,10 +66,8 @@ export function askMessages(input: AskInput): ChatMessage[] {
     },
     {
       role: "user",
-      content: `${renderState(state, input.era)}${since ? `\n开局：${since}` : ""}${input.settings.premise.trim() ? `\n\n【故事设定】\n${input.settings.premise.trim()}` : ""}${input.era.eraCard ? `\n\n【${free ? "世界卡" : "时代卡"}】${input.era.eraCard.name}\n${short(input.era.eraCard.content, 600)}` : ""}${section("设定集", [...cards, ...places])}${section("目标", goals)}${section("要点", essentials)}${section("章节", chapters)}${opening ? section("开场", [opening.narrative.trim().slice(0, 1200)]) : ""}${section("最近的剧情", recent)}${recall}
-
-${panel}
-【玩家的问题】${input.question.trim()}`,
+      content: `${current}${input.era.eraCard ? `\n\n【${free ? "世界卡" : "时代卡"}】${input.era.eraCard.name}\n${short(input.era.eraCard.content, 600)}` : ""}${section("设定集", [...cards, ...places])}${section("目标", goals)}${section("章节", chapters)}${opening ? section("开场", [opening.narrative.trim().slice(0, 1200)]) : ""}${section("最近的剧情", recent)}${recall}${required}`,
+      compactContent: `${current}${section("最近的剧情", recent.slice(-1).map(text => short(text, 1400)))}${recall}${required}`,
     },
   ];
 }

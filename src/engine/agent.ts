@@ -172,10 +172,14 @@ export function mergeAgentSessionPage(current: AgentSessionDetail | null, page: 
 }
 
 export const BUILTIN_AGENT_SKILLS = [
-  { id: "canon-reference", name: "遵循原著", description: "搜索和阅读原文，逐项核对人物、设定与剧情，保留本局合理改写。", version: "1.6.0" },
-  { id: "story-writing", name: "故事写作", description: "按任务创作正式剧情，区分正文与执行说明。", version: "1.4.0" },
-  { id: "world-upkeep", name: "世界整理", description: "校对和整理人物、记忆、规则与关联状态。", version: "1.3.0" },
-  { id: "historical-world", name: "历史世界", description: "核对时代、称谓、日期和历史背景。", version: "1.1.0" },
+  { id: "canon-reference", name: "遵循原著", description: "搜索和阅读原文，逐项核对人物、设定与剧情，保留本局合理改写。", version: "1.8.0" },
+  { id: "story-writing", name: "故事写作", description: "按任务创作正式剧情，区分正文与执行说明。", version: "1.6.0" },
+  { id: "world-upkeep", name: "世界整理", description: "校对和整理人物、记忆、规则与关联状态。", version: "1.5.0" },
+  { id: "story-recap", name: "故事回顾", description: "回顾当前处境、关键选择与未完事项，保留本局依据。", version: "1.1.0" },
+  { id: "character-knowledge", name: "人物与知情", description: "核对身份、称呼、关系，以及人物何时获知或相信某件事。", version: "1.3.0" },
+  { id: "continuity-check", name: "情节连续性", description: "检查指定情节的人物、物件、地点、时间与因果衔接。", version: "1.1.1" },
+  { id: "story-threads", name: "线索与承诺", description: "按路线查阅关键线索、约定与实际进展，保留出处。", version: "1.1.0" },
+  { id: "historical-world", name: "历史世界", description: "核对时代、称谓、日期和历史背景。", version: "1.2.0" },
   { id: "script-play", name: "剧本", description: "参考本局可编辑剧本，尊重玩家行动。", version: "1.0.0" },
   { id: "challenge-play", name: "挑战", description: "处理本局挑战目标与期限。", version: "1.1.0" },
   { id: "spectator-play", name: "旁观", description: "依照玩家幕后要求推进旁观故事。", version: "1.0.0" },
@@ -232,7 +236,7 @@ export async function saveAgentPreferences(game: Game, preferences: AgentPrefere
 export class AgentClient {
   constructor(private readonly game: Game) {}
   private async call<T>(request: unknown): Promise<T> {
-    if (!this.game.platform.execution?.agent) throw new Error("当前环境还不能运行 Agent 助手，请使用应用或本机开发宿主");
+    if (!this.game.platform.execution?.agent) throw new Error("当前环境还不能运行助手，请使用手机或电脑上的应用");
     return await this.game.platform.execution.agent(asJson(request)) as unknown as T;
   }
   async list(worldId: string, lineId: string): Promise<AgentSession[]> { return (await this.sessionList(worldId, lineId)).sessions; }

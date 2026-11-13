@@ -123,7 +123,7 @@ export function AutoplaySheet({ onStart, onClose, temporary = false }: { onStart
             <button key={n} aria-label={`连播 ${n} 段`} onClick={() => onStart(n)}><b>{n}</b><small>段</small></button>
           ))}
         </div>
-        <p className="muted" style={{ margin: 0 }}>{temporary ? "这几段暂由 AI 扮演主角，播完或停止后恢复原来的操作。" : "一段接一段往下演。"}每段照常调用 AI，随时可以停。</p>
+        <p className="muted m-0">{temporary ? "这几段暂由 AI 扮演主角，播完或停止后恢复原来的操作。" : "一段接一段往下演。"}每段照常调用 AI，随时可以停。</p>
       </div>
     </Sheet>
   );

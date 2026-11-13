@@ -9,6 +9,7 @@ import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { Card, CardKind, Place, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { BuiltinContent } from "./BuiltinContent";
 import { Icon } from "./Icon";
 import { deletionPatch, selectionKey, type CodexKind, type CodexSelection } from "../../engine/writing/codex";
 import "./writing.css";
@@ -67,14 +68,14 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
 
   return (
     <Sheet title={stored ? `修改${label}` : `新建${label}`} onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
+      <div className="stack gap-10">
         <label>名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder={isEra ? eraLabel === "世界卡" ? "如：云海群岛" : "如：唐 · 天宝七载 · 长安" : "名称"} /></label>
         {!isEra && <label>别名（提到这些名字时也会交给 AI，用顿号分开）<input value={aliases} onChange={(e) => setAliases(e.target.value)} placeholder="可不填" /></label>}
         <label>{editing.type === "place" ? "描述" : "内容"}
           <textarea rows={isEra ? 10 : 5} value={text} onChange={(e) => setText(e.target.value)}
             placeholder={isEra ? "时局、货币与物价、称谓、日常与节令、文风、不要出现的东西……" : "写给 AI 看的资料"} />
         </label>
-        {isEra && <p className="muted" style={{ margin: 0 }}>{text.length} / {ERA_CARD_LIMIT} 字{text.length > ERA_CARD_LIMIT ? "，超出的部分不会交给 AI" : `。${eraLabel}每回合都会交给 AI。`}</p>}
+        {isEra && <p className="muted m-0">{text.length} / {ERA_CARD_LIMIT} 字{text.length > ERA_CARD_LIMIT ? "，超出的部分不会交给 AI" : `。${eraLabel}每回合都会交给 AI。`}</p>}
         {taken && <p className="field-hint warn">已经有叫“{name.trim()}”的了，换个名字，或者去改那一张。</p>}
         <div className="row">
           {stored && <button className="danger-text" disabled={saving || isHere} onClick={remove}>{isHere ? "当前所在地不能删" : "删除"}</button>}
@@ -85,14 +86,15 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
   );
 }
 
-export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
-  state: WorldState; era: EraContext; busy: boolean;
-  onSave: (patch: TurnRecord, summary: string) => Promise<void>;
+export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganize }: {
+  headId: string; state: WorldState; era: EraContext; busy: boolean;
+  onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
   onOpenStory: () => void;
   /** Lets the AI organize the 设定集 from the premise; true when something was added. */
   onOrganize: (replaceOwnEra: boolean) => Promise<boolean>;
 }) {
   const { ask, toast } = useApp();
+  const [builtin, setBuiltin] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [organizing, setOrganizing] = useState(false);
@@ -145,7 +147,7 @@ export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
   return (
     <div className="stack">
       <section className="codex-era">
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row between">
           <b className="grow">{eraLabel}</b>
           <button className="ghost" disabled={busy || organizing} onClick={() => void organize()}>{organizing ? "整理中…" : eraCard ? "AI 重新整理" : "AI 整理"}</button>
           <button className="ghost" disabled={busy || organizing} onClick={() => open({ type: "card", kind: "时代", card: eraCard })}>{eraCard ? "编辑" : "写一张"}</button>
@@ -156,7 +158,9 @@ export function Codex({ state, era, busy, onSave, onOpenStory, onOrganize }: {
           {eraCard.content.length > 90 && <button className="ghost" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : "展开"}</button>}
         </> : <p className="muted" style={{ margin: "2px 0 0" }}>还没有{eraLabel}，AI 只按故事设定来写。可以写下这个世界的称谓、货币、风俗和其他背景。</p>}
       </section>
-      <button className="ghost" style={{ textAlign: "left" }} onClick={onOpenStory}>故事设定与要点 ›</button>
+      <button className="ghost t-left" onClick={onOpenStory}>故事设定与要点 ›</button>
+      <button className="ghost t-left" disabled={busy || organizing || deleting} onClick={() => setBuiltin(true)}>内置资料与灵感 ›</button>
+      {builtin && <BuiltinContent state={state} headId={headId} busy={busy || organizing || deleting} onSave={onSave} onClose={() => setBuiltin(false)} />}
       <div className="codex-tools">
         <input aria-label="搜索设定" placeholder="搜索名称、别名或内容" value={query} onChange={(e) => { setQuery(e.target.value); setSelected([]); }} />
         <button className="ghost" disabled={busy || organizing || deleting} onClick={() => { setSelecting(!selecting); setSelected([]); }}>

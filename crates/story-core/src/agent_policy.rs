@@ -1,10 +1,8 @@
 //! Authority is independent of the local commit policy. The same checks cover
 //! direct calls, script host calls, and delegated read-only work.
-use crate::{runtime::Engine, Error, Result, RunPlan};
+use crate::{Error, Result, RunPlan};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 pub(crate) fn read_only(name: &str) -> bool {
     matches!(
@@ -13,6 +11,8 @@ pub(crate) fn read_only(name: &str) -> bool {
             | "read_external_resource" | "read_commit_receipt" | "read_committed_snapshot" | "list_tool_packages" | "list_documents" | "read_document" | "find_document"
             | "discover_tools"
             | "read_resource"
+            | "read_story_resources"
+            | "read_continuity"
             | "read_tool_result"
             | "read_player_choices"
             | "search_resources"
@@ -118,77 +118,6 @@ pub(crate) fn check(plan: &RunPlan, name: &str, args: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn metadata(name: &str) -> Value {
-    json!({"readOnly":read_only(name),"effect":if read_only(name){"read"}else if name=="call_remote_tool"{"external"}else{"draft"},"parallel":read_only(name)&&!matches!(name,"ask_user"|"update_plan"|"discover_tools")})
-}
-
-pub(crate) fn is_external_write(plan: &RunPlan, name: &str, args: &Value) -> bool {
-    if name != "call_remote_tool" {
-        return false;
-    }
-    !plan.meta["agent"]["network"]["mcps"]
-        .as_array()
-        .and_then(|a| a.iter().find(|s| s["id"] == args["serverId"]))
-        .is_some_and(|s| {
-            s["readOnlyTools"]
-                .as_array()
-                .is_some_and(|a| a.iter().any(|n| n == &args["name"]))
-        })
-}
-
-impl Engine {
-    /// UI control requests may perform capability discovery without a model
-    /// request. Model tool calls still pass the task-scoped authority gateway.
-    pub async fn agent_request(self: &Arc<Self>, request: Value) -> Result<Value> {
-        match request["op"].as_str().unwrap_or("") {
-            "network_tools" => {
-                let mut network = request["network"].clone();
-                if !network.is_object() {
-                    return Err(Error::Invalid("请先配置MCP服务".into()));
-                }
-                network["mode"] = "configured".into();
-                self.model.network(json!({"op":"list_remote_tools","network":network,"serverId":request["serverId"],"userDiscovery":true,"limit":500}),CancellationToken::new()).await
-            }
-            "network_authorize" => {
-                let mut network = request["network"].clone();
-                if !network.is_object() {
-                    return Err(Error::Invalid("联网配置无效".into()));
-                }
-                for server in network["mcps"].as_array_mut().into_iter().flatten() {
-                    let allowed = server["allowedTools"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    let readonly = server["readOnlyTools"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    if allowed.len() > 500
-                        || allowed.iter().any(|s| {
-                            !s.as_str()
-                                .is_some_and(|n| !n.is_empty() && n.len() <= 256 && n != "*")
-                        })
-                        || readonly.iter().any(|n| !allowed.contains(n))
-                    {
-                        return Err(Error::Invalid(
-                            "请明确选择允许的工具，只读工具必须在允许范围内".into(),
-                        ));
-                    }
-                    server["allowedTools"] = json!(allowed);
-                    server["readOnlyTools"] = json!(readonly);
-                    server["authorizationVersion"] = json!(server["authorizationVersion"]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .saturating_add(1));
-                    server["authorizationIdentity"] = service_identity(server).into();
-                }
-                Ok(json!({"network":network}))
-            }
-            _ => self.agent(request),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +127,11 @@ mod tests {
         assert!(check(&p,"run_script",&json!({})).is_ok());
         assert!(check(&p,"call_tool_package",&json!({})).is_ok());
         assert!(check(&p,"write_document",&json!({})).is_err());
+        for name in ["read_story_resources", "read_continuity"] {
+            assert!(read_only(name));
+            assert!(check(&p, name, &json!({})).is_ok());
+            assert!(crate::pi_children::catalog().iter().any(|tool| tool.name == name && tool.read_only));
+        }
         p.meta["agent"]["parentTaskId"]="root-task".into();
         assert!(check(&p,"run_script",&json!({})).is_err());
         assert!(check(&p,"call_tool_package",&json!({})).is_err());
@@ -205,7 +139,7 @@ mod tests {
     }
     #[test]
     fn external_grant_is_bound_to_service_and_read_scope() {
-        let mut p:RunPlan=serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"n","kind":"agent_task","model":{"slot":"s","url":"https://test.invalid","model":"m","includeUsage":false},"messages":[],"extractMessages":[],"state":{},"settings":{},"options":{},"action":{},"meta":{"agent":{"readOnly":true,"network":{"mcps":[]}}}})).unwrap();
+        let mut p:RunPlan=serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"n","kind":"pi_task","model":{"slot":"s","url":"https://test.invalid","model":"m","includeUsage":false},"messages":[],"extractMessages":[],"state":{},"settings":{},"options":{},"action":{},"meta":{"agent":{"readOnly":true,"network":{"mcps":[]}}}})).unwrap();
         let mut server = json!({"id":"s","url":"https://test.invalid/mcp","enabled":true,"authorizationVersion":1,"allowedTools":["read","write"],"readOnlyTools":["read"]});
         server["authorizationIdentity"] = service_identity(&server).into();
         p.meta["agent"]["network"]["mcps"] = json!([server]);

@@ -125,7 +125,7 @@ export function ChallengeFields({ value, onChange, wanted, goalRef }: {
             {span !== null && <span className="field-suffix">{span >= 1440 ? `共 ${Math.round(span / 1440)} 天` : "不到一天"}</span>}
           </span>
         </label>
-        {value.limit.trim() && span === null && <p className="field-hint warn" style={{ margin: 0 }}>看不出有多久。写成“十日”“三个月”这样的时长，不写就不限时。</p>}
+        {value.limit.trim() && span === null && <p className="field-hint warn m-0">看不出有多久。写成“十日”“三个月”这样的时长，不写就不限时。</p>}
         <div className="limit-picks" role="group" aria-label="常用期限">
           {LIMIT_PICKS.map((l) => <button key={l} type="button" aria-pressed={value.limit.trim() === l} onClick={() => onChange({ ...value, limit: l })}>{l}</button>)}
           <button type="button" aria-pressed={!value.limit.trim()} onClick={() => onChange({ ...value, limit: "" })}>不限时</button>

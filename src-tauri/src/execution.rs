@@ -134,18 +134,19 @@ impl Model for NativeModel {
                     }) => {
                         break Err(if kind == "cancelled" {
                             Error::Cancelled
+                        } else if kind == "http" && story_core::chat::provider_context_rejected(status, message.as_deref().unwrap_or("")) {
+                            Error::ContextWindow
                         } else {
-                            Error::Invalid(format!(
-                                "{}{}",
-                                status
-                                    .map(|s| format!("AI 服务返回 {s}："))
-                                    .unwrap_or_default(),
-                                message.unwrap_or_else(|| format!("模型请求未完成（{kind}）"))
-                            ))
+                            Error::Provider {
+                                kind,
+                                status,
+                                message: message.unwrap_or_default(),
+                                partial: accumulator.has_content(),
+                            }
                         })
                     }
                     Some(StreamEvent::Open { .. }) => {}
-                    None => break Err(Error::Invalid("模型连接已经结束".into())),
+                    None => break Err(Error::Provider { kind: "network".into(), status: None, message: "模型连接已经结束".into(), partial: accumulator.has_content() }),
                 }
             };
             drop(cancel_on_drop);
@@ -184,14 +185,6 @@ pub async fn execution_stop(engine: State<'_, Arc<Engine>>, id: String) -> Resul
 #[tauri::command]
 pub async fn execution_resume(engine: State<'_, Arc<Engine>>, id: String) -> Result<(), Value> {
     engine.resume(&id).map_err(message)
-}
-
-#[tauri::command]
-pub async fn execution_agent(
-    engine: State<'_, Arc<Engine>>,
-    request: Value,
-) -> Result<Value, Value> {
-    engine.agent_request(request).await.map_err(message)
 }
 
 #[tauri::command]

@@ -20,6 +20,7 @@ import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget"
 import { WhatsNewSheet } from "../components/WhatsNew";
 import { UpdateButton, UpdateDevSource } from "../components/UpdateSheet";
 import { SourceLibrary } from "../components/Sources";
+import { localFind } from "../app/localFind";
 
 const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用", cancelled: "已取消" };
 type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev" | "budget";
@@ -30,6 +31,22 @@ const TITLES: Record<Page, string> = {
 };
 const THEMES: [Reading["theme"], string][] = [["auto", "跟随系统"], ["paper", "纸张"], ["day", "白天"], ["night", "夜间"]];
 const SIZES: [number, string][] = [[16, "小"], [18, "中"], [20, "大"], [22, "特大"]];
+// Search only these public descriptions, never service addresses or credentials.
+const FIND_WORDS: Record<string, string> = {
+  services: "连接 模型 服务 Key 密钥 主模型 辅助模型",
+  writing: "文风 篇幅 每段长短 叙述视角 第一人称 第二人称 第三人称 建议选项 写作",
+  memory: "上下文 输入预算 前文 章节摘要 设定集 自动整理 记忆",
+  play: "难度 运势 运气 用词提醒 内容尺度 战斗 感情 死亡",
+  reading: "主题 字号 字体 宋体 黑体 行距 段距 段首空两格 自动滚动 动画 触感 振动 阅读不锁屏 亮屏",
+  sources: "原著 同人 书库 参考资料 TXT EPUB PDF DOCX 导入 通读",
+  guide: "帮助 操作说明 怎么玩 常见问题",
+  notify: "通知 提醒 后台",
+  data: "存档 备份 恢复 导入 导出 数据",
+  budget: "用量 费用 花费 单价 预算 请求次数 tokens",
+  network: "联网 网络 代理 连接方式",
+  about: "版本 更新 升级 下载 反馈 Github",
+  dev: "开发者 日志 调试",
+};
 
 export default function Settings() {
   const { game, pop, push, profile, reading, devMode } = useApp();
@@ -40,6 +57,8 @@ export default function Settings() {
   const [notify, setNotify] = useState<{ granted: boolean; enabled: boolean } | null>(null);
   const [network, setNetwork] = useState<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>({ proxy: "none" });
   const [spend, setSpend] = useState("预算与单价");
+  const [sources, setSources] = useState(false);
+  const [query, setQuery] = useState("");
   useEffect(() => {
     void loadPlayDefaults(game.repo).then(setDefaults);
     void budgetState(game).then(setSpend).catch(() => setSpend("预算与单价"));
@@ -56,11 +75,12 @@ export default function Settings() {
     { group: "AI", items: [
       { page: "services", label: "AI 服务", state: profile ? `${profile.name} · ${profile.mainModel}` : "还没有连接" },
       { page: "writing", label: "写作与叙事", state: `${defaults.style} · ${defaults.length}篇幅 · 第${defaults.perspective === "你" ? "二" : defaults.perspective === "我" ? "一" : "三"}人称` },
-      { page: "memory", label: "记忆与整理", state: `${({ 8000: "省一些", 12000: "标准", 16000: "记得更多" } as Record<number, string>)[profile?.contextTokens ?? 12000] ?? "标准"} · ${defaults.chapterEvery ? `每 ${defaults.chapterEvery} 回合一章` : "不写章节"}` },
+      { page: "memory", label: "记忆与整理", state: `${({ 8000: "省一些", 12000: "标准", 16000: "记得更多" } as Record<number, string>)[profile?.contextTokens ?? 12000] ?? `${profile?.contextTokens?.toLocaleString()} tokens`} · ${defaults.chapterEvery ? `每 ${defaults.chapterEvery} 回合一章` : "不写章节"}` },
     ] },
     { group: "游戏", items: [
       { page: "play", label: "游玩默认", state: `难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
       { page: "reading", label: "阅读与外观", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
+      { page: "sources" as Page, label: "参考书籍", state: "导入、查看与管理，各个故事都能选用" },
       { page: "guide" as Page, label: "游玩指南", state: "怎么玩、各个功能在哪、常见问题" },
       { page: "notify", label: "通知与提醒", state: !android ? "电脑上不需要" : notify?.enabled ? "已打开" : "没打开", hidden: !android && !devMode },
     ] },
@@ -72,6 +92,7 @@ export default function Settings() {
       { page: "dev", label: "开发者", state: devMode ? "已打开" : "关", hidden: !devMode },
     ] },
   ];
+  const foundEntries = entries.map(group => ({ ...group, items: group.items.filter(item => !item.hidden && localFind(query, group.group, item.label, FIND_WORDS[item.page])) })).filter(group => group.items.length);
 
   return (
     <div className="screen">
@@ -80,12 +101,14 @@ export default function Settings() {
         <div className="title"><h1>{TITLES[page]}</h1></div>
       </div>
       <div className="screen-body stack settings">
-        {page === "home" && entries.map((g) => (
+        {page === "home" && <input type="search" aria-label="查找设置" placeholder="查找设置，如字号、自动滚动、备份" value={query} onChange={event => setQuery(event.target.value)} />}
+        {page === "home" && !!query.trim() && !foundEntries.length && <p className="muted" role="status">没有找到相关设置，试试功能名称。</p>}
+        {page === "home" && foundEntries.map((g) => (
           <section key={g.group} className="settings-group">
             <h2>{g.group}</h2>
             <div className="settings-list">
-              {g.items.filter((i) => !i.hidden).map((i) => (
-                <button key={i.page} className="settings-entry" aria-label={i.page === "about" && unread ? `${i.label}，有新版本` : undefined} onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : setPage(i.page))}>
+              {g.items.map((i) => (
+                <button key={i.page} className="settings-entry" aria-label={i.page === "about" && unread ? `${i.label}，有新版本` : undefined} onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : i.page === ("sources" as Page) ? setSources(true) : setPage(i.page))}>
                   <span><b>{i.label}{i.page === "about" && unread && <i className="update-dot" aria-hidden="true" />}</b><small>{i.state}</small></span><span aria-hidden="true">›</span>
                 </button>
               ))}
@@ -104,6 +127,7 @@ export default function Settings() {
         {page === "about" && <AboutPage />}
         {page === "dev" && <DevPage />}
       </div>
+      {sources && <SourceLibrary onClose={() => setSources(false)} />}
     </div>
   );
 }
@@ -183,12 +207,33 @@ function WritingPage({ defaults, onChange }: { defaults: PlayDefaults; onChange:
 }
 
 function MemoryPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: (d: PlayDefaults) => void }) {
-  const { game, profile, setProfile } = useApp();
+  const { game, profile, setProfile, toast } = useApp();
+  const [custom, setCustom] = useState("");
+  const [saving, setSaving] = useState(false);
+  const tokens = Number(custom);
+  const customValid = /^\d+$/.test(custom) && Number.isSafeInteger(tokens) && tokens > 0;
+  const setTarget = async (value: number) => {
+    if (!profile || saving) return;
+    setSaving(true);
+    try {
+      setProfile(await saveProfile(game.repo, { ...profile, contextTokens: value }, null));
+      setCustom("");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "输入目标未保存，请重试");
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <>
-      {profile && <Choice label="每回合给 AI 看多少前文" note={`跟着 AI 服务“${profile.name}”走。越多记得越清楚，但每回合更贵、更慢；更早的剧情靠章节摘要和设定集记住。`}
+      {profile && <><Choice label="每回合给 AI 看多少前文" note={`随 AI 服务“${profile.name}”保存。输入目标越高，可选前文越多，费用也可能增加。本次行动、所选改稿和玩家用法会完整保留。`}
         value={profile.contextTokens ?? 12000} options={[[8000, "省一些"], [12000, "标准"], [16000, "记得更多"]]}
-        onChange={async (n) => setProfile(await saveProfile(game.repo, { ...profile, contextTokens: n }, null))} />}
+        onChange={setTarget} />
+        <details><summary>自定义输入目标</summary><div className="stack">
+          <label>目标 tokens<input inputMode="numeric" value={custom} onChange={event => setCustom(event.target.value)} placeholder={String(profile.contextTokens ?? 12000)} /></label>
+          <small className="muted">此目标用于挑选前文和参考资料。可接收的总量由当前 AI 服务和模型决定。</small>
+          <button disabled={!customValid || saving} onClick={() => void setTarget(tokens)}>保存输入目标</button>
+        </div></details></>}
       <Choice label="章节摘要" note="每过这么多回合，AI 把这段剧情写成一章摘要，在“角色 · 记事”里看" value={defaults.chapterEvery}
         options={[[0, "关"], [8, "每 8 回合"], [12, "每 12 回合"], [20, "每 20 回合"]]} onChange={(v) => onChange({ ...defaults, chapterEvery: v })} />
       <Choice label="设定集自动整理" note="每过几回合，AI 把新出现的人物、地点、势力记进设定集；只改它自己写的卡，你写的不会动" value={defaults.autoUpkeep}
@@ -426,7 +471,7 @@ function DevPage() {
   return (
     <>
       <label className="row">
-        <input type="checkbox" checked={devMode} onChange={(e) => setDevMode(e.target.checked)} style={{ width: 20, minHeight: 20 }} />
+        <input type="checkbox" checked={devMode} onChange={(e) => setDevMode(e.target.checked)} className="check-20" />
         开发者模式（长按段落可查看原始输出）
       </label>
       <UpdateDevSource />

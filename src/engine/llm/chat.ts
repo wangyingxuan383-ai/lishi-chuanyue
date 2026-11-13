@@ -7,6 +7,8 @@ export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   /** A tool-only assistant message uses an empty string. */
   content: string;
+  /** Optional supporting material can be removed as a whole before a retry. */
+  compactContent?: string;
   tool_call_id?: string;
   tool_calls?: ChatToolCall[];
 }
@@ -112,6 +114,37 @@ export class ChatError extends Error {
   }
 }
 
+// Keep these markers aligned with provider_context_rejected in crates/story-core/src/chat.rs.
+export const CONTEXT_WINDOW_MARKERS = ["context_length_exceeded", "maximum context length", "exceeds the context window", "prompt is too long", "上下文窗口"];
+
+export function isContextWindowError(error: unknown): boolean {
+  return error instanceof ChatError && error.kind === "http" && !error.partial
+    && (error.status === 413 || ([400, 422].includes(error.status ?? 0)
+      && CONTEXT_WINDOW_MARKERS.some(marker => error.message.toLowerCase().includes(marker))));
+}
+
+export const CONTEXT_WINDOW_MESSAGE = "AI 服务报告模型上下文窗口不足。可缩小本次正文或资料范围，或改用输入窗口更大的模型。";
+
+export function compactChatMessages(messages: ChatMessage[]): ChatMessage[] | null {
+  let changed = false;
+  const compact = messages.map(message => {
+    const { compactContent } = message;
+    if (compactContent === undefined || compactContent.length >= message.content.length) return message;
+    changed = true;
+    return { ...message, content: compactContent };
+  });
+  return changed ? compact : null;
+}
+
+/** One retry shared by context recovery and transient failures, before body/tool output. */
+export function retryDecision(error: unknown, attempt: number, messages: ChatMessage[]): { retry: boolean; messages: ChatMessage[] } {
+  if (attempt !== 1 || !(error instanceof ChatError) || error.partial) return { retry: false, messages };
+  const compact = isContextWindowError(error) ? compactChatMessages(messages) : null;
+  const transient = error.kind === "network" || error.kind === "timeout_first"
+    || (error.kind === "http" && (error.status === 429 || (error.status ?? 0) >= 500));
+  return { retry: compact !== null || transient, messages: compact ?? messages };
+}
+
 export interface ChatRequest {
   slot: string;
   url: string;
@@ -193,13 +226,13 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
       else if (!text && !toolCalls.length) fail(new ChatError("empty", undefined, "", finishReason ?? undefined));
       else settle({ text, toolCalls, finishReason, usage, firstTokenMs, totalMs: performance.now() - started });
     } else if (event.type === "error") {
-      fail(new ChatError(event.kind, event.status, text, event.message));
+      fail(new ChatError(event.kind, event.status, text || (calls.size ? "[tool]" : ""), event.message));
     }
   };
 
   const body: Record<string, Json> = {
     model: request.model,
-    messages: request.messages as unknown as Json,
+    messages: request.messages.map(({ compactContent: _compact, ...message }) => message) as unknown as Json,
     stream: true,
     ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),

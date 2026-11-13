@@ -226,6 +226,40 @@ pub(crate) mod tests {
             .unwrap();
     }
     #[test]
+    fn readonly_reply_without_finish_task_completes_only_when_nothing_is_owed() {
+        let (store, gw, _) = fixture();
+        let permit = gw.permit("t").unwrap();
+        // Not read-only: the reply alone never finishes an editing task.
+        assert!(!gw.finish_readonly_reply(&permit, "回顾内容").unwrap());
+        store.lock().unwrap().execute("UPDATE pi_tasks SET read_only=1 WHERE id='t'", []).unwrap();
+        // A staged draft is still owed, so no implicit finish.
+        store.lock().unwrap().execute("UPDATE pi_tasks SET workspace_json='{\"turns\":[{\"summary\":\"草稿\",\"narrative\":\"新段落\"}]}' WHERE id='t'", []).unwrap();
+        assert!(!gw.finish_readonly_reply(&permit, "回顾内容").unwrap());
+        store.lock().unwrap().execute("UPDATE pi_tasks SET workspace_json='{}' WHERE id='t'", []).unwrap();
+        // An unconsumed steering input or an unread chosen skill is still owed.
+        store.lock().unwrap().execute("UPDATE pi_tasks SET intent_revision=consumed_intent_revision+1 WHERE id='t'", []).unwrap();
+        assert!(!gw.finish_readonly_reply(&permit, "回顾内容").unwrap());
+        store.lock().unwrap().execute("UPDATE pi_tasks SET intent_revision=consumed_intent_revision WHERE id='t'", []).unwrap();
+        store.lock().unwrap().execute("UPDATE pi_tasks SET metadata_json=json_set(metadata_json,'$.skills',json('[\"story-recap\"]')) WHERE id='t'", []).unwrap();
+        assert!(!gw.finish_readonly_reply(&permit, "回顾内容").unwrap());
+        store.lock().unwrap().execute("UPDATE pi_tasks SET metadata_json=json_set(metadata_json,'$.skillReads',json('[{\"id\":\"story-recap\",\"status\":\"fetched\",\"bodyRead\":true}]')) WHERE id='t'", []).unwrap();
+        // An empty reply is not an answer.
+        assert!(!gw.finish_readonly_reply(&permit, "  ").unwrap());
+        assert!(gw.finish_readonly_reply(&permit, "当前处境：……").unwrap());
+        let row = gw.0.task("t").unwrap();
+        assert_eq!(row["status"], "completed");
+        assert_eq!(row["result_json"]["status"], "answered");
+        assert_eq!(row["result_json"]["implicitFinish"], true);
+    }
+    #[test]
+    fn readonly_reply_does_not_skip_a_requested_canon_check() {
+        let (store, gw, _) = fixture();
+        store.lock().unwrap().execute("UPDATE pi_tasks SET read_only=1,text='按原著核对人物' WHERE id='t'", []).unwrap();
+        let permit = gw.permit("t").unwrap();
+        assert!(!gw.finish_readonly_reply(&permit, "已核对").unwrap());
+        assert_eq!(gw.0.task("t").unwrap()["status"], "running");
+    }
+    #[test]
     fn stop_is_durable_before_cleanup_and_prevents_a_late_commit() {
         let (store, gw, id) = fixture();
         let receipt = request_stop(&store, "t", &id, "user-stop").unwrap();

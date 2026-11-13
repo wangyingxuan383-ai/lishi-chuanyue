@@ -309,6 +309,10 @@ pub fn normalize_record(value: &Value, issues: &mut Vec<String>) -> Option<Value
     if !challenge.is_empty() {
         out.insert("challenge".into(), Value::Object(challenge));
     }
+    if let Some(raw) = v.get("continuity") {
+        let continuity = crate::continuity::normalize(raw, issues);
+        if continuity.as_object().is_some_and(|value| !value.is_empty()) { out.insert("continuity".into(), continuity); }
+    }
     let prefix = Regex::new(r"^\s*(?:[0-9一二三四五六]+[.、)）]|[-*•])\s*").unwrap();
     let choices: Vec<String> = arr(&v["choices"])
         .into_iter()

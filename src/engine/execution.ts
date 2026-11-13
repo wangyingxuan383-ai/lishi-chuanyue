@@ -1,13 +1,12 @@
 import type { ExecutionSnapshot, Json, Platform } from "../platform";
 import type { LlmConfig } from "./game";
 import type { ChatMessage } from "./llm/chat";
-import type { ExecutionMode, WorldSettings, WorldState } from "./types";
+import type { WorldSettings, WorldState } from "./types";
 
 /** Entry data, persisted without credentials. The native core owns everything afterwards. */
 export interface RunPlan {
   id: string; worldId: string; lineId: string; headId: string; baseId: string | null;
   kind: "turn" | "variant" | "continue" | "opening" | "correction" | "ask" | "autoplay";
-  executionMode: ExecutionMode;
   model: LlmConfig;
   messages: ChatMessage[];
   extractMessages: ChatMessage[];

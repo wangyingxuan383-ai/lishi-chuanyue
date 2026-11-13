@@ -14,151 +14,11 @@ fn safe_minute(value: &Value) -> Option<f64> {
         .as_f64()
         .filter(|n| n.is_finite() && n.fract() == 0.0 && *n >= 0.0 && *n <= 9_007_199_254_740_991.0)
 }
-fn validate_date_input(raw: &Value, rules: &Value, field: &str) -> Result<()> {
-    let era = ws::text(raw, "era");
-    let maximum = if ["公元", "公元前"].contains(&era) { 9999 } else { calendar::MAX_CUSTOM_ERA_YEAR };
-    if !raw["year"].as_f64().is_some_and(|year| year.fract() == 0.0 && (1.0..=maximum as f64).contains(&year)) {
-        return Err(invalid(&format!("{field}.year={} 无效，允许范围为1～{maximum}的整数", raw["year"])));
-    }
-    if !raw["month"].as_i64().is_some_and(|month| (1..=12).contains(&month)) {
-        return Err(invalid(&format!("{field}.month={} 无效，允许范围为1～12的整数", raw["month"])));
-    }
-    let date = calendar::coerce_date(raw, rules).ok_or_else(|| invalid(&format!("{field}不是有效日期")))?;
-    if raw.get("day").is_some_and(|day| !day.as_i64().is_some_and(|day| day == date.day && (1..=calendar::month_days(&date)).contains(&day))) {
-        return Err(invalid(&format!("{field}.day={} 无效，该月允许范围为1～{}", raw["day"], calendar::month_days(&date))));
-    }
-    if !raw["ceYear"].is_null() && raw["ceYear"].as_i64() != date.ce_year {
-        return Err(invalid(&format!("{field}.ceYear={}与实际公元年不符；自定纪年请使用null，不能把纪年数字当成公元年", raw["ceYear"])));
-    }
-    Ok(())
-}
-fn validate_calendar(rules: &Value) -> Result<()> {
-    let object = rules.as_object().ok_or_else(|| invalid("历法必须是对象"))?;
-    if object
-        .keys()
-        .any(|k| !["eras", "yearWord", "lunar"].contains(&k.as_str()))
-        || rules.get("lunar").is_some_and(|v| !v.is_boolean())
-        || rules
-            .get("yearWord")
-            .is_some_and(|v| !v.as_str().is_some_and(|s| s.chars().count() <= 24))
-    {
-        return Err(invalid("历法字段无效"));
-    }
-    if let Some(eras) = rules.get("eras") {
-        let eras = eras.as_array().ok_or_else(|| invalid("年号表必须是列表"))?;
-        let mut previous = None;
-        let mut names = std::collections::HashSet::new();
-        for era in eras {
-            let name = era["name"].as_str().unwrap_or("").trim();
-            let ce = era["startCe"]
-                .as_i64()
-                .filter(|n| *n != 0 && (-9999..=9999).contains(n))
-                .ok_or_else(|| invalid("年号起始年份无效"))?;
-            let month = era
-                .get("startMonth")
-                .map(|v| v.as_i64())
-                .unwrap_or(Some(1))
-                .filter(|n| (1..=12).contains(n))
-                .ok_or_else(|| invalid("年号起始月份无效"))?;
-            let at = calendar::month_index(ce, month);
-            if name.is_empty()
-                || name.encode_utf16().count() > 12
-                || !names.insert(name.to_owned())
-                || previous.is_some_and(|old| old >= at)
-                || era
-                    .get("firstYear")
-                    .is_some_and(|v| !v.as_i64().is_some_and(|n| (1..=9999).contains(&n)))
-                || era
-                    .get("yearWord")
-                    .is_some_and(|v| !v.as_str().is_some_and(|s| s.chars().count() <= 24))
-            {
-                return Err(invalid(
-                    "年号表须按生效时间排序，且名称、纪年不得重复或越界",
-                ));
-            }
-            previous = Some(at);
-        }
-    }
-    Ok(())
-}
-
-/// Basic invariants apply even when an unrelated edit retains an old unknown
-/// calendar. Stricter date requirements belong to a clock transition below.
 pub(crate) fn validate_state_clock(state: &Value) -> Result<()> {
-    if !state["time"]["elapsedMinutes"]
-        .as_f64()
-        .is_some_and(|n| n.is_finite() && n >= 0.0 && n <= 9_007_199_254_740_991.0)
-    {
-        return Err(invalid("经过时间必须是非负有限数值"));
-    }
-    if state["time"].get("startHour").is_some_and(|v| {
-        !v.as_f64()
-            .is_some_and(|n| n.is_finite() && (0.0..24.0).contains(&n))
-    }) {
-        return Err(invalid("开局时间须在0至24点之间"));
-    }
-    for (key, choices) in [
-        ("clockStyle", ["era", "elapsed"]),
-        ("timeStyle", ["24h", "shichen"]),
-    ] {
-        if state["era"]
-            .get(key)
-            .is_some_and(|v| !v.as_str().is_some_and(|s| choices.contains(&s)))
-        {
-            return Err(invalid("时间显示方式无效"));
-        }
-    }
-    Ok(())
+    crate::rules::clock::validate_state_clock(state).map_err(Error::Invalid)
 }
-
-fn clock_configuration(state: &Value) -> Value {
-    json!({"mode":state["era"]["mode"],"clockStyle":state["era"]["clockStyle"],"timeStyle":state["era"]["timeStyle"],"calendar":state["era"]["calendar"],"start":state["time"]["start"],"date":state["time"]["date"],"hasDate":state["time"].get("date").is_some(),"startHour":state["time"]["startHour"],"anchor":state["time"]["anchor"]})
-}
-
-/// Reject newly introduced invalid time settings without forcing a legacy
-/// undated story to invent a date just to edit money, people or other facts.
 pub(crate) fn validate_clock_transition(before: &Value, after: &Value) -> Result<()> {
-    validate_state_clock(after)?;
-    if clock_configuration(before) == clock_configuration(after) { return Ok(()); }
-    if let Some(rules) = after["era"].get("calendar").filter(|v| !v.is_null()) {
-        validate_calendar(rules)?;
-    }
-    if let Some(date) = after["time"].get("date").filter(|v| !v.is_null()) {
-        if after["era"]["mode"] == "free"
-            && before["time"]["date"] != *date
-            && !["公元", "公元前"].contains(&ws::text(date, "era"))
-            && !date.get("ceYear").is_some_and(Value::is_null)
-        {
-            return Err(invalid("time.date.ceYear必须显式为null：自由世界的自定纪年不映射为公元年"));
-        }
-        validate_date_input(date, &after["era"]["calendar"], "time.date")?;
-    }
-    if let Some(anchor) = after["time"].get("anchor").filter(|v| !v.is_null()) {
-        if after["era"]["mode"] == "free"
-            && before["time"]["anchor"] != *anchor
-            && !["公元", "公元前"].contains(&ws::text(&anchor["date"], "era"))
-            && !anchor["date"].get("ceYear").is_some_and(Value::is_null)
-        {
-            return Err(invalid("anchor.date.ceYear必须显式为null：自由世界的自定纪年不映射为公元年"));
-        }
-        validate_date_input(&anchor["date"], &after["era"]["calendar"], "anchor.date")?;
-        if calendar::read_clock_anchor(anchor, &after["era"]["calendar"]).is_none() {
-            return Err(invalid(
-                "日期锚点无效：请提供有效日期、非负经过分钟和0至1439的当天分钟",
-            ));
-        }
-    }
-    let style = after["era"]["clockStyle"].as_str().unwrap_or(if after["era"]["mode"] == "free" {"elapsed"} else {"era"});
-    if style == "era" {
-        let rules = &after["era"]["calendar"];
-        let date = if after["time"].get("date").is_some() {
-            calendar::coerce_date(&after["time"]["date"], rules)
-        } else { calendar::read_date(&after["time"]["start"], rules) };
-        if date.is_none() && calendar::read_clock_anchor(&after["time"]["anchor"], rules).is_none() {
-            return Err(invalid("clockStyle=era须有有效time.date或anchor；只切换显示方式不能设置纪年"));
-        }
-    }
-    Ok(())
+    crate::rules::clock::validate_clock_transition(before, after).map_err(Error::Invalid)
 }
 
 fn current_state(db: &Connection, plan: &RunPlan) -> Result<Value> {
@@ -203,7 +63,7 @@ fn clock_of(state: &Value, plan: &RunPlan) -> Value {
     } else {
         json!(calendar::read_date(&state["time"]["start"], &rules))
     };
-    json!({"mode":state["era"]["mode"],"clockStyle":style,"timeStyle":state["era"]["timeStyle"].as_str().unwrap_or(if style=="elapsed"{"24h"}else{"shichen"}),"date":date,"hour":state["time"]["startHour"].as_f64().unwrap_or(8.0),"label":state["time"]["start"],"rules":rules,"anchor":state["time"]["anchor"]})
+    json!({"mode":state["era"]["mode"],"clockStyle":style,"timeStyle":state["era"]["timeStyle"].as_str().unwrap_or(if style=="elapsed"{"24h"}else{"shichen"}),"date":date,"hour":state["time"]["startHour"].as_f64().unwrap_or(8.0),"label":state["time"]["start"],"rules":rules,"anchor":state["time"]["anchor"],"elapsedAnchor":state["time"]["elapsedAnchor"]})
 }
 
 pub(crate) fn read_clock(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Value> {
@@ -250,30 +110,16 @@ pub(crate) fn stage_clock(
             {
                 return Err(invalid("显示校准不能修改历史时长，请使用correct_history"));
             }
+            let mut changes = Map::new();
+            for key in ["clockStyle", "timeStyle", "calendar", "anchor", "elapsedAnchor"] {
+                if let Some(value) = args.get(key) { changes.insert(key.into(), value.clone()); }
+            }
+            let after = crate::rules::clock::apply_display(&before, &changes.clone().into()).map_err(Error::Invalid)?;
             let mut patch = json!({"era":{},"time":{}});
-            for key in ["clockStyle", "timeStyle", "calendar"] {
-                if let Some(value) = args.get(key) {
-                    patch["era"][key] = value.clone();
-                }
+            for (key, value) in changes {
+                let section = if ["anchor", "elapsedAnchor"].contains(&key.as_str()) {"time"} else {"era"};
+                patch[section][key] = value;
             }
-            if let Some(anchor) = args.get("anchor") {
-                patch["time"]["anchor"] = anchor.clone();
-            }
-            if patch["era"].as_object().unwrap().is_empty()
-                && patch["time"].as_object().unwrap().is_empty()
-            {
-                return Err(invalid("请选择显示方式或提供日期锚点"));
-            }
-            let mut after = before.clone();
-            for key in ["clockStyle", "timeStyle", "calendar"] {
-                if let Some(value) = patch["era"].get(key) {
-                    after["era"][key] = value.clone();
-                }
-            }
-            if let Some(anchor) = patch["time"].get("anchor") {
-                after["time"]["anchor"] = anchor.clone();
-            }
-            validate_clock_transition(&before, &after)?;
             after_now = calendar::now_of(&clock_of(&after, plan), before_elapsed);
             if after["era"]["clockStyle"] == "era" && after_now["date"].is_null() {
                 return Err(invalid("anchor.date超出可显示日期范围，请校准到当前经过时间内的有效纪年"));
@@ -282,7 +128,7 @@ pub(crate) fn stage_clock(
             stage["value"] = patch;
         }
         "correct_history" => {
-            if ["clockStyle", "timeStyle", "calendar", "anchor"]
+            if ["clockStyle", "timeStyle", "calendar", "anchor", "elapsedAnchor"]
                 .iter()
                 .any(|k| args.get(k).is_some())
             {
@@ -346,9 +192,10 @@ pub(crate) fn stage_clock(
 
 pub(crate) fn catalog() -> Vec<ToolDefinition> {
     let anchor = json!({"type":["object","null"],"properties":{"atElapsedMinutes":{"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_u64},"date":{"type":"object","description":"有效GameDate：era/year/month/day/lunar；自定纪年year允许1～999999999，ceYear必须为null，不把自定纪年映射成公元。阳历式纪年仍为12个月、不含闰日。"},"minuteOfDay":{"type":"integer","minimum":0,"maximum":1439}},"required":["atElapsedMinutes","date","minuteOfDay"],"additionalProperties":false});
+    let elapsed_anchor = json!({"type":["object","null"],"properties":{"atElapsedMinutes":{"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_u64},"day":{"type":"integer","minimum":1,"maximum":9_007_199_254_740_991_u64},"minuteOfDay":{"type":"integer","minimum":0,"maximum":1439}},"required":["atElapsedMinutes","day","minuteOfDay"],"additionalProperties":false});
     vec![
         ToolDefinition { name:"read_clock", description:"读取本局当前或指定经过分钟的日期、时间与锚点。实际经过时间和显示校准独立，不改变世界类型。",parameters:json!({"type":"object","properties":{"atElapsedMinutes":{"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_u64}},"required":[],"additionalProperties":false}),read_only:true },
-        ToolDefinition { name:"stage_clock", description:"调整时间：display切换纪年/经过天和24h/时辰，或用anchor把指定经过分钟映射为日期与当天分钟，不改年龄、期限和已过时间；correct_history须指定剧情nodeId，修改record.time后由核心重算后续状态，不能只改头部。可分别多次暂存。",parameters:json!({"type":"object","properties":{"operation":{"type":"string","enum":["display","correct_history"]},"clockStyle":{"type":"string","enum":["era","elapsed"]},"timeStyle":{"type":"string","enum":["24h","shichen"]},"anchor":anchor,"calendar":{"type":"object"},"nodeId":{"type":"string"},"time":{"type":["number","string"]},"hour":{"type":["number","null"],"minimum":0,"exclusiveMaximum":24},"routeId":{"type":"string"},"summary":{"type":"string","minLength":1}},"required":["operation","summary"],"additionalProperties":false}),read_only:false },
+        ToolDefinition { name:"stage_clock", description:"调整时间：display切换纪年/经过天和24h/时辰，或用anchor把指定经过分钟映射为日期与当天分钟、elapsedAnchor映射为第N天与当天分钟，不改年龄、期限和已过时间；correct_history须指定剧情nodeId，修改record.time后由核心重算后续状态，不能只改头部。可分别多次暂存。",parameters:json!({"type":"object","properties":{"operation":{"type":"string","enum":["display","correct_history"]},"clockStyle":{"type":"string","enum":["era","elapsed"]},"timeStyle":{"type":"string","enum":["24h","shichen"]},"anchor":anchor,"elapsedAnchor":elapsed_anchor,"calendar":{"type":"object"},"nodeId":{"type":"string"},"time":{"type":["number","string"]},"hour":{"type":["number","null"],"minimum":0,"exclusiveMaximum":24},"routeId":{"type":"string"},"summary":{"type":"string","minLength":1}},"required":["operation","summary"],"additionalProperties":false}),read_only:false },
     ]
 }
 
@@ -390,6 +237,61 @@ mod tests {
         db.execute("INSERT INTO agent_tasks(id,session_id,run_id,text,policy,status,base_json,created_at,updated_at) VALUES('task','session','run','时间调整','auto-reversible','running',?,'test','test')", [base.to_string()]).unwrap();
         let plan = serde_json::from_value(json!({"id":"run","worldId":"world","lineId":"line","headId":"n2","baseId":"n2","kind":"agent","model":{"slot":"main","url":"","model":"fixture","auxModel":null,"includeUsage":false,"maxTokens":null,"extra":{}},"messages":[],"extractMessages":[],"state":state(10,5),"settings":{},"options":{},"action":{},"meta":{"agent":{"taskId":"task"}}})).unwrap();
         (db, plan)
+    }
+
+    #[test]
+    fn continuity_history_adoption_reanchors_quotes_to_the_copied_node() {
+        let(mut db,plan)=fixture();
+        let change=json!({"knowledge":[{"id":"seen","person":"protagonist","claim":"旅人见到正文中的消息","awareness":"witnessed","source":{"from":"narrative","nodeId":"n1","quote":"正文1"}}]});
+        ws::stage(&db,&plan,"task",&json!({"kind":"node","id":"n1","path":"/record/continuity","operation":"set","value":change,"summary":"补记本回合获知"})).unwrap();
+        let tx=db.transaction().unwrap();ws::apply(&tx,&plan,"task","补记获知").unwrap();tx.commit().unwrap();
+        let head:String=db.query_row("SELECT l.node_id FROM lines l JOIN worlds w ON w.current_line_id=l.id WHERE w.id='world'",[],|r|r.get(0)).unwrap();
+        let projected=crate::continuity::project(&db,"world",&head).unwrap();assert_eq!(projected["knowledge"][0]["awareness"],"witnessed");assert_ne!(projected["knowledge"][0]["source"]["nodeId"],"n1");
+        assert_eq!(crate::continuity::project(&db,"world","n2").unwrap()["knowledge"],json!([]));
+    }
+
+    #[test]
+    fn clock_elapsed_calibration_has_its_own_day_axis_and_keeps_ages() {
+        let elapsed = 4054.0 * 1440.0 + 725.0;
+        let mut clock = json!({"mode":"free","clockStyle":"elapsed","timeStyle":"24h","hour":8,"date":null,"rules":{"lunar":false},"anchor":anchor(elapsed),"elapsedAnchor":{"atElapsedMinutes":elapsed,"day":31,"minuteOfDay":1430}});
+        assert_eq!(calendar::now_of(&clock, elapsed)["text"], "第 31 天 · 23:50");
+        assert_eq!(calendar::now_of(&clock, elapsed+20.0)["text"], "第 32 天 · 00:10");
+        assert_eq!(calendar::now_of(&clock, elapsed-1440.0)["text"], "第 30 天 · 23:50");
+        assert_eq!(calendar::new_years_between(&clock, elapsed, elapsed+525600.0), 1.0);
+        clock["clockStyle"]="era".into();
+        assert_eq!(calendar::now_of(&clock, elapsed)["text"], "斗罗2631年 5月8日 · 20:05");
+        assert_eq!(calendar::now_of(&clock, elapsed)["day"], 4055.0);
+        clock["clockStyle"]="elapsed".into();
+        clock["elapsedAnchor"]=json!({"atElapsedMinutes":elapsed,"day":0,"minuteOfDay":0});
+        // Invalid imported optional anchors fall back to the legacy formula.
+        assert_eq!(calendar::now_of(&clock, elapsed)["text"], "第 4055 天 · 20:05");
+    }
+
+    #[test]
+    fn clock_manual_record_and_agent_share_calibration_and_atomic_validation() {
+        let before=state(10, 5);
+        let changes=json!({"clockStyle":"elapsed","timeStyle":"24h","elapsedAnchor":{"atElapsedMinutes":10,"day":4055,"minuteOfDay":1205}});
+        let result=crate::rules::apply_record(&before,&json!({"rules":{"clock":changes}}),&json!({"mode":"do","advanceTime":false})).unwrap();
+        let after=&result["state"];
+        assert_eq!(after["time"]["elapsedMinutes"],10.0);
+        assert_eq!(after["protagonist"]["age"],20);
+        assert_eq!(after["era"]["mode"],"free");
+        assert_eq!(calendar::now_of(&clock_of(after,&fixture().1),10.0)["text"],"第 4055 天 · 20:05");
+        for bad in [json!({"elapsedAnchor":{"atElapsedMinutes":10,"day":0,"minuteOfDay":0}}),json!({"elapsedAnchor":{"atElapsedMinutes":10,"day":1,"minuteOfDay":1440}}),json!({"clockStyle":"era"}),json!({"elapsedMinutes":0})] {
+            assert!(crate::rules::apply_record(&before,&json!({"money":100,"rules":{"clock":bad}}),&json!({"advanceTime":false})).is_err());
+        }
+        assert_eq!(before,state(10,5));
+        let (db,plan)=fixture();
+        let mut args=changes;
+        args["operation"]="display".into(); args["summary"]="直接日序校准".into();
+        let staged=stage_clock(&db,&plan,"task",&args).unwrap();
+        assert_eq!(staged["afterDisplay"],"第 4055 天 · 20:05");
+        let tx=db.unchecked_transaction().unwrap();
+        ws::apply(&tx,&plan,"task","日序校准").unwrap(); tx.commit().unwrap();
+        let formal=ws::resource(&db,&plan,"state","").unwrap();
+        assert_eq!(formal["time"]["elapsedAnchor"],after["time"]["elapsedAnchor"]);
+        let tx=db.unchecked_transaction().unwrap(); ws::undo(&tx,"task").unwrap(); tx.commit().unwrap();
+        assert_eq!(ws::resource(&db,&plan,"state","").unwrap(),before);
     }
 
     #[test]

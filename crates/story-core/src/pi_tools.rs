@@ -12,6 +12,8 @@ const NAMES: &[&str] = &[
     "read_resource",
     "search_resources",
     "read_world",
+    "read_story_resources",
+    "read_continuity",
     "stage_edit",
     "stage_story_turn",
     "stage_route",
@@ -57,6 +59,7 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
         .into_iter()
         .filter(|t| supports(t.name)||crate::pi_async::supports(t.name))
         .map(|mut tool| {
+            if tool.name=="read_skill_resource" {tool.parameters["properties"]["version"]=json!({"type":"string","maxLength":64});}
             if tool.name=="run_script" {tool.description="运行受控JavaScript，调用示例：const r=await tools.read_resource({kind:'settings'}); text(r.value)。工具由tools.<工具名>(参数)调用。分页：for await (const page of pages('read_resource',{kind:'people'})) 可读取每页；const items=await collectPages('read_resource',{kind:'people'},{maxPages:5}) 直接返回数组，使用items.length，不是items.items。第一个参数必须是工具名称字符串，不能传回调。支持text/store/load，不能访问Node、文件、裸网络或直接提交任务。";}
             if tool.name=="finish_task" {tool.description="按已选策略采用核对通过的完整独立资源组，未通过部分保留草稿。采用后立即关闭本批写权限；用read_commit_receipt/read_committed_snapshot/read_tool_result核对固定回执和正式快照，再更新计划并简要答复。不能继续编辑、重复提交或把部分采用说成全部完成；查询不产生剧情。";}
             if tool.name=="check_draft" {
@@ -87,6 +90,8 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
     let mut facts=ToolDefinition{name:"read_fact_sources",description:"读取本局正式采用的事实来源和原句。按nodeId可定位历史回合；basis区分原著、玩家分支、本局自定与一致性。来源匹配不证明解释必然正确；新草稿不能把旧来源当成新的原著证据。",parameters:json!({"type":"object","properties":{"nodeId":{"type":"string"},"basis":{"type":"string"}},"additionalProperties":false}),read_only:true};paging_schema(&mut facts.parameters);tools.push(facts);
     tools.extend(crate::pi_history::catalog());
     tools.push(ToolDefinition{name:"draft_tool_package",description:"准备纯JavaScript工具包草稿。manifest遵循schema1/API1.0.0或1.0.1，files为包内相对路径到文字的映射；本地无IO检查后保存草稿，玩家采用和启用前不能执行。不提供Node、Shell、Tauri或任意设备权限。",parameters:json!({"type":"object","properties":{"manifest":{"type":"object"},"files":{"type":"object"}},"required":["manifest","files"],"additionalProperties":false}),read_only:false});
+    // Shared ordinary schemas, without broadening the retired Agent catalog.
+    tools.extend(crate::tools::catalog().into_iter().filter(|tool| matches!(tool.name, "read_story_resources" | "read_continuity")));
     tools.extend(crate::pi_documents::catalog());
     tools.extend(crate::pi_browser::catalog());
     tools.push(ToolDefinition{name:"list_tool_packages",description:"查看本任务启动时已启用的纯JavaScript工具包、版本、入口和工具名。工具包不能自行安装、授权或访问Node；不兼容的接口会明确失败。",parameters:json!({"type":"object","properties":{},"additionalProperties":false}),read_only:true});
@@ -135,6 +140,7 @@ pub(crate) fn call(
 ) -> Result<Value> {
     let args = &request.args;
     match request.tool.as_str() {
+        "read_story_resources" | "read_continuity" => crate::ordinary_resources::read(db, plan, &request.tool, &request.args),
         "discover_tools" => {
             let all = definitions();
             let names = args["names"]
@@ -535,6 +541,9 @@ fn skill_resource(db: &Connection, task: &Value, plan: &RunPlan, request: &PiCal
     // file or hash for the method whose version was already read.
     let (source_call,skill) = prior_skill(db, task, id, &actor)?
         .ok_or_else(|| invalid("请先read_skill取得本任务固定的技能版本及资源定位"))?;
+    if args.get("version").is_some_and(|version|version!=&skill["version"]) {
+        return Err(invalid("资源版本与本任务固定的技能版本不一致，请使用read_skill返回的版本"));
+    }
     let content = if path == "SKILL.md" {
         skill["body"].as_str()
     } else {
@@ -681,6 +690,14 @@ pub(crate) fn script_delivery(call_id:&str,result:Value)->Value {
     json!({"ok":result["ok"],"data":{"paged":true,"storedResult":true,"callId":call_id,"readTool":"read_tool_result","read":{"callId":call_id,"pageSize":40,"charBudget":12000},"message":"完整结构超过256KiB；未返回内容。请用pages(read_tool_result,read)读取，不能把分页定位当作value/resources。"}})
 }
 pub(crate) fn delivery(call_id: &str, tool: &str, mut result: Value) -> Value {
+    if tool=="read_skill" && result["ok"]==true {
+        let resources=crate::skills::resource_directory(&result["data"]);
+        if let Some(data)=result["data"].as_object_mut() {
+            // pi_calls retains all files, while the model sees paths only.
+            data.remove("files");
+            data.insert("resources".into(),resources);
+        }
+    }
     // Loadout control must survive display pagination. The trusted host has
     // already registered these native schemas; this adds no authority.
     let loadout=if tool=="discover_tools"&&result["ok"]==true {
@@ -718,12 +735,15 @@ mod actor_tests {
     struct Fixture { store: Store, gateway: StoryToolGateway, permit: TaskPermit, version: String, child: ChildAuthority, delegation: PiCallRequest }
     impl Fixture {
         fn new(body: &str) -> Self {
+            Self::configured(json!({"skills":["owned-skill"],"customSkills":[{"id":"owned-skill","name":"独立技能","version":"1.0.0","hash":"fixed-skill","content":body,"files":{"references/note.md":"同版本支持资料"}}]}))
+        }
+        fn configured(config: Value) -> Self {
             let mut db=Connection::open_in_memory().unwrap();
             db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
             crate::migration::migrate(&mut db,None).unwrap();
             db.execute_batch("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w','隔离技能','free','l','{\"premise\":\"正式设定\"}','test','test','test');INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n','w',0,'opening','独立正文','test');INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l','w','主线','n','test');INSERT INTO states(node_id,state_json) VALUES('n','{\"time\":{\"start\":\"第一天\",\"elapsedMinutes\":0},\"source\":null}');INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES('s','w','l','技能隔离','test','test')").unwrap();
             let store=Store(Arc::new(Mutex::new(db)));let gateway=StoryToolGateway::new(store.clone());
-            let task=gateway.start_task("s","t","核对技能","auto-reversible",false,json!({"model":"no-http"}),json!({"skills":["owned-skill"],"customSkills":[{"id":"owned-skill","name":"独立技能","version":"1.0.0","hash":"fixed-skill","content":body,"files":{"references/note.md":"同版本支持资料"}}]})).unwrap();
+            let task=gateway.start_task("s","t","核对技能","auto-reversible",false,json!({"model":"no-http"}),config).unwrap();
             let permit=gateway.permit("t").unwrap();let version=ws::text(&task,"base_world_version").to_owned();
             let delegation=PiCallRequest{task_id:"t".into(),call_id:"delegate".into(),tool:"delegate_readonly".into(),args:json!({"tasks":[{"name":"只读技能核对","prompt":"读取所选技能，不替主助手完成执行门槛"}]}),intent_revision:0,world_version:version.clone(),external_write:false};
             let prepared=gateway.prepare_children(&permit,&delegation).unwrap();assert_eq!(prepared["ok"],true,"{prepared}");
@@ -742,6 +762,35 @@ mod actor_tests {
             assert_eq!(self.gateway.finish_children(&self.permit,&self.delegation).unwrap()["ok"],true);
         }
         fn finish(&self,id:&str)->Value {self.root_raw(id,"finish_task",json!({"summary":"已核对独立方法","outcome":"no_changes_needed"}))}
+    }
+
+    #[test]
+    fn builtin_files_stay_in_the_task_snapshot_not_the_automatic_delivery_or_another_task() {
+        let mut skill=crate::skills::read("story-recap").unwrap();
+        skill["hash"]=crate::pi_store::arguments_hash(&skill).into();
+        let expected=skill["files"]["references/method.md"].clone();
+        let f=Fixture::configured(json!({"skills":["story-recap"],"skillSnapshots":[skill]}));
+        assert_eq!(f.root_raw("not-read","read_skill_resource",json!({"id":"story-recap","path":"references/method.md"}))["ok"],false);
+        let delivery=f.root("method","read_skill",json!({"id":"story-recap"}));
+        assert_eq!(delivery["version"],"1.1.0");assert_eq!(delivery["bodyRead"],true);
+        assert!(delivery.get("files").is_none());assert_eq!(delivery["resources"].as_array().unwrap().len(),2);
+        let saved:String=f.store.lock().unwrap().query_row("SELECT output_json FROM pi_calls WHERE task_id='t' AND call_id='method'",[],|row|row.get(0)).unwrap();
+        assert_eq!(ws::parse(&saved)["data"]["files"]["references/method.md"],expected);
+        let mut updated=crate::skills::read("story-recap").unwrap();updated["version"]="9.0.0".into();updated["metadata"]["version"]="9.0.0".into();updated["files"]["references/method.md"]="以后版本的支持资料".into();updated["hash"]=crate::pi_store::arguments_hash(&updated).into();
+        let mut metadata=f.gateway.0.task("t").unwrap()["metadata_json"].clone();metadata["skillSnapshots"]=json!([updated.clone()]);
+        f.store.lock().unwrap().execute("UPDATE pi_tasks SET metadata_json=? WHERE id='t'",[metadata.to_string()]).unwrap();
+        let fixed=f.root("support","read_skill_resource",json!({"id":"story-recap","path":"references/method.md","version":"1.1.0","limit":24000}));
+        assert_eq!(fixed["text"],expected);assert_eq!(fixed["version"],"1.1.0");
+        assert_eq!(f.root_raw("wrong-version","read_skill_resource",json!({"id":"story-recap","path":"references/method.md","version":"9.0.0"}))["ok"],false);
+        assert_eq!(f.root_raw("escape","read_skill_resource",json!({"id":"story-recap","path":"../SKILL.md"}))["ok"],false);
+        assert_eq!(f.child_raw("cannot-inherit","read_skill_resource",json!({"id":"story-recap","path":"references/method.md"}))["ok"],false);
+        f.end_child();assert_eq!(f.finish("done")["ok"],true);
+        let other=f.gateway.start_task("s","next-task","核对新版技能","auto-reversible",false,json!({"model":"no-http"}),json!({"skills":["story-recap"],"skillSnapshots":[updated]})).unwrap();
+        let permit=f.gateway.permit("next-task").unwrap();let version=ws::text(&other,"base_world_version").to_owned();
+        let call=|id:&str,tool:&str,args:Value|f.gateway.invoke(&permit,PiCallRequest{task_id:"next-task".into(),call_id:id.into(),tool:tool.into(),args,intent_revision:0,world_version:version.clone(),external_write:false}).unwrap();
+        assert_eq!(call("foreign-method","read_skill_resource",json!({"id":"story-recap","path":"references/method.md"}))["ok"],false,"a previous task's read does not authorize the new one");
+        assert_eq!(call("new-method","read_skill",json!({"id":"story-recap"}))["data"]["version"],"9.0.0");
+        assert_eq!(call("new-support","read_skill_resource",json!({"id":"story-recap","path":"references/method.md","version":"9.0.0"}))["data"]["text"],"以后版本的支持资料");
     }
 
     #[test]

@@ -573,6 +573,41 @@ impl StoryToolGateway {
         Ok(())
     }
 
+    /// A read-only task whose model replied without calling finish_task: the
+    /// reply is the whole result when nothing is staged, no question waits,
+    /// no child is checking and no canon finding is owed. Anything else stays
+    /// an interruption so a missing receipt is never faked (R26).
+    pub(crate) fn finish_readonly_reply(&self, permit: &TaskPermit, answer: &str) -> Result<bool> {
+        if answer.trim().is_empty() { return Ok(false); }
+        let mut db = self.0 .0.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = task_row(&tx, &permit.task_id)?;
+        if task["read_only"] != 1 || !["running", "committing"].contains(&ws::text(&task, "status")) || !task["question_json"].is_null()
+            || task["stop_revision"].as_i64().unwrap_or(0) > 0 || crate::pi_lifecycle::attempt(&task) != permit.attempt_id() {
+            return Ok(false);
+        }
+        if !ws::changes(&ws::workspace(&tx, &permit.task_id)?).is_empty()
+            || tx.query_row("SELECT EXISTS(SELECT 1 FROM pi_children WHERE task_id=? AND status IN ('prepared','running'))", [&permit.task_id], |r| r.get::<_, bool>(0))?
+            || crate::pi_goal_report::requires_canon(&tx, &task)?
+            || task["intent_revision"].as_i64().unwrap_or(0) != task["consumed_intent_revision"].as_i64().unwrap_or(0)
+            || tx.query_row("SELECT EXISTS(SELECT 1 FROM pi_inputs WHERE task_id=? AND status='pending' AND delivery IN ('steer','answer'))", [&permit.task_id], |r| r.get::<_, bool>(0))? {
+            return Ok(false);
+        }
+        // Same rule as finish_task: an explicitly chosen skill must have been read in full first.
+        let metadata = ws::parse(ws::text(&task, "metadata_json"));
+        for id in metadata["skills"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            if !metadata["skillReads"].as_array().into_iter().flatten().any(|read| read["id"] == id && ws::text(read, "actor").is_empty() && read["status"] == "fetched" && read["bodyRead"] == true) {
+                return Ok(false);
+            }
+        }
+        let summary: String = answer.chars().take(2000).collect();
+        let result = json!({"status":"answered","goalStatus":"completed","goalCompleted":true,"summary":summary,"changed":false,"changes":[],"implicitFinish":true});
+        tx.execute("UPDATE pi_tasks SET status='completed',result_json=?,updated_at=? WHERE id=?", params![result.to_string(), ws::now(), permit.task_id])?;
+        release_finished(&tx, &task)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Called only after Pi confirms cancellation or a transport failure.
     /// The old execution cannot mark a resumed owner's task as interrupted.
     pub fn interrupt(&self, permit: &TaskPermit, reason: &str) -> Result<()> {
@@ -784,7 +819,7 @@ fn task_plan(db: &Connection, task: &Value) -> Result<RunPlan> {
     // Business methods accept this existing rule context, without any model
     // authority, transcript, request scheduling or extraction messages.
     let plan = json!({"id":task["id"],"worldId":task["world_id"],"lineId":base["lineId"],"headId":base["headId"],
-        "baseId":null,"kind":"pi_task","executionMode":"classic",
+        "baseId":null,"kind":"pi_task",
         "model":{"slot":"","url":"","model":"","auxModel":null,"includeUsage":false,"maxTokens":null,"extra":{}},
         "messages":[],"extractMessages":[],"state":{},"settings":{},"options":{},"action":{},
         "meta":{"agent":{"taskId":task["id"],"sessionId":task["session_id"],"referenceScope":metadata["referenceScope"],"skills":metadata["skills"],"skillSnapshots":metadata["skillSnapshots"],"customSkills":metadata["customSkills"],"network":metadata["network"],"readOnly":task["read_only"]==1}}});

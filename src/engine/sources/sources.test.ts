@@ -3,7 +3,7 @@ import { zipSync, strToU8 } from "fflate";
 import { createMemoryPlatform } from "../../platform/memory";
 import { Game } from "../game";
 import { sampleState } from "../testing/fixtures";
-import { fakeLlm, RECORD } from "../testing/fakeLlm";
+import { fakeLlm } from "../testing/fakeLlm";
 import { parseBook, decodeText } from "./parse";
 import { analysisJobs, deleteBook, fitReference, getBook, referenceBlock, referenceContext, referenceEvidenceBlock, saveBook } from "./library";
 import { newBinding, type SourceBook } from "./types";
@@ -98,36 +98,4 @@ describe("external books", () => {
     expect(JSON.stringify(llm.calls)).not.toContain("终章秘密");
   });
 
-  it("uses saved source settings for opening, skip, regenerate, edited interrupted continuation and ask", async () => {
-    const llm = fakeLlm([
-      { text: "你走进书铺，阿青向你点头。" + RECORD({ time: "0", place: "书铺" }) },
-      { text: "几天后，阿兰仍安然住在书铺。" + RECORD({ time: "三天" }) },
-      { text: "你在书铺过了三天，阿青照看着妹妹。" + RECORD({ time: "三天" }) },
-      { text: "纸包里是一把钥匙，阿青让你先收好。" + RECORD({ time: "十分钟" }) },
-      { text: "【原著参考·第一章 灯】阿青重信守诺。" },
-    ]);
-    const game = await Game.open(await createMemoryPlatform(llm), llmConfig), book = shortBook(); await saveBook(game.repo, book);
-    const source = { ...newBinding(book.id, true), through: 0 };
-    const id = (await game.createWorld({ source, title: "开局引用", eraId: null, settings: { mode: "free", chapterEvery: 0, autoUpkeep: false, fortune: "off" }, protagonist: { name: "沈舟", gender: "男", age: 20, identity: "旅人" }, arrival: "不穿越", origin: "", opening: { mode: "ai", hint: "在书铺碰见阿青" } }, () => {}))!;
-    let c = await tree.cursor(game.repo, id); expect(c.head.meta.reference).toBeDefined();
-    await game.play(id, { mode: "skip", text: "过三天；在书铺休息" }, () => {}).done;
-    expect((await tree.cursor(game.repo, id)).head.meta.reference).toBeDefined();
-    const changed = { ...source, instructions: "按新用法保留已救下的阿兰" };
-    await game.bindSource(id, changed);
-    await game.regenerate(id, "换个写法", () => {}).done;
-    expect(JSON.stringify(llm.calls[2].body)).toContain(changed.instructions);
-    c = await tree.cursor(game.repo, id); expect((await game.repo.getState(c.head.id)).source).toEqual(changed);
-    c = await tree.append(game.repo, c, { kind: "turn", narrative: "你打开纸包，", status: "interrupted", state: await game.repo.getState(c.head.id), actionMode: "do", actionText: "打开纸包" });
-    const continued = { ...changed, instructions: "续写继续参考阿青守信，不恢复原著结局" };
-    await game.bindSource(id, continued);
-    const editId = (await tree.cursor(game.repo, id)).head.id;
-    await game.resumeInterrupted(id, () => {}).done;
-    c = await tree.cursor(game.repo, id);
-    expect(c.head.id).toBe(editId); expect((await game.repo.getState(c.head.id)).source).toEqual(continued);
-    expect((await game.repo.getNode(c.head.parentId!))!.narrative).toContain("纸包里是一把钥匙");
-    expect(JSON.stringify(llm.calls[3].body)).toContain(continued.instructions);
-    expect(await game.ask(id, "阿青性格如何？", () => {})).toContain("原著参考");
-    expect(llm.calls).toHaveLength(5);
-    expect(JSON.stringify(llm.calls)).not.toContain("终章秘密");
-  });
 });

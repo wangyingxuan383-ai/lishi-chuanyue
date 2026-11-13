@@ -431,7 +431,7 @@ pub(crate) fn list_page(db: &Connection, plan: &RunPlan, args: &Value) -> Result
         }
     }
     Ok(
-        json!({"resources":resources,"categories":categories,"currentHead":head(db,plan)?,"lineId":plan.line_id,"offset":offset,"nextOffset":offset+limit,"message":"这是资料定位。按kind分页列出，或search_resources搜索历史；不要反复请求完整目录。"}),
+        json!({"resources":resources,"categories":categories,"currentHead":head(db,plan)?,"lineId":plan.line_id,"offset":offset,"nextOffset":offset.saturating_add(limit),"message":"这是资料定位。按kind分页列出，或search_resources搜索历史；不要反复请求完整目录。"}),
     )
 }
 pub(crate) fn search(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Value> {
@@ -754,7 +754,7 @@ fn page_v2(value:Value,args:&Value)->Value {
     let budget=args["charBudget"].as_u64().or_else(||args["limit"].as_u64()).unwrap_or(6000).clamp(1,24000) as usize;
     let size=args["pageSize"].as_u64().unwrap_or(40).clamp(1,100) as usize;
     let mut page=match &value {
-        Value::String(s)=>{let text=s.chars().skip(offset).take(budget).collect::<String>();json!({"text":text,"total":s.chars().count(),"nextOffset":offset+text.chars().count()})},
+        Value::String(s)=>{let mut used=0;let text=s.chars().skip(offset).take_while(|c|{used+=c.len_utf16();used<=budget}).collect::<String>();if text.is_empty()&&offset<s.chars().count(){return json!({"pageError":{"code":"character_budget_too_small","message":"文字预算不足以返回一个完整字符，请至少设为2"},"complete":false});}json!({"text":text,"total":s.chars().count(),"nextOffset":offset+text.chars().count()})},
         Value::Array(items)=>{
             let mut kept=vec![];let mut oversized=vec![];let mut used=0;let mut next=offset;
             for (index,item) in items.iter().enumerate().skip(offset).take(size) {
@@ -1188,7 +1188,7 @@ fn clock_options(state: &Value, mode: &str, advance: bool) -> Value {
         } else {
             "era"
         });
-    json!({"mode":mode,"advanceTime":advance,"difficulty":"标准","currency":era["currency"],"clock":{"mode":era["mode"],"clockStyle":style,"timeStyle":era["timeStyle"],"anchor":state["time"]["anchor"],"date":state["time"]["date"],"label":state["time"]["start"],"hour":state["time"]["startHour"].as_f64().unwrap_or(8.0),"rules":era["calendar"]}})
+    json!({"mode":mode,"advanceTime":advance,"difficulty":"标准","currency":era["currency"],"clock":{"mode":era["mode"],"clockStyle":style,"timeStyle":era["timeStyle"],"anchor":state["time"]["anchor"],"elapsedAnchor":state["time"]["elapsedAnchor"],"date":state["time"]["date"],"label":state["time"]["start"],"hour":state["time"]["startHour"].as_f64().unwrap_or(8.0),"rules":era["calendar"]}})
 }
 fn validate_state(db: &Connection, state: &Value) -> Result<()> {
     crate::agent_clock::validate_state_clock(state)?;
@@ -1550,7 +1550,7 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
         } else {
             Value::Null
         };
-        let mut remap = HashMap::new();
+        let mut remap: HashMap<String,String> = HashMap::new();
         for old in path.iter().skip(first) {
             let old_id = text(old, "id");
             let mut changed = if local.contains(old_id) {
@@ -1607,6 +1607,16 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
             changed["created_at"] = now().into();
             changed["rewritten"] = 1.into();
             changed["meta"]["agentOriginalNodeId"] = old_id.into();
+            if changed["record"]["continuity"].is_object(){
+                for kind in ["knowledge","threads"] {for item in changed.get_mut("record").and_then(|r|r.get_mut("continuity")).and_then(|r|r.get_mut(kind)).and_then(Value::as_array_mut).into_iter().flatten(){
+                    if let Some(source)=item["source"]["nodeId"].as_str().map(str::to_owned){if source==old_id{item["source"]["nodeId"]=new_id.clone().into();}else if let Some(mapped)=remap.get(&source){item["source"]["nodeId"]=Value::String(mapped.clone());}}
+                    if kind=="knowledge" {let prior=state(tx,&plan.world_id,old_id)?;if let Some(person)=prior["people"].as_array().into_iter().flatten().find(|p|p["id"]==item["person"]){if let Some(p)=next["people"].as_array().into_iter().flatten().find(|p|p["name"]==person["name"]){item["person"]=p["id"].clone();}}}
+                }}
+                let action=json!({"text":changed["action_text"],"directorNote":changed["director_note"]});
+                let (record,_)=crate::continuity::validate_record(tx,&plan.world_id,parent.as_deref().unwrap_or(""),&new_id,text(&changed,"narrative"),&action,&next,&changed["record"],true)?;
+                changed["record"]=record;
+            }
+
             insert_row(tx, "nodes", &encode(changed))?;
             tx.execute(
                 "INSERT INTO states(node_id,state_json) VALUES(?,?)",
@@ -1728,6 +1738,7 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
         let after =
             rules::apply_record(&before, &record, &opts).map_err(Error::Invalid)?["state"].clone();
         let new = id();
+        let (record,_)=crate::continuity::validate_record(tx,&plan.world_id,&current_head,&new,text(turn,"narrative"),&json!({"text":"Agent 写入剧情"}),&after,&record,true)?;
         tx.execute("INSERT INTO nodes(id,world_id,parent_id,seq,kind,action_mode,action_text,narrative,record_json,choices_json,status,meta_json,created_at) VALUES(?,?,?,?, 'turn','continue','Agent 写入剧情',?,?,?,'ok',?,?)",params![new,plan.world_id,current_head,seq+1,text(turn,"narrative"),record.to_string(),turn.get("choices").unwrap_or(&json!([])).to_string(),json!({"agentTaskId":plan.meta["agent"]["taskId"],"settlementOptions":opts}).to_string(),now()])?;
         tx.execute(
             "INSERT INTO states(node_id,state_json) VALUES(?,?)",
@@ -1912,6 +1923,7 @@ pub(crate) fn validate(tx: &Transaction<'_>, plan: &RunPlan, task: &str) -> Resu
     tx.execute_batch("ROLLBACK TO agent_validation; RELEASE agent_validation")?;
     report
 }
+#[cfg(test)]
 pub(crate) fn apply(
     tx: &Transaction<'_>,
     plan: &RunPlan,
@@ -1950,6 +1962,7 @@ pub(crate) fn apply_contents(
     let result = json!({"summary":summary,"changes":changes,"headId":head,"worldChanged":!changes.is_empty(),"undoable":backup.is_some()});
     Ok((result, backup))
 }
+#[cfg(test)]
 pub(crate) fn undo(tx: &Transaction<'_>, task: &str) -> Result<Value> {
     let row = raw(tx, "agent_tasks", "id", task)?;
     if text(&row, "status") != "committed" || text(&row, "policy") != "auto-reversible" {

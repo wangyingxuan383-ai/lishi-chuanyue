@@ -30,7 +30,7 @@ describe("writing assistance", () => {
   });
   it("versions the prompt and keeps rewriting and action polishing factual", () => {
     // The version is kept with each adopted rewrite, not sent to the model.
-    expect(WRITING_PROMPT_VERSION).toBe("writing-2");
+    expect(WRITING_PROMPT_VERSION).toBe("writing-3");
     expect(writingMessages("rewrite", "雨", "", "前文", "do")[0].content).not.toContain(WRITING_PROMPT_VERSION);
     expect(writingMessages("rewrite", "雨", "", "前文", "do")[0].content).toContain("不改变已经发生的事实");
     expect(writingMessages("polish", "去问路", "", "前文", "say")[0].content).toContain("不写行动结果");
@@ -59,6 +59,17 @@ describe("writing assistance", () => {
     expect(await startWriting(s.game, s.request, () => {}).done).toBe("细雨。");
     expect(s.llm.calls).toHaveLength(2);
     expect((await s.platform.sql.query("SELECT outcome FROM usage ORDER BY rowid")).map((x) => x.outcome)).toEqual(["failed", "ok"]);
+  });
+  it("retries a provider context rejection with just the selected text and requirements", async () => {
+    const s = await setup([[{ type: "error", kind: "http", status: 400, message: "context_length_exceeded" }], { text: "细雨。" }]);
+    expect(await startWriting(s.game, s.request, () => {}).done).toBe("细雨。");
+    const sent = s.llm.calls.map(call => JSON.stringify(call.body.messages));
+    expect(sent[0]).toContain("客人推门");
+    expect(sent[1]).not.toContain("客人推门");
+    expect(sent[1]).toContain("雨落下来。");
+    expect(sent[1]).toContain("简练些");
+    expect(sent.join("")).not.toContain("compactContent");
+    expect((await s.platform.sql.query("SELECT outcome FROM usage ORDER BY rowid")).map(row => row.outcome)).toEqual(["failed", "ok"]);
   });
   it("does not retry partial output, and never offers truncated or refused output", async () => {
     for (const script of [

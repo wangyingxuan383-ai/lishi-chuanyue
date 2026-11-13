@@ -120,8 +120,12 @@ impl Fixture {
             .unwrap()
             .into()
     }
-    async fn start(&self, session: &str) -> Value {
-        self.service.request(json!({"op":"start","sessionId":session,"text":"只读取本局资料","readOnly":true,"model":{"slot":"agent-slot","model":"requested-agent","apiKey":"UNTRUSTED-UI-KEY","url":"https://untrusted.invalid/v1","headers":{"Authorization":"UNTRUSTED-UI-KEY"}}})).await.unwrap()
+    async fn start(&self, session: &str) -> Value { self.start_with(session, true).await }
+    /// An editing task: a reply without finish_task leaves it interrupted, which
+    /// the compact/continue tests need. A read-only reply may finish implicitly (R26).
+    async fn start_editing(&self, session: &str) -> Value { self.start_with(session, false).await }
+    async fn start_with(&self, session: &str, read_only: bool) -> Value {
+        self.service.request(json!({"op":"start","sessionId":session,"text":"只读取本局资料","readOnly":read_only,"model":{"slot":"agent-slot","model":"requested-agent","apiKey":"UNTRUSTED-UI-KEY","url":"https://untrusted.invalid/v1","headers":{"Authorization":"UNTRUSTED-UI-KEY"}}})).await.unwrap()
     }
     async fn idle(&self) {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -155,7 +159,7 @@ async fn manual_compact_reopens_pi_without_prompt_or_resetting_requirements_draf
         }
         peer.eof().await;
     });
-    let session=f.session().await;let first=bounded(f.start(&session)).await;f.idle().await;let id=first["taskId"].as_str().unwrap();
+    let session=f.session().await;let first=bounded(f.start_editing(&session)).await;f.idle().await;let id=first["taskId"].as_str().unwrap();
     let draft=json!({"edits":[{"kind":"settings","id":"","before":{},"after":{"premise":"未采用草稿"},"summary":"尚未核对"}]});
     {
         let db=f.store.lock().unwrap();
@@ -298,7 +302,7 @@ async fn continue_saves_corrections_and_replays_unconsumed_inputs_in_order() {
         peer.eof().await;
     });
     let session = f.session().await;
-    let first = bounded(f.start(&session)).await;
+    let first = bounded(f.start_editing(&session)).await;
     f.idle().await;
     let id = first["taskId"].as_str().unwrap();
     // Simulate a supplement saved before the old host stopped, never consumed.
@@ -728,7 +732,7 @@ async fn continue_waits_for_the_previous_sessions_close_after_database_settlemen
         peer.reply(&close,Value::Null).await;
         peer.one_task(2).await;peer.eof().await;
     });
-    let session=f.session().await;let first=bounded(f.start(&session)).await;let id=first["taskId"].as_str().unwrap();
+    let session=f.session().await;let first=bounded(f.start_editing(&session)).await;let id=first["taskId"].as_str().unwrap();
     for _ in 0..100 {
         if f.service.snapshot(id,0,100).unwrap()["status"]=="interrupted"{break;}
         tokio::time::sleep(Duration::from_millis(2)).await;

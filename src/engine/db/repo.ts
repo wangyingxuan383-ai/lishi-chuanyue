@@ -94,6 +94,14 @@ export interface RevisionGuard {
   worldId: string; lineId: string; headId: string; nodeId: string; original: string;
   /** Exact JSON of the source binding on the preview's head; absent/null is "null". */
   sourceGuard: string;
+  /** Direct time corrections also guard the exact original record and active native lease. */
+  recordGuard?: string;
+  requireIdle?: boolean;
+  settingsGuard?: string;
+  targetStateGuard?: string;
+  parentStateGuard?: string;
+  targetMetaGuard?: string;
+  parentMetaGuard?: string;
 }
 
 export class Repo {
@@ -208,10 +216,29 @@ export class Repo {
    * Appends a node under its parent and moves the given line to it, in one
    * transaction. `extra` statements (usage rows, pins…) join the same commit.
    */
-  async appendNode(worldId: string, lineId: string, node: NewNode, extra: SqlStatement[] = []): Promise<StoryNode> {
+  async appendNode(worldId: string, lineId: string, node: NewNode, extra: SqlStatement[] = [], guard?: { headId: string; requireIdle?: boolean; preserveNodeId?: string }): Promise<StoryNode> {
     const t = now();
     const seqRows = await this.q("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM nodes WHERE world_id = ?", [worldId]);
     const { statements, nodeId } = this.nodeStatements(worldId, seqRows[0].seq as number, node, t);
+    if (guard) {
+      if (extra.length) throw new Error("受保护的手动追加不接受未校验的附加写入");
+      const condition = `EXISTS(SELECT 1 FROM worlds w JOIN lines l ON l.id=w.current_line_id
+        WHERE w.id=? AND w.archived=0 AND l.id=? AND l.world_id=w.id AND l.node_id=? AND l.deleted_at IS NULL AND l.archived=0)
+        AND (?=0 OR NOT EXISTS(SELECT 1 FROM world_execution_leases busy WHERE busy.world_id=? AND busy.expires_at_ms>?))`;
+      const exists = "EXISTS(SELECT 1 FROM nodes WHERE id=?)";
+      const preservedName = guard.preserveNodeId ? await this.uniqueLineName(worldId, "未命名路线") : null;
+      await this.platform.sql.batch([
+        { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, worldId, lineId, guard.headId, guard.requireIdle ? 1 : 0, worldId, Date.now()] },
+        { sql: "INSERT INTO states(node_id,state_json) SELECT ?,? WHERE " + exists, params: [nodeId, JSON.stringify(node.state), nodeId] },
+        ...(node.parentId ? [{ sql: "UPDATE nodes SET last_child_id=? WHERE id=? AND " + exists, params: [nodeId, node.parentId, nodeId] }] : []),
+        { sql: "UPDATE lines SET node_id=? WHERE id=? AND " + exists, params: [nodeId, lineId, nodeId] },
+        { sql: "UPDATE worlds SET updated_at=?,played_at=? WHERE id=? AND " + exists, params: [t, t, worldId, nodeId] },
+        ...(guard.preserveNodeId ? [{ sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',1,? WHERE " + exists, params: [newId(), worldId, preservedName!, guard.preserveNodeId, t, nodeId] }] : []),
+      ]);
+      const saved = await this.getNode(nodeId);
+      if (!saved) throw new Error("故事已变化或仍有任务执行，请等任务结束并重新打开时间设置。");
+      return saved;
+    }
     await this.platform.sql.batch([
       ...statements,
       { sql: "UPDATE lines SET node_id = ? WHERE id = ?", params: [nodeId, lineId] },
@@ -234,13 +261,23 @@ export class Repo {
         AND l.node_id=? AND l.deleted_at IS NULL AND l.archived=0
         AND target.world_id=w.id AND target.narrative=? AND target.parent_id IS ?
         AND COALESCE(json_extract(s.state_json,'$.source'),'null')=?
+        AND (? IS NULL OR COALESCE(target.record_json,'null')=?)
+        AND (? IS NULL OR w.settings_json=?)
+        AND (? IS NULL OR (SELECT state_json FROM states WHERE node_id=target.id)=?)
+        AND (? IS NULL OR (SELECT state_json FROM states WHERE node_id=target.parent_id)=?)
+        AND (? IS NULL OR target.meta_json=?)
+        AND (? IS NULL OR (SELECT meta_json FROM nodes WHERE id=target.parent_id)=?)
+        AND (?=0 OR NOT EXISTS (SELECT 1 FROM world_execution_leases busy WHERE busy.world_id=w.id AND busy.expires_at_ms>?))
         AND target.id IN (WITH RECURSIVE path(id) AS (
           SELECT l.node_id UNION ALL SELECT n.parent_id FROM nodes n JOIN path p ON n.id=p.id WHERE n.parent_id IS NOT NULL
         ) SELECT id FROM path)
     )`;
     const exists = "EXISTS(SELECT 1 FROM nodes WHERE id=?)";
     await this.platform.sql.batch([
-      { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, guard.nodeId, guard.worldId, guard.lineId, guard.headId, guard.original, node.parentId, guard.sourceGuard] },
+      { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, guard.nodeId, guard.worldId, guard.lineId, guard.headId, guard.original, node.parentId, guard.sourceGuard, guard.recordGuard ?? null, guard.recordGuard ?? null,
+        guard.settingsGuard ?? null, guard.settingsGuard ?? null, guard.targetStateGuard ?? null, guard.targetStateGuard ?? null,
+        guard.parentStateGuard ?? null, guard.parentStateGuard ?? null, guard.targetMetaGuard ?? null, guard.targetMetaGuard ?? null,
+        guard.parentMetaGuard ?? null, guard.parentMetaGuard ?? null, guard.requireIdle ? 1 : 0, Date.now()] },
       { sql: "INSERT INTO states(node_id,state_json) SELECT ?,? WHERE " + exists, params: [nodeId, JSON.stringify(node.state), nodeId] },
       { sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique, nodeId, t, nodeId] },
       { sql: "UPDATE worlds SET current_line_id=?,updated_at=?,played_at=? WHERE id=? AND " + exists, params: [lineId, t, t, guard.worldId, nodeId] },
@@ -352,6 +389,14 @@ export class Repo {
       [nodeId, limit],
     );
     return rows.map(toNode);
+  }
+
+  /** Small clock snapshots keep chapter/bookmark dates at their saved calibration. */
+  async clocksOnPath(nodeId: string): Promise<Map<string, Pick<WorldState, "time" | "era">>> {
+    const rows = await this.q(`WITH RECURSIVE up(id) AS (
+      SELECT id FROM nodes WHERE id=? UNION ALL SELECT n.parent_id FROM nodes n JOIN up ON n.id=up.id WHERE n.parent_id IS NOT NULL
+    ) SELECT s.node_id AS id,json_extract(s.state_json,'$.time') AS time,json_extract(s.state_json,'$.era') AS era FROM up JOIN states s ON s.node_id=up.id`, [nodeId]);
+    return new Map(rows.map(row => [String(row.id), { time: JSON.parse(String(row.time)), era: JSON.parse(String(row.era)) }]));
   }
 
   /** Game minutes at each node on the path to `nodeId`, read from the states without parsing them (目录 and search). */

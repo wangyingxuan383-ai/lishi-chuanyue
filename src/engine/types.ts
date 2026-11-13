@@ -1,6 +1,6 @@
 // Core game types. See docs/PLAN_V3.md §6.
 import type { CalendarRules, GameDate } from "./calendar/date";
-import type { ClockAnchor } from "./calendar/clock";
+import type { ClockAnchor, ElapsedClockAnchor } from "./calendar/clock";
 import type { FortuneMode } from "./fortune";
 
 /**
@@ -14,6 +14,7 @@ export type Attitude = "仇视" | "敌意" | "冷淡" | "一般" | "友善" | "�
 export type GoalStatus = "进行中" | "完成" | "失败" | "放弃";
 export type Difficulty = "宽松" | "标准" | "残酷";
 export type Intensity = "含蓄" | "写实" | "浓烈";
+/** @deprecated Legacy opening drafts only; ignored by the execution core. */
 export type ExecutionMode = "classic" | "agent";
 
 export interface FactCitation {
@@ -153,8 +154,6 @@ export interface Protagonist {
 
 export interface WorldState {
   source?: import("./sources/types").SourceBinding | null;
-  /** Missing in old worlds means classic. Stored on snapshots so routes remain independent. */
-  executionMode?: ExecutionMode;
   facts?: FactProvenance[];
   /** 2 from D121: the era card lives in `cards`; version 1 saves get it from their pack. */
   version: 1 | 2;
@@ -163,7 +162,7 @@ export interface WorldState {
    * start: how that date reads ("天宝七载 冬月十七", or the opening's own words such as "中平元年秋");
    * startHour: hour of day at minute 0.
    */
-  time: { start: string; date?: GameDate | null; startHour?: number; elapsedMinutes: number; anchor?: ClockAnchor | null };
+  time: { start: string; date?: GameDate | null; startHour?: number; elapsedMinutes: number; anchor?: ClockAnchor | null; elapsedAnchor?: ElapsedClockAnchor | null };
   placeId: string | null;
   protagonist: Protagonist;
   people: Person[];

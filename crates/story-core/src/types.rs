@@ -9,6 +9,12 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Invalid(String),
+    #[error("{}", provider_message(.kind, .status, .message))]
+    Provider { kind: String, status: Option<u16>, message: String, partial: bool },
+    #[error("{0}")]
+    Refused(String),
+    #[error("AI 服务报告模型上下文窗口不足。可缩小本次正文或资料范围，或改用输入窗口更大的模型。")]
+    ContextWindow,
     #[error("{message}")]
     Tool { code: &'static str, field: &'static str, message: String, next: serde_json::Value },
     #[error("故事路线或参考配置已经变化，请重新发起")]
@@ -20,12 +26,45 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ExecutionMode {
-    #[default]
-    Classic,
-    Agent,
+fn provider_message(kind: &str, status: &Option<u16>, message: &str) -> String {
+    if let Some(status) = status {
+        format!("AI 服务返回 {status}：{message}")
+    } else if message.is_empty() {
+        format!("模型请求未完成（{kind}）")
+    } else {
+        message.to_owned()
+    }
+}
+
+pub fn failure_kind(error: &Error) -> &'static str {
+    match error {
+        Error::Cancelled => "cancelled",
+        Error::ContextWindow => "context",
+        Error::Limit(_) => "limit",
+        Error::Stale => "stale",
+        Error::Refused(_) => "refused",
+        Error::Provider { kind, status, .. } => match kind.as_str() {
+            k if k.starts_with("timeout") => "timeout",
+            "network" => "network",
+            "http" => match status {
+                Some(401 | 403) => "auth",
+                Some(402 | 429) => "quota",
+                _ => "http",
+            },
+            _ => "config",
+        },
+        Error::Invalid(message) => {
+            if ["拒绝", "内容政策", "安全"].iter().any(|s| message.contains(s)) {
+                "refused"
+            } else if message.contains("记录")
+                && ["不完整", "没有记录", "记录块"].iter().any(|s| message.contains(s)) {
+                "no_record"
+            } else {
+                "config"
+            }
+        },
+        _ => "config",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +232,7 @@ impl ModelConfig {
 
 /// Prepared at entry; thereafter the entire run is independent of the WebView.
 /// It contains no secret. All state changes are settled against the guarded base.
+/// Serde's default unknown-field handling accepts and ignores legacy executionMode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunPlan {
@@ -202,8 +242,6 @@ pub struct RunPlan {
     pub head_id: String,
     pub base_id: Option<String>,
     pub kind: String,
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
     pub model: ModelConfig,
     pub messages: Vec<Value>,
     pub extract_messages: Vec<Value>,
@@ -235,6 +273,8 @@ pub struct RunSnapshot {
     pub draft: Value,
     pub result: Option<Value>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_kind: Option<String>,
     pub events: Vec<RunEvent>,
 }
 
@@ -242,4 +282,54 @@ pub struct RunSnapshot {
 pub struct RunEvent {
     pub seq: u64,
     pub event: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_kind_uses_structured_errors_before_message_fallbacks() {
+        for (error, expected) in [
+            (Error::Cancelled, "cancelled"),
+            (Error::ContextWindow, "context"),
+            (Error::Limit("请求额度已用完"), "limit"),
+            (Error::Stale, "stale"),
+            (Error::Refused("AI 这次没有给出可用的故事".into()), "refused"),
+            (Error::Invalid("AI 服务拒绝请求".into()), "refused"),
+            (Error::Invalid("触发内容政策".into()), "refused"),
+            (Error::Invalid("安全限制".into()), "refused"),
+            (Error::Invalid("回合记录不完整".into()), "no_record"),
+            (Error::Invalid("配置不完整".into()), "config"),
+            (Error::Invalid("完整记录".into()), "config"),
+        ] {
+            assert_eq!(failure_kind(&error), expected, "{error}");
+        }
+        for (kind, status, expected) in [
+            ("network", None, "network"),
+            ("timeout_first", None, "timeout"),
+            ("timeout_idle", None, "timeout"),
+            ("timeout_total", None, "timeout"),
+            ("http", Some(401), "auth"),
+            ("http", Some(403), "auth"),
+            ("http", Some(402), "quota"),
+            ("http", Some(429), "quota"),
+            ("http", Some(500), "http"),
+            ("http", None, "http"),
+            ("future", None, "config"),
+        ] {
+            for partial in [false, true] {
+                let error = Error::Provider { kind: kind.into(), status, message: "拒绝 网络 超时 记录不完整".into(), partial };
+                assert_eq!(failure_kind(&error), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn provider_display_keeps_the_service_detail_or_kind_fallback() {
+        let error = |status, message: &str| Error::Provider { kind: "network".into(), status, message: message.into(), partial: false };
+        assert_eq!(error(Some(503), "服务繁忙").to_string(), "AI 服务返回 503：服务繁忙");
+        assert_eq!(error(None, "连接中断").to_string(), "连接中断");
+        assert_eq!(error(None, "").to_string(), "模型请求未完成（network）");
+    }
 }

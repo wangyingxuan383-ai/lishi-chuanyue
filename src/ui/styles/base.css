@@ -26,6 +26,10 @@
   --story-measure: 36em;
   --radius: 4px;
   --tap: 44px;
+  /* Spacing, radii and layers (DESIGN_SPEC §4). */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --radius-card: 3px; --radius-dialog: 6px; --radius-sheet: 10px;
+  --z-bar: 5; --z-backdrop: 20; --z-sheet: 21; --z-dialog: 31; --z-toast: 40;
   --serif: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
   --sans: system-ui, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   font-family: var(--sans);
@@ -92,6 +96,7 @@ input, textarea, select {
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; border-color: var(--accent); }
 textarea { resize: none; line-height: 1.6; }
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+input.check-20 { width: 20px; min-height: 20px; }
 summary { min-height: var(--tap); display: flex; align-items: center; cursor: pointer; }
 details > summary { list-style: none; }
 details > summary::before { content: "›"; display: inline-block; width: 1em; color: var(--accent); transition: transform 0.15s; }
@@ -103,6 +108,11 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .row { display: flex; gap: 10px; align-items: center; }
 .grow { flex: 1; min-width: 0; }
 .stack { display: grid; gap: 12px; align-content: start; }
+/* Layout utilities instead of inline styles (DESIGN_SPEC §4); !important keeps the precedence the inline styles had. */
+.gap-0 { gap: 0 !important; } .gap-10 { gap: 10px !important; } .gap-1 { gap: var(--s1) !important; } .gap-2 { gap: var(--s2) !important; } .gap-3 { gap: var(--s3) !important; } .gap-4 { gap: var(--s4) !important; }
+.m-0 { margin: 0 !important; } .mt-0 { margin-top: 0 !important; } .mb-0 { margin-bottom: 0 !important; } .small { font-size: 13px !important; } .center { align-items: center !important; } .warn-text { color: var(--warn) !important; } .mt-1 { margin-top: var(--s1) !important; } .mt-2 { margin-top: var(--s2) !important; } .mt-3 { margin-top: var(--s3) !important; } .mt-4 { margin-top: var(--s4) !important; }
+.between { justify-content: space-between !important; } .wrap { flex-wrap: wrap !important; } .start { align-self: flex-start !important; }
+.t-left { text-align: left !important; } .t-center { text-align: center !important; } .t-right { text-align: right !important; }
 
 /* ---------- the seal: boot screen, empty home, app icon ---------- */
 .seal {

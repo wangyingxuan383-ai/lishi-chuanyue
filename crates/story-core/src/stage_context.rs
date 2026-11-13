@@ -62,7 +62,7 @@ pub fn facts(state:&Value,query:&str,cap:usize)->Value{
 pub fn extraction(plan:&RunPlan,narrative:&str)->Vec<Value>{
     let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
     let mut system=plan.extract_messages.first().and_then(|m|m["content"].as_str()).unwrap_or("只输出本回合变化的JSON记录，time/log/choices必须有。").to_owned();
-    if plan.kind=="opening"&&plan.meta["titlePolicy"]=="auto"{system+="请将本次开场的小说书名写入额外字段storyTitle（2～24字），不要写进正文或状态。";}
+    if plan.kind=="opening"&&plan.meta["titlePolicy"]=="auto"{system+="请结合本段实际开场拟一个小说书名（2～12字为宜，最多24字）：像书架上的网文或小说名，点出核心处境、悬念或人物志向，可用意象或反差；不用“某某的故事/某某传/穿越之XX/重生之XX/我在XX当XX”等套式，不堆砌“天下、风云、传奇、录”，不照抄主角姓名或朝代名。写入额外字段storyTitle，不要写进正文或状态。";}
     vec![json!({"role":"system","content":system}),json!({"role":"user","content":format!("【当前相关状态】{}\n【结算货币】{}\n【当前时钟】{}\n【本回合行动】{}\n【本回合正文】\n{}",state(&plan.state,narrative,(cap/5).min(3000)),plan.options["currency"],plan.options["clock"],plan.action,narrative)})]
 }
 /// Lossless paragraph groups; even an unusually long paragraph is split on a
@@ -77,6 +77,7 @@ pub fn parts(body:&str,cap:usize)->Vec<String>{
 }
 pub fn label(purpose:&str)->&str{match purpose.split(':').next().unwrap_or(purpose){"writing"=>"写作","extract"=>"补记回合记录","reference-review"=>"原著核对","upkeep"=>"整理世界资料","chapter"=>"整理章节摘要",_=>"准备请求"}}
 pub fn report(plan:&RunPlan,purpose:&str,messages:&[Value],tools:&[Value])->Value{
+    let messages=crate::chat::wire_messages(messages);
     let size=|role:&str|messages.iter().filter(|m|m["role"]==role).map(|m|units(&m.to_string())).sum::<usize>();
     json!({"version":"stage-context-1","phase":purpose,"budgetChars":plan.meta["budgetChars"],"chars":units(&json!({"messages":messages,"tools":tools}).to_string()),"system":size("system"),"user":size("user"),"toolResults":size("tool"),"assistant":size("assistant"),"tools":units(&json!(tools).to_string())})
 }

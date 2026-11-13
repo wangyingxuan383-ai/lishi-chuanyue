@@ -2,6 +2,7 @@
 // (D104, D113). Invalid changes are corrected or dropped, never fatal; the
 // player sees what actually happened as chips, and the next prompt gets notes.
 import { clockOffsetMinutes, newYearsBetween, nowOf, playYears, type GameClock } from "../calendar/clock";
+import { applyDisplayClock, type ClockDisplayChange } from "../calendar/clockEdit";
 import { coerceDate, formatDate } from "../calendar/date";
 import { parseDurationMinutes } from "../calendar/duration";
 import { currencyIssues, formatMoney, parseMoney, type Currency } from "../money";
@@ -18,10 +19,10 @@ import { matchName } from "./names";
 
 /** The normalised record every output format is converted into. */
 export interface TurnRecord {
+  /** Sparse sourced changes live on their adopted node, not in every state snapshot. */
+  continuity?: import("../continuity").ContinuityChanges;
   /** Player edits only; never parsed from the model's record. */
   sourceSet?: SourceBinding | null;
-  /** Trusted player setting, never parsed from a model record. */
-  executionSet?: import("../types").ExecutionMode;
   time?: string | number | null;
   place?: string | null;
   money?: number | string | null;
@@ -56,7 +57,7 @@ export interface TurnRecord {
   /** Panel edits: place cards. */
   places?: PlacePatch[] | null;
   /** Panel edits: the world's rules (D121). date is the start date as {era, year, month, day, ceYear?}; null clears it. */
-  rules?: { currency?: { name: string; value: number }[]; lunar?: boolean; date?: Record<string, unknown> | null } | null;
+  rules?: { currency?: { name: string; value: number }[]; lunar?: boolean; date?: Record<string, unknown> | null; clock?: ClockDisplayChange } | null;
   /** From the story (R14): the current beat's key event has happened in this passage. */
   beat?: "done" | null;
   /** From the story: the challenge's progress; won when the goal is truly reached, lost when the failure truly comes. The deadline is the program's. */
@@ -193,7 +194,6 @@ export function applyRecord(
 ): ApplyResult {
   const s: WorldState = structuredClone(before);
   if (opts?.advanceTime === false && record?.sourceSet !== undefined && (record.sourceSet === null || validBinding(record.sourceSet))) s.source = structuredClone(record.sourceSet);
-  if (opts?.advanceTime === false && (record?.executionSet === "agent" || record?.executionSet === "classic")) s.executionMode = record.executionSet;
   const free = s.era.mode === "free";
   const chips: Chip[] = [];
   const notes: string[] = [];
@@ -568,6 +568,10 @@ export function applyRecord(
 
   // Rules: currency units, calendar style and the start date every later date is counted from.
   const rules = record.rules;
+  if (rules?.clock) {
+    const calibrated = applyDisplayClock(s, rules.clock);
+    s.era = calibrated.era; s.time = calibrated.time;
+  }
   if (rules?.currency) {
     const problems = currencyIssues(rules.currency);
     if (problems.length) log.push(`货币设置没有生效：${problems[0].message}`);

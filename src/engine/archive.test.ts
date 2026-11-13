@@ -41,6 +41,18 @@ async function content(repo: Repo, worldId: string) {
 }
 
 describe("world archive", () => {
+  it.each(["agent", "classic", "unknown", null, { legacy: true }])("ignores legacy executionMode %j without rewriting old snapshots", async (mode) => {
+    const repo = await emptyRepo(), { worldId } = await richWorld(repo);
+    const cursor = await tree.cursor(repo, worldId);
+    const legacy = { ...await repo.getState(cursor.head.id), executionMode: mode };
+    await repo.platform.sql.batch([{ sql: "UPDATE states SET state_json=? WHERE node_id=?", params: [JSON.stringify(legacy), cursor.head.id] }]);
+    const file = await exportWorld(repo, worldId);
+    expect(archiveProblems(file)).toEqual([]);
+    const copy = await importWorld(repo, file, "new"), copied = await tree.cursor(repo, copy);
+    expect(await repo.getState(copied.head.id)).toHaveProperty("executionMode", mode);
+    expect(await repo.getState(cursor.head.id)).toEqual(legacy);
+  });
+
   it("upgrades an existing version-six database without changing stories or old task snapshots", async () => {
     const platform = await createMemoryPlatform();
     await platform.sql.batch([{ sql: "CREATE TABLE schema_version(version INTEGER NOT NULL)" }]);

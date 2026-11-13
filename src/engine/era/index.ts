@@ -32,7 +32,7 @@ export function eraPack(id: string | null | undefined): EraPack | null {
 }
 
 /** The start date of a world; old saves only have the label. */
-export function startDate(state: WorldState, rules: CalendarRules): GameDate | null {
+export function startDate(state: Pick<WorldState, "time" | "era">, rules: CalendarRules): GameDate | null {
   // A legacy free-world label is not an implicit historical calendar.
   if (state.era.mode === "free" && (state.era.clockStyle ?? "elapsed") === "elapsed") return state.time.date ?? null;
   return state.time.date !== undefined ? state.time.date : readDate(state.time.start, rules);
@@ -45,12 +45,13 @@ function eraCard(state: WorldState | null | undefined, pack: EraPack | null): Ca
   return { id: `pack:${pack.id}`, kind: "时代", name: pack.title, keys: [], content: eraCardText(pack), source: "卡组" };
 }
 
-export function eraContext(eraId: string | null, state?: WorldState | null): EraContext {
+/** The clock can be projected from a small snapshot without loading people or imported books. */
+export function worldClock(eraId: string | null, state?: Pick<WorldState, "time" | "era"> | null): GameClock {
   const mode = state?.era.mode ?? "history";
   const clockStyle = state?.era.clockStyle ?? (mode === "free" ? "elapsed" : "era");
   const pack = mode === "free" ? null : eraPack(eraId);
   const rules: CalendarRules = state?.era.calendar ?? pack?.calendar ?? (mode === "free" ? { lunar: false } : {});
-  const clock: GameClock = {
+  return {
     mode, clockStyle,
     date: state ? startDate(state, rules) : pack?.start.date ?? null,
     hour: state?.time.startHour ?? pack?.start.hour ?? 8,
@@ -58,7 +59,14 @@ export function eraContext(eraId: string | null, state?: WorldState | null): Era
     rules,
     ...(state?.era.timeStyle ? { timeStyle: state.era.timeStyle } : {}),
     ...(state?.time.anchor ? { anchor: state.time.anchor } : {}),
+    ...(state?.time.elapsedAnchor ? { elapsedAnchor: state.time.elapsedAnchor } : {}),
   };
+}
+
+export function eraContext(eraId: string | null, state?: WorldState | null): EraContext {
+  const mode = state?.era.mode ?? "history";
+  const pack = mode === "free" ? null : eraPack(eraId);
+  const clock = worldClock(eraId, state);
   const stateCurrency = state?.era.currency?.units?.length ? (state.era.currency as Currency) : null;
   return {
     mode,

@@ -230,8 +230,10 @@ export class PiHost {
       if (this.nativeFetch) {
         const write = stream.result().then(async message => {
           if (message?.stopReason === "error" && this.requestGeneration === generation && !this.lastModelTransportError) {
-            const error = new Error("模型服务未完成本次请求，要求与草稿已保留");
-            error.code = "model_response_failed"; this.lastModelTransportError = error;
+            const overflow = /context_length_exceeded|maximum context length|exceeds the context window|上下文窗口/i.test(message.errorMessage ?? "");
+            const error = new Error(overflow ? "AI 服务报告模型上下文窗口不足，要求与草稿已保留" : "模型服务未完成本次请求，要求与草稿已保留");
+            error.code = overflow ? "model_context_window" : "model_response_failed";
+            this.lastModelTransportError = error;
           }
           await this.nativeFetch.recordUsage(ids, message);
         }, () => this.nativeFetch.recordUsage(ids, { stopReason: "error" })).catch(() => {

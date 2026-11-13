@@ -3,7 +3,7 @@ import { agoText, newYearsBetween, nowOf, timeOfDay, timeRows } from "./calendar
 import { eraContext, GENERIC_CURRENCY } from "./era";
 import { askMessages } from "./prompt/ask";
 import { codexMessages, codexPatch, codexSummary } from "./prompt/codex";
-import { upkeepMessages, upkeepPatch } from "./prompt/upkeep";
+import { upkeepMessages } from "./prompt/upkeep";
 import { applyRecord } from "./state/apply";
 import { sampleState } from "./testing/fixtures";
 import { DEFAULT_SETTINGS } from "./types";
@@ -96,12 +96,6 @@ describe("free world helpers and auxiliary prompts", () => {
     expect(messages).toContain("【世界卡】星海");
     expect(messages).toContain("不输出 timeline、deviation");
     expect(messages).not.toMatch(/历史互动|这个时代|测试历史禁词|官署/);
-    const raw = JSON.stringify({ people: [{ name: "阿洛", role: "领航员" }], cards: [{ kind: "设定", name: "跃迁", content: "需充能" }], timeline: [{ date: "天宝八载", title: "未来" }], deviation: "改史" });
-    const patch = upkeepPatch(raw, state)!;
-    expect(patch.people?.[0].name).toBe("阿洛");
-    expect(patch.cards?.[0].name).toBe("跃迁");
-    expect(patch.timeline).toBeUndefined();
-    expect(patch.deviation).toBeUndefined();
     expect(upkeepMessages({ ...input, state: sampleState() })[0].content).toContain("历史互动小说");
   });
 

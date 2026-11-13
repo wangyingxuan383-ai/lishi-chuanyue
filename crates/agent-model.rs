@@ -27,6 +27,11 @@ enum Protocol {
 fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
 }
+/// A model request failure with its transport kind, so the runner can retry
+/// transient failures and the UI can classify without parsing text (R26-T003).
+fn provider(kind: &str, status: Option<u16>, message: &str, partial: bool) -> Error {
+    Error::Provider { kind: kind.into(), status, message: message.into(), partial }
+}
 fn items(v: &Value) -> &[Value] {
     v.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
@@ -741,12 +746,15 @@ pub async fn complete(
     // TCP connection still has the client's 30s connect timeout. A service
     // can accept it and then spend longer prefilling/reasoning before headers
     // or the next content chunk; keep the overall request deadline at 180s.
-    let mut response = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_secs(120),request.send())=>r.map_err(|_|invalid("等待模型响应超时"))?.map_err(|_|invalid("无法连接模型服务"))?};
+    let mut response = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_secs(120),request.send())=>r.map_err(|_|provider("timeout_first",None,"等待模型响应超时",false))?.map_err(|_|provider("network",None,"无法连接模型服务",false))?};
     if !response.status().is_success() {
-        return Err(invalid(&format!(
-            "模型服务返回 {}",
-            response.status().as_u16()
-        )));
+        let status = response.status().as_u16();
+        let detail = response.text().await.unwrap_or_default().replace(&key, "***");
+        if story_core::chat::provider_context_rejected(Some(status), &detail) {
+            return Err(Error::ContextWindow);
+        }
+        let detail: String = detail.chars().take(2000).collect();
+        return Err(provider("http", Some(status), if detail.trim().is_empty() { "模型服务返回错误" } else { detail.trim() }, false));
     }
     let sse = response
         .headers()
@@ -759,7 +767,7 @@ pub async fn complete(
     let mut total = 0;
     let mut first = None;
     'read: loop {
-        let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_secs(120),response.chunk())=>r.map_err(|_|invalid("等待模型内容超时"))?.map_err(|_|invalid("模型连接中断"))?};
+        let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_secs(120),response.chunk())=>r.map_err(|_|provider(if first.is_none() {"timeout_first"} else {"timeout_idle"},None,"等待模型内容超时",first.is_some()))?.map_err(|_|provider("network",None,"模型连接中断",first.is_some()))?};
         let Some(chunk) = chunk else {
             break;
         };

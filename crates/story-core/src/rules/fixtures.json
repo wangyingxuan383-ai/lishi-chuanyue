@@ -6086,7 +6086,8 @@
           "问路"
         ]
       },
-      "issues": []
+      "issues": [],
+      "openingTitle": null
     }
   },
   {
@@ -6109,7 +6110,8 @@
       },
       "issues": [
         "缺少 choices"
-      ]
+      ],
+      "openingTitle": null
     }
   },
   {
@@ -6127,7 +6129,8 @@
           "继续"
         ]
       },
-      "issues": []
+      "issues": [],
+      "openingTitle": null
     }
   },
   {
@@ -6145,7 +6148,8 @@
           "继续"
         ]
       },
-      "issues": []
+      "issues": [],
+      "openingTitle": null
     }
   },
   {
@@ -6226,7 +6230,8 @@
       "issues": [
         "物品无法理解：{\"name\":\"坏\",\"delta\":\"bad\"}",
         "人物缺少名字：{}"
-      ]
+      ],
+      "openingTitle": null
     }
   },
   {
@@ -6626,7 +6631,9 @@
         "lunar": true
       },
       "newYears": 0,
-      "text": "天宝七载 腊月廿九 · 辰时"
+      "text": "天宝七载 腊月廿九 · 辰时",
+      "displayDay": 1,
+      "timeStyle": "shichen"
     }
   },
   {
@@ -6676,7 +6683,9 @@
         "lunar": true
       },
       "newYears": 1,
-      "text": "天宝八载 正月初一 · 子时"
+      "text": "天宝八载 正月初一 · 子时",
+      "displayDay": 2,
+      "timeStyle": "shichen"
     }
   },
   {
@@ -6726,7 +6735,9 @@
         "lunar": true
       },
       "newYears": 1,
-      "text": "天宝八载 正月初一 · 酉时"
+      "text": "天宝八载 正月初一 · 酉时",
+      "displayDay": 2,
+      "timeStyle": "shichen"
     }
   },
   {
@@ -6776,7 +6787,9 @@
         "lunar": true
       },
       "newYears": 2,
-      "text": "天宝九载 正月十一 · 辰时"
+      "text": "天宝九载 正月十一 · 辰时",
+      "displayDay": 366,
+      "timeStyle": "shichen"
     }
   },
   {

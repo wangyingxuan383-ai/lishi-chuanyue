@@ -295,7 +295,7 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
     <Sheet title={title} onClose={onClose}>
       <div className="stack">
         {controls}
-        <div className="stack" style={{ gap: 6 }}>
+        <div className="stack gap-2">
           <span className="muted">样式 · {LAYOUTS.find((l) => l.id === layout)!.note}</span>
           <div className="segmented" role="group" aria-label="样式">
             {LAYOUTS.map((l) => <button key={l.id} aria-pressed={layout === l.id} onClick={() => setLayout(l.id)}>{l.id}</button>)}
@@ -306,7 +306,7 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
           {url ? <img src={url} alt="书摘卡预览" onLoad={(e) => { const box = e.currentTarget.parentElement; if (box) box.scrollLeft = box.scrollWidth; }} /> : <p className={error ? "notice" : "muted"} role={error ? "alert" : undefined}>{error || "正在画…"}</p>}
         </div>
         <button className="primary" disabled={!url} onClick={() => void save()}>保存图片</button>
-        {!browser && <p className="muted" style={{ margin: 0, fontSize: 13 }}>手机上暂时不能直接存进相册：会存成一个网页文件（.html），用浏览器打开就能看到这张图，再长按图片保存。</p>}
+        {!browser && <p className="muted m-0 small">手机上暂时不能直接存进相册：会存成一个网页文件（.html），用浏览器打开就能看到这张图，再长按图片保存。</p>}
       </div>
     </Sheet>
   );
@@ -344,7 +344,7 @@ export function PassageCardSheet({ world, node, onClose }: { world: World; node:
   if (!content) return null;
   // Up to five passages ending with this one, along the route it is on; the date is this one's.
   const range = passages.length > 1 && (
-    <div className="stack" style={{ gap: 6 }}>
+    <div className="stack gap-2">
       <span className="muted">连同前面几段</span>
       <div className="segmented" role="group" aria-label="分享范围">
         {passages.map((_, i) => (

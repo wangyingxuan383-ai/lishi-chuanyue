@@ -225,7 +225,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
           </div>
         )}
 
-        <section className="stack" style={{ gap: 8 }}>
+        <section className="stack gap-2">
           <span className="field-label">服务商</span>
           <button className="picker" onClick={() => setPresetsOpen(true)} aria-label={`服务商：${preset.name}`}>
             <span><b>{preset.name}</b><small>{preset.blurb}</small></span><span aria-hidden="true">›</span>
@@ -245,12 +245,12 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
         ) : (
           <details>
             <summary className="muted">服务地址：{cleanUrl}</summary>
-            <input value={baseUrl} onChange={(e) => onUrlChange(e.target.value)} onBlur={() => setBaseUrl(cleanUrl)} inputMode="url" autoCapitalize="off" style={{ marginTop: 8 }} aria-label="服务地址" />
+            <input value={baseUrl} onChange={(e) => onUrlChange(e.target.value)} onBlur={() => setBaseUrl(cleanUrl)} inputMode="url" autoCapitalize="off" className="mt-2" aria-label="服务地址" />
           </details>
         )}
         {isHttp && (
-          <label className="row" style={{ color: "var(--warn)" }}>
-            <input type="checkbox" checked={allowHttp} onChange={(e) => setAllowHttp(e.target.checked)} style={{ width: 20, minHeight: 20 }} />
+          <label className="row warn-text">
+            <input type="checkbox" checked={allowHttp} onChange={(e) => setAllowHttp(e.target.checked)} className="check-20" />
             这是 HTTP 地址，Key 和剧情会以明文经过网络。我了解，仍要使用。
           </label>
         )}
@@ -266,8 +266,8 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
           {baseChanged && !key.trim() && <small className="field-hint warn">换了地址，要重新填一次 Key。</small>}
         </label>
 
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="stack gap-2">
+          <div className="row between">
             <span className="field-label">模型</span>
             {keyReady && <button className="link" disabled={busy === "models"} onClick={() => void loadModels()}>{busy === "models" ? "正在获取…" : models.length ? "刷新列表" : "获取模型列表"}</button>}
           </div>
@@ -282,7 +282,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
             </>
           ) : (
             <>
-              <p className="muted" style={{ margin: 0 }}>{busy === "models" ? "正在从服务拿模型列表…" : modelsNote ?? (keyReady ? "" : "填好 Key，模型列表会自己出来。")}</p>
+              <p className="muted m-0">{busy === "models" ? "正在从服务拿模型列表…" : modelsNote ?? (keyReady ? "" : "填好 Key，模型列表会自己出来。")}</p>
               {(modelsNote || (keyReady && busy !== "models")) && (
                 <label className="field">模型名（手动填写）
                   <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="例如 deepseek-flash" autoCapitalize="off" spellCheck={false} />
@@ -333,7 +333,7 @@ function ModelPicker({ models, current, recommended, title, note, onPick, onClos
   return (
     <Sheet title={title} onClose={onClose}>
       <div className="stack">
-        {note && <p className="muted" style={{ margin: 0 }}>{note}</p>}
+        {note && <p className="muted m-0">{note}</p>}
         {models.length > 8 && <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型" aria-label="搜索模型" autoCapitalize="off" />}
         <div className="sheet-menu model-list">
           {shown.map((m) => (
@@ -345,7 +345,7 @@ function ModelPicker({ models, current, recommended, title, note, onPick, onClos
         </div>
         <details>
           <summary className="muted">列表里没有？手动填写</summary>
-          <div className="row" style={{ marginTop: 8 }}>
+          <div className="row mt-2">
             <input className="grow" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="模型名" aria-label="手动填写模型名" autoCapitalize="off" spellCheck={false} />
             <button className="primary" disabled={!typed.trim()} onClick={() => onPick(typed.trim())}>用这个</button>
           </div>

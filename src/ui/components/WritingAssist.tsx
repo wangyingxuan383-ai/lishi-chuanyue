@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { type WritingAnchor, type TextRange, type CanonCorrectionPreview, paragraphs, replaceRange, startWriting, runCanonCorrection, writingError } from "../../engine/writing/assist";
 import type { ActionMode } from "../../engine/types";
 import type { SourceBinding } from "../../engine/sources/types";
+import { WRITING_REQUIREMENT_PRESETS } from "../../content/agentTasks";
 import { useApp } from "../app/context";
-import { Sheet } from "./Sheet";
+import { MenuSheet, Sheet } from "./Sheet";
 import "./writing.css";
 
 export interface WritingDraft { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; mode: ActionMode; source?: SourceBinding | null }
@@ -24,6 +25,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
   const whole: TextRange = { start: 0, end: draft.text.length };
   const [range, setRange] = useState<TextRange>(whole);
   const [hint, setHint] = useState("");
+  const [presetsOpen, setPresetsOpen] = useState(false);
   const [preview, setPreview] = useState("");
   const [correction, setCorrection] = useState<CanonCorrectionPreview | null>(null);
   const [ready, setReady] = useState(false);
@@ -54,7 +56,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
         const result = await work.done;
         if (current()) { setCorrection(result); setPreview(result.replacement ?? result.narrative); setReady(true); }
       } else {
-        const work = startWriting(game, { ...draft, text: original, hint }, (text) => { if (current()) setPreview(text); });
+        const work = startWriting(game, { ...draft, text: original, hint, range: rewrite ? range : undefined }, (text) => { if (current()) setPreview(text); });
         task.current = work;
         const text = await work.done;
         if (current()) { setPreview(text); setReady(true); }
@@ -78,12 +80,14 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
         {ranges.map((r, i) => <label key={r.start} className="writing-option"><input type="radio" name="writing-range" aria-label={`第 ${i + 1} 段：${brief(draft.text.slice(r.start, r.end))}`} checked={range.start === r.start && range.end === r.end} disabled={pending || saving} onChange={() => choose(r)} /><span>{draft.text.slice(r.start, r.end)}</span></label>)}
       </div> : <p className="writing-original">{original}</p>}
       <label>希望怎么改<input value={hint} disabled={pending || saving} onChange={(e) => { setHint(e.target.value); setReady(false); }} placeholder={canon ? "可不填，如：核对人物身份、关系和这时的经历" : "可不填，如：简练一些、多些对话"} /></label>
+      <button className="ghost" disabled={pending || saving} onClick={() => setPresetsOpen(true)}>常用改稿要求</button>
+      {presetsOpen && <MenuSheet title="常用改稿要求" onClose={() => setPresetsOpen(false)} items={WRITING_REQUIREMENT_PRESETS.filter(item => !item.canon || rewrite).map(item => ({ label: item.name, onSelect: () => { choose(range); setHint(item.hint); if (rewrite) setCanon(item.canon); } }))} />}
       {(preview || pending) && <label>{pending ? <span className="cursor-blink" role="status">正在改稿</span> : canon ? "改稿预览" : "改稿（可以再改几个字）"}<textarea aria-label="改稿预览" readOnly={canon} value={preview} disabled={pending || saving} onChange={(e) => setPreview(e.target.value)} /></label>}
       {correction && <details><summary>更正与出处</summary>{correction.corrections.map((c, i) => <div key={i}><p>{c.detail}</p>{c.citations.map((cite, j) => <blockquote key={j}>{cite.quote}<small> — {cite.title}{cite.page ? ` · 第${cite.page}页` : ""}</small></blockquote>)}</div>)}</details>}
       {correction?.recordChanges && <details><summary>本回合记录{correction.recordChanges.length ? ` · ${correction.recordChanges.length}项调整` : "保持原样"}</summary><dl>{correction.recordChanges.map((c, i) => <div key={i}><dt>{c.name}</dt><dd>原：{c.before}</dd><dd>改：{c.after}</dd></div>)}</dl></details>}
       {correction?.unresolved?.map((t, i) => <p className="field-hint warn" key={`u${i}`}>待核对：{t}</p>)}
       {correction?.related?.map((t, i) => <p className="muted" key={`r${i}`}>关联问题：{t}</p>)}
-      {correction && ((correction.related?.length ?? 0) + (correction.unresolved?.length ?? 0) > 0) && <button disabled={pending || saving} onClick={() => { const paragraph = isWhole ? undefined : ranges.findIndex(r => r.start === range.start); onClose(); push({ name: "agent", worldId: draft.anchor.worldId, lineId: draft.anchor.lineId, skills: ["canon-reference"], target: { nodeId: draft.anchor.nodeId, ...(paragraph !== undefined ? { paragraph } : {}), evidence: correction.corrections.flatMap(c => c.citations) }, initialText: `继续核对局部改稿的关联问题，保留玩家主动分支：\n${[...correction.related ?? [], ...correction.unresolved ?? []].join("\n")}\n${hint}` }); }}>交给 Agent 处理关联问题</button>}
+      {correction && ((correction.related?.length ?? 0) + (correction.unresolved?.length ?? 0) > 0) && <button disabled={pending || saving} onClick={() => { const paragraph = isWhole ? undefined : ranges.findIndex(r => r.start === range.start); onClose(); push({ name: "agent", worldId: draft.anchor.worldId, lineId: draft.anchor.lineId, skills: ["canon-reference"], target: { nodeId: draft.anchor.nodeId, ...(paragraph !== undefined ? { paragraph } : {}), evidence: correction.corrections.flatMap(c => c.citations) }, initialText: `继续核对局部改稿的关联问题，保留玩家主动分支：\n${[...correction.related ?? [], ...correction.unresolved ?? []].join("\n")}\n${hint}` }); }}>交给助手处理关联问题</button>}
       {error && <p role="alert" className="field-hint warn">{error}</p>}
       <div className="writing-actions">
         {pending ? <button onClick={() => { stop(); setError("已取消，原文没有改动。"); }}>取消生成</button> : <button disabled={saving} onClick={close}>取消</button>}

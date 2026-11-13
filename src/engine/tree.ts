@@ -37,22 +37,23 @@ async function tail(repo: Repo, from: StoryNode): Promise<StoryNode[]> {
  * Before a new child is added under `parent`, keep the branch it replaces as
  * "last child" if it is long enough and no line already reaches into it.
  */
-async function preserveReplacedBranch(repo: Repo, c: Cursor, parent: StoryNode): Promise<void> {
-  if (!parent.lastChildId) return;
+async function replacedBranchEnd(repo: Repo, c: Cursor, parent: StoryNode): Promise<StoryNode | null> {
+  if (!parent.lastChildId) return null;
   const first = await repo.getNode(parent.lastChildId);
-  if (!first) return;
+  if (!first) return null;
   const branch = [first, ...(await tail(repo, first))];
   const others = (await repo.lines(c.worldId)).filter((l) => l.id !== c.line.id);
-  if (branch.length < KEEP_BRANCH_MIN) return;
-  if (others.some((l) => branch.some((n) => n.id === l.nodeId))) return;
+  if (branch.length < KEEP_BRANCH_MIN) return null;
+  if (others.some((l) => branch.some((n) => n.id === l.nodeId))) return null;
   // The current line itself may sit inside the branch (it will move away now).
-  await repo.createLine(c.worldId, branch[branch.length - 1].id, "未命名路线", true);
+  return branch[branch.length - 1];
 }
 
 /** Continue the story: the new node becomes the head of the current line. */
-export async function append(repo: Repo, c: Cursor, node: Omit<NewNode, "parentId">): Promise<Cursor> {
-  await preserveReplacedBranch(repo, c, c.head);
-  const created = await repo.appendNode(c.worldId, c.line.id, { ...node, parentId: c.head.id });
+export async function append(repo: Repo, c: Cursor, node: Omit<NewNode, "parentId">, guard?: { headId: string; requireIdle?: boolean }): Promise<Cursor> {
+  const replaced = await replacedBranchEnd(repo, c, c.head);
+  if (replaced && !guard) await repo.createLine(c.worldId, replaced.id, "未命名路线", true);
+  const created = await repo.appendNode(c.worldId, c.line.id, { ...node, parentId: c.head.id }, [], guard ? { ...guard, preserveNodeId: replaced?.id } : undefined);
   return { ...c, line: { ...c.line, nodeId: created.id }, head: created };
 }
 

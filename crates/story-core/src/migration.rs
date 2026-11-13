@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{fs, path::Path};
 
-pub const LATEST_VERSION: i64 = 11;
+pub const LATEST_VERSION: i64 = 12;
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/001.sql")),
     (2, include_str!("migrations/002.sql")),
@@ -17,6 +17,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (9, include_str!("migrations/009.sql")),
     (10, include_str!("migrations/010.sql")),
     (11, include_str!("migrations/011.sql")),
+    (12, include_str!("migrations/012.sql")),
 ];
 
 pub fn version(connection: &Connection) -> Result<i64> {
@@ -115,7 +116,7 @@ mod tests {
         // Keep an independent connection alive: migration must snapshot WAL,
         // not copy the main file while committed pages are still in its log.
         let store = SqlStore::open(directory.path().into()).unwrap();
-        assert_eq!(version(&store.shared().lock().unwrap()).unwrap(), 9);
+        assert_eq!(version(&store.shared().lock().unwrap()).unwrap(), LATEST_VERSION);
         assert_eq!(
             store
                 .query("SELECT status FROM agent_tasks WHERE id='old-task'", vec![])
@@ -175,5 +176,22 @@ mod tests {
                 |r| r.get::<_, bool>(0)
             )
             .unwrap());
+    }
+
+    #[test]
+    fn v12_adds_nullable_error_kind_preserves_old_errors_and_can_reopen() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE schema_version(version INTEGER NOT NULL)").unwrap();
+        for (v, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 11) {
+            if *v == 8 { db.execute_batch(include_str!("execution_lease_schema.sql")).unwrap(); }
+            db.execute_batch(sql).unwrap();
+            db.execute("INSERT INTO schema_version VALUES(?)", [v]).unwrap();
+        }
+        db.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,created_at,updated_at) VALUES('old','w','l','n','failed','{}','{}','{}','旧错误','test','test')", []).unwrap();
+        assert_eq!(migrate(&mut db, None).unwrap(), 12);
+        let saved: (String, Option<String>) = db.query_row("SELECT error,error_kind FROM execution_runs WHERE id='old'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(saved, ("旧错误".into(), None));
+        assert_eq!(migrate(&mut db, None).unwrap(), 12);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM schema_version WHERE version=12", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 }

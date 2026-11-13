@@ -63,7 +63,7 @@ export function TreeView({ worldId, onClose, onJumped }: { worldId: string; onCl
   };
   return (
     <Sheet title="回合树" onClose={onClose}>
-      <p className="muted" style={{ marginTop: 0 }}>没有岔路的一段合成一行，点开能看每一回合。红框是你现在走的路。</p>
+      <p className="muted mt-0">没有岔路的一段合成一行，点开能看每一回合。红框是你现在走的路。</p>
       <div className="tree">{data ? roots.map((root) => <SegmentRow key={root.nodes[0].id} seg={root} depth={0} marks={marks} onPath={data.path} onJump={(n, i) => void jump(n, i)} />) : <p className="muted">正在读取…</p>}</div>
     </Sheet>
   );

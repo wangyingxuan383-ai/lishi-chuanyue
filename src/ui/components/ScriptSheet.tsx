@@ -152,7 +152,7 @@ export function ScriptSheet({ state, busy, onSave, onClose }: {
           </div>
         </div>
 
-        {problem && <p className="notice" role="alert" style={{ margin: 0 }}>{problem}</p>}
+        {problem && <p className="notice m-0" role="alert">{problem}</p>}
         <div className="sheet-foot">
           {!creating && <button type="button" className="ghost danger-text" disabled={busy || saving} onClick={() => void removeScript()}>删掉剧本</button>}
           <button type="button" className="primary" disabled={busy || saving || (!creating && !dirty) || typeof checked === "string"}
@@ -160,7 +160,7 @@ export function ScriptSheet({ state, busy, onSave, onClose }: {
             {busy ? "正在写…" : saving ? "正在保存…" : creating ? "开始这个剧本" : "保存"}
           </button>
         </div>
-        {typeof checked === "string" && dirty && <p className="mode-hint" style={{ textAlign: "right" }}>{checked}</p>}
+        {typeof checked === "string" && dirty && <p className="mode-hint t-right">{checked}</p>}
       </div>
     </Sheet>
   );

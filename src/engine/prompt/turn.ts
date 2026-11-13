@@ -1,5 +1,6 @@
 // Prompts for opening, turns, the extraction fallback and the setup assistant.
 // Changes are logged in ./CHANGES.md together with eval results.
+import { continuityBlock, type ContinuityView } from "../continuity";
 import type { ChatMessage } from "../llm/chat";
 import { nowOf } from "../calendar/clock";
 import { formatDate } from "../calendar/date";
@@ -16,7 +17,7 @@ import { beatTitle, challengeView } from "../modes";
 
 import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-24";
+export const PROMPT_VERSION = "turn-25";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -68,6 +69,7 @@ const RECORD_FIELDS = `{"time":"本回合经过的时长，如：一刻 / 半个
  "status":[{"op":"add 或 remove","name":"身体或精神的状况（伤、病、醉、饿、累、中毒、惊惧）","detail":"说明"}],
  "died":只有主角的伤病里已有“垂危”、这一段又写到他伤上加伤死去时才写 true，写了就要把死写出来,
  "goals":[{"op":"add / progress / done / fail","name":"目标名（已有目标沿用原名）","detail":"进展","kind":"新目标才写：主线 / 支线"}],
+ "continuity":{"knowledge":[{"id":"稳定简短编号","person":"本局人物名字或ID","claim":"关键秘密或误会的具体说法","awareness":"witnessed/told/believes/rumor/denied/uncertain","source":{"from":"narrative","quote":"本回合实际原句"}}],"threads":[{"id":"稳定简短编号","kind":"clue/promise","title":"线索或约定","detail":"当前进展","status":"open/resolved/dismissed","recall":true,"source":{"from":"narrative","quote":"本回合实际原句"}}]},
  "log":"一句话记下本回合发生了什么",
  "deviation":"本回合的剧情若改变了史书记载的事（如救下了本该死去的人、阻止了本该发生的事），写一句；没有就不写",
  "risk":{"what":"玩家的行动里有风险或要看运气的那件事（没有就不写 risk）","result":"成 / 败 / 半成"},
@@ -92,6 +94,7 @@ ${RECORD_FIELDS}
 记录必须与正文一致：正文里付了钱、得到或失去东西、受伤、结识人物，记录里都要写；正文没有发生的，记录里不要写。人物、物品、目标沿用【当前】中的原名。
 items 只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写，钱不算物品。people 只写本回合真正出场或打过交道的人。
 主角已经许下的承诺、欠下的人情或债、和人约好的事，在 goals 里记成支线目标，兑现了写 done，落空了写 fail；不凭空添加任务。主线目标确实再也办不成才写 fail，一次失手不算。
+continuity只记本段明确的关键获知/误会/澄清或非目标线索/约定，每类最多8项；无变化省略。更新沿用read_continuity实际返回的id，找不到旧定位不要猜编号。原著未来知识不能赋给人物，听闻/相信不等于事情为真，未记不等于不知道；已经用goals记录的同一目标不重复造线索，参与回忆不代表已解决，不强制兑现或安排后续。只给真实本局原句，资料不足省略，不为附加元数据另行请求或重试。
 status 只记身体和精神的状况；东西记 items，知道的事、处境、别人的态度都不记在 status 里；伤好了、状况过去了就 remove。`;
 
 const OPENING_EXTRA = `开场的记录块另有要求：
@@ -279,6 +282,7 @@ function challengeBlock(state: Pick<WorldState, "challenge" | "time">): string {
 }
 
 export interface TurnPromptInput extends StoryContext {
+  continuity?: ContinuityView;
   reference?: ReferenceContext;
   state: WorldState;
   /** Committed story so far on the current path, oldest first (opening included); the newest 40 nodes. */
@@ -428,14 +432,16 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const story = (input.allTurns ?? input.history).filter((n) => n.kind !== "edit");
   const older = (ids: Set<string>) => story.map((node, turn) => ({ node, turn })).filter(({ node }) => !ids.has(node.id));
   // First pass reserves room for the recap and recall; the second gives the window whatever they left.
-  const reserve = (chapters.length ? RECAP_BUDGET : 0) + (story.length > 3 ? RECALL_BUDGET : 0);
+  const continuity = continuityBlock(input.continuity, `${recent}\n${query}`, Math.min(1200, RECALL_BUDGET));
+  const recallBudget = Math.max(0, RECALL_BUDGET - continuity.length);
+  const reserve = (chapters.length ? RECAP_BUDGET : 0) + (story.length > 3 || continuity ? RECALL_BUDGET : 0);
   let window = historyWindow(input.history, target - fixed - referenceChars - cardsBlock(cardLines).length - reserve, input.settings, !!input.reference);
   let recap = recapBlock(chapters, (id) => window.ids.has(id));
-  let recall = recallBlock(input.state, recent, older(window.ids), RECALL_BUDGET, query);
+  let recall = continuity + recallBlock(input.state, recent, older(window.ids), recallBudget, query);
   if (reserve) {
     window = historyWindow(input.history, target - fixed - referenceChars - cardsBlock(cardLines).length - recap.length - recall.length, input.settings, !!input.reference);
     recap = recapBlock(chapters, (id) => window.ids.has(id));
-    recall = recallBlock(input.state, recent, older(window.ids), RECALL_BUDGET, query);
+    recall = continuity + recallBlock(input.state, recent, older(window.ids), recallBudget, query);
   }
   let historyChars = window.messages.reduce((n, m) => n + m.content.length, 0);
   const total = () => fixed + referenceChars + cardsBlock(cardLines).length + recap.length + recall.length + historyChars;
@@ -457,7 +463,10 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const cards = cardsBlock(cardLines);
   const system = joinSystem(parts, recap);
   const user = `${state}${essentials}${world}${cards}${recall}${reference}${directive}${modes}${notes}${action}`;
-  const messages: ChatMessage[] = [{ role: "system", content: system }, ...window.messages, { role: "user", content: user }];
+  const messages: ChatMessage[] = [
+    { role: "system", content: system, compactContent: joinSystem(parts, "") }, ...window.messages,
+    { role: "user", content: user, compactContent: `${state}${essentials}${world}${reference}${directive}${modes}${notes}${action}` },
+  ];
 
   const turnsIn = input.history.filter((n) => n.kind !== "edit" && window.ids.has(n.id)).length;
   const turnsOut = input.history.filter((n) => n.kind !== "edit").length - turnsIn;

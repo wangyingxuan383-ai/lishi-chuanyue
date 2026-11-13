@@ -6,6 +6,7 @@ import type { TurnRecord } from "../../engine/state/apply";
 import type { Chapter, StoryNode, TimelineEvent, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { ThreadsSection } from "./Continuity";
 import { Icon } from "./Icon";
 import type { EraContext } from "../../engine/era";
 import type { GameClock } from "../../engine/calendar/clock";
@@ -57,21 +58,21 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
 
   return (
     <Sheet title={`第 ${row.n} 章 · ${c.title}`} onClose={onClose}>
-      {editing ? <div className="stack" style={{ gap: 10 }}>
+      {editing ? <div className="stack gap-10">
         <label>标题<input value={title} onChange={(e) => setTitle(e.target.value)} className={title.trim() ? "" : "wanted"} /></label>
-        {!title.trim() && <p className="field-hint warn" style={{ margin: 0 }}>标题不能空着，写几个字概括这一章。</p>}
+        {!title.trim() && <p className="field-hint warn m-0">标题不能空着，写几个字概括这一章。</p>}
         <label>一句话梗概（更早的章节只交给 AI 这一句）<input value={gist} onChange={(e) => setGist(e.target.value)} /></label>
         <label>摘要<textarea rows={8} value={summary} onChange={(e) => setSummary(e.target.value)} /></label>
         <div className="row">
           <button disabled={busy} onClick={() => setEditing(false)}>取消</button>
           <button className="primary grow" disabled={busy || !title.trim()} onClick={() => void save()}>保存</button>
         </div>
-      </div> : <div className="stack" style={{ gap: 10 }}>
-        <p className="muted" style={{ margin: 0 }}>第 {row.from}～{row.to} 回合 · {c.edited ? "你改过" : "AI 写的"}</p>
-        <p className="codex-text" style={{ margin: 0 }}>{c.summary}</p>
+      </div> : <div className="stack gap-10">
+        <p className="muted m-0">第 {row.from}～{row.to} 回合 · {c.edited ? "你改过" : "AI 写的"}</p>
+        <p className="codex-text m-0">{c.summary}</p>
         {row.turns.length > 0 && <details>
           <summary className="muted">这一章每回合发生了什么</summary>
-          <div className="stack" style={{ gap: 4, marginTop: 6 }}>{row.turns.map((t, i) => <small key={t.id} className="muted">{logLine(t, row.from + i)}</small>)}</div>
+          <div className="stack gap-1 mt-2">{row.turns.map((t, i) => <small key={t.id} className="muted">{logLine(t, row.from + i)}</small>)}</div>
         </details>}
         <div className="row">
           <button className="danger-text" disabled={busy} onClick={() => void remove()}>删除</button>
@@ -124,8 +125,8 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
   };
   if (event && !editing) return (
     <Sheet title={event.title} onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
-        <p className="muted" style={{ margin: 0 }}>{event.date} · {event.kind === "固定" ? "固定：不管你做什么都会发生" : "可变：你的行动可能改变它"}{event.source === "卡组" ? " · 来自内置卡组" : event.source === "AI" ? " · AI 整理" : ""}</p>
+      <div className="stack gap-10">
+        <p className="muted m-0">{event.date} · {event.kind === "固定" ? "固定：不管你做什么都会发生" : "可变：你的行动可能改变它"}{event.source === "卡组" ? " · 来自内置卡组" : event.source === "AI" ? " · AI 整理" : ""}</p>
         {event.atMinute === null && <p className="field-hint warn">这个日期换算不了，时间到了不会提醒。点“修改”换个写法。</p>}
         <div className="row">
           <button className="danger-text" disabled={saving} onClick={() => void run({ timeline: [{ op: "remove", id: event.id }] }, `删除大事：${event.title}`)}>从年表删除</button>
@@ -137,15 +138,15 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
   const example = era.clock.date ? monthLabel(era.clock.date, era.clock.rules).replace(/\s+/g, "") : "天宝九载十月";
   return (
     <Sheet title={event ? "修改大事" : "添加大事"} onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
-        {!event && <p className="muted" style={{ margin: 0 }}>史书上记载、或你想让它发生的大事。游戏时间到了，回合下会提醒，AI 也会知道。</p>}
+      <div className="stack gap-10">
+        {!event && <p className="muted m-0">史书上记载、或你想让它发生的大事。游戏时间到了，回合下会提醒，AI 也会知道。</p>}
         <label>日期（年号、年份和月份）<input value={date} onChange={(e) => setDate(e.target.value)} placeholder={`如：${example}`} className={date.trim() && !placed ? "wanted" : ""} /></label>
-        {!era.clock.date ? <p className="field-hint warn" style={{ margin: 0 }}>这个世界还没有开局日期，大事没法按时提醒。先在“此时此地 → 修改纪年与货币”里填开局日期。</p>
-          : date.trim() && <p className={`field-hint${placed ? "" : " warn"}`} style={{ margin: 0 }}>{placed
+        {!era.clock.date ? <p className="field-hint warn m-0">这个世界还没有开局日期，大事没法按时提醒。先在“此时此地 → 修改纪年与货币”里填开局日期。</p>
+          : date.trim() && <p className={`field-hint m-0${placed ? "" : " warn"}`}>{placed
           ? `${placed.label}${placed.atMinute < 0 ? "，在开局之前" : placed.atMinute <= 0 ? "" : `，从开局算起约 ${Math.max(1, Math.round(placed.atMinute / 1440))} 天后`}`
           : `换算不了。写成“${example}”这样：年号、第几年、几月。`}</p>}
         <label>发生什么<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="如：杨钊请改名，玄宗赐名国忠" /></label>
-        {taken && <p className="field-hint warn" style={{ margin: 0 }}>年表里已经有这件事了。</p>}
+        {taken && <p className="field-hint warn m-0">年表里已经有这件事了。</p>}
         <div className="segmented">
           {(["固定", "可变"] as const).map((k) => <button key={k} aria-pressed={kind === k} onClick={() => setKind(k)}>{k === "固定" ? "固定（一定发生）" : "可变（能被改变）"}</button>)}
         </div>
@@ -158,8 +159,8 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
   );
 }
 
-export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSave }: {
-  worldId: string; headId: string; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save;
+export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSave, onContinuitySaved }: {
+  worldId: string; headId: string; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { game, toast } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -200,6 +201,7 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
   const to = pending.from + pending.turns.length - 1;
   return (
     <div className="stack">
+      <ThreadsSection worldId={worldId} headId={headId} busy={busy} onSaved={onContinuitySaved} />
       {rows.length ? rows.map((row) => (
         <button key={row.chapter.id} className="item-row codex-item" disabled={busy} onClick={() => setOpen(row)}>
           <div className="grow">
@@ -209,13 +211,13 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
           <span className="person-side"><small>第 {row.from}～{row.to} 回合</small></span>
         </button>
       )) : <p className="muted">{chapterEvery ? `还没有章节。每过 ${chapterEvery} 回合，AI 会把这段剧情写成一章摘要，帮它记住更早的事。` : "自动写章节摘要已关闭，可以手动把最近的回合写成一章。"}</p>}
-      {pending.turns.length > 0 && <section className="stack" style={{ gap: 6 }}>
+      {pending.turns.length > 0 && <section className="stack gap-2">
         <b>本章进行中 · 第 {pending.from}～{to} 回合</b>
         {pending.turns.map((t, i) => <small key={t.id} className="muted">{logLine(t, pending.from + i)}</small>)}
-        <button className="ghost" style={{ alignSelf: "flex-start" }} disabled={busy || writing} onClick={() => void writeNow()}>{writing ? "正在写…" : `把第 ${pending.from}～${to} 回合写成一章`}</button>
+        <button className="ghost start" disabled={busy || writing} onClick={() => void writeNow()}>{writing ? "正在写…" : `把第 ${pending.from}～${to} 回合写成一章`}</button>
       </section>}
-      {state.era.mode !== "free" && <section className="stack" style={{ gap: 4 }}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
+      {state.era.mode !== "free" && <section className="stack gap-1">
+        <div className="row between">
           <b>天下大事</b>
           <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => setEvent({ event: null })}><Icon name="plus" size={18} />添加</button>
         </div>
@@ -224,9 +226,9 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
             <div className="grow"><b>{e.title}</b><small>{e.date}{e.atMinute === null ? "（日期换算不了，不会提醒）" : e.atMinute < 0 ? " · 开局之前" : e.atMinute <= now ? " · 已到" : ""}</small></div>
             <span className="tag">{e.kind}</span>
           </button>
-        )) : <p className="muted" style={{ margin: 0 }}>这个世界还没有年表。可以把史书上的大事加进来，时间到了会提醒。</p>}
+        )) : <p className="muted m-0">这个世界还没有年表。可以把史书上的大事加进来，时间到了会提醒。</p>}
       </section>}
-      {state.era.mode !== "free" && state.deviations.length > 0 && <section className="stack" style={{ gap: 4 }}>
+      {state.era.mode !== "free" && state.deviations.length > 0 && <section className="stack gap-1">
         <b>历史偏离</b>
         {state.deviations.map((d, i) => <small key={i} className="muted">{d}</small>)}
       </section>}

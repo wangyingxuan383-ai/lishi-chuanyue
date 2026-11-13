@@ -328,9 +328,6 @@ pub fn build(input: &Value) -> Result<Value> {
         .unwrap_or_else(|| {
             crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128
         });
-    if fixed + overhead > cap {
-        return Err(Error::Invalid(format!("本次上下文固定内容{}字符（规则与要求{}、必要状态{}、格式及包装{}），超过{}字符预算；请检查对应项目或调整输入预算。",fixed+overhead,layers.iter().filter(|l|["premise","essentials","directive","referenceRules","action"].contains(&text(&l["key"]))).map(|l|l["chars"].as_u64().unwrap_or(0)).sum::<u64>(),layers.iter().find(|l|l["key"]=="state").map(|l|l["chars"].as_u64().unwrap_or(0)).unwrap_or(0),overhead,cap)));
-    }
     let mut remaining = (cap / 4).min(cap.saturating_sub(fixed + overhead + 400));
     let mut evidence = String::new();
     let mut fitted = vec![];
@@ -372,6 +369,9 @@ pub fn build(input: &Value) -> Result<Value> {
     }
     layers.push(json!({"key":"reference","label":"原著证据","content":evidence,"chars":size(&evidence),"note":"先保留原文，最多四分之一预算"}));
     let mut room = cap.saturating_sub(fixed + overhead + size(&evidence));
+    let continuity=crate::continuity::recall(&input["continuity"],&recent,1200.min(room/4));
+    room=room.saturating_sub(size(&continuity));
+    if !continuity.is_empty(){layers.push(json!({"key":"recall","label":"知情与未完事项","content":continuity,"chars":size(&continuity),"note":"只取本路线相关记录，原句可只读回查"}));}
     let mut cards = String::new();
     for c in list(&state["cards"])
         .iter()
@@ -476,21 +476,22 @@ pub fn build(input: &Value) -> Result<Value> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    messages.push(json!({"role":"system","content":system}));
+    let compact_system = ["rules", "premise", "era", "spec"].iter()
+        .filter_map(|key| layers.iter().find(|layer| layer["key"] == *key).map(|layer| text(&layer["content"])))
+        .collect::<Vec<_>>().join("\n");
+    messages.push(json!({"role":"system","content":system,"compactContent":compact_system}));
     for (action, body) in pairs {
         messages.push(json!({"role":"user","content":action}));
         messages.push(json!({"role":"assistant","content":body}));
     }
-    let user = layers
-        .iter()
-        .filter(|l| !["rules", "premise", "era", "recap", "spec"].contains(&text(&l["key"])))
-        .map(|l| text(&l["content"]))
-        .collect::<Vec<_>>()
-        .join("\n");
-    messages.push(json!({"role":"user","content":user}));
+    let user_layers = || layers.iter().filter(|l| !["rules", "premise", "era", "recap", "spec"].contains(&text(&l["key"])));
+    let user = user_layers().map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
+    let compact_user = user_layers().filter(|l| !["cards", "recall"].contains(&text(&l["key"])))
+        .map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
+    messages.push(json!({"role":"user","content":user,"compactContent":compact_user}));
     let message_chars: usize = messages.iter().map(|m| size(text(&m["content"])) + 8).sum();
     let chars = message_chars + overhead;
-    layers.push(json!({"key":"tools","label":"工具与技能目录及消息包装","chars":overhead,"content":"按当前原著只读工具说明和技能目录预留，正式请求会再次校验实际总量。","note":"已计入输入预算，不发送完整世界状态"}));
+    layers.push(json!({"key":"tools","label":"工具与技能目录及消息包装","chars":overhead,"content":"按当前只读工具说明与技能目录预留，正式请求会优先精简可选资料。","note":"计入输入估算，必要内容完整保留"}));
     Ok(
         json!({"messages":messages,"layers":layers,"reference":reference,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-1"}),
     )
@@ -518,13 +519,16 @@ mod tests {
         assert!(body.contains("保留玩家主动改变"));
     }
     #[test]
-    fn fixed_player_requirements_fail_with_component_diagnosis() {
+    fn fixed_player_requirements_outweigh_the_history_target() {
         let mut i = input();
-        i["settings"]["rules"] = "完整要求".repeat(5000).into();
-        let e = build(&i).unwrap_err().to_string();
-        assert!(e.contains("必要状态"));
-        assert!(e.contains("14545"));
-        assert!(!e.contains("缩短用法"));
+        let rules = "完整要求".repeat(5000);
+        i["settings"]["rules"] = rules.clone().into();
+        let context = build(&i).unwrap();
+        assert_eq!(context["budgetExceeded"], true);
+        assert_eq!(context["budgetChars"], 14545);
+        let body = context["messages"].to_string();
+        assert!(body.contains(&rules));
+        assert!(!body.contains("上一段开头"));
     }
     #[test]
     fn bounded_correction_preserves_other_text_and_unrelated_record() {

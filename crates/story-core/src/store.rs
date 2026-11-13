@@ -4,15 +4,25 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub(crate) fn lock_connection(mutex: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        eprintln!("story-core: recovered the database connection after a panic in another thread");
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
 /// One shared connection lock for UI SQL, runs, tools and final commits.
 #[derive(Clone)]
 pub struct Store(pub Arc<Mutex<Connection>>);
 
 impl Store {
+    /// A panic in another thread while holding the connection poisons the
+    /// mutex. Its open transaction was rolled back during unwinding, so the
+    /// connection is still consistent: recover instead of failing every later
+    /// UI query, run and tool call until the process restarts.
     pub fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.0
-            .lock()
-            .map_err(|_| Error::Invalid("数据库暂时不可用".into()))
+        Ok(lock_connection(&self.0))
     }
     pub fn initialize(&self) -> Result<()> {
         self.lock()?.execute_batch(include_str!("schema.sql"))?;
@@ -172,12 +182,12 @@ impl Store {
         &self,
         plan: &RunPlan,
         status: &str,
-        error: Option<&str>,
+        error: Option<&Error>,
     ) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         lease::guard_plan(&tx, plan)?;
-        tx.execute("UPDATE execution_runs SET status=?,error=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')",params![status,error,Utc::now().to_rfc3339(),plan.id])?;
+        tx.execute("UPDATE execution_runs SET status=?,error=?,error_kind=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')",params![status,error.map(ToString::to_string),error.map(crate::failure_kind),Utc::now().to_rfc3339(),plan.id])?;
         tx.commit()?;
         Ok(())
     }
@@ -208,7 +218,7 @@ impl Store {
     }
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {
         let db = self.lock()?;
-        let row = db.query_row("SELECT world_id,status,budget_json,draft_json,result_json,error FROM execution_runs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,Option<String>>(5)?)))?;
+        let row = db.query_row("SELECT world_id,status,budget_json,draft_json,result_json,error,error_kind FROM execution_runs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,Option<String>>(5)?, r.get::<_,Option<String>>(6)?)))?;
         let mut stmt = db.prepare(
             "SELECT seq,event_json FROM execution_events WHERE run_id=? AND seq>? ORDER BY seq",
         )?;
@@ -231,6 +241,7 @@ impl Store {
             draft: serde_json::from_str(&row.3)?,
             result: row.4.map(|s| serde_json::from_str(&s)).transpose()?,
             error: row.5,
+            error_kind: row.6,
             events,
         })
     }
@@ -248,8 +259,8 @@ impl Store {
         let rows = s.query_map([], |r| Ok(json!({"id":r.get::<_,String>(0)?,"worldId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?})))?;
         Ok(Value::Array(rows.collect::<std::result::Result<_, _>>()?))
     }
-    pub fn finish(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
-        self.lock()?.execute("UPDATE execution_runs SET status=?,error=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')", params![status, error, Utc::now().to_rfc3339(), id])?;
+    pub fn finish(&self, id: &str, status: &str, error: Option<&Error>) -> Result<()> {
+        self.lock()?.execute("UPDATE execution_runs SET status=?,error=?,error_kind=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')", params![status, error.map(ToString::to_string), error.map(crate::failure_kind), Utc::now().to_rfc3339(), id])?;
         Ok(())
     }
     pub fn resume(&self, id: &str) -> Result<()> {
@@ -279,7 +290,7 @@ impl Store {
         let ticket = Self::acquire_plan_tx(&tx, &plan, lease::now_ms())?;
         plan.meta["executionLease"] = serde_json::to_value(ticket)?;
         tx.execute(
-            "UPDATE execution_runs SET status='running',error=NULL,plan_json=? WHERE id=?",
+            "UPDATE execution_runs SET status='running',error=NULL,error_kind=NULL,plan_json=? WHERE id=?",
             params![serde_json::to_string(&plan)?, id],
         )?;
         tx.commit()?;

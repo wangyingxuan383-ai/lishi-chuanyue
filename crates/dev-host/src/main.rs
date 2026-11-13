@@ -60,11 +60,6 @@ impl Host {
                     .request(params.get("request").unwrap_or(&params).clone())
                     .await
             }
-            "agent" => self
-                .engine
-                .agent_request(params.get("request").unwrap_or(&params).clone())
-                .await
-                .map_err(core_error),
             "context" => story_core::writing_context::build(&params["input"]).map_err(core_error),
             "settle" => story_core::rules::apply_record(
                 &params["state"],

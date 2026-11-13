@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import type { TurnHandle } from "../../engine/game";
 import { archiveProblems, exportWorldFile, importWorld } from "../../engine/archive";
 import { exportStory } from "../../engine/book";
 import { eraContext } from "../../engine/era";
@@ -15,6 +14,7 @@ import { Icon } from "../components/Icon";
 import { BookCover } from "../components/BookArt";
 import { BudgetReminder } from "../components/MonthlyBudget";
 import { WhatsNewNotice } from "../components/WhatsNew";
+import { localFind } from "../app/localFind";
 
 interface WorldCard {
   world: World;
@@ -109,12 +109,11 @@ export default function Home() {
   const { game, push, profile, toast, ask, askName } = useApp();
   const [deleted, setDeleted] = useState<World[]>([]);
   const [cards, setCards] = useState<WorldCard[] | null>(null);
+  const [query, setQuery] = useState("");
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
   const exporting = useRef(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
-  const [oldOpenings, setOldOpenings] = useState<{ id: string; status: string; title: string; error: string | null; requests: number }[]>([]);
-  const openingHandles = useRef(new Map<string, TurnHandle>());
 
   // R08-T001: a world as one file.
   const exportOne = async (card: WorldCard) => {
@@ -172,29 +171,6 @@ export default function Home() {
     setDeleted(await game.repo.deletedWorlds());
   };
   useEffect(() => { void load(); return game.subscribe(() => { void load(); }); }, [game]);
-  useEffect(() => {
-    let live = true, previous = new Set<string>();
-    const read = async () => {
-      try {
-        const rows = await game.platform.sql.query("SELECT id,status,error,budget_json,json_extract(plan_json,'$.newWorld.title') AS title FROM execution_runs r WHERE json_extract(plan_json,'$.kind')='opening' AND json_extract(plan_json,'$.executionMode')='agent' AND status NOT IN ('committed','previewed','stale') AND NOT EXISTS(SELECT 1 FROM worlds w WHERE w.id=r.world_id) ORDER BY created_at DESC");
-        if (!live) return;
-        const next = rows.map((row) => ({ id: String(row.id), status: String(row.status), title: typeof row.title === "string" ? row.title : "未完成的故事", error: row.error ? String(row.error) : null, requests: Number(JSON.parse(String(row.budget_json)).modelRequests ?? 0) }));
-        if ([...previous].some((id) => !next.some((row) => row.id === id))) void load();
-        previous = new Set(next.map((row) => row.id)); setOldOpenings(next);
-      } catch { /* Historical runs are optional on older databases. */ }
-    };
-    void read(); const timer = setInterval(() => void read(), 1500);
-    return () => { live = false; clearInterval(timer); openingHandles.current.forEach((handle) => handle.detach?.()); openingHandles.current.clear(); };
-  }, [game]);
-  const continueOpening = (run: { id: string; status: string }) => {
-    if (openingHandles.current.has(run.id)) return;
-    const handle = game.followExecution(run.id, (event) => {
-      if (event.type === "done") { void load(); toast("上次的开场已完成"); }
-      else if (event.type === "failed") toast(event.detail ?? "进度已保存，稍后可以继续");
-    }, !["running", "committing"].includes(run.status));
-    openingHandles.current.set(run.id, handle);
-    void handle.done.finally(() => openingHandles.current.delete(run.id));
-  };
 
   // Once a day, if the player allows it: is there a newer release? (设置 → 关于与更新)
   const { store: updates, unread } = useUpdateNotice(game);
@@ -208,6 +184,7 @@ export default function Home() {
     await game.repo.setSetting("newgameDraft", fromSetup(setup));
     start();
   };
+  const shownCards = cards?.filter(card => localFind(query, card.world.title, card.protagonist, card.lastLine));
 
   return (
     <div className="screen">
@@ -219,7 +196,6 @@ export default function Home() {
         {exportStatus && <div className="notice" role="status">{exportStatus}</div>}
         <BudgetReminder />
         <WhatsNewNotice />
-        {oldOpenings.map((run) => <div className="notice" key={run.id}><b>上次的开场还没写完</b><p className="muted">{run.title} · 已用 {run.requests} 次模型请求，沿用原来的任务和额度。</p>{run.error && <p className="muted">{run.error}</p>}<div className="row">{["running", "committing"].includes(run.status) ? <button onClick={() => void game.platform.execution?.stop(run.id).catch(() => toast("暂时没能停止"))}>停止开场</button> : <button disabled={run.status === "paused"} onClick={() => continueOpening(run)}>继续上次的开场</button>}</div></div>)}
         {cards && cards.length === 0 && (
           <div className="hero">
             <Seal />
@@ -227,22 +203,24 @@ export default function Home() {
             <p className="muted">醒来时，你已在另一个时代。</p>
           </div>
         )}
-        {cards && cards.length > 0 && (
-          <WorldItem featured card={cards[0]} onOpen={() => push({ name: "play", worldId: cards[0].world.id })} onMenu={() => setMenuFor(cards[0])} />
+        {cards && cards.length > 0 && <input type="search" aria-label="查找故事" placeholder="按书名、主角或最近剧情查找故事" value={query} onChange={event => setQuery(event.target.value)} />}
+        {cards && cards.length > 0 && shownCards && !shownCards.length && <p className="muted" role="status">没有找到相关故事，清空查找即可查看全部。</p>}
+        {shownCards && shownCards.length > 0 && (
+          <WorldItem featured card={shownCards[0]} onOpen={() => push({ name: "play", worldId: shownCards[0].world.id })} onMenu={() => setMenuFor(shownCards[0])} />
         )}
         <button className={cards && cards.length > 0 ? "big-btn" : "primary big-btn"} onClick={start}>{cards && cards.length > 0 ? "开始新的故事" : "开始穿越"}</button>
-        {!profile && <p className="muted" style={{ textAlign: "center" }}>先连接一个 AI 服务才能开始。</p>}
-        {cards && cards.length > 1 && (
+        {!profile && <p className="muted t-center">先连接一个 AI 服务才能开始。</p>}
+        {shownCards && shownCards.length > 1 && (
           <div className="list">
             <p className="section-title">其他故事</p>
-            {cards.slice(1).map((c) => (
+            {shownCards.slice(1).map((c) => (
               <WorldItem key={c.world.id} card={c} onOpen={() => push({ name: "play", worldId: c.world.id })} onMenu={() => setMenuFor(c)} />
             ))}
           </div>
         )}
         {deleted.length > 0 && <details className="recent-deleted">
           <summary className="muted">最近删除（{deleted.length}，30 天后自动清除）</summary>
-          <div className="stack" style={{ gap: 4, marginTop: 8 }}>
+          <div className="stack gap-1 mt-2">
             {deleted.map((w) => (
               <div key={w.id} className="item-row">
                 <span className="grow">{w.title}</span>

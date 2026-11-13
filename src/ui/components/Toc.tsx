@@ -3,6 +3,7 @@
 // search over what is on the current path. Tapping a chapter, a passage or a
 // pin scrolls the story there; a bookmark on another route carries on from it.
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { worldClock } from "../../engine/era";
 import { nowOf, type GameClock } from "../../engine/calendar/clock";
 import { huimu, searchBook, turnNumbers, type SearchHit } from "../../engine/book";
 import type { Chapter, Line, Pin, StoryNode, WorldState } from "../../engine/types";
@@ -15,6 +16,7 @@ interface Data {
   pins: Pin[];
   bookmarks: { line: Line; onPath: boolean; minute: number | null }[];
   minutes: Map<string, number>;
+  dates: Map<string, string>;
 }
 
 function Highlight({ hit }: { hit: SearchHit }) {
@@ -35,21 +37,23 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
 
   useEffect(() => {
     void (async () => {
-      const [path, chapters, pins, lines, minutes] = await Promise.all([
+      const [path, chapters, pins, lines, minutes, clocks, world] = await Promise.all([
         game.repo.path(headId), game.repo.chaptersOnPath(worldId, headId), game.repo.pinsOnPath(worldId, headId),
-        game.repo.lines(worldId), game.repo.minutesOnPath(headId),
+        game.repo.lines(worldId), game.repo.minutesOnPath(headId), game.repo.clocksOnPath(headId), game.repo.getWorld(worldId),
       ]);
+      const dates = new Map([...clocks].map(([id, saved]) => [id, nowOf(worldClock(world?.eraId ?? null, saved), saved.time.elapsedMinutes).text]));
       const onPath = new Set(path.map((n) => n.id));
-      const bookmarks = await Promise.all(lines.filter((l) => l.kind === "bookmark" && !l.deletedAt).map(async (line) => ({
-        line, onPath: onPath.has(line.nodeId),
-        minute: minutes.get(line.nodeId) ?? (await game.repo.getState(line.nodeId).then((s) => s.time.elapsedMinutes).catch(() => null)),
-      })));
-      setData({ path, chapters, pins, bookmarks, minutes });
+      const bookmarks = await Promise.all(lines.filter((l) => l.kind === "bookmark" && !l.deletedAt).map(async (line) => {
+        const saved = clocks.get(line.nodeId) ?? await game.repo.getState(line.nodeId).catch(() => null);
+        if (saved) dates.set(line.nodeId, nowOf(worldClock(world?.eraId ?? null, saved), saved.time.elapsedMinutes).text);
+        return { line, onPath: onPath.has(line.nodeId), minute: saved?.time.elapsedMinutes ?? null };
+      }));
+      setData({ path, chapters, pins, bookmarks, minutes, dates });
     })();
   }, [worldId, headId]);
 
   const hits = useMemo(() => (data && query.trim() ? searchBook({ path: data.path, chapters: data.chapters, state, minutes: data.minutes }, query) : []), [data, query, state]);
-  const when = (minute: number | null | undefined) => (minute == null ? null : nowOf(clock, minute).text);
+  const when = (minute: number | null | undefined, nodeId?: string) => (nodeId && data?.dates.get(nodeId)) || (minute == null ? null : nowOf(clock, minute).text);
   const go = (nodeId: string) => { onClose(); onJump(nodeId); };
 
   if (!data) return <Sheet title="目录" onClose={onClose}><p className="muted">正在读取…</p></Sheet>;
@@ -69,14 +73,14 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
       <div className="stack toc">
         <input type="search" aria-label="搜索" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜正文、人物、设定、回目" />
         {query.trim() ? (
-          <section className="stack" style={{ gap: 0 }} aria-label="搜索结果">
+          <section className="stack gap-0" aria-label="搜索结果">
             <p className="muted" style={{ margin: "0 0 4px" }}>{hits.length ? `找到 ${hits.length} 处${hits.filter((h) => h.kind === "正文").length >= 60 ? "（正文只列最近 60 段）" : ""}` : "没有找到。换个词试试，如人名、地名。"}</p>
             {hits.map((hit, i) => {
               const content = (
                 <div className="grow">
                   <b>{hit.title}</b>
                   <Highlight hit={hit} />
-                  {hit.minute != null && <small>{when(hit.minute)}</small>}
+                  {hit.minute != null && <small>{when(hit.minute, hit.nodeId)}</small>}
                 </div>
               );
               return hit.nodeId
@@ -86,11 +90,11 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
           </section>
         ) : (
           <>
-            <section className="stack" style={{ gap: 0 }}>
+            <section className="stack gap-0">
               <p className="section-title">章回</p>
               {data.path[0] && (
                 <button className="item-row codex-item" onClick={() => go(data.path[0].id)}>
-                  <div className="grow"><b>{data.chapters.length ? "楔子" : "开篇"}</b><small>{when(data.minutes.get(data.path[0].id))}</small></div>
+                  <div className="grow"><b>{data.chapters.length ? "楔子" : "开篇"}</b><small>{when(data.minutes.get(data.path[0].id), data.path[0].id)}</small></div>
                 </button>
               )}
               {data.chapters.map((c, i) => (
@@ -98,7 +102,7 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
                   <div className="grow">
                     <b>{huimu(i + 1, c.title)}</b>
                     {c.gist && <small>{c.gist}</small>}
-                    <small>{meta(when(data.minutes.get(c.firstNodeId)), turnsOf(c))}</small>
+                    <small>{meta(when(data.minutes.get(c.firstNodeId), c.firstNodeId), turnsOf(c))}</small>
                   </div>
                 </button>
               ))}
@@ -106,33 +110,33 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
                 <button className="item-row codex-item" onClick={() => go(rest[0].id)}>
                   <div className="grow">
                     <b>{huimu(data.chapters.length + 1)}（进行中）</b>
-                    <small>{meta(when(data.minutes.get(rest[0].id)), numbers.get(rest[0].id) ? `从第 ${numbers.get(rest[0].id)} 回合起，${rest.length} 回合` : null)}</small>
+                    <small>{meta(when(data.minutes.get(rest[0].id), rest[0].id), numbers.get(rest[0].id) ? `从第 ${numbers.get(rest[0].id)} 回合起，${rest.length} 回合` : null)}</small>
                   </div>
                 </button>
               )}
-              {!data.chapters.length && <p className="muted" style={{ margin: "6px 0 0" }}>每过一些回合，AI 会把剧情写成一回，回目会列在这里。</p>}
+              {!data.chapters.length && <p className="muted mt-2 mb-0">每过一些回合，AI 会把剧情写成一回，回目会列在这里。</p>}
             </section>
 
-            <section className="stack" style={{ gap: 0 }}>
+            <section className="stack gap-0">
               <p className="section-title">书签</p>
               {data.bookmarks.length ? data.bookmarks.map(({ line, onPath, minute }) => (
                 <button key={line.id} className="item-row codex-item" onClick={() => { if (onPath) go(line.nodeId); else { onClose(); onBookmark(line); } }}>
-                  <div className="grow"><b>{line.name}</b><small>{meta(when(minute), onPath ? null : "在另一条路线上，点一下从那里接着玩")}</small></div>
+                  <div className="grow"><b>{line.name}</b><small>{meta(when(minute, line.nodeId), onPath ? null : "在另一条路线上，点一下从那里接着玩")}</small></div>
                 </button>
-              )) : <p className="muted" style={{ margin: "6px 0 0" }}>长按任意一段选“加书签”，以后在这里一点就能回去。</p>}
+              )) : <p className="muted mt-2 mb-0">长按任意一段选“加书签”，以后在这里一点就能回去。</p>}
             </section>
 
-            <section className="stack" style={{ gap: 0 }}>
+            <section className="stack gap-0">
               <p className="section-title">我记下的要点</p>
               {data.pins.length ? data.pins.map((pin) => (
                 <button key={pin.id} className="item-row codex-item" onClick={() => go(pin.originNodeId)}>
-                  <div className="grow"><span className="toc-pin">{pin.text}</span><small>{when(data.minutes.get(pin.originNodeId))}</small></div>
+                  <div className="grow"><span className="toc-pin">{pin.text}</span><small>{when(data.minutes.get(pin.originNodeId), pin.originNodeId)}</small></div>
                 </button>
-              )) : <p className="muted" style={{ margin: "6px 0 0" }}>长按一段选“记住这件事”，AI 会一直记着，这里也能找到。</p>}
+              )) : <p className="muted mt-2 mb-0">长按一段选“记住这件事”，AI 会一直记着，这里也能找到。</p>}
             </section>
 
             {state.era.mode !== "free" && state.deviations.length > 0 && (
-              <section className="stack" style={{ gap: 0 }}>
+              <section className="stack gap-0">
                 <p className="section-title">历史因你而变</p>
                 {state.deviations.map((d, i) => <Fragment key={i}><div className="item-row"><span className="grow toc-pin">{d}</span></div></Fragment>)}
               </section>

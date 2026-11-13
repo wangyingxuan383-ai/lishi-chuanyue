@@ -1,3 +1,4 @@
+import { memo } from "react";
 // Narrative paragraphs; the date line of an opening is emphasised. While a
 // passage streams, each sentence fades in as it starts (UX_CN 3: "writing",
 // not a jittering cursor); the motion setting turns the fade off in CSS.
@@ -15,7 +16,7 @@ function Streamed({ text }: { text: string }) {
   return <>{sentences(text).map((s, i) => <span key={i} className="sent">{s}</span>)}</>;
 }
 
-export function StoryText({ text, streaming = false, emphasizeDate = true }: { text: string; streaming?: boolean; emphasizeDate?: boolean }) {
+export const StoryText = memo(function StoryText({ text, streaming = false, emphasizeDate = true }: { text: string; streaming?: boolean; emphasizeDate?: boolean }) {
   const paragraphs = text.split(/\n+/).filter((p) => p.trim());
   if (streaming && paragraphs.length === 0) paragraphs.push("");
   return (
@@ -30,7 +31,7 @@ export function StoryText({ text, streaming = false, emphasizeDate = true }: { t
       })}
     </div>
   );
-}
+});
 
 const WAITING = {
   shop: ["掌柜抬眼…", "算盘一停…", "伙计迎上来…"],

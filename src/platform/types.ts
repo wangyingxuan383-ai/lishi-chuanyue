@@ -81,6 +81,7 @@ export interface ExecutionSnapshot {
   id: string; worldId: string; status: string;
   budget: { modelRequests: number; toolCalls: number; corrections: number; activeMs: number };
   draft: Json; result: Json; error: string | null;
+  errorKind?: string | null;
   events: { seq: number; event: Json }[];
 }
 

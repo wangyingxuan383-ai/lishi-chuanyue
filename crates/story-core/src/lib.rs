@@ -1,13 +1,6 @@
 //! Shared execution and rules. No Tauri, browser or Android dependencies.
-pub mod agent;
-pub mod agent_budget;
 pub(crate) mod agent_verification;
 mod agent_clock;
-mod agent_context;
-mod agent_control;
-mod agent_dialogue;
-mod agent_memory;
-mod agent_subtasks;
 pub mod agent_script;
 mod agent_packages;
 mod agent_policy;
@@ -16,6 +9,8 @@ mod agent_workspace;
 mod autoplay;
 pub mod chat;
 pub mod context;
+pub(crate) mod continuity;
+pub(crate) mod ordinary_resources;
 pub mod error;
 pub mod mcp;
 pub mod organize;

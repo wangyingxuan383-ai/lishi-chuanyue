@@ -1,5 +1,6 @@
 // Lenient parsing of the record block into a TurnRecord. Whatever can be
 // understood is kept; malformed parts are dropped and reported in `issues`.
+import { normalizeContinuity } from "../continuity";
 import type { TurnRecord } from "../state/apply";
 
 export interface ParsedRecord {
@@ -193,6 +194,8 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
     .filter((c): c is string => !!c)
     .map((c) => c.replace(/^\s*(?:[0-9一二三四五六]+[.、)）]|[-*•])\s*/, ""))
     .slice(0, 6);
+  const continuity = normalizeContinuity(v.continuity, issues);
+  if (Object.keys(continuity).length) r.continuity = continuity;
   return r;
 }
 

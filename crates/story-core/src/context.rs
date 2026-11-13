@@ -8,8 +8,8 @@ fn units(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-fn request_size(messages: &[Value], tools: &[Value]) -> usize {
-    units(&json!({"messages":messages,"tools":tools}).to_string())
+pub(crate) fn request_size(messages: &[Value], tools: &[Value]) -> usize {
+    units(&json!({"messages":crate::chat::wire_messages(messages),"tools":tools}).to_string())
 }
 
 fn invalid(messages: &[Value], tools: &[Value], budget: usize) -> Error {
@@ -323,10 +323,49 @@ fn bound_sources(plan: &RunPlan, messages: &mut [Value], allowance: usize) -> us
 }
 
 pub fn bound_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value]) -> Result<Vec<Value>> {
-    let budget = plan.meta["budgetChars"]
+    fit_context(plan, messages, tools, false, target(plan))
+}
+
+/// Ordinary writing uses the budget to choose supporting material. A local
+/// estimate cannot establish the provider's actual input limit.
+pub fn fit_writing_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value]) -> Result<Vec<Value>> {
+    fit_context(plan, messages, tools, true, target(plan))
+}
+
+fn target(plan: &RunPlan) -> usize {
+    plan.meta["budgetChars"]
         .as_u64()
         .unwrap_or(12000)
-        .min(usize::MAX as u64) as usize;
+        .min(usize::MAX as u64) as usize
+}
+
+fn compact_support(messages: &mut [Value]) {
+    for message in messages {
+        if let Some(compact) = message["compactContent"].as_str() {
+            if units(compact) < units(message["content"].as_str().unwrap_or("")) {
+                message["content"] = compact.to_owned().into();
+            }
+        }
+    }
+}
+
+/// A provider rejection earns a retry only when the next wire request is smaller.
+/// Keep the tool names, schemas and protocol groups intact.
+pub(crate) fn recover_writing_request(plan: &RunPlan, messages: &[Value], tools: &[Value]) -> Result<Option<(Vec<Value>, Vec<Value>)>> {
+    let previous = request_size(messages, tools);
+    let mut compact = messages.to_vec();
+    compact_support(&mut compact);
+    let mut definitions = tools.to_vec();
+    for tool in &mut definitions {
+        if let Some(function) = tool["function"].as_object_mut() {
+            function.remove("description");
+        }
+    }
+    let compact = fit_context(plan, compact, &definitions, true, target(plan).min(previous.saturating_mul(2) / 3))?;
+    Ok((request_size(&compact, &definitions) < previous).then_some((compact, definitions)))
+}
+
+fn fit_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value], writing: bool, budget: usize) -> Result<Vec<Value>> {
     let message_groups = groups(&messages)?;
     let fixed = protected(plan, &messages, &message_groups);
     let mut removed = vec![false; messages.len()];
@@ -339,8 +378,8 @@ pub fn bound_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value]) -> R
             .collect::<Vec<_>>();
         // Re-fit from the full trace after removing groups. Otherwise an
         // inline quote could stay marked duplicate after its tool copy went.
-        bound_sources(plan, &mut retained, budget / 4);
-        retained
+        let evidence = bound_sources(plan, &mut retained, budget / 4);
+        (retained, evidence)
     };
     // Old prose goes before old tool rounds. Never split an action/prose pair.
     let mut candidates = vec![];
@@ -370,24 +409,37 @@ pub fn bound_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value]) -> R
             .map(|g| g.range.clone()),
     );
     for range in candidates {
-        if request_size(&current(&removed, &messages), tools) <= budget {
+        if request_size(&current(&removed, &messages).0, tools) <= budget {
             break;
         }
         removed[range].fill(true);
     }
-    let mut outgoing = current(&removed, &messages);
-    let mut evidence = bound_sources(plan, &mut outgoing, budget / 4);
+    let (mut outgoing, mut evidence) = current(&removed, &messages);
+    if writing && request_size(&outgoing, tools) > budget {
+        let mut compact = messages.clone();
+        compact_support(&mut compact);
+        let (shorter, remaining) = current(&removed, &compact);
+        if request_size(&shorter, tools) < request_size(&outgoing, tools) {
+            outgoing = shorter;
+            evidence = remaining;
+        }
+    }
     // If fixed layers still need room, omit complete remaining excerpts before
     // reporting failure. Their instructions and the latest tool group survive.
     while request_size(&outgoing, tools) > budget && evidence > 0 {
         let over = request_size(&outgoing, tools) - budget;
         let previous = request_size(&outgoing, tools);
-        evidence = bound_sources(plan, &mut outgoing, evidence.saturating_sub(over));
-        if request_size(&outgoing, tools) >= previous {
+        let mut reduced = outgoing.clone();
+        let remaining = bound_sources(plan, &mut reduced, evidence.saturating_sub(over));
+        // Keep complete evidence available for the current writing step. A
+        // small estimated overflow is preferable to sending no usable source.
+        if (writing && remaining == 0) || request_size(&reduced, tools) >= previous {
             break;
         }
+        outgoing = reduced;
+        evidence = remaining;
     }
-    if request_size(&outgoing, tools) > budget {
+    if !writing && request_size(&outgoing, tools) > budget {
         return Err(invalid(&outgoing, tools, budget));
     }
     groups(&outgoing)?;

@@ -6,119 +6,45 @@ import { nowOf, timeRows } from "../../engine/calendar/clock";
 import type { AutoplayEvent, AutoplayHandle, ContextPreview, TurnEvent, TurnHandle } from "../../engine/game";
 import { explainFailure } from "../../engine/llm/providers";
 import { challengeInputOf, challengeView } from "../../engine/modes";
-import type { Chip, TurnRecord } from "../../engine/state/apply";
+import type { TurnRecord } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
-import type { ActionMode, Challenge, Intensity, Pilot, Pin, Script, StoryNode, World, WorldState } from "../../engine/types";
+import type { ActionMode, Challenge, Script, StoryNode, World, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
 import { BookmarkSheet, LinesSheet } from "../components/Lines";
 import { Panel } from "../components/Panel";
+import { TimeCorrectionSheet } from "../components/TimeCorrectionSheet";
 import { RulesSheet } from "../components/RulesSheet";
-import { MenuSheet, Sheet } from "../components/Sheet";
+import { Sheet } from "../components/Sheet";
 import { RecapCard, useRecap } from "../components/Recap";
 import { TocSheet } from "../components/Toc";
 import { StoryText, daypart, waitingLine } from "../components/StoryText";
 import { fromSetup } from "./openingDraft";
-import { useLongPress } from "../components/useLongPress";
 import { useMedia, useMouse, useWide } from "../components/useMedia";
 import { EndingCard, LifeSheet, useSealToast } from "../components/LifeSheet";
 import { PassageCardSheet } from "../components/ShareCard";
 import { useShortcuts } from "../components/useShortcuts";
 import { ShortcutsSheet } from "../components/ShortcutsSheet";
-import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { Icon } from "../components/Icon";
-import { FORTUNE_MODES, FORTUNE_MODE_NOTE, fortuneMode } from "../../engine/fortune";
 import { adoptRewrite, adoptCanonCorrection, assertWritingAnchor, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview } from "../../engine/writing/assist";
 import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
 import { WritingDesk } from "../components/WritingDesk";
-import { NarrativePresets } from "../components/NarrativePresets";
 import { PlayQualityEffects } from "../components/PlayQualityEffects";
-import { AutoplaySheet, ChallengeEndCard, ModeBanner, ModesSettings, ScriptEndCard, endsAt } from "../components/Modes";
+import { AutoplaySheet, ChallengeEndCard, ModeBanner, ScriptEndCard, endsAt } from "../components/Modes";
 import { ScriptSheet } from "../components/ScriptSheet";
 import { ChallengeSheet } from "../components/ChallengeSheet";
-import { Switch } from "../components/Switch";
-import { SourceSetup, ReferenceSheet } from "../components/Sources";
-import type { SourceBinding } from "../../engine/sources/types";
-
-// These optional fields also accept saves from before R13. The engine owns their interpretation.
-type WritingSettings = World["settings"] & { mode?: "history" | "free"; clockStyle?: "era" | "elapsed"; heroPanelEnabled?: boolean };
-
-const PAGE = 30;
-/** `short` is the placeholder on a phone, where the one-line box would cut the long one off. */
-const MODES: { mode: ActionMode; label: string; placeholder: string; short?: string }[] = [
-  { mode: "do", label: "做", placeholder: "写下你要做的事…" },
-  { mode: "say", label: "说", placeholder: "写下你要说的话…" },
-  { mode: "write", label: "写", placeholder: "亲手写一段剧情，AI 会顺着往下写…", short: "亲手写一段剧情…" },
-  { mode: "direct", label: "幕后", placeholder: "给叙事者的要求，如“这段写紧张些”", short: "给叙事者的要求…" },
-];
-/** 旁观 (R14): the AI plays the protagonist; the player directs from behind the scenes or writes. */
-const WATCH_MODES: typeof MODES = [
-  { mode: "direct", label: "幕后", placeholder: "想让故事往哪走？留空就让它自己发展", short: "想让故事往哪走？" },
-  { mode: "write", label: "写", placeholder: "亲手写一段剧情，AI 会顺着往下写…", short: "亲手写一段剧情…" },
-];
-/** What each input mode does, shown in the mode picker (AUDIT 4.9). */
-const MODE_NOTES: Record<string, string> = {
-  do: "写你要做的事，AI 写出结果", say: "写你要说的话，原样说出口", write: "亲手写一段剧情，AI 顺着往下写", direct: "不写行动，只告诉叙事者这段怎么写",
-};
-const WATCH_NOTES: Record<string, string> = { direct: "写一句想要的走向，主角怎么做由 AI 来演", write: "亲手写一段剧情，AI 顺着往下写" };
-/** The words 写尾声 puts in the box. */
-const EPILOGUE = "写一段尾声，交代主要人物后来的去向";
-/** The toast after a 剧本 / 挑战 edit, from the line it leaves in the story. */
-const MODE_SAVED: [RegExp, string][] = [[/删掉了剧本/, "已删掉剧本"], [/加了一个剧本/, "剧本定下了"], [/放弃了挑战/, "已放弃挑战"], [/加了一个挑战/, "挑战开始了"], [/挑战/, "已修改挑战"]];
-const HINTS = ["写短一点", "写长一点", "换个结果", "让对方拒绝", "多些对话", "节奏快一些"];
-/** "过些日子" (PLAN §4.6): how long, and how the protagonist spends it. */
-const SPANS: [string, string][] = [
-  ["到明天", "过一天"], ["几天", "过三五天"], ["一个月", "过一个月"], ["一季", "过一季"], ["一年", "过一年"], ["直到有事发生", "一直过下去，直到有事发生"],
-];
-const PASTIMES = ["照常过日子", "读书", "经营", "练武"];
-
-interface Gen {
-  minHeight?: number;
-  phase: "starting" | "thinking" | "writing" | "organizing";
-  text: string;
-  action: { mode: ActionMode; text: string } | null;
-  variant: boolean;
-}
-
-function ChipRow({ chips }: { chips: Chip[] }) {
-  if (!chips?.length) return null;
-  return <div className="chips">{chips.map((c, i) => <span key={i} className={`chip ${c.tone}`}>{c.text}</span>)}</div>;
-}
-
-/** What the protagonist heard while time passed (R05-T001). */
-function ReportCard({ report }: { report?: TurnRecord["report"] }) {
-  if (!report) return null;
-  const rows = [["天下", report.world], ["市面", report.local], ["人情", report.people]].filter(([, text]) => text);
-  if (!rows.length) return null;
-  return <div className="report-card"><b>这段日子</b>{rows.map(([label, text]) => <p key={label}><span>{label}</span>{text}</p>)}</div>;
-}
-
-function TurnView({ node, onMenu, pressed, watch, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; pressed?: boolean; watch?: boolean; children?: React.ReactNode }) {
-  const press = useLongPress(() => onMenu(node));
-  const { devMode } = useApp();
-  // Developer mode: era words the local check found (R07-T002).
-  const taboos = devMode ? ((node.meta.taboos as { term: string; instead: string | null }[] | undefined) ?? []) : [];
-  const referenceReview = node.meta.referenceReview as { findings?: { claim: string; status: string }[]; unresolved?: string[] } | undefined;
-  // A summary already in the player's words (“你修改了剧本”) is shown as it is.
-  if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" || node.actionText?.startsWith("你") ? node.actionText : `你修改了：${node.actionText}`}</div>;
-  return (
-    <div className={`turn${pressed ? " pressed" : ""}`} data-node-id={node.id} {...press}>
-      {node.kind !== "opening" && node.actionMode === "write" && node.actionText && (
-        <div className="turn-written"><StoryText text={node.actionText} /></div>
-      )}
-      {node.kind !== "opening" && node.actionMode !== "continue" && node.actionMode !== "write" && node.actionText && (
-        <div className={`turn-action ${node.actionMode ?? ""}`}>{node.actionText}</div>
-      )}
-      {/* 旁观 passages follow one another without a “（继续）” before each. */}
-      {node.kind !== "opening" && node.actionMode === "continue" && !watch && <div className="turn-action continue">（继续）</div>}
-      <StoryText text={node.narrative} />
-      {node.rewritten && <span className="rewritten-mark">已改写</span>}
-      {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
-      <ChipRow chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
-      {referenceReview && <details className="muted"><summary>原著核对{referenceReview.unresolved?.length ? ` · ${referenceReview.unresolved.length}项待查` : ""}</summary>{referenceReview.findings?.map((f, i) => <p key={i}>{f.claim} · {f.status === "supported" ? "有原文依据" : f.status === "branch" ? "保留玩家分支" : "资料不足"}</p>)}{referenceReview.unresolved?.map((t, i) => <p key={`u${i}`}>{t}</p>)}</details>}
-      {children}
-    </div>
-  );
-}
+import { ReferenceSheet } from "../components/Sources";
+import { AskSheet } from "./play/AskSheet";
+import { InputModeSheet, PlayDock } from "./play/PlayInput";
+import { EPILOGUE, HINTS, MODES, MODE_SAVED, PAGE, WATCH_MODES } from "./play/constants";
+import { HintInput } from "./play/HintInput";
+import { MoreMenu, PassageMenu, PassageMoreMenu } from "./play/PlayMenus";
+import { RegenButton } from "./play/RegenButton";
+import { RememberSheet } from "./play/RememberSheet";
+import { SkipSheet } from "./play/SkipSheet";
+import { StorySheet } from "./play/StorySheet";
+import { TurnView } from "./play/TurnView";
+import type { Gen, WritingSettings } from "./play/types";
+import { WorldSettingsSheet } from "./play/WorldSettingsSheet";
 
 export default function Play({ worldId, active = true }: { worldId: string; active?: boolean }) {
   const { game, push, replace, toast, devMode, pop, profile, reading } = useApp();
@@ -174,12 +100,13 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
+  const [menuMore, setMenuMore] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
   const [rawNode, setRawNode] = useState<StoryNode | null>(null);
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
   const wide = useWide();
@@ -296,7 +223,8 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     let live = true;
     const check = async () => {
       try {
-        const rows = await game.platform.sql.query("SELECT id FROM execution_runs WHERE world_id=? AND status IN ('running','committing') AND json_extract(plan_json,'$.kind')='agent_task' LIMIT 1", [worldId]);
+        // The Pi assistant's tasks (pi_tasks); the old agent_task runs no longer exist (R26-T002).
+        const rows = await game.platform.sql.query("SELECT id FROM pi_tasks WHERE world_id=? AND status IN ('running','committing') LIMIT 1", [worldId]);
         if (live) {
           const running = !!rows.length;
           if (running !== agentActive.current) {
@@ -308,8 +236,12 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       } catch { /* An older host still reports conflicts when a run starts. */ }
     };
     void check();
-    const timer = setInterval(() => void check(), 750);
-    return () => { live = false; clearInterval(timer); };
+    // Fast while the assistant works, slow otherwise; a committed change also triggers a check.
+    let timer = 0;
+    const loop = () => { timer = window.setTimeout(async () => { await check(); if (live) loop(); }, agentActive.current ? 1000 : 4000); };
+    loop();
+    const off = game.subscribe((id) => { if (id === worldId) void check(); });
+    return () => { live = false; window.clearTimeout(timer); off(); };
   }, [game, worldId]);
   useEffect(() => {
     if (!active) { captureReading(); follow.current = false; return; }
@@ -808,7 +740,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
 
   const panelProps = {
     worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy,
-    onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
+    onContinuitySaved: refresh, onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
     onOrganize: async (replaceOwnEra: boolean) => {
       const c = await game.organize(worldId, { replaceOwnEra });
       if (!c) { toast("这次没整理出来，稍后再试"); return false; }
@@ -816,7 +748,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       toast("已整理设定集，可以接着修改");
       return true;
     },
-    onSave: async (patch: TurnRecord, summary: string) => { await game.editState(worldId, patch, summary); await refresh(); },
+    onSave: async (patch: TurnRecord, summary: string, expectedHeadId?: string) => { await game.editState(worldId, patch, summary, undefined, expectedHeadId); await refresh(); },
   };
 
   return (
@@ -841,7 +773,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
             {shown.map((node) => {
               const isHead = node.id === turn?.id && !busy;
               return (
-                <TurnView key={node.id} node={node} onMenu={setMenuNode} pressed={menuNode?.id === node.id} watch={watch}>
+                <TurnView key={node.id} node={node} onMenu={setMenuNode} pressed={menuNode?.id === node.id} watch={watch}>{isHead ? <>
                   {isHead && node.status === "interrupted" && (
                     <div className="notice">这段没有写完。{notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}<div className="row"><button onClick={resume}>续写</button><button onClick={() => regenerate(null)}>重说</button></div></div>
                   )}
@@ -863,7 +795,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
                   {isHead && pressTip && (
                     <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
                   )}
-                </TurnView>
+                </> : null}</TurnView>
               );
             })}
             {gen && (
@@ -900,109 +832,27 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
         {!atBottom && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
       </div>
 
-      <div className="dock">
-        {!dead && state.protagonist.statuses.some((x) => x.name === "垂危") && <p className="dying-note">你伤重垂危：再受重伤就会死去，先设法疗伤。</p>}
-        {/* 旁观: one row for 连播 (or its progress) and, while typing, the big box; the suggestions under it are directions. */}
-        {!dead && (watch || auto) && (
-          <div className="dock-tools">
-            {auto ? (
-              <span className="autoplay-state" role="status">连播 {Math.max(1, auto.step)}/{auto.total}
-                <span className="autoplay-dots" aria-hidden="true">{Array.from({ length: auto.total }, (_, i) => <i key={i} className={i + 1 < auto.step ? "done" : i + 1 === auto.step ? "now" : ""} />)}</span>
-              </span>
-            ) : showChoices ? <span className="choices-head">接下来可以……</span> : <span />}
-            {/* With words in the box (or the keyboard up on a phone) the big box is the tool; otherwise 连播. */}
-            {!auto && (input.trim() || (typing && !mouse)
-              ? <button className="ghost" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => setDesk(true)}>展开输入</button>
-              : <button className="autoplay-btn" disabled={busy} onClick={() => setSheet("autoplay")}><span>连播</span></button>)}
-          </div>
-        )}
-        {showChoices && (
-          <div className="choices">
-            {turn.choices.map((choice, i) => <ChoiceButton key={choice} text={choice} title={mouse ? `${i < 4 ? `Alt+${i + 1} 选这个，` : ""}右键放进输入框改一改` : undefined}
-              onTap={() => send({ mode: watch ? "direct" : "do", text: choice })} onLong={() => { setInput(choice); setModeIndex(0); }} />)}
-          </div>
-        )}
-        {noteOpen && !watch && mode.mode !== "direct" && (
-          <div className="row director-row">
-            <input className="director-note grow" value={note} onChange={(e) => setNote(e.target.value)} placeholder="幕后要求（只影响这一段）" aria-label="幕后要求" />
-            <button className="icon-btn" aria-label="去掉幕后要求" onClick={() => { setNote(""); setNoteOpen(false); }}><Icon name="close" size={20} /></button>
-          </div>
-        )}
-        {/* The writing tools come up with the keyboard, so they never take reading space at rest. */}
-        {!dead && !watch && (typing || !!input.trim()) && (
-          <div className="dock-tools end">
-            <button className="ghost" disabled={busy || !input.trim()} onMouseDown={(e) => e.preventDefault()} onClick={() => openWriting("polish", turn ?? head)}>润色行动</button>
-            <button className="ghost" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => setDesk(true)}>展开输入</button>
-          </div>
-        )}
-        <div className="inputbar">
-          <button className="mode-btn" aria-label={`输入方式：${mode.label}`} onClick={() => setModePicker(true)} disabled={!!gen || !!auto}>{mode.label}</button>
-          <textarea
-            ref={inputBox}
-            rows={1}
-            value={input}
-            disabled={dead}
-            onFocus={() => setTyping(true)}
-            onBlur={() => setTyping(false)}
-            placeholder={dead ? "" : roomy ? mode.placeholder : mode.short ?? mode.placeholder}
-            onKeyDown={(e) => {
-              // On a desktop keyboard Enter sends and Shift+Enter starts a new line.
-              if (mouse && e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!busy) send(); }
-            }}
-            onChange={(e) => {
-              const v = e.target.value;
-              setInput(v);
-              if (!watch && modeIndex === 0 && /^[“"「]/.test(v)) setModeIndex(1);
-              e.target.style.height = "auto";
-              e.target.style.height = `${e.target.scrollHeight}px`;
-            }}
-          />
-          <button className={`send-btn ${busy ? "" : "primary"}`} title={agentBusy ? "Agent 助手正在执行，完成或停止后可继续游玩" : mouse ? (busy ? "停止" : "Enter 发送，Shift+Enter 换行") : undefined} disabled={agentBusy || (dead && !busy)} onClick={stopOrSend}>{sendLabel}</button>
-        </div>
-      </div>
+      <PlayDock dead={dead} state={state} watch={watch} auto={auto} showChoices={showChoices} input={input} typing={typing}
+        mouse={mouse} busy={busy} turn={turn} head={head} noteOpen={noteOpen} mode={mode} note={note} inputBox={inputBox}
+        gen={gen} roomy={roomy} modeIndex={modeIndex} agentBusy={agentBusy} sendLabel={sendLabel} setDesk={setDesk}
+        setSheet={setSheet} send={send} setInput={setInput} setModeIndex={setModeIndex} setNote={setNote} setNoteOpen={setNoteOpen}
+        openWriting={openWriting} setModePicker={setModePicker} setTyping={setTyping} stopOrSend={stopOrSend} />
 
-      {menuNode && (
-        <MenuSheet
-          title={`“${menuNode.narrative.replace(/\s+/g, "").slice(0, 16)}…”`}
-          onClose={() => setMenuNode(null)}
-          items={[
-            { label: "AI 改写", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim() || busy, onSelect: () => openWriting("rewrite", menuNode) },
-            { label: "改写这段文字", hidden: menuNode.kind === "edit" || busy, onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
-            { label: "恢复 AI 写的原文", hidden: !menuNode.rewritten || typeof menuNode.meta.original !== "string" || menuNode.meta.original === menuNode.narrative || busy, onSelect: () => void game.repo.restoreNarrative(menuNode.id).then(() => { void refresh(); toast("已恢复原文"); }) },
-            { label: "改我的行动", hidden: !menuNode.actionText || menuNode.actionMode === "continue" || menuNode.actionMode === "skip" || busy, onSelect: () => setEditing({ node: menuNode, field: "action", text: menuNode.actionText ?? "" }) },
-            { label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim() || busy, onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
-            { label: "回到这里", hidden: menuNode.id === head.id || busy, onSelect: () => void goBack(menuNode) },
-            { label: "加书签", hidden: menuNode.kind === "edit", onSelect: () => setBookmark({ node: menuNode, name: menuNode.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
-            { label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
-            { label: "做成书摘卡", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => setCardNode(menuNode) },
-            { label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuNode) },
-          ]}
-        />
-      )}
+      {menuNode && <PassageMenu menuNode={menuNode} head={head} busy={busy} setMenuNode={setMenuNode}
+        openWriting={openWriting} setRemember={setRemember} goBack={goBack} toast={toast} setMenuMore={setMenuMore} />}
+      {menuMore && <PassageMoreMenu menuMore={menuMore} busy={busy} devMode={devMode} game={game} setMenuMore={setMenuMore}
+        setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode} setRawNode={setRawNode} />}
       {writing && <WritingAssist draft={writing} onClose={() => setWriting(null)} onAdopt={adoptWriting} />}
       {desk && <WritingDesk text={input} mode={mode.mode} onClose={() => setDesk(false)} onDone={(text, nextMode) => {
         // 旁观 has only 幕后 and 写: 做 / 说 written in the big box go in as a 幕后 note.
         setInput(text); setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === nextMode))); setDesk(false); inputBox.current?.focus();
       }} />}
-      {remember && (
-        <Sheet title="记住这件事" onClose={() => setRemember(null)}>
-          <div className="stack">
-            <p className="muted" style={{ margin: 0 }}>把这段删改成一句要点。AI 之后每一段都会记着它；只在这条路线有效，回到这段之前就不算数。</p>
-            <textarea rows={6} aria-label="要点" value={remember.text} onChange={(e) => setRemember({ ...remember, text: e.target.value })} />
-            {remember.text.length > 120 && <p className="muted" style={{ margin: 0 }}>{remember.text.length} 字，越短越好。</p>}
-            <button className="primary" disabled={!remember.text.trim()} onClick={() => {
-              const { node, text } = remember;
-              setRemember(null);
-              void game.repo.addPin(worldId, node.id, text).then(() => toast("记下了"));
-            }}>记下</button>
-          </div>
-        </Sheet>
-      )}
+      {remember && <RememberSheet remember={remember} setRemember={setRemember} game={game} worldId={worldId} toast={toast} />}
       {editing && (
         <Sheet title={editing.field === "action" ? "改我的行动" : "改写这段文字"} onClose={() => setEditing(null)}>
           <div className="stack">
-            {editing.field === "action" && <p className="muted" style={{ margin: 0 }}>会从这一回合之前重新写，原来的内容保留在另一条路线里。</p>}
-            {editing.field === "narrative" && <p className="muted" style={{ margin: 0 }}>只改这一段的文字，钱物和时间不变；原文随时可以恢复。</p>}
+            {editing.field === "action" && <p className="muted m-0">会从这一回合之前重新写，原来的内容保留在另一条路线里。</p>}
+            {editing.field === "narrative" && <p className="muted m-0">只改这一段的文字，钱物和时间不变；原文随时可以恢复。</p>}
             <textarea rows={editing.field === "action" ? 3 : 12} value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
             <button className="primary" disabled={!editing.text.trim()} onClick={() => {
               const { node, field, text } = editing;
@@ -1021,7 +871,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       )}
       {context && (
         <Sheet title="下一回合的上下文" onClose={() => setContext(null)}>
-          <p className="muted" style={{ marginTop: 0 }}>
+          <p className="muted mt-0">
             共 {context.chars} 字，约 {Math.round(context.chars * context.ratio).toLocaleString()} token
             （{context.calibrated ? `按实际用量校准，每字约 ${context.ratio} token` : "还没有实际用量，按每字 1 token 估算"}）；预算 {context.budgetChars} 字。
           </p>
@@ -1033,19 +883,9 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           ))}
         </Sheet>
       )}
-      {modePicker && (
-        <Sheet title={watch ? "怎么指点这一段" : "怎么写这一回合"} onClose={() => setModePicker(false)}>
-          <div className="sheet-menu">
-            {modeList.map((m, i) => (
-              <button key={m.mode} aria-pressed={i === modeIndex} className="mode-option" onClick={() => { setModeIndex(i); setModePicker(false); inputBox.current?.focus(); }}>
-                <b>{m.label}</b><small>{(watch ? WATCH_NOTES : MODE_NOTES)[m.mode]}</small>
-              </button>
-            ))}
-            {!watch && !noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b><Icon name="plus" size={16} />幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
-            <button className="mode-option" onClick={() => { captureReading(); setModePicker(false); push({ name: "agent", worldId, lineId: cursor.line.id }); }}><b>Agent 助手 ›</b><small>单独交谈、查资料或修改本局，完成后继续游玩</small></button>
-          </div>
-        </Sheet>
-      )}
+      {modePicker && <InputModeSheet watch={watch} modeList={modeList} modeIndex={modeIndex} inputBox={inputBox} noteOpen={noteOpen}
+        mode={mode} worldId={worldId} cursor={cursor} setModePicker={setModePicker} setModeIndex={setModeIndex}
+        setNoteOpen={setNoteOpen} captureReading={captureReading} push={push} />}
       {sheet === "life" && <LifeSheet world={world} state={state} headId={head.id} dead={dead} onClose={() => setSheet(null)} />}
       {cardNode && <PassageCardSheet world={world} node={cardNode} onClose={() => setCardNode(null)} />}
       {sheet === "keys" && <ShortcutsSheet onClose={() => setSheet(null)} />}
@@ -1059,40 +899,22 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           <HintInput onSubmit={(h) => { setSheet(null); regenerate(h); }} />
         </Sheet>
       )}
-      {sheet === "more" && (
-        <MenuSheet
-          onClose={() => setSheet(null)}
-          items={[
-            { label: mouse ? "撤销（Ctrl+Z）" : "撤销", hidden: !head.parentId || busy, onSelect: () => void undo() },
-            { label: mouse ? "重做（Ctrl+Y）" : "重做", hidden: !tree.canRedo(cursor) || busy, onSelect: () => void redo() },
-            { label: "连播", hidden: busy || dead, onSelect: () => setSheet("autoplay") },
-            { label: "过些日子", hidden: busy, onSelect: () => setSheet("skip") },
-            { label: mouse ? "查一查（Ctrl+F）" : "查一查", hidden: busy, onSelect: () => setSheet("ask") },
-            { label: "幕后要求", hidden: noteOpen || watch, onSelect: () => setNoteOpen(true) },
-            { label: "目录与搜索", onSelect: () => setSheet("toc") },
-            { label: "世界线", onSelect: () => setSheet("lines") },
-            { label: "故事设定与要点", onSelect: () => setSheet("story") },
-            { label: "本局设置", onSelect: () => setSheet("settings") },
-            { label: "这一世小传", onSelect: () => setSheet("life") },
-            { label: mouse ? "游玩指南（F1）" : "游玩指南", onSelect: () => push({ name: "guide" }) },
-            { label: "快捷键", hidden: !mouse, onSelect: () => setSheet("keys") },
-            { label: "查看上下文（开发者）", hidden: !devMode || busy, onSelect: async () => setContext(await game.previewContext(worldId)) },
-            { label: "用同样设定再开一局", hidden: busy, onSelect: () => void again(false) },
-            { label: "回到首页", onSelect: () => (busy ? toast("正在写，先停止或等写完") : pop()) },
-          ]}
-        />
-      )}
+      {sheet === "more" && <MoreMenu mouse={mouse} busy={busy} state={state} dead={dead} watch={watch} head={head} cursor={cursor}
+        noteOpen={noteOpen} devMode={devMode} game={game} worldId={worldId} setSheet={setSheet} undo={undo} redo={redo}
+        setNoteOpen={setNoteOpen} push={push} again={again} setContext={setContext} />}
       {sheet === "time" && (
         <Sheet title="此时此地" onClose={() => setSheet(null)}>
           <dl className="facts">
             {placeName && <><dt>地点</dt><dd>{placeName}</dd></>}
             {timeRows(era.clock, state.time.elapsedMinutes).map((r) => <Fragment key={r.label}><dt>{r.label}</dt><dd>{r.value}</dd></Fragment>)}
-            {state.protagonist.age != null && <><dt>年龄</dt><dd>{state.protagonist.age} 岁{now.date?.lunar ? "（虚岁，过年长一岁）" : ""}</dd></>}
+            {state.protagonist.age != null && <><dt>年龄</dt><dd>{state.protagonist.age} 岁{state.era.mode !== "free" && era.clock.date?.lunar ? "（虚岁，过年长一岁）" : ""}</dd></>}
           </dl>
           <button disabled={busy} onClick={() => setSheet("rules")}>{(world.settings as WritingSettings).mode === "free" ? "修改时间与货币" : "修改纪年与货币"}</button>
         </Sheet>
       )}
-      {sheet === "rules" && <RulesSheet state={state} era={era} busy={busy} onClose={() => setSheet(null)} onSave={async (patch, summary) => { await game.editState(worldId, patch, summary); await refresh(); }} />}
+      {sheet === "rules" && <RulesSheet state={state} era={era} headId={head.id} busy={busy} onClose={() => setSheet(null)} onCorrectDuration={() => setSheet("duration")} onSave={async (patch, summary, expectedHeadId) => { await game.editState(worldId, patch, summary, undefined, expectedHeadId); await refresh(); toast("已保存时间与货币，可在 ⋯ 中撤销"); }} />}
+      {sheet === "duration" && <TimeCorrectionSheet worldId={worldId} headId={head.id} busy={busy} onClose={() => setSheet(null)} onSaved={refresh} />}
+      {sheet === "reference" && state.source && <ReferenceSheet worldId={worldId} binding={state.source} onClose={() => setSheet(null)} />}
       {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
         onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
         onBookmark={(line) => void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); })} />}
@@ -1116,240 +938,11 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       {sheet === "autoplay" && <AutoplaySheet temporary={!watch} onClose={() => setSheet(null)} onStart={(n) => { setSheet(null); startAutoplay(n); }} />}
       {panel && !wide && <Panel {...panelProps} />}
       {notificationStart && <Sheet title="写好了提醒你？" onClose={() => void answerNotifications("later")}>
-        <p className="muted" style={{ marginTop: 0 }}>切到别的应用时，故事会在后台接着写。打开通知，写好了会提醒你回来看。</p>
+        <p className="muted mt-0">切到别的应用时，故事会在后台接着写。打开通知，写好了会提醒你回来看。</p>
         <div className="row"><button className="primary grow" onClick={() => void answerNotifications("allow")}>打开通知</button><button onClick={() => void answerNotifications("no")}>不用了</button></div>
       </Sheet>}
     </div>
     {wide && <div className="play-side"><Panel {...panelProps} docked /></div>}
     </div>
-  );
-}
-
-/** 查一查 (R07-T001): questions about this world or the era; the story does not move. */
-function AskSheet({ worldId, onClose }: { worldId: string; onClose: () => void }) {
-  const { game } = useApp();
-  const [question, setQuestion] = useState("");
-  const [asked, setAsked] = useState<{ q: string; a: string; pending: boolean }[]>([]);
-  const pending = asked.some((x) => x.pending);
-  const update = (patch: { a: string; pending: boolean }) => setAsked((list) => list.map((x, i) => (i === list.length - 1 ? { ...x, ...patch } : x)));
-  const ask = async () => {
-    const q = question.trim();
-    if (!q || pending) return;
-    setQuestion("");
-    setAsked((list) => [...list, { q, a: "", pending: true }]);
-    try {
-      const answer = await game.ask(worldId, q, (full) => update({ a: full, pending: true }));
-      update({ a: answer || "没有查到。", pending: false });
-    } catch {
-      update({ a: "这次没查到，稍后再试。", pending: false });
-    }
-  };
-  return (
-    <Sheet title="查一查" onClose={onClose}>
-      <div className="stack">
-        <p className="muted" style={{ margin: 0 }}>问这个世界里的人和事，或者这个时代的常识。只是查资料，故事不会往下走。</p>
-        {asked.map((x, i) => (
-          <div key={i} className="ask-item">
-            <b>{x.q}</b>
-            {x.a ? <StoryText text={x.a} /> : <p className="muted">查找中…</p>}
-          </div>
-        ))}
-        <div className="row">
-          <input className="grow" aria-label="想问什么" value={question} onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void ask(); }} placeholder="如：王掌柜是什么来头？一斗米多少钱？" />
-          <button className="primary" disabled={!question.trim() || pending} onClick={() => void ask()}>问</button>
-        </div>
-      </div>
-    </Sheet>
-  );
-}
-
-function SkipSheet({ onStart, onClose }: { onStart: (text: string) => void; onClose: () => void }) {
-  const [span, setSpan] = useState("一个月");
-  const [pastime, setPastime] = useState("照常过日子");
-  const [own, setOwn] = useState("");
-  const how = pastime === "自己写" ? own.trim() : pastime;
-  return (
-    <Sheet title="过些日子" onClose={onClose}>
-      <div className="stack">
-        <span className="muted">过多久</span>
-        <div className="segmented">
-          {SPANS.map(([label]) => <button key={label} aria-pressed={span === label} onClick={() => setSpan(label)}>{label}</button>)}
-        </div>
-        <span className="muted">这段时间做什么</span>
-        <div className="segmented">
-          {[...PASTIMES, "自己写"].map((p) => <button key={p} aria-pressed={pastime === p} onClick={() => setPastime(p)}>{p}</button>)}
-        </div>
-        {pastime === "自己写" && <input aria-label="这段时间做什么" value={own} onChange={(e) => setOwn(e.target.value)} placeholder="如：在西市摆摊替人写信" />}
-        <p className="muted" style={{ margin: 0 }}>遇到要你拿主意的事，会提前停下来。</p>
-        <button className="primary" disabled={!how} onClick={() => onStart(`${SPANS.find(([label]) => label === span)![1]}；这段时间${how}`)}>开始</button>
-      </div>
-    </Sheet>
-  );
-}
-
-function RegenButton({ onTap, onLong, title }: { onTap: () => void; onLong: () => void; title?: string }) {
-  const press = useLongPress(onLong, onTap);
-  return <button className="ghost" title={title} {...press}>重说</button>;
-}
-
-function ChoiceButton({ text, onTap, onLong, title }: { text: string; onTap: () => void; onLong: () => void; title?: string }) {
-  const press = useLongPress(onLong, onTap);
-  return <button className="choice" title={title} {...press}>{text}</button>;
-}
-
-function HintInput({ onSubmit }: { onSubmit: (hint: string) => void }) {
-  const [text, setText] = useState("");
-  return (
-    <div className="row" style={{ marginTop: 12 }}>
-      <input className="grow" value={text} onChange={(e) => setText(e.target.value)} placeholder="或者自己写，如：让掌柜答应" />
-      <button className="primary" disabled={!text.trim()} onClick={() => onSubmit(text.trim())}>重说</button>
-    </div>
-  );
-}
-
-
-function StorySheet({ world, headId, onSave, onClose }: { world: World; headId: string; onSave: (p: Partial<World["settings"]>) => Promise<void>; onClose: () => void }) {
-  const { game } = useApp();
-  const s = world.settings;
-  const [pins, setPins] = useState<Pin[]>([]);
-  useEffect(() => { void game.repo.pinsOnPath(world.id, headId).then(setPins); }, [world.id, headId]);
-  const [premise, setPremise] = useState(s.premise);
-  const [essentials, setEssentials] = useState(s.essentials);
-  const [rules, setRules] = useState(s.rules);
-  const [directive, setDirective] = useState(s.directive);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  return (
-    <Sheet title="故事设定与要点" dirty={premise !== s.premise || essentials !== s.essentials || directive !== s.directive || rules !== s.rules} onClose={() => { if (!saving) onClose(); }}>
-      <div className="stack">
-        <label>故事设定<textarea rows={6} value={premise} onChange={(e) => setPremise(e.target.value)} placeholder="时代、地点、处境……AI 每一段都会参考" /></label>
-        <label>要点<textarea rows={4} value={essentials} onChange={(e) => setEssentials(e.target.value)} placeholder="必须一直记住的事，每行一条。比如：王掌柜其实是主角的远房舅舅" /></label>
-        {pins.length > 0 && <div className="stack" style={{ gap: 4 }}>
-          <span className="muted">从剧情里记下的要点，只在这条路线有效</span>
-          {pins.map((pin) => (
-            <div className="item-row" key={pin.id}>
-              <div className="grow">{pin.text}</div>
-              <button aria-label={`删除要点：${pin.text}`} onClick={() => void game.repo.deletePin(pin.id).then(() => setPins((list) => list.filter((x) => x.id !== pin.id)))}>删除</button>
-            </div>
-          ))}
-        </div>}
-        <NarrativePresets directive={directive} rules={rules} onApply={(preset) => { setDirective(preset.directive); setRules(preset.rules); }} />
-        <label>叙事方针<textarea rows={2} value={directive} onChange={(e) => setDirective(e.target.value)} placeholder="文风和节奏，比如：节奏快一些，多写市井人物" /></label>
-        <label>给 AI 的额外规则<textarea rows={3} value={rules} onChange={(e) => setRules(e.target.value)} placeholder="比如：不要让主角轻易获得权力" /></label>
-        {error && <p role="alert" className="notice">{error}</p>}
-        <button className="primary" disabled={saving} onClick={() => {
-          setSaving(true); setError("");
-          void onSave({ premise, essentials, rules, directive }).catch(() => setError("没有保存成功，文字还在，请重试。")).finally(() => setSaving(false));
-        }}>{saving ? "正在保存…" : "保存"}</button>
-      </div>
-    </Sheet>
-  );
-}
-
-function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot, onScript, onChallenge, onRules, onSourceSave, onClose }: {
-  world: World; state: WorldState; busy: boolean; onChange: (p: Partial<WritingSettings>) => void; onPanelSave: (text: string) => Promise<void>;
-  onPilot: (pilot: Pilot) => void; onScript: () => void; onChallenge: () => void; onRules: () => void; onClose: () => void;
-  onSourceSave: (source: SourceBinding | null) => Promise<void>;
-}) {
-  const { game, toast } = useApp();
-  const s = world.settings as WritingSettings;
-  const storedPanel = (state.protagonist as { panel?: string }).panel ?? "";
-  const [heroPanel, setHeroPanel] = useState(storedPanel);
-  const [savingPanel, setSavingPanel] = useState(false);
-  const [source, setSource] = useState(state.source ?? null), [savingSource, setSavingSource] = useState(false), [reference, setReference] = useState(false);
-  const sourceDirty = JSON.stringify(source) !== JSON.stringify(state.source ?? null);
-  const [defaults, setDefaults] = useState<PlayDefaults | null>(null);
-  useEffect(() => { void loadPlayDefaults(game.repo).then(setDefaults); }, []);
-  const differs = defaults ? differsFromDefaults(s, defaults) : [];
-  /** “本局” on a heading whose value differs from the play defaults. */
-  const mark = (key: keyof PlayDefaults) => (differs.includes(key) ? <span className="tag own">本局</span> : null);
-  const levels: Intensity[] = ["含蓄", "写实", "浓烈"];
-  const intensity = (key: keyof typeof s.intensity, label: string) => (
-    <div className="stack" style={{ gap: 6 }}>
-      <span className="muted">{label}</span>
-      <div className="segmented">
-        {levels.map((l) => <button key={l} aria-pressed={s.intensity[key] === l} onClick={() => onChange({ intensity: { ...s.intensity, [key]: l } })}>{l}</button>)}
-      </div>
-    </div>
-  );
-  return (
-    <Sheet title="本局设置" dirty={heroPanel !== storedPanel || sourceDirty} onClose={onClose}>
-      <div className="stack">
-        <p className="muted" style={{ margin: 0 }}>只改这个故事，从下一段起生效。</p>
-        <h3 className="settings-sub">玩法</h3>
-        <ModesSettings state={state} pilot={s.pilot ?? "player"} busy={busy} onPilot={onPilot} onScript={onScript} onChallenge={onChallenge} />
-        <span className="muted">难度 {mark("difficulty")}</span>
-        <div className="segmented">
-          {(["宽松", "标准", "残酷"] as const).map((l) => <button key={l} aria-pressed={s.difficulty === l} onClick={() => onChange({ difficulty: l })}>{l}</button>)}
-        </div>
-        <p className="muted" style={{ margin: 0 }}>{s.difficulty === "宽松" ? "运气偏好；受了重伤也只是昏过去，不会死。" : s.difficulty === "残酷" ? "运气偏差；重伤可能直接丧命。" : "运气平常；伤重时先“垂危”，剧情真写到才会死。"}</p>
-        <span className="muted">运势 {mark("fortune")}</span>
-        <div className="segmented">
-          {FORTUNE_MODES.map(([v, l]) => <button key={v} aria-pressed={fortuneMode(s.fortune) === v} onClick={() => onChange({ fortune: v })}>{l}</button>)}
-        </div>
-        <p className="muted" style={{ margin: 0 }}>{FORTUNE_MODE_NOTE[fortuneMode(s.fortune)]}</p>
-
-        <h3 className="settings-sub">写法</h3>
-        <span className="muted">每段篇幅 {mark("length")}</span>
-        <div className="segmented">
-          {(["短", "中", "长"] as const).map((l) => <button key={l} aria-pressed={s.length === l} onClick={() => onChange({ length: l })}>{l}</button>)}
-        </div>
-        <span className="muted">建议选项数量 {mark("choiceCount")}</span>
-        <div className="segmented">
-          {[0, 2, 3, 4].map((n) => <button key={n} aria-pressed={s.choiceCount === n} onClick={() => onChange({ choiceCount: n })}>{n === 0 ? "不要" : n}</button>)}
-        </div>
-        <span className="muted">叙述视角 {mark("perspective")}</span>
-        <div className="segmented">
-          {([["你", "你"], ["我", "我"], ["他", "他 / 她"]] as const).map(([v, l]) => <button key={v} aria-pressed={s.perspective === v} onClick={() => onChange({ perspective: v })}>{l}</button>)}
-        </div>
-        <span className="muted">文风 {mark("style")}</span>
-        <div className="segmented">
-          {(["白话", "半文半白"] as const).map((v) => <button key={v} aria-pressed={s.style === v} onClick={() => onChange({ style: v })}>{v}</button>)}
-        </div>
-
-        <h3 className="settings-sub">记忆与整理</h3>
-        <details><summary>参考书籍</summary><div className="stack"><SourceSetup value={source} onChange={setSource} disabled={busy || savingSource} />
-          <div className="row"><button disabled={busy || savingSource || !sourceDirty} onClick={() => { setSavingSource(true); void onSourceSave(source).then(() => toast("书籍用法已保存，可撤销")).catch((e) => toast(e.message ?? "没能保存")).finally(() => setSavingSource(false)); }}>保存书籍用法</button>{state.source && <button onClick={() => setReference(true)}>查看参考资料</button>}</div>
-        </div></details>
-        {reference && state.source && <ReferenceSheet worldId={world.id} binding={state.source} onClose={() => setReference(false)} />}
-        <Switch label="显示主角面板" note={s.heroPanelEnabled ? "写下想随时查看的能力、境界或约定" : undefined} checked={s.heroPanelEnabled ?? false} onChange={(v) => onChange({ heroPanelEnabled: v })} />
-        {s.heroPanelEnabled && <div className="stack" style={{ gap: 8 }}>
-          <label>主角面板内容<textarea rows={5} maxLength={2000} value={heroPanel} onChange={(e) => setHeroPanel(e.target.value.slice(0, 2000))} placeholder="如：境界、技能、特长……" /></label>
-          <div className="row">
-            <span className="muted grow">{heroPanel.length}/2000 字 · 只记事，不计算数值</span>
-            <button disabled={savingPanel || heroPanel === storedPanel} onClick={() => {
-              setSavingPanel(true); void onPanelSave(heroPanel).then(() => toast("已保存，可在 ⋯ 里撤销")).catch(() => toast("没有保存成功，请稍后再试")).finally(() => setSavingPanel(false));
-            }}>{savingPanel ? "正在保存…" : "保存面板"}</button>
-          </div>
-        </div>}
-        <span className="muted">设定集自动整理 {mark("autoUpkeep")}</span>
-        <div className="segmented">
-          {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={s.autoUpkeep === v} onClick={() => onChange({ autoUpkeep: v })}>{l}</button>)}
-        </div>
-        <p className="muted" style={{ margin: 0 }}>每过几回合，AI 把新出现的人物、地点和势力记进设定集；你写的卡不会动。</p>
-        <span className="muted">章节摘要 {mark("chapterEvery")}</span>
-        <div className="segmented">
-          {[0, 8, 12, 20].map((n) => <button key={n} aria-pressed={s.chapterEvery === n} onClick={() => onChange({ chapterEvery: n })}>{n ? `每 ${n} 回合` : "关"}</button>)}
-        </div>
-        <p className="muted" style={{ margin: 0 }}>把一段剧情写成一章摘要，更早的事靠它记住；在“我 → 记事”里看。</p>
-        {s.mode !== "free" && <><span className="muted">用词提醒 {mark("tabooHints")}</span>
-        <div className="segmented">
-          {([[true, "开"], [false, "关"]] as const).map(([v, l]) => <button key={l} aria-pressed={(s.tabooHints ?? true) === v} onClick={() => onChange({ tabooHints: v })}>{l}</button>)}
-        </div>
-        <p className="muted" style={{ margin: 0 }}>AI 用了这个朝代不该有的说法时，下一段提醒它改。</p></>}
-
-        <h3 className="settings-sub">内容尺度</h3>
-        {intensity("violence", "暴力与伤亡")}
-        {intensity("romance", "感情与亲密")}
-        {intensity("darkness", "黑暗与压抑")}
-        <p className="muted">“浓烈”仍受所用 AI 服务的规则限制。</p>
-        {defaults && differs.length > 0 && <div className="row" style={{ flexWrap: "wrap" }}>
-          <button onClick={() => { onChange({ difficulty: defaults.difficulty, length: defaults.length, choiceCount: defaults.choiceCount, perspective: defaults.perspective, style: defaults.style, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery, fortune: defaults.fortune, tabooHints: defaults.tabooHints, intensity: defaults.intensity }); toast("已恢复为默认"); }}>全部恢复为默认</button>
-          <button className="ghost" onClick={() => { const next = { ...defaults, difficulty: s.difficulty, length: s.length, choiceCount: s.choiceCount, perspective: s.perspective, style: s.style, autoUpkeep: s.autoUpkeep, chapterEvery: s.chapterEvery, fortune: fortuneMode(s.fortune), tabooHints: s.tabooHints ?? true, intensity: s.intensity }; void savePlayDefaults(game.repo, next).then(() => { setDefaults(next); toast("以后新开一局都用这些设置"); }); }}>设为以后的默认</button>
-        </div>}
-        <button className="ghost" style={{ textAlign: "left" }} onClick={onRules}>{s.mode === "free" ? "时间与货币 ›" : "纪年与货币 ›"}</button>
-      </div>
-    </Sheet>
   );
 }

@@ -13,13 +13,15 @@ use std::{
 use story_core::{
     chat::{BoxFuture, Completion, Model, TextSink},
     runtime::Engine,
-    Error, ExecutionMode, ModelConfig, Result, RunPlan, RunSnapshot, Store,
+    Error, ModelConfig, Result, RunPlan, RunSnapshot, Store,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 enum Step {
     Reply(Completion),
+    RejectContext,
+    Fail(Error),
     Wait {
         started: Arc<Notify>,
         release: Arc<Notify>,
@@ -59,6 +61,13 @@ impl Model for FakeModel {
         Box::pin(async move {
             let reply = match step {
                 Some(Step::Reply(reply)) => reply,
+                Some(Step::RejectContext) => return Err(Error::ContextWindow),
+                Some(Step::Fail(error)) => {
+                    if matches!(&error, Error::Provider { partial: true, .. }) {
+                        text("已经收到部分正文".into());
+                    }
+                    return Err(error);
+                }
                 Some(Step::Wait {
                     started,
                     release,
@@ -135,7 +144,7 @@ impl Fixture {
         }
     }
 
-    fn plan(&self, id: &str, mode: ExecutionMode) -> RunPlan {
+    fn plan(&self, id: &str) -> RunPlan {
         RunPlan {
             id: id.into(),
             world_id: "world".into(),
@@ -143,7 +152,6 @@ impl Fixture {
             head_id: "n0".into(),
             base_id: Some("n0".into()),
             kind: "turn".into(),
-            execution_mode: mode,
             model: ModelConfig {
                 slot: "isolated".into(),
                 url: "https://model.invalid/v1".into(),
@@ -220,13 +228,357 @@ fn written() -> Completion {
     ))
 }
 
+#[test]
+fn legacy_execution_mode_is_ignored_by_serde_instead_of_validated_or_serialized() {
+    let fixture = Fixture::new(vec![]);
+    let original = serde_json::to_value(fixture.plan("legacy-mode")).unwrap();
+    assert!(original.get("executionMode").is_none());
+    for value in [json!("agent"), json!("classic"), json!("unknown"), json!(null), json!({"old":true})] {
+        let mut wire = original.clone();
+        wire["executionMode"] = value;
+        let plan: RunPlan = serde_json::from_value(wire).unwrap();
+        assert_eq!(serde_json::to_value(plan).unwrap(), original);
+    }
+}
+
+#[tokio::test]
+async fn legacy_agent_flags_use_ordinary_writing_without_migrating_the_saved_state() {
+    let fixture = Fixture::new(vec![Step::Reply(written())]);
+    let mut plan = serde_json::to_value(fixture.plan("legacy-ordinary")).unwrap();
+    plan["executionMode"] = "agent".into();
+    plan["state"]["executionMode"] = "agent".into();
+    let before = plan["state"].clone();
+    fixture.store.lock().unwrap().execute("UPDATE states SET state_json=? WHERE node_id='n0'", [before.to_string()]).unwrap();
+    fixture.engine.start(serde_json::from_value(plan).unwrap()).unwrap();
+    let snapshot = fixture.settled("legacy-ordinary").await;
+    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
+    assert_eq!(fixture.model.count(), 1);
+    let saved: Value = serde_json::from_str(&fixture.text("SELECT state_json FROM states WHERE node_id='n0'")).unwrap();
+    assert_eq!(saved, before);
+    let meta: Value = serde_json::from_str(&fixture.text("SELECT meta_json FROM nodes WHERE id<>'n0'")).unwrap();
+    assert!(meta.get("executionMode").is_none());
+    let stored_plan: Value = serde_json::from_str(&fixture.text("SELECT plan_json FROM execution_runs")).unwrap();
+    assert!(stored_plan.get("executionMode").is_none());
+}
+
+#[tokio::test]
+async fn retired_task_kind_cannot_fall_through_to_ordinary_execution() {
+    let fixture = Fixture::new(vec![]);
+    let mut plan = fixture.plan("retired-task");
+    plan.kind = "agent_task".into();
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("retired-task").await;
+    assert_eq!(snapshot.status, "failed");
+    assert!(snapshot.error.unwrap().contains("不支持的运行类型"));
+    assert_eq!(fixture.model.count(), 0);
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 1);
+}
+
+#[tokio::test]
+async fn failed_opening_leaves_no_partial_world_or_nodes() {
+    for storage_failure in [false, true] {
+        let mut reply = written();
+        if !storage_failure {
+            reply.finish_reason = Some("content_filter".into());
+        }
+        let f = Fixture::new(vec![Step::Reply(reply)]);
+        if storage_failure {
+            f.store.lock().unwrap().execute_batch("CREATE TRIGGER reject_opening_state BEFORE INSERT ON states WHEN NEW.node_id <> 'n0' BEGIN SELECT RAISE(ABORT, 'isolated opening failure'); END;").unwrap();
+        }
+        let mut plan = f.plan("failed-opening");
+        plan.kind = "opening".into();
+        plan.world_id = "new-world".into();
+        plan.line_id = "new-line".into();
+        plan.head_id.clear();
+        plan.base_id = None;
+        plan.new_world = Some(json!({"title":"新故事","eraId":"free"}));
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("failed-opening").await;
+        assert_eq!(saved.status, "failed", "{:?}", saved.error);
+        assert!(saved.result.is_none());
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM worlds"), 1);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 1);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM states"), 1);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM lines"), 1);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 1);
+        assert!(f.committed.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn model_refusal_does_not_commit_a_turn_even_with_a_record() {
+    let mut reply = written();
+    reply.finish_reason = Some("content_filter".into());
+    let f = Fixture::new(vec![Step::Reply(reply)]);
+    f.engine.start(f.plan("refused-turn")).unwrap();
+    let saved = f.settled("refused-turn").await;
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.error_kind.as_deref(), Some("refused"));
+    assert!(saved.error.unwrap().contains("原路线未改动"));
+    assert!(saved.result.is_none());
+    assert_eq!(f.model.count(), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM states"), 1);
+    assert_eq!(f.text("SELECT node_id FROM lines WHERE id='line'"), "n0");
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 1);
+    assert!(f.committed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn context_retry_accounts_for_each_request_separately() {
+    let f = Fixture::new(vec![Step::RejectContext, Step::Reply(written())]);
+    let mut plan = f.plan("retry-usage");
+    plan.messages = vec![json!({"role":"user","content":"可选背景，买一张纸","compactContent":"买一张纸"})];
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("retry-usage").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(saved.budget.model_requests, 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed' AND estimated=1"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage WHERE outcome='ok' AND prompt_tokens=12 AND completion_tokens=8"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 2);
+    f.engine.resume("retry-usage").unwrap();
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+}
+
+fn provider(kind: &str, status: Option<u16>, partial: bool) -> Error {
+    Error::Provider { kind: kind.into(), status, message: "隔离服务错误".into(), partial }
+}
+
+#[tokio::test]
+async fn network_before_content_retries_once_and_accounts_each_request() {
+    let f = Fixture::new(vec![Step::Fail(provider("network", None, false)), Step::Reply(written())]);
+    f.engine.start(f.plan("network-retry")).unwrap();
+    let saved = f.settled("network-retry").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(saved.error_kind, None);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(saved.budget.model_requests, 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed' AND estimated=1"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage WHERE outcome='ok' AND prompt_tokens=12 AND completion_tokens=8"), 1);
+}
+
+#[tokio::test]
+async fn network_after_partial_content_does_not_retry() {
+    let f = Fixture::new(vec![Step::Fail(provider("network", None, true)), Step::Reply(written())]);
+    f.engine.start(f.plan("partial-network")).unwrap();
+    let saved = f.settled("partial-network").await;
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.error_kind.as_deref(), Some("network"));
+    assert_eq!(f.model.count(), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 1);
+    assert!(saved.events.iter().any(|e| e.event["type"] == "text" && e.event["full"] == "已经收到部分正文"));
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 1);
+}
+
+#[tokio::test]
+async fn http_429_retries_once_and_succeeds() {
+    let f = Fixture::new(vec![Step::Fail(provider("http", Some(429), false)), Step::Reply(written())]);
+    f.engine.start(f.plan("quota-retry")).unwrap();
+    let saved = f.settled("quota-retry").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+}
+
+#[tokio::test]
+async fn consecutive_transient_errors_stop_after_one_retry_with_persisted_kind() {
+    for (kind, status, expected) in [("network", None, "network"), ("http", Some(429), "quota")] {
+        let f = Fixture::new(vec![Step::Fail(provider(kind, status, false)), Step::Fail(provider(kind, status, false)), Step::Reply(written())]);
+        f.engine.start(f.plan("transient-twice")).unwrap();
+        let saved = f.settled("transient-twice").await;
+        assert_eq!(saved.status, "failed");
+        assert_eq!(saved.error_kind.as_deref(), Some(expected));
+        assert_eq!(serde_json::to_value(&saved).unwrap()["errorKind"], expected);
+        assert_eq!(f.text("SELECT error_kind FROM execution_runs"), expected);
+        assert_eq!(f.model.count(), 2);
+        assert_eq!(saved.budget.model_requests, 2);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed'"), 2);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 1);
+    }
+}
+
+#[tokio::test]
+async fn context_and_transient_recovery_share_one_retry_in_both_orders() {
+    for context_first in [true, false] {
+        let network = || Step::Fail(provider("network", None, false));
+        let f = Fixture::new(if context_first { vec![Step::RejectContext, network(), Step::Reply(written())] }
+            else { vec![network(), Step::RejectContext, Step::Reply(written())] });
+        let mut plan = f.plan("shared-retry");
+        plan.messages = vec![json!({"role":"user","content":"可选背景，买一张纸","compactContent":"买一张纸"})];
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("shared-retry").await;
+        assert_eq!(saved.status, "failed");
+        assert_eq!(saved.error_kind.as_deref(), Some(if context_first { "network" } else { "context" }));
+        assert_eq!(f.model.count(), 2);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_retry_wait_stops_before_another_request() {
+    let f = Fixture::new(vec![Step::Fail(provider("http", Some(429), false)), Step::Reply(written())]);
+    f.engine.start(f.plan("cancel-retry-wait")).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while f.scalar("SELECT COUNT(*) FROM execution_steps WHERE status='failed'") == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    let began = std::time::Instant::now();
+    f.engine.stop("cancel-retry-wait").unwrap();
+    let saved = f.settled("cancel-retry-wait").await;
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(saved.status, "cancelled");
+    assert_eq!(saved.error_kind.as_deref(), Some("cancelled"));
+    assert_eq!(f.model.count(), 1);
+    assert_eq!(saved.budget.model_requests, 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 1);
+}
+
+#[tokio::test]
+async fn transient_retry_obeys_request_limit_and_only_retries_eligible_errors() {
+    for (kind, status, limit, expected) in [
+        ("network", None, 1, "failed"),
+        ("timeout_first", None, 2, "failed"),
+        ("http", Some(503), 2, "committed"),
+        ("timeout_idle", None, 2, "failed"),
+        ("timeout_total", None, 2, "failed"),
+        ("http", Some(400), 2, "failed"),
+    ] {
+        let f = Fixture::new(vec![Step::Fail(provider(kind, status, false)), Step::Reply(written())]);
+        let mut plan = f.plan("retry-limits");
+        plan.meta["modelRequestLimit"] = limit.into();
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("retry-limits").await;
+        assert_eq!(saved.status, expected, "{kind} {status:?}: {:?}", saved.error);
+        assert_eq!(f.model.count(), if expected == "committed" { 2 } else { 1 });
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), f.model.count() as i64);
+    }
+}
+
+#[tokio::test]
+async fn turn_autoplay_correction_and_ask_persist_the_same_auth_failure() {
+    for kind in ["turn", "autoplay", "correction", "ask"] {
+        let f = Fixture::new(vec![Step::Fail(provider("http", Some(401), false))]);
+        let mut plan = f.plan("auth-exits");
+        plan.kind = kind.into();
+        plan.meta = json!({"referenceReviewVersion":"reference-review-2"});
+        if kind == "autoplay" {
+            plan.meta["autoplayCount"] = 1.into();
+            plan.settings["pilot"] = "ai".into();
+            f.store.lock().unwrap().execute("UPDATE worlds SET settings_json=? WHERE id='world'", [plan.settings.to_string()]).unwrap();
+        }
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("auth-exits").await;
+        assert_eq!(saved.status, "failed", "{kind}: {:?}", saved.error);
+        assert_eq!(saved.error_kind.as_deref(), Some("auth"), "{kind}: {:?}", saved.error);
+        assert_eq!(f.model.count(), 1, "{kind}");
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 1, "{kind}");
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 1);
+        if kind == "autoplay" {
+            assert_eq!(f.engine.snapshot("auth-exits:step:1", 0).unwrap().error_kind.as_deref(), Some("auth"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn variant_carries_player_edits_after_the_previous_turn() {
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Reply(written())]);
+    f.engine.start(f.plan("old-turn")).unwrap();
+    assert_eq!(f.settled("old-turn").await.status, "committed");
+    let old_turn = f.text("SELECT node_id FROM lines WHERE id='line'");
+    let patch = json!({"setStats":{"money":50}});
+    {
+        let db = f.store.lock().unwrap();
+        db.execute("INSERT INTO nodes(id,world_id,parent_id,seq,kind,action_text,record_json,created_at) VALUES('player-edit','world',?,2,'edit','钱 8 → 50',?,'test')", rusqlite::params![old_turn, patch.to_string()]).unwrap();
+        db.execute("INSERT INTO states SELECT 'player-edit',json_set(state_json,'$.protagonist.stats.money',50) FROM states WHERE node_id=?", [&old_turn]).unwrap();
+        db.execute("UPDATE lines SET node_id='player-edit' WHERE id='line'", []).unwrap();
+    }
+    let mut plan = f.plan("variant-edits");
+    plan.kind = "variant".into();
+    plan.head_id = "player-edit".into();
+    plan.carried_edits = vec![json!({"record":patch,"actionText":"钱 8 → 50"})];
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("variant-edits").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let result = saved.result.unwrap();
+    let db = f.store.lock().unwrap();
+    let (parent, kind, action, raw): (String, String, String, String) = db.query_row("SELECT n.parent_id,n.kind,n.action_text,s.state_json FROM nodes n JOIN states s ON s.node_id=n.id WHERE n.id=?", [result["headId"].as_str().unwrap()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(parent, result["nodeId"].as_str().unwrap());
+    assert_eq!(kind, "edit");
+    assert_eq!(action, "钱 8 → 50（已沿用）");
+    let state: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(state["protagonist"]["stats"]["money"].as_f64(), Some(50.0));
+    assert_eq!(state["time"]["elapsedMinutes"].as_f64(), Some(5.0));
+    let old_money: f64 = db.query_row("SELECT json_extract(state_json,'$.protagonist.stats.money') FROM states WHERE node_id=?", [&old_turn], |r| r.get(0)).unwrap();
+    assert_eq!(old_money, 8.0, "the old turn must remain unchanged");
+}
+
+#[tokio::test]
+async fn native_autoplay_stops_after_death_or_the_last_script_beat() {
+    for script in [false, true] {
+        let record = if script { json!({"time":5,"beat":"done"}) } else { json!({"time":5,"died":true}) };
+        let f = Fixture::new(vec![Step::Reply(prose(&format!("故事演到这里。<record>{record}</record>")))]);
+        let mut plan = f.plan("auto-ending");
+        plan.kind = "autoplay".into();
+        plan.settings = json!({"pilot":"ai","choiceCount":0,"difficulty":"残酷"});
+        plan.options["difficulty"] = "残酷".into();
+        plan.meta = json!({"autoplayCount":3,"autoplayPauseMs":0});
+        if script {
+            plan.state["script"] = json!({"line":"送信","beats":[{"id":"last","text":"信送到了","status":"todo"}],"ending":"平安抵达"});
+        }
+        {
+            let db = f.store.lock().unwrap();
+            db.execute("UPDATE worlds SET settings_json=? WHERE id='world'", [plan.settings.to_string()]).unwrap();
+            db.execute("UPDATE states SET state_json=? WHERE node_id='n0'", [plan.state.to_string()]).unwrap();
+        }
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("auto-ending").await;
+        assert_eq!(saved.status, "committed", "script={script}: {:?}", saved.error);
+        assert_eq!(saved.result.as_ref().unwrap()["reason"], if script { "script" } else { "died" });
+        assert_eq!(saved.result.as_ref().unwrap()["steps"], 1);
+        assert_eq!(f.model.count(), 1);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 2);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 1);
+    }
+}
+
+#[tokio::test]
+async fn manual_stop_of_native_autoplay_keeps_completed_steps_and_starts_no_more() {
+    let started = Arc::new(Notify::new());
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Wait {
+        started: started.clone(), release: Arc::new(Notify::new()), reply: written(),
+    }]);
+    let mut plan = f.plan("auto-stop");
+    plan.kind = "autoplay".into();
+    plan.settings = json!({"pilot":"ai","choiceCount":0,"difficulty":"标准"});
+    plan.meta = json!({"autoplayCount":3,"autoplayPauseMs":0});
+    f.store.lock().unwrap().execute("UPDATE worlds SET settings_json=? WHERE id='world'", [plan.settings.to_string()]).unwrap();
+    f.engine.start(plan).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    let head = f.text("SELECT node_id FROM lines WHERE id='line'");
+    f.engine.stop("auto-stop").unwrap();
+    let saved = f.settled("auto-stop").await;
+    assert_eq!(saved.status, "cancelled");
+    assert_eq!(saved.draft["steps"], 1);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 2);
+    assert_eq!(f.text("SELECT node_id FROM lines WHERE id='line'"), head);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_runs WHERE id='auto-stop:step:3'"), 0);
+}
+
 #[tokio::test]
 async fn oversized_chapter_is_grouped_and_only_the_complete_summary_is_saved() {
     let summary = prose(r#"{"title":"青桥旧事","gist":"行旅买纸","summary":"行旅买纸后，接到了渡江口信。"}"#);
     let mut steps = vec![Step::Reply(written())];
     steps.extend((0..8).map(|_| Step::Reply(summary.clone())));
     let fixture = Fixture::new(steps);
-    let mut plan = fixture.plan("chapter-groups", ExecutionMode::Classic);
+    let mut plan = fixture.plan("chapter-groups");
     plan.meta = json!({"budgetChars":6000,"chapterFirstId":"n0","chapterVersion":"chapter-1","chapterMessages":[{"role":"system","content":"记录本章全部实际剧情，返回title/gist/summary的JSON。"},{"role":"user","content":format!("【前几章梗概】{}\n【本章剧情】\n{}结尾唯一事件：接到渡江口信。\n{{{{NARRATIVE}}}}","过去的摘要".repeat(1000),"行旅询问旧事。\n".repeat(1000))}]});
     fixture.engine.start(plan).unwrap();
     let done = fixture.settled("chapter-groups").await;
@@ -242,12 +594,106 @@ async fn oversized_chapter_is_grouped_and_only_the_complete_summary_is_saved() {
 fn calls(calls: Vec<(&str, &str, Value)>) -> Completion {
     Completion { tool_calls: calls.into_iter().map(|(id,name,args)| json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})).collect(), finish_reason: Some("tool_calls".into()), usage: Some(json!({"prompt_tokens":10,"completion_tokens":6})), ..Default::default() }
 }
-fn capability() -> Step {
-    Step::Reply(calls(vec![(
-        "probe",
-        "report_capability",
-        json!({"value":"ready"}),
-    )]))
+#[tokio::test]
+async fn canon_correction_delivers_required_text_and_evidence_above_the_history_target() {
+    let quote = "纸铺一张纸售价两文。";
+    let original = "前文。四文纸。后文。";
+    let response = json!({
+        "replacement":"两文纸。", "recordPatch":{},
+        "corrections":[{"claim":"纸价","citations":[{"bookId":"book","section":0,"chunk":0,"quote":quote}]}]
+    });
+    let fixture = Fixture::new(vec![
+        Step::Reply(calls(vec![
+            ("skill", "read_skill", json!({"name":"canon-reference"})),
+            ("original", "read_original", json!({"section":0,"chunk":0})),
+        ])),
+        Step::RejectContext,
+        Step::Reply(prose(&response.to_string())),
+    ]);
+    let binding = json!({"bookId":"book","position":0,"through":0,"instructions":"保留玩家设定"});
+    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','短篇','txt','test','{}'); INSERT INTO source_sections VALUES('book',0,'第一章',NULL); INSERT INTO source_chunks VALUES('book',0,0,'纸铺一张纸售价两文。');").unwrap();
+    let required = format!("【原著用法】保留玩家设定\n【选中范围】四文纸。\n【玩家要求】{}", "保留所选段落的完整要求".repeat(440));
+    let mut plan = fixture.plan("correction-history-target");
+    plan.kind = "correction".into();
+    plan.state["source"] = binding.clone();
+    plan.reference = Some(json!({"bookId":"book","binding":binding,"passages":[]}));
+    plan.messages = vec![
+        json!({"role":"system","content":"依据已读原文改稿。".repeat(240)}),
+        json!({"role":"user","content":"旧行动"}),
+        json!({"role":"assistant","content":"可省略的旧剧情".repeat(1500)}),
+        json!({"role":"user","content":required}),
+    ];
+    plan.meta = json!({"budgetChars":14545,"anchor":{"original":original},"correctionRange":{"start":3,"end":7},"originalRecord":{"time":5,"money":-2}});
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("correction-history-target").await;
+    assert_eq!(snapshot.status, "previewed", "{:?}", snapshot.error);
+    assert_eq!(snapshot.result.unwrap()["narrative"], "前文。两文纸。后文。");
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 1);
+    let requests = fixture.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let first_followup = &requests[1];
+    let followup = &requests[2];
+    assert!(first_followup.to_string().encode_utf16().count() > 14545);
+    assert!(followup.to_string().len() < first_followup.to_string().len());
+    assert_eq!(snapshot.draft["contextReports"]["writing:1"]["status"], "context-retry");
+    let messages = followup["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|m| m["role"] == "user" && m["content"] == required));
+    assert!(messages.iter().any(|m| m["tool_call_id"] == "original" && m["content"].as_str().unwrap().contains(quote)));
+    assert!(!followup.to_string().contains("可省略的旧剧情"));
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed'"), 1);
+}
+
+#[tokio::test]
+async fn context_recovery_resends_only_a_smaller_request_and_stops_after_one_rejection() {
+    for optional in [false, true] {
+        let fixture = Fixture::new(vec![Step::RejectContext, Step::RejectContext]);
+        let mut plan = fixture.plan("provider-context");
+        if optional {
+            plan.messages[0] = json!({"role":"user","content":"带可选背景，买一张纸","compactContent":"买一张纸"});
+        }
+        fixture.engine.start(plan).unwrap();
+        let snapshot = fixture.settled("provider-context").await;
+        assert!(snapshot.error.unwrap().contains("上下文窗口不足"));
+        assert_eq!(fixture.model.count(), if optional { 2 } else { 1 });
+        assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 1);
+        let requests = fixture.model.requests.lock().unwrap();
+        assert!(requests.iter().all(|body| !body.to_string().contains("compactContent")));
+        if optional {
+            assert_eq!(requests[1]["messages"].as_array().unwrap().last().unwrap()["content"], "买一张纸");
+        }
+    }
+}
+
+#[tokio::test]
+async fn large_character_results_offer_a_readable_location_and_advance_the_page() {
+    let fixture = Fixture::new(vec![
+        Step::Reply(calls(vec![("people", "read_characters", json!({"limit":2}))])),
+        Step::Reply(calls(vec![("detail", "read_story_resources", json!({"kind":"people","query":"long-person"}))])),
+        Step::Reply(prose("可以按定位查看本局人物。")),
+    ]);
+    let mut plan = fixture.plan("large-people-page");
+    plan.kind = "ask".into();
+    plan.meta = json!({"budgetChars":14545,"writingContext":{}});
+    let long = "旧人物资料正文。".repeat(5000);
+    plan.state["people"] = json!([
+        {"id":"long-person","name":"掌柜","notes":long},
+        {"id":"next-person","name":"旅人","notes":"第二项"}
+    ]);
+    fixture.store.lock().unwrap().execute("UPDATE states SET state_json=? WHERE node_id='n0'", [plan.state.to_string()]).unwrap();
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("large-people-page").await;
+    assert_eq!(snapshot.status, "previewed", "{:?}", snapshot.error);
+    let requests = fixture.model.requests.lock().unwrap();
+    let result = |index: usize, id: &str| -> Value {
+        let message = requests[index]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == id).unwrap();
+        serde_json::from_str(message["content"].as_str().unwrap()).unwrap()
+    };
+    let page = result(1, "people");
+    assert_eq!(page["people"][0]["name"], "掌柜");
+    assert_eq!(page["people"][0]["read"]["query"], "long-person");
+    assert_eq!(page["nextOffset"], 1);
+    assert!(!page.to_string().contains(&long));
+    assert!(result(2, "detail")["value"][0]["ref"].is_object());
 }
 
 #[tokio::test]
@@ -255,7 +701,7 @@ async fn classic_commits_without_a_subscriber_and_events_can_be_replayed_once() 
     let fixture = Fixture::new(vec![Step::Reply(written())]);
     fixture
         .engine
-        .start(fixture.plan("classic", ExecutionMode::Classic))
+        .start(fixture.plan("classic"))
         .unwrap();
     // There is deliberately no snapshot reader until the lease has ended.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -284,7 +730,7 @@ async fn classic_commits_without_a_subscriber_and_events_can_be_replayed_once() 
         .unwrap();
     let state: Value = serde_json::from_str(&state).unwrap();
     assert_eq!(state["protagonist"]["stats"]["money"].as_f64(), Some(8.0));
-    assert_eq!(state["executionMode"], "classic");
+    assert!(state.get("executionMode").is_none());
     assert_eq!(
         fixture.scalar("SELECT COUNT(*) FROM usage WHERE outcome='ok' AND node_id IS NOT NULL"),
         1
@@ -312,159 +758,6 @@ async fn classic_commits_without_a_subscriber_and_events_can_be_replayed_once() 
 }
 
 #[tokio::test]
-async fn agent_discovers_tools_reads_a_skill_receives_results_and_commits_staged_turn() {
-    let fixture = Fixture::new(vec![
-        capability(),
-        Step::Reply(calls(vec![
-            ("skill", "read_skill", json!({"name":"story-writing"})),
-            ("world", "read_world", json!({})),
-        ])),
-        Step::Reply(calls(vec![(
-            "commit",
-            "commit_turn",
-            json!({"narrative":"你付了两文，收好一张纸。","record":record()}),
-        )])),
-    ]);
-    fixture
-        .engine
-        .start(fixture.plan("agent", ExecutionMode::Agent))
-        .unwrap();
-    let snapshot = fixture.settled("agent").await;
-    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
-    assert_eq!(snapshot.budget.model_requests, 3);
-    assert_eq!(snapshot.budget.tool_calls, 3);
-    assert_eq!(
-        fixture.scalar(
-            "SELECT COUNT(*) FROM execution_steps WHERE kind='read_skill' AND status='done'"
-        ),
-        1
-    );
-    let requests = fixture.model.requests.lock().unwrap();
-    assert!(requests[1]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|tool| tool["function"]["name"] == "commit_turn"));
-    let messages = requests[2]["messages"].as_array().unwrap();
-    let skill = messages
-        .iter()
-        .find(|message| message["tool_call_id"] == "skill")
-        .unwrap();
-    assert_eq!(skill["role"], "tool");
-    assert!(skill["content"].as_str().unwrap().contains("story-writing"));
-    let world: Value = serde_json::from_str(
-        messages
-            .iter()
-            .find(|message| message["tool_call_id"] == "world")
-            .unwrap()["content"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(world["state"]["protagonist"]["name"], "李安");
-    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 2);
-}
-
-#[tokio::test]
-async fn fetching_original_and_committing_in_one_batch_requires_a_reading_roundtrip() {
-    let commit = json!({"narrative":"你付了两文，收好一张纸。","record":record()});
-    let fixture = Fixture::new(vec![
-        capability(),
-        Step::Reply(calls(vec![
-            ("read", "read_original", json!({"section":0,"chunk":0})),
-            ("early", "commit_turn", commit.clone()),
-        ])),
-        Step::Reply(calls(vec![("after-reading", "commit_turn", commit)])),
-    ]);
-    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','短篇','txt','test','{}'); INSERT INTO source_sections VALUES('book',0,'第一章',NULL); INSERT INTO source_chunks VALUES('book',0,0,'纸铺一张纸售价两文。');").unwrap();
-    let mut plan = fixture.plan("reading-roundtrip", ExecutionMode::Agent);
-    plan.state["source"] =
-        json!({"bookId":"book","position":0,"through":0,"instructions":"核对纸价"});
-    fixture.engine.start(plan).unwrap();
-    let snapshot = fixture.settled("reading-roundtrip").await;
-    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
-    let requests = fixture.model.requests.lock().unwrap();
-    let messages = requests[2]["messages"].as_array().unwrap();
-    let early: Value = serde_json::from_str(
-        messages
-            .iter()
-            .find(|m| m["tool_call_id"] == "early")
-            .unwrap()["content"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(early["isError"], true);
-    assert_eq!(snapshot.draft["originalRead"], true);
-    assert_eq!(
-        snapshot.draft["originalPassages"][0]["text"],
-        "纸铺一张纸售价两文。"
-    );
-    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 2);
-}
-
-#[tokio::test]
-async fn history_lookup_searches_old_route_text_and_excludes_other_branches() {
-    let fixture = Fixture::new(vec![
-        capability(),
-        Step::Reply(calls(vec![(
-            "old",
-            "read_history",
-            json!({"query":"青铜钥匙","limit":1}),
-        )])),
-        Step::Reply(calls(vec![(
-            "commit",
-            "commit_turn",
-            json!({"narrative":"你收好纸。","record":record()}),
-        )])),
-    ]);
-    fixture.store.lock().unwrap().execute_batch("UPDATE nodes SET narrative='本路旧事：青铜钥匙藏在灯座下。' WHERE id='n0'; INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('other','world',1,'turn','另一条路线把青铜钥匙送走了。','test'); INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,created_at) VALUES('chapter','world','n0','n0','旧约','见面','曾约定保管青铜钥匙。','test');").unwrap();
-    fixture
-        .engine
-        .start(fixture.plan("history-search", ExecutionMode::Agent))
-        .unwrap();
-    assert_eq!(fixture.settled("history-search").await.status, "committed");
-    let requests = fixture.model.requests.lock().unwrap();
-    let value: Value = serde_json::from_str(
-        requests[2]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["tool_call_id"] == "old")
-            .unwrap()["content"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(value["turns"][0]["id"], "n0");
-    assert_eq!(value["chapters"][0]["id"], "chapter");
-    assert!(!value.to_string().contains("另一条路线"));
-}
-
-#[tokio::test]
-async fn lower_request_limit_is_visible_to_the_model_and_survives_resume() {
-    let fixture = Fixture::new(vec![
-        capability(),
-        Step::Reply(calls(vec![("world", "read_world", json!({}))])),
-    ]);
-    let mut plan = fixture.plan("lower-limit", ExecutionMode::Agent);
-    plan.meta["modelRequestLimit"] = 2.into();
-    fixture.engine.start(plan).unwrap();
-    let snapshot = fixture.settled("lower-limit").await;
-    assert_eq!(snapshot.status, "paused");
-    assert_eq!(fixture.model.count(), 2);
-    assert!(
-        fixture.model.requests.lock().unwrap()[1]["messages"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("尚可请求模型1次")
-    );
-    fixture.engine.resume("lower-limit").unwrap();
-    assert_eq!(fixture.settled("lower-limit").await.status, "paused");
-    assert_eq!(fixture.model.count(), 2);
-}
-
-#[tokio::test]
 async fn stopped_extraction_resumes_cached_writing_without_duplicate_settlement_or_usage() {
     let started = Arc::new(Notify::new());
     let fixture = Fixture::new(vec![
@@ -478,7 +771,7 @@ async fn stopped_extraction_resumes_cached_writing_without_duplicate_settlement_
     ]);
     fixture
         .engine
-        .start(fixture.plan("resume", ExecutionMode::Classic))
+        .start(fixture.plan("resume"))
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
@@ -524,7 +817,7 @@ async fn moving_the_route_during_a_model_wait_refuses_the_entire_commit() {
     }]);
     fixture
         .engine
-        .start(fixture.plan("stale", ExecutionMode::Classic))
+        .start(fixture.plan("stale"))
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
@@ -556,7 +849,7 @@ async fn a_storage_failure_rolls_back_body_state_and_route_together() {
     fixture.store.lock().unwrap().execute_batch("CREATE TRIGGER reject_new_state BEFORE INSERT ON states WHEN NEW.node_id <> 'n0' BEGIN SELECT RAISE(ABORT, 'isolated fault'); END;").unwrap();
     fixture
         .engine
-        .start(fixture.plan("rollback", ExecutionMode::Classic))
+        .start(fixture.plan("rollback"))
         .unwrap();
     let snapshot = fixture.settled("rollback").await;
     assert_eq!(snapshot.status, "failed");
@@ -568,68 +861,6 @@ async fn a_storage_failure_rolls_back_body_state_and_route_together() {
     );
     assert!(snapshot.result.is_none());
     assert_eq!(fixture.committed.lock().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn the_twenty_fifth_tool_is_not_executed_and_the_draft_is_retained() {
-    let ids: Vec<String> = (0..25).map(|n| format!("read-{n}")).collect();
-    let response = calls(
-        ids.iter()
-            .map(|id| (id.as_str(), "read_world", json!({})))
-            .collect(),
-    );
-    let fixture = Fixture::new(vec![capability(), Step::Reply(response)]);
-    fixture
-        .engine
-        .start(fixture.plan("tool-limit", ExecutionMode::Agent))
-        .unwrap();
-    let snapshot = fixture.settled("tool-limit").await;
-    assert_eq!(snapshot.status, "paused", "{:?}", snapshot.error);
-    assert_eq!(snapshot.budget.tool_calls, 24);
-    assert_eq!(fixture.model.count(), 2);
-    assert_eq!(
-        fixture.scalar("SELECT COUNT(*) FROM execution_steps WHERE kind='read_world'"),
-        24
-    );
-    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 1);
-    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM execution_steps WHERE kind='writing:0' AND output_json IS NOT NULL"), 1);
-}
-
-#[tokio::test]
-async fn the_capability_probe_and_every_followup_count_towards_the_ten_request_limit() {
-    let mut steps = vec![capability()];
-    for round in 0..9 {
-        steps.push(Step::Reply(calls(vec![(
-            &format!("read-{round}"),
-            "read_world",
-            json!({}),
-        )])));
-    }
-    let fixture = Fixture::new(steps);
-    fixture
-        .engine
-        .start(fixture.plan("model-limit", ExecutionMode::Agent))
-        .unwrap();
-    let snapshot = fixture.settled("model-limit").await;
-    assert_eq!(snapshot.status, "paused", "{:?}", snapshot.error);
-    assert_eq!(snapshot.budget.model_requests, 10);
-    assert_eq!(snapshot.budget.tool_calls, 9);
-    assert_eq!(fixture.model.count(), 10);
-    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 1);
-}
-
-#[tokio::test]
-async fn unsupported_tools_do_not_silently_run_agent_as_classic() {
-    let fixture = Fixture::new(vec![Step::Reply(prose("这个模型只返回正文。"))]);
-    fixture
-        .engine
-        .start(fixture.plan("unsupported", ExecutionMode::Agent))
-        .unwrap();
-    let snapshot = fixture.settled("unsupported").await;
-    assert_eq!(snapshot.status, "failed");
-    assert!(snapshot.error.as_deref().unwrap().contains("工具调用检查"));
-    assert_eq!(fixture.model.count(), 1);
-    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes"), 1);
 }
 
 #[tokio::test]
@@ -647,7 +878,7 @@ async fn continuation_cannot_commit_if_the_target_is_no_longer_interrupted() {
         .unwrap()
         .execute("UPDATE nodes SET status='interrupted' WHERE id='n0'", [])
         .unwrap();
-    let mut plan = fixture.plan("continue-stale", ExecutionMode::Classic);
+    let mut plan = fixture.plan("continue-stale");
     plan.kind = "continue".into();
     plan.original = "原有正文".into();
     plan.meta = json!({"targetId":"n0"});

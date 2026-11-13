@@ -14,6 +14,17 @@ const ctx = (difficulty: Difficulty = "标准") => ({ mode: "do" as const, diffi
 const apply = (s: WorldState, r: TurnRecord | null, d?: Difficulty) => applyRecord(s, r, ctx(d));
 const chipTexts = (r: { chips: { text: string }[] }) => r.chips.map((c) => c.text);
 
+describe("legacy execution settings", () => {
+  it("ignores executionSet in old edit records and leaves saved flags inert", () => {
+    const before = { ...sampleState(), executionMode: "agent" };
+    const record = { executionSet: "classic", log: "旧编辑" } as TurnRecord;
+    const result = applyRecord(before, record, ctx(), { advanceTime: false });
+    expect(result.state).toHaveProperty("executionMode", "agent");
+    expect(before.executionMode).toBe("agent");
+    expect(applyRecord(sampleState(), record, ctx(), { advanceTime: false }).state).not.toHaveProperty("executionMode");
+  });
+});
+
 describe("money", () => {
   it("formats and parses Tang coins", () => {
     expect(formatMoney(1200, TANG_CURRENCY)).toBe("1 贯 200 文");

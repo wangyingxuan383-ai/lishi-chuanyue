@@ -2,7 +2,7 @@ use crate::{
     chat::{self, BoxFuture, Completion, Model, TextSink},
     execution_lease,
     mcp::BuiltinMcp,
-    rules, Error, ExecutionMode, Result, RunBudget, RunPlan, RunSnapshot, Store,
+    rules, Error, Result, RunBudget, RunPlan, RunSnapshot, Store,
 };
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -25,10 +25,6 @@ pub struct Engine {
     active: Mutex<HashMap<String, CancellationToken>>,
     lease: LeaseFactory,
     pub(crate) committed: CompletionSink,
-    pub(crate) agent_model_slots: tokio::sync::Semaphore,
-    pub(crate) agent_child_slots: tokio::sync::Semaphore,
-    pub(crate) agent_read_slots: tokio::sync::Semaphore,
-    pub(crate) agent_write_lock: tokio::sync::Mutex<()>,
 }
 pub(crate) struct Context {
     pub(crate) plan: RunPlan,
@@ -56,7 +52,6 @@ impl Context {
     }
     fn charge_request(&mut self)->Result<()>{self.step_budget().request()?;self.budget.model_requests+=1;Ok(())}
     fn charge_tool(&mut self)->Result<()>{self.step_budget().tool()?;self.budget.tool_calls+=1;Ok(())}
-    fn charge_correction(&mut self)->Result<()>{self.step_budget().correction()?;self.budget.corrections+=1;Ok(())}
 }
 pub(crate) type Shared = Arc<Mutex<Context>>;
 
@@ -73,10 +68,6 @@ impl Engine {
             active: Mutex::new(HashMap::new()),
             lease,
             committed,
-            agent_model_slots: tokio::sync::Semaphore::new(2),
-            agent_child_slots: tokio::sync::Semaphore::new(2),
-            agent_read_slots: tokio::sync::Semaphore::new(4),
-            agent_write_lock: tokio::sync::Mutex::new(()),
         }
     }
     /// Only called once by a fresh native process, before accepting requests.
@@ -87,15 +78,6 @@ impl Engine {
         // Starting a UI process must not interrupt work owned by :agent, or
         // any other live process. Only expired/unowned stories are recovered.
         tx.execute("UPDATE execution_runs SET status='interrupted',error='进程曾中断，已保留完成步骤，可恢复' WHERE status IN ('running','committing') AND NOT EXISTS(SELECT 1 FROM world_execution_leases l WHERE l.world_id=execution_runs.world_id AND l.owner_id<>'' AND l.expires_at_ms>?)",[execution_lease::now_ms()])?;
-        tx.execute("UPDATE agent_tasks SET status='interrupted',error='进程曾中断，已保留完成步骤，可恢复' WHERE status='running' AND run_id IN (SELECT id FROM execution_runs WHERE status='interrupted')",[])?;
-        tx.execute(
-            "UPDATE agent_subtasks SET status='interrupted' WHERE status IN ('pending','running') AND task_id IN (SELECT id FROM agent_tasks WHERE status='interrupted')",
-            [],
-        )?;
-        // Queue claim and task insertion can be separated by a process exit.
-        // Reconcile from the immutable queue identifier before allowing retry.
-        tx.execute("UPDATE agent_inputs SET task_id=(SELECT json_extract(r.plan_json,'$.meta.agent.taskId') FROM execution_runs r WHERE json_extract(r.plan_json,'$.meta.agent.queuedInputId')=agent_inputs.id LIMIT 1),status='delivered' WHERE delivery='queued' AND status='starting' AND EXISTS(SELECT 1 FROM execution_runs r WHERE json_extract(r.plan_json,'$.meta.agent.queuedInputId')=agent_inputs.id)",[])?;
-        tx.execute("UPDATE agent_inputs SET status='pending' WHERE delivery='queued' AND status='starting' AND NOT EXISTS(SELECT 1 FROM agent_sessions s JOIN world_execution_leases l ON l.world_id=s.world_id WHERE s.id=agent_inputs.session_id AND l.owner_id<>'' AND l.expires_at_ms>?)",[execution_lease::now_ms()])?;
         tx.commit()?;
         Ok(())
     }
@@ -109,14 +91,7 @@ impl Engine {
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {
         self.store.snapshot(id, after)
     }
-    pub(crate) fn is_active(&self, id: &str) -> bool {
-        self.active
-            .lock()
-            .map(|a| a.contains_key(id))
-            .unwrap_or(true)
-    }
     pub fn stop(&self, id: &str) -> Result<()> {
-        crate::agent_control::stop(&self.store, id)?;
         if let Some(token) = self.active.lock().map_err(|_| Error::Cancelled)?.get(id) {
             token.cancel();
         }
@@ -185,9 +160,7 @@ impl Engine {
         drop(active);
         let engine = self.clone();
         let active_before = budget.active_ms;
-        let total_ms = if plan.kind == "agent_task" {
-            crate::agent::limits(&plan).active_ms
-        } else if plan.kind=="autoplay" && plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
+        let total_ms = if plan.kind=="autoplay" && plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
             300_000 * plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100)
         } else {
             300_000
@@ -201,13 +174,7 @@ impl Engine {
             cancel: token.clone(),
         }));
         // The lease exists until settlement, including tools, extraction and commit.
-        // Unlimited Agent work has no root deadline. The platform lease still
-        // retains its existing bounded two-hour system safeguard.
-        let lease = (self.lease)(if total_ms == 0 {
-            7_200_000
-        } else {
-            total_ms.saturating_sub(active_before)
-        });
+        let lease = (self.lease)(total_ms.saturating_sub(active_before));
         tokio::spawn(async move {
             let _lease = lease;
             let heartbeat_done = CancellationToken::new();
@@ -230,19 +197,12 @@ impl Engine {
                 }
             });
             let remaining = total_ms.saturating_sub(active_before);
-            let outcome = if total_ms == 0 {
-                tokio::select! {
-                    _=token.cancelled()=>Err(Error::Cancelled),
-                    result=engine.execute(context.clone())=>result,
-                }
-            } else {
-                tokio::select! {
+            let outcome = tokio::select! {
                     _=token.cancelled()=>Err(Error::Cancelled),
                     result=tokio::time::timeout(std::time::Duration::from_millis(remaining),engine.execute(context.clone()))=>match result {
                         Ok(result)=>result,
-                        Err(_)=>{token.cancel();Err(Error::Limit(if total_ms == 300_000 && context.lock().map(|c|c.plan.kind != "agent_task").unwrap_or(false) {"本次运行已达到 5 分钟上限"} else {"已达到本次时长上限"}))}
+                        Err(_)=>{token.cancel();Err(Error::Limit(if total_ms == 300_000 {"本次运行已达到 5 分钟上限"} else {"已达到本次时长上限"}))}
                     }
-                }
             };
             // An expired process may finish after another process resumed the
             // same run. It must not overwrite that owner's progress/status.
@@ -266,12 +226,11 @@ impl Engine {
                 if plan.is_some_and(|plan| {
                     engine
                         .store
-                        .finish_owned(&plan, status, Some(&error.to_string()))
+                        .finish_owned(&plan, status, Some(&error))
                         .is_ok()
                 }) {
                     let _ = engine.flush_usage(&id, status);
                     let _ = engine.store.event(&id, json!({"type":"failed","reason":if matches!(error, Error::Cancelled) {"cancelled"} else {"config"},"detail":error.to_string(),"partialSaved":false}));
-                    let _ = crate::agent::failed(&engine.store, &id, status, &error.to_string());
                 }
             }
             token.cancel();
@@ -292,7 +251,6 @@ impl Engine {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         execution_lease::guard_plan(&tx, &c.plan)?;
         let counters:(i64,i64,i64)=tx.query_row("SELECT COALESCE(MAX(json_extract(budget_json,'$.modelRequests')),0),COALESCE(MAX(json_extract(budget_json,'$.toolCalls')),0),COALESCE(MAX(json_extract(budget_json,'$.corrections')),0) FROM execution_runs WHERE json_extract(plan_json,'$.meta.parentRun')=?",[&c.plan.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        tx.execute("UPDATE agent_subtasks SET status=?,updated_at=? WHERE task_id=? AND status IN ('pending','running')",params![outcome,Utc::now().to_rfc3339(),c.plan.meta["agent"]["taskId"].as_str().unwrap_or("")])?;
         c.budget.model_requests = c.budget.model_requests.max(counters.0 as u32);
         c.budget.tool_calls = c.budget.tool_calls.max(counters.1 as u32);
         c.budget.corrections = c.budget.corrections.max(counters.2 as u32);
@@ -332,12 +290,7 @@ impl Engine {
         }
         execution_lease::guard_plan(&*self.store.lock()?, &c.plan)?;
         let budget = c.budget();
-        if c.plan.kind == "agent_task" {
-            if crate::agent::limits(&c.plan).time_exhausted(budget.active_ms) {
-                return Err(Error::Limit("本次 Agent 已达到执行时间上限"));
-            }
-            Ok(())
-        } else if c.plan.kind=="autoplay"&&c.plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
+        if c.plan.kind=="autoplay"&&c.plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
             if budget.active_ms>=300_000*c.plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100){Err(Error::Limit("连播已达到各段合计的时间保护上限"))}else{Ok(())}
         } else {
             c.step_budget().time()
@@ -390,82 +343,120 @@ impl Engine {
             }
         }
         let before=crate::stage_context::report(&plan,purpose,&messages,&tools);
-        let bounded=crate::context::bound_context(&plan,messages,&tools);
+        let bounded = crate::context::fit_writing_context(&plan, messages, &tools);
         let mut report=match &bounded {Ok(messages)=>crate::stage_context::report(&plan,purpose,messages,&tools),Err(_)=>before.clone()};
-        report["beforeChars"]=before["chars"].clone();report["status"]=if bounded.is_ok(){"ready"}else{"budget-error"}.into();
+        report["beforeChars"] = before["chars"].clone();
+        let target = plan.meta["budgetChars"].as_u64().unwrap_or(12000);
+        report["status"] = if bounded.is_err() { "invalid" }
+            else if report["chars"].as_u64().unwrap_or(0) > target { "above-target" }
+            else { "ready" }.into();
         {
             let mut c=shared.lock().map_err(|_|Error::Cancelled)?;
             if !c.draft["contextReports"].is_object(){c.draft["contextReports"]=json!({});}
             c.draft["contextReports"][purpose]=report.clone();c.draft["phase"]=purpose.into();
         }
         self.checkpoint(shared)?;self.store.run_event(&plan,json!({"type":"request-context","report":report}))?;
-        let messages=bounded.map_err(|e|Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),e)))?;
-        let body = chat::request(&plan.model, &messages, &tools, aux);
-        let delivered_messages = messages;
-        let (key, token, remaining) = {
-            let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
-            c.budget();
-            if c.step_budget().model_requests >= request_limit {
-                return Err(Error::Limit(if request_limit == 10 {
-                    "本次已达到 10 次模型请求上限"
-                } else {
-                    "本次模型请求额度已用完"
-                }));
-            }
-            c.charge_request()?;
-            (
-                format!("model:{}", c.budget.model_requests),
-                c.cancel.clone(),
-                300_000u64.saturating_sub(c.step_budget().active_ms),
-            )
-        };
-        self.checkpoint(shared)?;
-        self.store.lock()?.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
-        self.store.run_event(&plan, json!({"type":"thinking"}))?;
-        let store = self.store.clone();
-        let id = plan.id.clone();
-        let parent_run = plan.meta["parentRun"].as_str().map(str::to_owned);
-        let original = if plan.kind == "continue" {
-            plan.original.clone()
-        } else {
-            String::new()
-        };
-        let show_text = purpose.starts_with("writing:")
-            || purpose.starts_with("tool:compose_draft")
-            || purpose.starts_with("tool:check_draft");
-        let sink: TextSink = Arc::new(move |text| {
-            if !show_text {
-                return;
-            }
-            let visible = narrative_part(&text);
-            if !visible.is_empty() {
-                let event = json!({"type":"text","delta":"","full":format!("{original}{visible}")});
-                let _ = store.event(&id, event.clone());
-                if let Some(parent) = &parent_run {
-                    let _ = store.event(parent, event);
+        let mut messages=bounded.map_err(|e|Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),e)))?;
+        let mut tools = tools;
+        let mut retried = false;
+        loop {
+            self.check(shared)?;
+            let body = chat::request(&plan.model, &messages, &tools, aux);
+            let (key, token, remaining) = {
+                let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+                c.budget();
+                if c.step_budget().model_requests >= request_limit {
+                    return Err(Error::Limit(if request_limit == 10 {
+                        "本次已达到 10 次模型请求上限"
+                    } else {
+                        "本次模型请求额度已用完"
+                    }));
                 }
-            }
-        });
-        let future = self
-            .model
-            .complete(plan.model.clone(), body, token.child_token(), sink);
-        let result = tokio::select! {
-            _ = token.cancelled() => Err(Error::Cancelled),
-            result = tokio::time::timeout(std::time::Duration::from_millis(remaining), future) => match result {
-                Ok(value) => value,
-                Err(_) => { token.cancel(); Err(Error::Limit("本次运行已达到 5 分钟上限")) }
-            }
-        };
-        self.checkpoint(shared)?;
-        match result {
-            Ok(result) => {
-                self.store.lock()?.execute("UPDATE execution_steps SET status='done',output_json=? WHERE run_id=? AND step_key=?", params![serde_json::to_string(&result)?, plan.id,key])?;
-                self.note_reading(shared, &delivered_messages)?;
-                Ok(result)
-            }
-            Err(error) => {
-                self.store.lock()?.execute("UPDATE execution_steps SET status='failed',output_json=? WHERE run_id=? AND step_key=?", params![json!({"error":error.to_string()}).to_string(),plan.id,key])?;
-                match error {Error::Cancelled|Error::Limit(_)=>Err(error),other=>Err(Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),other)))}
+                c.charge_request()?;
+                (
+                    format!("model:{}", c.budget.model_requests),
+                    c.cancel.clone(),
+                    300_000u64.saturating_sub(c.step_budget().active_ms),
+                )
+            };
+            self.checkpoint(shared)?;
+            self.store.lock()?.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
+            self.store.run_event(&plan, json!({"type":"thinking"}))?;
+            let store = self.store.clone();
+            let id = plan.id.clone();
+            let parent_run = plan.meta["parentRun"].as_str().map(str::to_owned);
+            let original = if plan.kind == "continue" {
+                plan.original.clone()
+            } else {
+                String::new()
+            };
+            let show_text = purpose.starts_with("writing:")
+                || purpose.starts_with("tool:compose_draft")
+                || purpose.starts_with("tool:check_draft");
+            let sink: TextSink = Arc::new(move |text| {
+                if !show_text {
+                    return;
+                }
+                let visible = narrative_part(&text);
+                if !visible.is_empty() {
+                    let event = json!({"type":"text","delta":"","full":format!("{original}{visible}")});
+                    let _ = store.event(&id, event.clone());
+                    if let Some(parent) = &parent_run {
+                        let _ = store.event(parent, event);
+                    }
+                }
+            });
+            let future = self
+                .model
+                .complete(plan.model.clone(), body, token.child_token(), sink);
+            let result = tokio::select! {
+                _ = token.cancelled() => Err(Error::Cancelled),
+                result = tokio::time::timeout(std::time::Duration::from_millis(remaining), future) => match result {
+                    Ok(value) => value,
+                    Err(_) => { token.cancel(); Err(Error::Limit("本次运行已达到 5 分钟上限")) }
+                }
+            };
+            self.checkpoint(shared)?;
+            match result {
+                Ok(result) => {
+                    self.store.lock()?.execute("UPDATE execution_steps SET status='done',output_json=? WHERE run_id=? AND step_key=?", params![serde_json::to_string(&result)?, plan.id,key])?;
+                    self.note_reading(shared, &messages)?;
+                    return Ok(result);
+                }
+                Err(error) => {
+                    self.store.lock()?.execute("UPDATE execution_steps SET status='failed',output_json=? WHERE run_id=? AND step_key=?", params![json!({"error":error.to_string()}).to_string(),plan.id,key])?;
+                    let can_retry = !retried
+                        && shared.lock().map_err(|_| Error::Cancelled)?.step_budget().model_requests < request_limit;
+                    if can_retry && matches!(error, Error::ContextWindow) {
+                        if let Some((smaller, definitions)) = crate::context::recover_writing_request(&plan, &messages, &tools)? {
+                            retried = true;
+                            messages = smaller;
+                            tools = definitions;
+                            let mut report = crate::stage_context::report(&plan, purpose, &messages, &tools);
+                            report["status"] = "context-retry".into();
+                            report["beforeChars"] = before["chars"].clone();
+                            shared.lock().map_err(|_| Error::Cancelled)?.draft["contextReports"][purpose] = report.clone();
+                            self.checkpoint(shared)?;
+                            self.store.run_event(&plan, json!({"type":"request-context","report":report}))?;
+                            continue;
+                        }
+                    }
+                    if can_retry {
+                        if let Some(delay) = transient_retry_delay(&error) {
+                            retried = true;
+                            tokio::select! {
+                                _ = token.cancelled() => return Err(Error::Cancelled),
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                            continue;
+                        }
+                    }
+                    return match error {
+                        Error::Cancelled | Error::Limit(_) | Error::Stale | Error::ContextWindow
+                        | Error::Provider { .. } | Error::Refused(_) => Err(error),
+                        other => Err(Error::Invalid(format!("{}：{}", crate::stage_context::label(purpose), other))),
+                    };
+                }
             }
         }
     }
@@ -535,11 +526,10 @@ impl Engine {
     }
     pub(crate) async fn execute(self: &Arc<Self>, shared: Shared) -> Result<()> {
         let plan = shared.lock().map_err(|_| Error::Cancelled)?.plan.clone();
-        if plan.kind == "agent_task" {
-            return self.execute_agent(shared).await;
-        }
-        if plan.kind == "autoplay" {
-            return Box::pin(self.execute_autoplay(shared)).await;
+        match plan.kind.as_str() {
+            "autoplay" => return Box::pin(self.execute_autoplay(shared)).await,
+            "turn" | "variant" | "continue" | "opening" | "correction" | "ask" => {},
+            _ => return Err(Error::Invalid("不支持的运行类型".into())),
         }
         if plan.new_world.is_none() {
             let mut db = self.store.lock()?;
@@ -557,15 +547,17 @@ impl Engine {
         }))
         .await?;
         let all_tools = mcp.tools().await?;
-        let agent = plan.execution_mode == ExecutionMode::Agent
-            && !plan.meta["playerNarrative"].is_string();
         let has_book = plan.state.get("source").is_some_and(Value::is_object);
         let tools: Vec<Value> = all_tools
             .into_iter()
-            .filter(|t| agent || is_read_tool(t["function"]["name"].as_str().unwrap_or("")))
+            .filter(|t| is_read_tool(t["function"]["name"].as_str().unwrap_or("")))
             .collect();
         let mut messages = plan.messages.clone();
-        messages.insert(0,json!({"role":"system","content":format!("{}\n{}", crate::skills::catalog_text(), if agent { AGENT_RULES } else { CLASSIC_RULES })}));
+        // Ordinary passages already carry the world, rules and recalled facts in
+        // their context: telling the model to read skills first cost two extra
+        // requests per turn. Checks and corrections keep the full instruction.
+        let rules = if matches!(plan.kind.as_str(), "turn" | "variant" | "continue" | "opening" | "autoplay") { format!("{}\n{}", crate::skills::catalog_brief(), ORDINARY_RULES) } else { format!("{}\n{}", crate::skills::catalog_text(), CLASSIC_RULES) };
+        messages.insert(0,json!({"role":"system","content":rules}));
         if let Some(saved) = shared
             .lock()
             .map_err(|_| Error::Cancelled)?
@@ -579,19 +571,19 @@ impl Engine {
         let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"));
         let support = if modern {
             self.cached_tool_support(&plan)?.unwrap_or(true)
-        } else if agent || has_book {
+        } else if has_book {
             self.tool_capability(&shared).await?
         } else {
             false
         };
-        if (agent || plan.kind == "correction") && !support {
+        if plan.kind == "correction" && !support {
             return Err(Error::Invalid("这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用".into()));
         }
         let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
         // The native validator owns machine-width bounds. Avoid repeating the
         // 16-digit JS safe-integer ceiling for every locator in each request;
         // meaningful limits (neighbours, batch sizes, text) remain visible.
-        if modern&&!agent {for tool in &mut active_tools{compact_locator_schema(&mut tool["function"]["parameters"]);}}
+        if modern {for tool in &mut active_tools{compact_locator_schema(&mut tool["function"]["parameters"]);}}
         let mut round = shared.lock().map_err(|_| Error::Cancelled)?.draft["round"]
             .as_u64()
             .unwrap_or(0);
@@ -599,7 +591,7 @@ impl Engine {
             self.check(&shared)?;
             let attempt=self.complete(&shared,&format!("writing:{round}"),messages.clone(),active_tools.clone(),false).await;
             let response=match attempt {
-                Err(error) if modern&&!agent&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{self.save_tool_support(&plan,false)?;active_tools.clear();continue;},
+                Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{self.save_tool_support(&plan,false)?;active_tools.clear();continue;},
                 other=>other?,
             };
             if !response.tool_calls.is_empty(){self.save_tool_support(&plan,true)?;}
@@ -622,7 +614,7 @@ impl Engine {
                         c.charge_tool()?;
                     }
                     self.checkpoint(&shared)?;
-                    let output = if !agent && !is_read_tool(name) {
+                    let output = if !is_read_tool(name) {
                         json!({"isError":true,"message":"经典写作只允许读取资料"})
                     } else {
                         mcp.call(name, &args).await?
@@ -641,9 +633,6 @@ impl Engine {
                 c.draft["messages"] = Value::Array(messages.clone());
             }
             self.checkpoint(&shared)?;
-            if agent && shared.lock().map_err(|_| Error::Cancelled)?.draft["commit"].is_object() {
-                break response;
-            }
         };
         self.check(&shared)?;
         if plan.kind == "ask" {
@@ -652,7 +641,7 @@ impl Engine {
         }
         if plan.kind == "correction" {
             let response = rules::record::lenient_json(&result.text)
-                .ok_or_else(|| Error::Invalid(if refused(&result,&result.text,false){"AI服务拒绝了本次原著改稿，原路线未改动"}else{"原著改稿预览没有返回完整格式，可恢复重试"}.into()))?;
+                .ok_or_else(|| if refused(&result,&result.text,false){Error::Refused("AI服务拒绝了本次原著改稿，原路线未改动".into())}else{Error::Invalid("原著改稿预览没有返回完整格式，可恢复重试".into())})?;
             let response = crate::writing_context::local_correction(&plan,&response)?;
             let c = shared.lock().map_err(|_| Error::Cancelled)?;
             if c.draft["originalRead"] != true || c.draft["canonSkillRead"] != true {
@@ -726,17 +715,7 @@ impl Engine {
             self.finish_preview(&shared, preview)?;
             return Ok(());
         }
-        let staged = shared.lock().map_err(|_| Error::Cancelled)?.draft["commit"].clone();
-        if agent && !staged.is_object() {
-            return Err(Error::Invalid(
-                "Agent 尚未通过工具提交完整回合，草稿已保留".into(),
-            ));
-        }
-        let raw = if staged["narrative"].is_string() {
-            staged["narrative"].as_str().unwrap_or("").to_owned()
-        } else {
-            result.text.clone()
-        };
+        let raw = result.text.clone();
         let mut narrative = if let Some(player) = plan.meta["playerNarrative"].as_str() {
             player.to_owned()
         } else {
@@ -752,16 +731,12 @@ impl Engine {
         };
         let parsed = rules::parse_record(&raw).map_err(Error::Invalid)?;
         if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
-        let mut record = if staged["record"].is_object() {
-            rules::record::normalize_record(&staged["record"], &mut vec![]).unwrap_or(Value::Null)
-        } else {
-            parsed["record"].clone()
-        };
+        let mut record = parsed["record"].clone();
         if narrative.trim().is_empty() {
             return Err(Error::Invalid("模型没有写出正文，草稿已保留".into()));
         }
         if refused(&result, narrative.as_str(), !record.is_null()) {
-            return Err(Error::Invalid(
+            return Err(Error::Refused(
                 "AI 这次没有给出可用的故事，原路线未改动".into(),
             ));
         }
@@ -817,18 +792,11 @@ impl Engine {
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
         }
-        // Staged changes never mutate the live world before the full turn commits.
-        let staged_changes = shared.lock().map_err(|_| Error::Cancelled)?.draft["changes"].clone();
-        if let Some(changes) = staged_changes.as_object() {
-            for (key, value) in changes {
-                record[key] = value.clone();
-            }
-        }
         let mut options = plan.options.clone();
         options["advanceTime"] = true.into();
         let mut seed = plan.state.clone();
         let mut codex_timeline = Value::Null;
-        if !agent && plan.kind == "opening" {
+        if plan.kind == "opening" {
             if let Some(messages) = plan.meta["codexMessages"].as_array() {
                 if let Some(response) = self
                     .optional_complete(&shared, "codex", messages.clone())
@@ -882,7 +850,7 @@ impl Engine {
             .map_err(Error::Invalid)?["state"]
                 .clone();
         }
-        if !agent {
+        {
             if let Some(messages) = plan.meta["upkeepMessages"].as_array() {
                 let messages = crate::stage_context::organization(&plan, messages, &narrative);
                 if let Some(response) = self.optional_complete(&shared, "upkeep", messages).await? {
@@ -984,7 +952,7 @@ impl Engine {
                 continue;
             }
             let mut report=match rules::record::lenient_json(&result.text){Some(report)=>report,None=>{
-                if refused(&result,&result.text,false){return Err(Error::Invalid("AI服务拒绝了这次原著核对，正文草稿已保留，原路线未改动。请检查服务提示或换用可用模型后继续。".into()));}
+                if refused(&result,&result.text,false){return Err(Error::Refused("AI服务拒绝了这次原著核对，正文草稿已保留，原路线未改动。请检查服务提示或换用可用模型后继续。".into()));}
                 if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":"请按要求返回完整JSON核对结果；资料不足标uncertain，不再展开查证。"}));continue;}
                 return Err(Error::Invalid("原著核对未返回完整结果，正文草稿已保留，可继续重试".into()));
             }};
@@ -1223,9 +1191,7 @@ impl Engine {
             }
         }
         meta["reference"] = reference;
-        meta["agentVersion"] = "agent-2".into();
         meta["skillVersions"] = c.draft["skillVersions"].clone();
-        meta["executionMode"] = serde_json::to_value(plan.execution_mode)?;
         if c.draft["upkeepAttempted"] == true {
             meta["upkeep"] = true.into();
         }
@@ -1233,7 +1199,6 @@ impl Engine {
             meta["openingSeed"] = plan.state.clone();
         }
         let mut state = applied["state"].clone();
-        state["executionMode"] = serde_json::to_value(plan.execution_mode)?;
         let mut facts=state["facts"].as_array().cloned().unwrap_or_else(||if plan.kind=="opening"{vec![]}else{vec![json!({"id":format!("legacy:{}",plan.base_id.as_deref().unwrap_or("")),"detail":"此前资料来源未记录，涉及原著细节需要核实；不自动清洗旧剧情","origin":"legacyUnknown","citations":[]})]});
         if let Some(action) = plan.action["text"].as_str().filter(|s| !s.is_empty()) {
             facts.push(json!({"id":uuid::Uuid::new_v4().simple().to_string(),"nodeId":id,"detail":format!("玩家输入（不是行动结果）：{action}"),"origin":"player","citations":[]}));
@@ -1242,6 +1207,9 @@ impl Engine {
             facts.push(json!({"id":uuid::Uuid::new_v4().simple().to_string(),"nodeId":id,"detail":detail,"origin":"ai","citations":[]}));
         }
         state["facts"] = Value::Array(facts);
+        let (record, continuity_issues)=crate::continuity::validate_record(&tx,&plan.world_id,plan.base_id.as_deref().unwrap_or(""),&id,narrative,&plan.action,&state,&record,false)?;
+        if !continuity_issues.is_empty(){let mut logs=meta["log"].as_array().cloned().unwrap_or_default();logs.extend(continuity_issues.into_iter().map(Value::String));meta["log"]=json!(logs);}
+
         if plan.kind == "continue" {
             let changed=tx.execute("UPDATE nodes SET narrative=?,record_json=?,choices_json=?,status='ok',meta_json=? WHERE id=? AND status='interrupted' AND narrative=?",params![narrative,record.to_string(),record["choices"].as_array().cloned().unwrap_or_default().into_iter().collect::<Value>().to_string(),meta.to_string(),id,plan.original])?;
             if changed != 1 {
@@ -1424,8 +1392,8 @@ impl Engine {
         match name.as_str() {
             "list_skills" => Ok(crate::skills::catalog_json()),
             "read_skill" => {
-                let name=args["name"].as_str().unwrap_or("");let mut skill = if plan.execution_mode==crate::ExecutionMode::Agent{crate::skills::read(name)?}else{crate::skills::read_writing(name)?};
-                if plan.execution_mode != crate::ExecutionMode::Agent { skill["taskAdapter"]="当前是普通写作或局部改稿，只提供只读查证与记录预演。技能中涉及Agent草稿、record_findings、finish_task等步骤不适用。直接返回本次要求的正文/JSON，正常回合由程序保存，改稿由玩家采用。".into(); }
+                let name=args["name"].as_str().unwrap_or("");let mut skill = crate::skills::read_writing(name)?;
+                skill["taskAdapter"]="当前是普通写作或局部改稿，只提供只读查证与记录预演。技能中涉及Agent草稿、record_findings、finish_task等步骤不适用。直接返回本次要求的正文/JSON，正常回合由程序保存，改稿由玩家采用。".into();
                 {
                     let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
                     c.draft["skillVersions"][args["name"].as_str().unwrap_or("")] =
@@ -1434,13 +1402,38 @@ impl Engine {
                 self.checkpoint(&shared)?;
                 Ok(skill)
             }
+            "read_skill_resource" => {
+                let id=args["id"].as_str().unwrap_or("");let version=args["version"].as_str().unwrap_or("");
+                let read=shared.lock().map_err(|_|Error::Cancelled)?.draft["skillVersions"][id].clone();
+                if read!=version {return Err(Error::Invalid("请先read_skill取得本次内置技能版本及资源目录".into()));}
+                crate::skills::read_writing_resource(id,args["path"].as_str().unwrap_or(""),version,args["offset"].as_u64().unwrap_or(0).min(usize::MAX as u64) as usize,args["limit"].as_u64().unwrap_or(2000).min(6000) as usize)
+            }
             "read_world" => {
                 Ok(json!({"summary":crate::writing_context::project_state(&plan.state,&json!({"currency":plan.options["currency"],"clock":plan.options["clock"]}),plan.action["text"].as_str().unwrap_or("")),"settings":plan.settings,"referenceBinding":plan.state["source"],"partial":true,"available":{"people":plan.state["people"].as_array().map(Vec::len).unwrap_or(0),"places":plan.state["places"].as_array().map(Vec::len).unwrap_or(0),"cards":plan.state["cards"].as_array().map(Vec::len).unwrap_or(0)},"next":"人物按read_characters(query,offset,limit)读取，历史按read_history(query)搜索；完整状态保留本机，不代表其他资料为空。"}))
             }
+            "read_story_resources" | "read_continuity" => crate::ordinary_resources::read(&*self.store.lock()?, &plan, &name, &args),
             "read_characters" => {
                 let query=args["query"].as_str().unwrap_or("").trim();let offset=args["offset"].as_u64().unwrap_or(0) as usize;let limit=args["limit"].as_u64().unwrap_or(12).clamp(1,20) as usize;
                 let all=plan.state["people"].as_array().into_iter().flatten().filter(|p|query.is_empty()||p["name"].as_str().unwrap_or("").contains(query)||p["aliases"].as_array().into_iter().flatten().any(|a|a.as_str().is_some_and(|s|s.contains(query)))).collect::<Vec<_>>();
-                Ok(json!({"protagonist":plan.state["protagonist"],"people":all.iter().skip(offset).take(limit).collect::<Vec<_>>(),"total":all.len(),"nextOffset":if offset+limit<all.len(){Some(offset+limit)}else{None}}))
+                let allowance = (plan.meta["budgetChars"].as_u64().unwrap_or(12000) / 4).clamp(600, 6000) as usize;
+                let mut used = 0;
+                let mut people = vec![];
+                for person in all.iter().skip(offset).take(limit) {
+                    let cost = crate::stage_context::units(&person.to_string());
+                    if !people.is_empty() && used + cost > allowance { break; }
+                    if cost > allowance {
+                        people.push(json!({"id":person["id"],"name":person["name"],"partial":true,
+                            "read":{"kind":"people","query":person["id"]}}));
+                        break;
+                    }
+                    people.push((*person).clone());
+                    used += cost;
+                }
+                let next = offset.saturating_add(people.len());
+                let current = crate::stage_context::state(&plan.state, query, 900);
+                Ok(json!({"protagonist":current["protagonist"],"people":people,"total":all.len(),
+                    "nextOffset":(next < all.len()).then_some(next),
+                    "note":"长人物资料用read_story_resources的people目录按read定位，再分页读字段。"}))
             }
             "read_history" => {
                 let db = self.store.lock()?;
@@ -1465,99 +1458,6 @@ impl Engine {
                 self.checkpoint(&shared)?;
                 Ok(value)
             }
-            "compose_draft" | "check_draft" => {
-                if name == "check_draft" {
-                    let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
-                    c.charge_correction()?;
-                }
-                let evidence =
-                    shared.lock().map_err(|_| Error::Cancelled)?.draft["evidence"].clone();
-                let messages = vec![
-                    json!({"role":"system","content":if name=="compose_draft" {"根据本局事实、玩家行动和已核实原文写正文及完整<record>。遵循现有格式，不把原著未来当成本局事实。"} else {"逐项核对草稿中新引入的人物身份、关系、称谓、时间、地点、物品和事件。只根据已读原文及本局玩家分支；给出更正后的整回合正文和完整<record>，没有依据的细节保留不确定性。"}}),
-                    json!({"role":"user","content":json!({"request":args,"state":plan.state,"settings":plan.settings,"evidence":evidence}).to_string()}),
-                ];
-                let call_number = shared
-                    .lock()
-                    .map_err(|_| Error::Cancelled)?
-                    .budget
-                    .tool_calls;
-                let result = self
-                    .complete(
-                        &shared,
-                        &format!("tool:{name}:{call_number}"),
-                        messages,
-                        vec![],
-                        name == "check_draft",
-                    )
-                    .await?;
-                let value = json!({"text":result.text});
-                {
-                    shared.lock().map_err(|_| Error::Cancelled)?.draft["composition"] =
-                        value.clone();
-                }
-                self.checkpoint(&shared)?;
-                Ok(value)
-            }
-            "calculate" => {
-                let mode = args["operation"].as_str().unwrap_or("settle");
-                if mode == "settle" {
-                    rules::apply_record(&plan.state, &args["record"], &plan.options)
-                        .map_err(Error::Invalid)
-                } else {
-                    Err(Error::Invalid(
-                        "请选择 settle 并提供要试算的记录；试算不会写入世界".into(),
-                    ))
-                }
-            }
-            "stage_changes" => {
-                let patch = args.get("record").unwrap_or(&args);
-                if !patch.is_object() {
-                    return Err(Error::Invalid("变更需要是记录对象".into()));
-                }
-                // Input may not change execution settings or bind arbitrary books.
-                if ["sourceSet", "executionMode", "protagonist"]
-                    .iter()
-                    .any(|k| patch.get(k).is_some())
-                {
-                    return Err(Error::Invalid("工具不能更改玩家设置或直接替换主角".into()));
-                }
-                shared.lock().map_err(|_| Error::Cancelled)?.draft["changes"] = patch.clone();
-                self.checkpoint(&shared)?;
-                Ok(json!({"staged":true,"committed":false}))
-            }
-            "commit_turn" => {
-                if !args["narrative"].is_string() || !args["record"].is_object() {
-                    return Err(Error::Invalid(
-                        "提交需要完整正文 narrative 和记录 record".into(),
-                    ));
-                }
-                if plan.state["source"].is_object() {
-                    let c = shared.lock().map_err(|_| Error::Cancelled)?;
-                    let supplied = plan
-                        .reference
-                        .as_ref()
-                        .and_then(|r| r["passages"].as_array())
-                        .is_some_and(|p| {
-                            p.iter().any(|p| {
-                                p["kind"] == "original"
-                                    && p["text"].as_str().is_some_and(|s| !s.is_empty())
-                            })
-                        });
-                    if c.draft["originalRead"] != true
-                        && c.draft["insufficientRead"] != true
-                        && !supplied
-                    {
-                        return Err(Error::Invalid(
-                            "先读取本轮原文工具结果，或明确获得资料不足结果，再提交回合".into(),
-                        ));
-                    }
-                }
-                shared.lock().map_err(|_| Error::Cancelled)?.draft["commit"] = args;
-                self.checkpoint(&shared)?;
-                Ok(
-                    json!({"staged":true,"message":"完整回合已暂存，由共享核心校验并在同一事务提交"}),
-                )
-            }
             _ => Err(Error::Invalid("没有这个内置工具".into())),
         }
     }
@@ -1568,6 +1468,8 @@ fn is_read_tool(name: &str) -> bool {
         name,
         "read_world"
             | "read_history"
+            | "read_story_resources"
+            | "read_continuity"
             | "read_characters"
             | "locate_original_event"
             | "prepare_reference_check"
@@ -1577,6 +1479,7 @@ fn is_read_tool(name: &str) -> bool {
             | "read_canon_facts"
             | "list_skills"
             | "read_skill"
+            | "read_skill_resource"
     )
 }
 
@@ -1695,6 +1598,21 @@ fn compact_locator_schema(schema:&mut Value){
     match schema {
         Value::Object(fields)=>{if fields.get("maximum").and_then(Value::as_u64)==Some(9_007_199_254_740_991){fields.remove("maximum");}for value in fields.values_mut(){compact_locator_schema(value);}},
         Value::Array(values)=>for value in values{compact_locator_schema(value);},_=>()
+    }
+}
+
+/// A first-byte timeout already waited the full response window (120 s on
+/// the native hosts); retrying it would leave the player waiting about four
+/// minutes before seeing a failure, so only quick transient errors retry.
+fn transient_retry_delay(error: &Error) -> Option<std::time::Duration> {
+    match error {
+        Error::Provider { kind, status, partial: false, .. }
+            if kind == "network"
+                || (kind == "http" && status.is_some_and(|s| s == 429 || s >= 500)) =>
+        {
+            Some(std::time::Duration::from_secs(if *status == Some(429) && kind == "http" { 2 } else { 1 }))
+        }
+        _ => None,
     }
 }
 
@@ -1823,8 +1741,8 @@ pub(crate) fn write_usage(
     }
     Ok(())
 }
+const ORDINARY_RULES:&str="普通回合：本回合所需的世界、规则、人物和旧事已在上下文中，直接写本回合正文及<record>。只有在需要核实上下文里没有的具体人物、设定或原著细节时才调用只读工具，不要为了例行检查读取技能或世界资料；不要调用写入工具。";
 const CLASSIC_RULES:&str="经典模式：生成和整理顺序由程序安排。你可以读取技能并调用只读工具核实资料。绑定参考书且任务需要原著细节时，按遵循原著技能读取原文，不用模型记忆补齐事实。最后返回本回合正文及<record>；不要调用写入工具。";
-const AGENT_RULES:&str="你负责本局故事的执行。根据任务主动读取适用技能，调用内置 MCP 工具查世界和原著、写作、核对、试算并整理。原著查证必须读到原文或明确资料不足；玩家明确改变的分支保留，AI 自行错误需要核实修订。新事实先暂存，最后用 commit_turn 提交完整正文和记录。工具不会立即更改当前世界；共享核心最终在同一事务提交。每次最多10次模型、24次工具、5分钟、1次自动校正，内部写作校核均计数，合理安排。";
 
 #[cfg(test)]
 mod correction_notes_tests {

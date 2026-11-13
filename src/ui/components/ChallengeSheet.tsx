@@ -91,7 +91,7 @@ export function ChallengeSheet({ state, busy, onSave, onClose }: {
               {!view.active && view.outcome && <><dt>结局</dt><dd>{view.outcome}</dd></>}
               {(c.status === "won" || c.status === "lost") && <><dt>用时</dt><dd>{view.days} 天{view.turns ? `，${view.turns} 回合` : ""}</dd></>}
             </dl>
-            {problem && <p className="notice" role="alert" style={{ margin: 0 }}>{problem}</p>}
+            {problem && <p className="notice m-0" role="alert">{problem}</p>}
             <div className="sheet-foot">
               {view.active ? (
                 <>
@@ -107,7 +107,7 @@ export function ChallengeSheet({ state, busy, onSave, onClose }: {
           <>
             {mode === "create" && <p className="mode-hint">期限从现在算起。</p>}
             <ChallengeFields value={fields} onChange={setFields} />
-            {problem && <p className="notice" role="alert" style={{ margin: 0 }}>{problem}</p>}
+            {problem && <p className="notice m-0" role="alert">{problem}</p>}
             <div className="sheet-foot">
               {(mode === "edit" || c) && <button type="button" className="ghost" disabled={saving} onClick={() => { setProblem(null); setMode("view"); }}>取消</button>}
               <button type="button" className="primary" disabled={busy || saving || !fields.goal.trim() || (mode === "edit" && !dirty)} onClick={submit}>

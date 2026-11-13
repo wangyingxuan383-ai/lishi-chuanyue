@@ -1,23 +1,29 @@
 //! A quotation proves that a source was read, not that a model's inference is
 //! correct. New canon tasks bind each proposed edit to explicit findings so
 //! one unrelated quotation cannot stand in for an entire verification report.
+#[cfg(test)]
 use crate::{Error, Result, RunPlan};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
+#[cfg(test)]
 fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
+#[cfg(test)]
 fn enabled(plan: &RunPlan) -> bool {
     plan.meta["agent"]["canonVerificationVersion"] == 1
 }
+#[cfg(test)]
 fn explicit_canon(plan: &RunPlan) -> bool {
     plan.meta["agent"]["requiresOriginalEvidence"] == true
 }
+#[cfg(test)]
 fn uses_canon(plan: &RunPlan, draft: &Value) -> bool {
     explicit_canon(plan)
         || plan.meta["agent"]["skills"]
@@ -77,6 +83,7 @@ fn required_calls(workspace: &Value) -> BTreeSet<String> {
 pub(crate) fn pending(workspace: &Value) -> Value {
     json!({"workspaceFingerprint":fingerprint(workspace),"requiredEditCallIds":required_calls(workspace),"message":"按每一项修改登记核对结论和实际依据；内部section/chunk为读取索引，书中章名只能引用工具返回的title。证据匹配不等于模型推断已由程序证明。"})
 }
+#[cfg(test)]
 fn strings(value: &Value, label: &str, max: usize) -> Result<Vec<String>> {
     let Some(items) = value.as_array() else {
         if value.is_null() {
@@ -97,6 +104,7 @@ fn strings(value: &Value, label: &str, max: usize) -> Result<Vec<String>> {
         })
         .collect()
 }
+#[cfg(test)]
 fn quote<'a>(reference: &'a Value) -> Result<&'a str> {
     let quoted = text(reference, "quote").trim();
     if !(4..=2400).contains(&quoted.chars().count()) {
@@ -104,6 +112,7 @@ fn quote<'a>(reference: &'a Value) -> Result<&'a str> {
     }
     Ok(quoted)
 }
+#[cfg(test)]
 fn cited_page<'a>(draft: &'a Value, reference: &Value, original: bool) -> Result<&'a Value> {
     let quoted = quote(reference)?;
     let call = text(reference, "callId");
@@ -143,6 +152,7 @@ fn cited_page<'a>(draft: &'a Value, reference: &Value, original: bool) -> Result
             })
         })
 }
+#[cfg(test)]
 fn citation(draft: &Value, reference: &Value, original: bool) -> Result<Value> {
     let page = cited_page(draft, reference, original)?;
     let location = &page["location"];
@@ -155,6 +165,7 @@ fn citation(draft: &Value, reference: &Value, original: bool) -> Result<Value> {
         "sourceLocationVerified":true,"interpretationVerified":false
     }))
 }
+#[cfg(test)]
 fn player_reference(draft: &Value, reference: &Value) -> Result<Value> {
     let quoted = quote(reference)?;
     let id = text(reference, "id");
@@ -181,6 +192,7 @@ fn player_reference(draft: &Value, reference: &Value) -> Result<Value> {
 
 /// `args` is record_skill_check input. Store the returned value, not the
 /// model-authored object, in draft.skillChecks.
+#[cfg(test)]
 pub(crate) fn validate_report(
     plan: &RunPlan,
     draft: &Value,
@@ -301,6 +313,7 @@ pub(crate) fn validate_report(
 /// Call before adopting a completed canon task. A deliberate blocked result
 /// may retain an incomplete report and draft; it must not call this adoption
 /// guard as if the draft were ready to commit.
+#[cfg(test)]
 pub(crate) fn validate_completion(
     plan: &RunPlan,
     draft: &Value,
@@ -364,7 +377,7 @@ pub(crate) fn validate_completion(
 mod tests {
     use super::*;
     fn plan() -> RunPlan {
-        serde_json::from_value(json!({"id":"verification","worldId":"w","lineId":"l","headId":"n","kind":"agent_task","model":{"slot":"no-key","url":"https://fixture.invalid","model":"fake","includeUsage":false},"options":{},"action":{},"meta":{"agent":{"canonVerificationVersion":1,"requiresOriginalEvidence":true}},"messages":[],"extractMessages":[],"state":{},"settings":{}})).unwrap()
+        serde_json::from_value(json!({"id":"verification","worldId":"w","lineId":"l","headId":"n","kind":"pi_task","model":{"slot":"no-key","url":"https://fixture.invalid","model":"fake","includeUsage":false},"options":{},"action":{},"meta":{"agent":{"canonVerificationVersion":1,"requiresOriginalEvidence":true}},"messages":[],"extractMessages":[],"state":{},"settings":{}})).unwrap()
     }
     fn draft() -> Value {
         json!({"memorySnapshot":{"head":"n"},"evidenceLedger":[{"id":"e1","callId":"read-1","sourceCallId":"read-1","sourceTool":"read_original","sourceKind":"original","quote":"玄老明确说，五年后你们将参加下一届大赛。","location":{"title":"第六十三章 预备队（上）","section":211,"chunk":301,"bookId":"b"},"read":{"callId":"read-1","path":"/excerpts/0/text"},"searchSnippet":false}],"playerChoiceReferences":[{"id":"p1","text":"我救下阿兰，保留他活着的分支。","nodeId":"n0","seq":3,"field":"action_text"}]})

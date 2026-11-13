@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { BUILTIN_SOURCE_USAGES } from "../../content/writingPresets";
 import { useApp } from "../app/context";
+import { localFind } from "../app/localFind";
 import { Sheet } from "./Sheet";
 import { StoryText } from "./StoryText";
 import { Icon } from "./Icon";
@@ -9,26 +11,79 @@ import { analysisJobs, chunksOf, deleteBook, getBook, listBooks, referenceContex
 import { newBinding, type AnalysisJob, type SourceBinding, type SourceBook } from "../../engine/sources/types";
 import "./writing.css";
 
+/** A collapsed summary reads book metadata, never the full imported text. */
+export function SourceSummary({ value, label = "参考书籍" }: { value: SourceBinding | null | undefined; label?: string }) {
+  const { game } = useApp();
+  const [book, setBook] = useState<{ id: string; title: string } | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setBook(null); setLoaded(false);
+    if (value) void listBooks(game.repo).then((books) => {
+      if (live) { setBook(books.find((b) => b.id === value.bookId) ?? null); setLoaded(true); }
+    }).catch(() => { if (live) setLoaded(true); });
+    return () => { live = false; };
+  }, [game, value?.bookId]);
+  const selected = book?.id === value?.bookId ? book : null;
+  return <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{label}{value && <small className="muted" style={{ display: "block", lineHeight: 1.6 }}>
+    {selected?.title ?? (loaded ? "书籍暂不可读，请重新选择" : "正在读取书名…")} · {value.through === null ? "全书" : `截至第 ${value.through + 1} 节`} · {!value.fanfic ? "只作资料" : value.plot === "canon" ? "尽量沿原剧情" : "允许改写原著"} · {value.method === "analysis" ? "通读整理与原文" : "直接检索引用"}
+  </small>}</span>;
+}
+
 /** Uses the same library rows and copy-into-form behavior as 我的要求组. */
-function SourcePresets({ value, onChange }: { value: string; onChange: (s: string) => void }) {
+function SourcePresets({ value, onChange, disabled = false }: { value: string; onChange: (s: string) => void; disabled?: boolean }) {
   const { game, askName, toast } = useApp();
-  const [presets, setPresets] = useState<{ id: string; name: string; text: string }[]>([]);
+  type SavedUsage = { id: string; name: string; text: string };
+  const [presets, setPresets] = useState<SavedUsage[]>([]);
+  const [loaded, setLoaded] = useState(false), [busy, setBusy] = useState(false);
+  const [undo, setUndo] = useState<string | null>(null);
   const key = "source:presets:1";
-  useEffect(() => { void game.repo.getSetting<typeof presets>(key, []).then(setPresets); }, [game]);
-  const save = async () => {
-    const name = await askName({ title: "保存为常用用法", placeholder: "如：改写人物命运" });
-    if (!name) return;
-    const current = await game.repo.getSetting<typeof presets>(key, []);
-    const next = [...current, { id: crypto.randomUUID(), name, text: value }];
-    await game.repo.setSetting(key, next); setPresets(next); toast("已保存，别的故事也能选用");
+  const load = async () => {
+    const raw = await game.repo.getSetting<unknown>(key, []);
+    return Array.isArray(raw) ? raw.filter((item): item is SavedUsage => !!item && typeof item.id === "string" && typeof item.name === "string" && typeof item.text === "string") : [];
   };
-  return <details className="writing-presets"><summary>选择已保存用法</summary><div className="writing-library">
+  useEffect(() => {
+    let live = true;
+    void load().then((items) => { if (live) { setPresets(items); setLoaded(true); } }).catch(() => { if (live) { setLoaded(true); toast("没能读取已保存用法，请稍后重试"); } });
+    return () => { live = false; };
+  }, [game]);
+  const choose = (text: string) => { if (!disabled && !busy) { setUndo(value); onChange(text); } };
+  const save = async () => {
+    if (disabled || busy || !value.trim()) return;
+    setBusy(true);
+    try {
+      const name = await askName({ title: "保存为常用用法", placeholder: "如：改写人物命运" });
+      if (!name) return;
+      const next = [...await load(), { id: crypto.randomUUID(), name, text: value }];
+      await game.repo.setSetting(key, next); setPresets(next); toast("已保存，别的故事也能选用");
+    } catch { toast("没能保存，请稍后再试"); }
+    finally { setBusy(false); }
+  };
+  const remove = async (id: string) => {
+    if (disabled || busy) return;
+    setBusy(true);
+    try { const next = (await load()).filter((item) => item.id !== id); await game.repo.setSetting(key, next); setPresets(next); }
+    catch { toast("没能删除，请稍后再试"); }
+    finally { setBusy(false); }
+  };
+  return <details className="writing-presets"><summary>选择已保存用法与内置用法</summary><div className="writing-library">
+    <details>
+      <summary>内置原著用法 · {BUILTIN_SOURCE_USAGES.length}</summary>
+      <div className="stack gap-0">
+        <p className="muted">只填入“原著怎么用”，可继续修改或撤回。不会更换书籍、章节范围或剧情关系，也不会自动通读。</p>
+        {BUILTIN_SOURCE_USAGES.map((preset) => <div className="writing-preset" key={preset.id}>
+          <div className="writing-preset-text"><b>{preset.name}</b><p>{preset.text}</p><details><summary className="muted">查看完整用法</summary><div className="codex-text">{preset.text}</div></details></div>
+          <button disabled={disabled || busy} aria-label={`选用内置用法“${preset.name}”`} onClick={() => choose(preset.text)}>选用</button>
+        </div>)}
+      </div>
+    </details>
     {!presets.length && <p className="muted">把原著怎么用存下来，别的故事也能选用。</p>}
-    {presets.map((p) => <div className="writing-preset" key={p.id}><div className="writing-preset-text"><b>{p.name}</b><p>{p.text}</p></div>
-      <button onClick={() => onChange(p.text)}>选用</button><button className="ghost writing-remove" aria-label={`删除“${p.name}”`} onClick={() => {
-        void game.repo.getSetting<typeof presets>(key, []).then(async (current) => { const next = current.filter((x) => x.id !== p.id); await game.repo.setSetting(key, next); setPresets(next); });
-      }}><Icon name="close" size={18} /></button></div>)}
-    <button className="ghost writing-add" disabled={!value.trim()} onClick={() => void save().catch(() => toast("没能保存，请稍后再试"))}><Icon name="plus" size={18} />保存为常用用法</button>
+    {presets.map((preset) => <div className="writing-preset" key={preset.id}><div className="writing-preset-text"><b>{preset.name}</b><p>{preset.text}</p></div>
+      <button disabled={disabled || busy} aria-label={`选用用法“${preset.name}”`} onClick={() => choose(preset.text)}>选用</button>
+      <button disabled={disabled || busy} className="ghost writing-remove" aria-label={`删除“${preset.name}”`} onClick={() => void remove(preset.id)}><Icon name="close" size={18} /></button>
+    </div>)}
+    {undo !== null && <div className="writing-applied"><span className="muted">已填进下方，保存后生效。</span><button disabled={disabled || busy} className="ghost" onClick={() => { onChange(undo); setUndo(null); }}>撤回选用</button></div>}
+    <button className="ghost writing-add" disabled={disabled || busy || !loaded || !value.trim()} onClick={() => void save()}><Icon name="plus" size={18} />保存为常用用法</button>
   </div></details>;
 }
 
@@ -48,6 +103,8 @@ export function BookPreview({ book, through }: { book: SourceBook; through?: num
 export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSelect?: (book: SourceBook, use?: "reference" | "fanfic") => void }) {
   const { game, toast, ask, push } = useApp();
   const [books, setBooks] = useState<Awaited<ReturnType<typeof listBooks>>>([]);
+  const [bookQuery, setBookQuery] = useState("");
+  const shownBooks = books.filter((book) => localFind(bookQuery, book.title, book.format));
   const [preview, setPreview] = useState<SourceBook | null>(null), [imported, setImported] = useState(false);
   const [file, setFile] = useState<{ name: string; bytes: Uint8Array } | null>(null);
   const [encoding, setEncoding] = useState<TextEncoding>("auto"), [progress, setProgress] = useState("");
@@ -88,9 +145,10 @@ export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSe
     } catch { setError("没能保存，请稍后再试"); } finally { setProgress(""); }
   };
   return <Sheet title="参考书籍" onClose={() => { cancel(); onClose(); }}><div className="stack">
-    <p className="muted" style={{ margin: 0 }}>TXT、EPUB、文字 PDF、DOCX，单个不超过 64 MiB。书籍保存在本机；生成和 AI 整理时，相关内容会发送给你选择的服务。</p>
+    <p className="muted m-0">TXT、EPUB、文字 PDF、DOCX，单个不超过 64 MiB。书籍保存在本机；生成和 AI 整理时，相关内容会发送给你选择的服务。</p>
     {error && <div className="notice">{error}</div>}
     {progress ? <div className="row"><span className="muted grow" role="status">{progress}</span>{progress !== "正在保存书籍…" && <button onClick={cancel}>取消</button>}</div> : <button onClick={() => void choose()}>导入书籍</button>}
+    {!preview && books.length > 0 && <input type="search" aria-label="查找参考书籍" placeholder="按书名或格式查找" value={bookQuery} onChange={(event) => setBookQuery(event.target.value)} />}
     {preview ? <>
       {imported ? <label className="field">书名<input aria-label="书名" value={preview.title} onChange={(e) => setPreview({ ...preview, title: e.target.value })} /></label> : <h3>{preview.title}</h3>}
       {file && preview.format === "txt" && <label className="field">文本编码<select aria-label="文本编码" disabled={!!progress} value={encoding} onChange={(e) => { const value = e.target.value as TextEncoding; setEncoding(value); void parse(file, value); }}>
@@ -100,10 +158,11 @@ export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSe
       {imported && <><span className="muted">使用方式</span><div className="segmented">{([["library", "只存入书库"], ["reference", "用作参考"], ["fanfic", "同人开局"]] as const).map(([v, label]) => <button key={v} aria-pressed={usage === v} onClick={() => setUsage(v)}>{label}</button>)}</div><button className="primary" disabled={!!progress || !!error || !preview.title.trim()} onClick={() => void save()}>保存书籍</button></>}
       {!imported && onSelect && <button className="primary" onClick={() => { onSelect(preview); onClose(); }}>使用这本书</button>}
       <button className="ghost" disabled={!!progress} onClick={() => { setPreview(null); setFile(null); setImported(false); }}>返回书库</button>
-    </> : books.map((book) => <div className="row" key={book.id}><button className="grow" onClick={() => void getBook(game.repo, book.id).then((b) => { setPreview(b); setImported(false); })}>{book.title} · {book.format.toUpperCase()}</button><button className="ghost danger" onClick={async () => {
+    </> : shownBooks.map((book) => <div className="row" key={book.id}><button className="grow" onClick={() => void getBook(game.repo, book.id).then((b) => { setPreview(b); setImported(false); })}>{book.title} · {book.format.toUpperCase()}</button><button className="ghost danger" onClick={async () => {
       if (!await ask({ title: `删除“${book.title}”？`, message: "未被当前或历史路线引用的书籍才能删除。", confirm: "删除", danger: true })) return;
       try { await deleteBook(game.repo, book.id); load(); } catch (e) { toast(e instanceof Error ? e.message : "没能删除"); }
     }}>删除</button></div>)}
+    {!preview && !!books.length && !shownBooks.length && <p className="muted">没有找到相符的书籍，可以换个词或清除查找。</p>}
     {!preview && !books.length && !progress && <p className="muted">书库还是空的。导入一次，可以给多个故事使用。</p>}
   </div></Sheet>;
 }
@@ -116,16 +175,17 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false 
   const set = (patch: Partial<SourceBinding>) => { if (value) onChange({ ...value, ...patch }); };
   return <div className="stack">
     <div className="row"><button disabled={disabled} onClick={() => setLibrary(true)}>{book ? `参考书籍：${book.title}` : "选择或导入参考书籍"}</button>{value && <button className="ghost" disabled={disabled} onClick={() => onChange(null)}>解除绑定</button>}</div>
+    {value && <p className="field-hint m-0">这里是当前表单中的选择，随开局或本局设置一起保存。</p>}
     {value && !book && <p className="muted">正在读取书籍，若已删除请重新选择。</p>}
     {value && book && <>
       <label className="field">原著位置<select aria-label="原著位置" disabled={disabled} value={value.position} onChange={(e) => set({ position: Number(e.target.value) })}>{book.sections.map((s, i) => value.through !== null && i > value.through ? null : <option value={i} key={i}>{i + 1}. {s.title}</option>)}</select></label>
       <span className="muted">剧情关系</span><div className="segmented">{([["reference", "只作资料"], ["rewrite", "允许改写原著"], ["canon", "尽量沿原剧情"]] as const).map(([v, label]) => <button disabled={disabled} key={v} aria-pressed={v === "reference" ? !value.fanfic : value.fanfic && value.plot === v} onClick={() => set({ fanfic: v !== "reference", ...(v === "reference" ? {} : { plot: v }) })}>{label}</button>)}</div>
       <span className="muted">参考范围</span><div className="segmented"><button disabled={disabled} aria-pressed={value.through === null} onClick={() => set({ through: null })}>全书</button><button disabled={disabled} aria-pressed={value.through !== null} onClick={() => set({ through: value.position, analysisId: undefined })}>截至指定章节</button></div>
       {value.through !== null && <label className="field">截至章节<select aria-label="截至章节" disabled={disabled} value={value.through} onChange={(e) => set({ through: Number(e.target.value), position: Math.min(value.position, Number(e.target.value)), analysisId: undefined })}>{book.sections.map((s, i) => <option key={i} value={i}>{i + 1}. {s.title}</option>)}</select></label>}
-      <SourcePresets value={value.instructions} onChange={(instructions) => { if (!disabled) set({ instructions }); }} />
+      <SourcePresets key={value.bookId} disabled={disabled} value={value.instructions} onChange={(instructions) => { if (!disabled) set({ instructions }); }} />
       <label className="field">原著怎么用<textarea rows={4} maxLength={12000} disabled={disabled} aria-label="原著怎么用" value={value.instructions} onChange={(e) => set({ instructions: e.target.value })} /></label>
       <span className="muted">理解方式</span><div className="segmented"><button disabled={disabled} aria-pressed={value.method === "search"} onClick={() => set({ method: "search" })}>直接检索引用</button><button disabled={disabled} aria-pressed={value.method === "analysis"} onClick={() => set({ method: "analysis" })}>先让 AI 通读整理</button></div>
-      <p className="muted" style={{ margin: 0 }}>直接检索无需预先调用 AI。未整理也可以先直接使用，以后再整理。修改用法不会自动重新整理，也不会自动产生费用。</p>
+      <p className="muted m-0">直接检索无需预先调用 AI。未整理也可以先直接使用，以后再整理。修改用法不会自动重新整理，也不会自动产生费用。</p>
       <div className="row"><button onClick={() => setBrowse(true)}>目录与正文</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
     </>}
     {library && <SourceLibrary onClose={() => setLibrary(false)} onSelect={(b, use) => { onChange(newBinding(b.id, use === "fanfic" || fanfic || value?.fanfic)); toast("已选入，保存设置后生效"); }} />}

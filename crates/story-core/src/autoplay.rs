@@ -2,7 +2,7 @@
 //! pauses between passages. Child turns keep ordinary transactional settlement.
 use crate::{
     runtime::{Context, Engine, Shared},
-    Error, ExecutionMode, Result, RunBudget, RunPlan, Store,
+    Error, Result, RunBudget, RunPlan, Store,
 };
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
@@ -129,7 +129,7 @@ impl Engine {
                     _ => "failed",
                 };
                 self.store
-                    .finish(&child_id, status, Some(&error.to_string()))?;
+                    .finish(&child_id, status, Some(&error))?;
                 self.flush_usage(&child_id, status)?;
                 // A terminal event can fail after the child committed. Keep
                 // the parent's atomic route/step update before checkpointing.
@@ -230,8 +230,6 @@ impl Engine {
         plan.base_id = Some(parent.head_id.clone());
         plan.state = live.state;
         plan.settings = live.settings;
-        // Legacy world flags never choose the execution engine for ordinary play.
-        plan.execution_mode = ExecutionMode::Classic;
         plan.action = json!({"mode":"continue","text":""});
         plan.original.clear();
         plan.carried_edits.clear();
@@ -373,8 +371,9 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     template["notes"]=history.last().and_then(|n|n["meta"]["notes"].as_array()).map(|a|a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")).unwrap_or_default().into();
     let era=json!({"currency":plan.options["currency"],"clock":plan.options["clock"]});
     let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters});
+    let mut input=input;
+    input["continuity"]=crate::continuity::project(&*store.lock()?,&plan.world_id,plan.base_id.as_deref().unwrap_or(&plan.head_id)).unwrap_or_else(|_|json!({"unavailable":true}));
     let context=crate::writing_context::build(&input)?;
-    if context["budgetExceeded"]==true{return Err(Error::Invalid(format!("连播上下文{}字符超过{}字符预算，请检查必要状态及要求",context["chars"],cap)));}
     plan.messages=context["messages"].as_array().cloned().unwrap_or_default();
     plan.reference=context.get("reference").filter(|v|v.is_object()).cloned();
     plan.meta["contextUsage"]=json!({"chars":context["chars"],"budgetChars":cap,"layers":context["layers"],"version":context["contextVersion"]});

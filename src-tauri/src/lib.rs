@@ -106,7 +106,6 @@ pub fn run() {
             commands::network_set,
             commands::http_get_public,
             execution::execution_start,
-            execution::execution_agent,
             pi_agent::pi_agent_request,
             execution::execution_settle,
             execution::execution_context,

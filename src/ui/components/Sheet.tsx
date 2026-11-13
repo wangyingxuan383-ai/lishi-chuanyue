@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { Fragment, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useApp, useBack } from "../app/context";
 import { Icon } from "./Icon";
@@ -47,6 +47,7 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
 
 export interface MenuItem {
   label: string;
+  group?: string;
   onSelect: () => void;
   danger?: boolean;
   hidden?: boolean;
@@ -56,10 +57,11 @@ export function MenuSheet({ title, items, onClose }: { title?: string; items: Me
   return (
     <Sheet title={title} onClose={onClose}>
       <div className="sheet-menu">
-        {items.filter((i) => !i.hidden).map((item) => (
-          <button key={item.label} className={item.danger ? "danger" : ""} onClick={() => { onClose(); item.onSelect(); }}>
-            {item.label}
-          </button>
+        {items.filter((i) => !i.hidden).map((item, index, visible) => (
+          <Fragment key={item.label}>
+            {item.group && visible[index - 1]?.group !== item.group && <h3 className="settings-sub">{item.group}</h3>}
+            <button className={item.danger ? "danger" : ""} onClick={() => { onClose(); item.onSelect(); }}>{item.label}</button>
+          </Fragment>
         ))}
       </div>
     </Sheet>

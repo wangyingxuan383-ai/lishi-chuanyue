@@ -1,6 +1,6 @@
 //! Versioned, local skill resources. Import/adoption are user RPCs; models may
 //! only prepare drafts and read resources already present in their snapshot.
-use crate::{agent_workspace as ws, Error, Result, RunPlan, Store};
+use crate::{agent_workspace as ws, Error, Result, Store};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -369,45 +369,6 @@ pub(crate) fn rpc(store: &Store, request: &Value) -> Result<Option<Value>> {
     };
     Ok(Some(result))
 }
-pub(crate) fn tool(store: &Store, plan: &RunPlan, name: &str, args: &Value) -> Result<Value> {
-    match name {
-        "draft_skill" => {
-            let skill = make_skill(args.clone(), "Agent任务草稿")?;
-            Ok(
-                json!({"draft":save_draft(store,skill,plan.meta["agent"]["taskId"].as_str())?,"message":"技能草稿已保存，需玩家采用后成为常用技能；没有新增授权"}),
-            )
-        }
-        "read_skill_resource" => {
-            let id = args["id"].as_str().unwrap_or("");
-            let path = args["path"].as_str().unwrap_or("SKILL.md");
-            if !safe_path(path) {
-                return Err(invalid("只能读取所选技能包内的资源"));
-            }
-            let skill = plan.meta["agent"]["customSkills"]
-                .as_array()
-                .and_then(|a| a.iter().find(|s| s["id"] == id))
-                .ok_or_else(|| invalid("本任务没有这个技能包"))?;
-            let text = skill["files"][path]
-                .as_str()
-                .or_else(|| {
-                    if path == "SKILL.md" {
-                        skill["content"].as_str()
-                    } else {
-                        None
-                    }
-                })
-                .ok_or_else(|| invalid("技能资源不存在"))?;
-            let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-            let limit = args["limit"].as_u64().unwrap_or(2400).clamp(1, 12000) as usize;
-            let part = text.chars().skip(offset).take(limit).collect::<String>();
-            Ok(
-                json!({"id":id,"path":path,"hash":skill["hash"],"version":skill["version"],"text":part,"offset":offset,"nextOffset":offset+part.chars().count(),"total":text.chars().count()}),
-            )
-        }
-        _ => Err(invalid("没有这项技能资源操作")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

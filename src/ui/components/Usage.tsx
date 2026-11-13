@@ -50,7 +50,7 @@ export function UsageSheet({ onClose }: { onClose: () => void }) {
         <div className="segmented">
           {([["world", "按世界"], ["day", "按天"], ["purpose", "按用途"]] as const).map(([k, l]) => <button key={k} aria-pressed={by === k} onClick={() => setBy(k)}>{l}</button>)}
         </div>
-        <p className="muted" style={{ margin: 0 }}>
+        <p className="muted m-0">
           共 {total.calls} 次调用，输入 {total.input.toLocaleString()}、输出 {total.output.toLocaleString()} token{total.unknown ? `；${total.unknown} 次服务没报用量，算作未知` : ""}
           {priced ? `；估计约 ${(rows.reduce((n, r) => n + cost(r), 0)).toFixed(2)} 元` : ""}。
         </p>
@@ -63,7 +63,7 @@ export function UsageSheet({ onClose }: { onClose: () => void }) {
             {priced && <span className="tag">{cost(r).toFixed(2)} 元</span>}
           </div>
         ))}
-        <p className="muted" style={{ margin: "8px 0 0" }}>{priced ? "按“用量与花费”里填的单价估算，不是账单。" : "在“用量与花费”里填上单价，就能估算花费。"}</p>
+        <p className="muted mt-2 mb-0">{priced ? "按“用量与花费”里填的单价估算，不是账单。" : "在“用量与花费”里填上单价，就能估算花费。"}</p>
       </div>
     </Sheet>
   );

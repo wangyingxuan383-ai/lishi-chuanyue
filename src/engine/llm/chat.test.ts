@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import type { Platform, StreamEvent, StreamRequest } from "../../platform";
-import { ChatError, chatCompletionsUrl, parseChunk, serviceBase, streamChat, type ChatMessage, type ChatToolDefinition } from "./chat";
+import { ChatError, CONTEXT_WINDOW_MARKERS, chatCompletionsUrl, isContextWindowError, parseChunk, retryDecision, serviceBase, streamChat, type ChatMessage, type ChatToolDefinition } from "./chat";
 
 function fakePlatform(events: StreamEvent[]): Platform {
   return {
@@ -178,5 +179,64 @@ describe("urls", () => {
     expect(serviceBase("http://1.2.3.4:8317/")).toBe("http://1.2.3.4:8317/v1");
     expect(chatCompletionsUrl("https://generativelanguage.googleapis.com/v1beta/openai")).toBe("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions");
     expect(chatCompletionsUrl("https://open.bigmodel.cn/api/paas/v4")).toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions");
+  });
+});
+
+describe("retryDecision", () => {
+  const messages: ChatMessage[] = [{ role: "user", content: "可选前文：必需选区", compactContent: "必需选区" }];
+
+  it.each([
+    new ChatError("network"), new ChatError("timeout_first"),
+    new ChatError("http", 429), new ChatError("http", 500), new ChatError("http", 503),
+  ])("retries a first transient failure without changing messages: %s", error => {
+    const result = retryDecision(error, 1, messages);
+    expect(result.retry).toBe(true);
+    expect(result.messages).toBe(messages);
+    expect(retryDecision(error, 2, messages).retry).toBe(false);
+  });
+
+  it.each([
+    new ChatError("cancelled"), new ChatError("timeout_idle"), new ChatError("timeout_total"),
+    new ChatError("http", 401), new ChatError("http", 403), new ChatError("http", 402),
+    new ChatError("http", 400), new ChatError("empty"), new Error("network"),
+    new ChatError("network", undefined, "半句"), new ChatError("http", 429, "[tool]"),
+    new ChatError("http", 413, "半句"),
+  ])("does not retry ineligible or partial failures: %s", error => {
+    expect(retryDecision(error, 1, messages)).toEqual({ retry: false, messages });
+  });
+
+  it("only retries context rejection with a smaller request and shares the retry allowance", () => {
+    const error = new ChatError("http", 400, "", "maximum context length");
+    const decision = retryDecision(error, 1, messages);
+    expect(decision).toEqual({ retry: true, messages: [{ ...messages[0], content: "必需选区" }] });
+    expect(messages[0].content).toBe("可选前文：必需选区");
+    expect(retryDecision(error, 1, decision.messages).retry).toBe(false);
+    expect(retryDecision(new ChatError("network"), 2, decision.messages).retry).toBe(false);
+    expect(retryDecision(error, 2, messages).retry).toBe(false);
+    expect(retryDecision(new ChatError("http", 413), 1, messages).retry).toBe(true);
+  });
+
+  it("keeps the TS and Rust provider context rejection markers identical", () => {
+    const rust = readFileSync(new URL("../../../crates/story-core/src/chat.rs", import.meta.url), "utf8");
+    const body = rust.match(/pub fn provider_context_rejected\([\s\S]*?\n\}/)?.[0];
+    expect(body).toBeDefined();
+    const markers = body!.match(/\[\s*"[\s\S]*?\]/)?.[0];
+    expect(markers).toBeDefined();
+    expect(JSON.parse(markers!).sort()).toEqual([...CONTEXT_WINDOW_MARKERS].sort());
+    for (const marker of CONTEXT_WINDOW_MARKERS) {
+      expect(isContextWindowError(new ChatError("http", 422, "", marker.toUpperCase()))).toBe(true);
+      expect(isContextWindowError(new ChatError("http", 401, "", marker))).toBe(false);
+    }
+  });
+
+  it("treats streamed tool fragments as partial output when the network fails", async () => {
+    const handle = streamChat(fakePlatform([
+      data({ choices: [{ delta: { tool_calls: [{ index: 0, id: "read", function: { name: "read_original", arguments: "{" } }] } }] }),
+      { type: "error", kind: "network" },
+    ]), { slot: "test", url: "https://fixture.invalid", model: "mock", messages });
+    const error = await handle.result.catch(error => error);
+    expect(error).toBeInstanceOf(ChatError);
+    expect(error.partial).toBeTruthy();
+    expect(retryDecision(error, 1, messages).retry).toBe(false);
   });
 });

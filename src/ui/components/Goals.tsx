@@ -32,14 +32,14 @@ function GoalSheet({ goal, era, onClose, onSave }: { goal: Goal; era: EraContext
   const ref = { id: goal.id, name: goal.name };
   return (
     <Sheet title={goal.name} onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
-        <p className="muted" style={{ margin: 0 }}>
+      <div className="stack gap-10">
+        <p className="muted m-0">
           {goal.kind} · {goal.status}{goal.startedMinute != null ? ` · ${dayOf(era, goal.startedMinute)}起` : ""}{goal.endedMinute != null ? `，${dayOf(era, goal.endedMinute)}${goal.status}` : ""}
         </p>
         {goal.steps?.length
           ? <ol className="timeline">{goal.steps.map((s, i) => <li key={i}><small>{dayOf(era, s.minute)}</small>{s.text}</li>)}</ol>
-          : <p style={{ margin: 0 }}>{goal.progress || "还没有进展。"}</p>}
-        {goal.kind === "心愿" && active && <p className="muted" style={{ margin: 0 }}>这是你自己的心愿：AI 不会替你去做，但会让相关的人和机会自然出现。</p>}
+          : <p className="m-0">{goal.progress || "还没有进展。"}</p>}
+        {goal.kind === "心愿" && active && <p className="muted m-0">这是你自己的心愿：AI 不会替你去做，但会让相关的人和机会自然出现。</p>}
         <div className="row">
           {active ? <>
             <button disabled={saving} onClick={() => void run({ goals: [{ op: "abandon", ...ref }] }, `放弃目标：${goal.name}`)}>放弃</button>
@@ -66,8 +66,8 @@ function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => v
   };
   return (
     <Sheet title="我的心愿" onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
-        <p className="muted" style={{ margin: 0 }}>写下你想让主角做成的事。AI 不会替你去做，但会让相关的人和机会自然出现。</p>
+      <div className="stack gap-10">
+        <p className="muted m-0">写下你想让主角做成的事。AI 不会替你去做，但会让相关的人和机会自然出现。</p>
         <label>心愿<input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：攒钱在长安买一处宅子" /></label>
         <label>打算怎么做（可不填）<input value={how} onChange={(e) => setHow(e.target.value)} placeholder="如：先替人抄书攒钱" /></label>
         {taken && <p className="field-hint warn">已经有这个目标了，换个说法，或者在目标里补进展。</p>}
@@ -84,7 +84,7 @@ export function Goals({ state, era, busy, onSave }: { state: WorldState; era: Er
   const ended = state.goals.filter((g) => g.status !== "进行中").reverse();
   return (
     <div className="stack">
-      <div className="row" style={{ justifyContent: "space-between" }}>
+      <div className="row between">
         <b>进行中{active.length ? ` ${active.length}` : ""}</b>
         <button className="ghost" aria-label="添加心愿" disabled={busy} onClick={() => setWish(true)}><Icon name="plus" size={18} />我的心愿</button>
       </div>

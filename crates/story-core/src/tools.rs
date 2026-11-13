@@ -30,7 +30,6 @@ fn integer(description: &str, min: u64, max: u64) -> Value {
 }
 
 pub fn catalog() -> Vec<ToolDefinition> {
-    let record = json!({"type":"object","description":"只包含本局实际正文中发生的变化；原著资料本身不是已发生事实。"});
     vec![
         ToolDefinition { name: "read_world", description: "读取本次运行绑定路线的当前世界、玩家要求、人物处境、参考配置和玩法；不读取别的世界。", parameters: object(json!({}), &[]), read_only: true },
         ToolDefinition { name: "read_history", description: "查阅当前路线已经发生的正文和章节摘要，可用关键词寻找旧事；其他路线不混入。", parameters: object(json!({"query":text("要寻找的旧事或关键词",4000),"limit":integer("最多返回几回合",1,40)}), &[]), read_only: true },
@@ -41,13 +40,11 @@ pub fn catalog() -> Vec<ToolDefinition> {
         ToolDefinition { name: "locate_original_event", description: "按当前事件、人物和地点寻找原著候选章节；不改变开局位置，不把候选当已核实。用read_original直接回传ref读原文。", parameters:object(json!({"query":text("当前事件与具体线索",4000),"queries":{"type":"array","maxItems":8,"items":{"type":"string"}}}),&[]),read_only:true },
         ToolDefinition { name: "prepare_reference_check", description: "将最多8项具体主张批量定位到原著候选；为身份、关系、能力、物品、时点和遗漏事件分别准备资料。返回verified=false，须read_original核对原句。", parameters:object(json!({"claims":{"type":"array","maxItems":8,"items":{"type":"string"}}}),&["claims"]),read_only:true },
         ToolDefinition { name: "preview_turn_record", description: "只读预演本回合记录对时间、钱物和状态的影响，返回前后对照与程序提示；不保存、不推进实际故事。", parameters:object(json!({"record":{"type":"object"}}),&["record"]),read_only:true },
+        ToolDefinition { name: "read_story_resources", description: "查询本路线地点places、设定cards、目标goals、人物people或物品items；用返回ref分页读字段。仅正式资料，定位不授予修改权限。", parameters: object(json!({"kind":{"type":"string","enum":["places","cards","goals","people","items"]},"query":text("查询线索",1000),"ref":{"type":"object"},"pageSize":integer("条目数",1,20),"charBudget":integer("文字预算",128,6000),"nextCursor":{"type":"string"}}), &[]), read_only:true },
+        ToolDefinition { name: "read_continuity", description: "查询本路线人物知情knowledge或线索承诺threads及原句；相信或传闻不等于事实，未记录不等于不知情。", parameters: object(json!({"kind":{"type":"string","enum":["knowledge","threads"]},"query":text("人物或线索",1000),"includeInactive":{"type":"boolean"},"ref":{"type":"object"},"pageSize":integer("条目数",1,20),"charBudget":integer("文字预算",128,6000),"nextCursor":{"type":"string"}}), &[]), read_only:true },
         ToolDefinition { name: "list_skills", description: "列出本机内置技能的名称、说明和版本；按当前世界与玩法选择并读取。", parameters: object(json!({}), &[]), read_only: true },
         ToolDefinition { name: "read_skill", description: "读取指定内置技能的完整正文与固定版本；技能是工作指导，不是可执行代码。", parameters: object(json!({"name":text("list_skills 返回的技能名称",64)}), &["name"]), read_only: true },
-        ToolDefinition { name: "compose_draft", description: "依据当前行动、本局事实和已读原文生成或修改本次草稿；内部模型调用计入本次请求上限，不立即保存为回合。", parameters: object(json!({"instructions":text("本次草稿的写作安排或有出处的修正要求",12000),"draft":text("需要修改的现有草稿",96000)}), &[]), read_only: false },
-        ToolDefinition { name: "check_draft", description: "检查当前草稿是否符合行动、原著证据、人物已知范围和本局状态；列出有出处的问题或资料不足，内部模型调用计入上限。", parameters: object(json!({"instructions":text("需要重点核对的问题",12000),"draft":text("要核对的草稿；省略则检查当前草稿",96000)}), &[]), read_only: false },
-        ToolDefinition { name: "calculate", description: "用正式规则试算记录对日期、钱物和当前状态的影响，返回校正和实际变化，不修改世界，不运行任意代码。", parameters: object(json!({"operation":{"type":"string","enum":["settle"],"description":"按正式状态规则试算"},"record":record.clone()}), &["operation","record"]), read_only: true },
-        ToolDefinition { name: "stage_changes", description: "为本次草稿暂存状态变化，交由程序校验；尚未提交，不修改既有路线。只记录正文真正发生的事。", parameters: object(json!({"record":record.clone()}), &["record"]), read_only: false },
-        ToolDefinition { name: "commit_turn", description: "提交最终正文与完整记录。程序复核原著查证、状态、运行预算和基础路线后一次保存；工具成功不等于可以绕过事务校验。", parameters: object(json!({"narrative":text("最终正文，不含工具日志和记录块",96000),"record":record}), &["narrative","record"]), read_only: false },
+        ToolDefinition { name: "read_skill_resource", description: "按read_skill返回的内置技能版本和路径分段读取支持资料。必须传同版本，不执行脚本，不访问自定义包或任意文件；SKILL.md仅返回普通只读配置。", parameters: object(json!({"id":text("固定内置技能标识",64),"path":text("资源目录返回的相对路径",500),"version":text("read_skill返回的版本",64),"offset":integer("起始文字位置",0,9007199254740991),"limit":integer("最多返回字符数",1,6000)}), &["id","path","version"]), read_only: true },
     ]
 }
 
@@ -164,7 +161,8 @@ mod tests {
     #[test]
     fn definitions_and_validation_share_the_contract() {
         let tools = definitions();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 14);
+        assert!(catalog().iter().all(|tool| tool.read_only));
         assert!(tools
             .iter()
             .all(|t| t["type"] == "function" && t["function"]["parameters"]["type"] == "object"));
@@ -173,26 +171,13 @@ mod tests {
             &json!({"section":2,"chunk":7,"neighbors":1}),
         )
         .unwrap();
-        validate("stage_changes", &json!({"record":{"money":-10}})).unwrap();
-        validate(
-            "commit_turn",
-            &json!({"narrative":"他推开了门。","record":{"time":"十分钟"}}),
-        )
-        .unwrap();
-        validate(
-            "calculate",
-            &json!({"operation":"settle","record":{"money":-10}}),
-        )
-        .unwrap();
         for (name, args) in [
             ("search_original", json!({})),
             ("search_original", json!({"query":" "})),
             ("read_original", json!({"section":-1})),
             ("read_original", json!({"section":0,"neighbors":3})),
             ("read_world", json!({"worldId":"another-world"})),
-            ("stage_changes", json!({"record":[]})),
             ("commit_turn", json!({})),
-            ("calculate", json!({"operation":"eval","record":{}})),
             ("arbitrary_sql", json!({})),
         ] {
             assert!(validate(name, &args).is_err(), "{name}: {args}");

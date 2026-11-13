@@ -16,6 +16,22 @@ export interface ClockAnchor {
   minuteOfDay: number;
 }
 
+/** Optional day-number calibration; the actual story duration keeps its original axis. */
+export interface ElapsedClockAnchor {
+  atElapsedMinutes: number;
+  day: number;
+  minuteOfDay: number;
+}
+
+export function readElapsedClockAnchor(raw: unknown): ElapsedClockAnchor | null {
+  if (!raw || typeof raw !== "object") return null;
+  const v = raw as Record<string, unknown>;
+  if (typeof v.atElapsedMinutes !== "number" || !Number.isSafeInteger(v.atElapsedMinutes) || v.atElapsedMinutes < 0
+    || typeof v.day !== "number" || !Number.isSafeInteger(v.day) || v.day < 1
+    || typeof v.minuteOfDay !== "number" || !Number.isInteger(v.minuteOfDay) || v.minuteOfDay < 0 || v.minuteOfDay >= 1440) return null;
+  return { atElapsedMinutes: v.atElapsedMinutes, day: v.day, minuteOfDay: v.minuteOfDay };
+}
+
 /** Invalid imported calibration is ignored rather than corrupting clock arithmetic. */
 export function readClockAnchor(raw: unknown, rules: CalendarRules): ClockAnchor | null {
   if (!raw || typeof raw !== "object") return null;
@@ -38,6 +54,7 @@ export interface GameClock {
   clockStyle?: "era" | "elapsed";
   timeStyle?: "24h" | "shichen";
   anchor?: ClockAnchor | null;
+  elapsedAnchor?: ElapsedClockAnchor | null;
   /** Date at minute 0; null when unknown, and then days are counted. */
   date: GameDate | null;
   /** Hour of day at minute 0. */
@@ -52,6 +69,8 @@ export interface Now {
   timeStyle?: "24h" | "shichen";
   /** Day of the story, from 1. */
   day: number;
+  /** Independently calibrated day number for display; never used for ages or deadlines. */
+  displayDay: number;
   hour: number;
   minute: number;
   shichen: string;
@@ -64,6 +83,8 @@ export interface Now {
 
 /** Clock offset used for displayed time of day, including calibrated clocks. */
 export function clockOffsetMinutes(clock: GameClock): number {
+  const elapsedAnchor = (clock.clockStyle ?? (clock.mode === "free" ? "elapsed" : "era")) === "elapsed" ? readElapsedClockAnchor(clock.elapsedAnchor) : null;
+  if (elapsedAnchor) return elapsedAnchor.minuteOfDay - elapsedAnchor.atElapsedMinutes;
   const anchor = readClockAnchor(clock.anchor, clock.rules);
   return anchor ? anchor.minuteOfDay - anchor.atElapsedMinutes : clock.hour * 60;
 }
@@ -83,7 +104,9 @@ export function nowOf(clock: GameClock, elapsedMinutes: number): Now {
   const anchor = readClockAnchor(clock.anchor, clock.rules);
   // Story days and deadlines keep their original axis when the date is calibrated.
   const days = Math.floor((clock.hour * 60 + elapsed) / 1440);
+  const elapsedAnchor = clockStyle === "elapsed" ? readElapsedClockAnchor(clock.elapsedAnchor) : null;
   const total = clockOffsetMinutes(clock) + elapsed;
+  const displayDay = elapsedAnchor ? elapsedAnchor.day + Math.floor(total / 1440) : days + 1;
   const inDay = ((total % 1440) + 1440) % 1440;
   const hour = Math.floor(inDay / 60);
   const sc = shichen(hour);
@@ -94,11 +117,11 @@ export function nowOf(clock: GameClock, elapsedMinutes: number): Now {
     : moved;
   const time = timeStyle === "24h" ? `${String(hour).padStart(2, "0")}:${String(inDay % 60).padStart(2, "0")}` : `${sc}时`;
   const text = clockStyle === "elapsed"
-    ? `第 ${days + 1} 天 · ${time}`
+    ? `第 ${displayDay} 天 · ${time}`
     : date
     ? `${formatDate(date, clock.rules)} · ${time}`
     : `${clock.label ? `${clock.label} · ` : ""}第 ${days + 1} 日 · ${time}`;
-  return { clockStyle, timeStyle, day: days + 1, hour, minute: inDay % 60, shichen: sc, date, newYears: clockStyle !== "elapsed" && clock.date ? newYearsAfterDays(clock.date, days) : 0, text };
+  return { clockStyle, timeStyle, day: days + 1, displayDay, hour, minute: inDay % 60, shichen: sc, date, newYears: clockStyle !== "elapsed" && clock.date ? newYearsAfterDays(clock.date, days) : 0, text };
 }
 
 const YEAR = 365 * 1440;
@@ -143,7 +166,7 @@ export function agoText(clock: GameClock, thenMinutes: number, nowMinutes: numbe
 export function timeRows(clock: GameClock, elapsedMinutes: number): { label: string; value: string }[] {
   const now = nowOf(clock, elapsedMinutes);
   if (now.clockStyle === "elapsed") return [
-    { label: "日期", value: `第 ${now.day} 天` },
+    { label: "日期", value: `第 ${now.displayDay} 天` },
     { label: now.timeStyle === "shichen" ? "时辰" : "时间", value: timeOfDay(now) },
     { label: "开局", value: now.day === 1 ? "今天开局" : `已过 ${now.day - 1} 天` },
   ];

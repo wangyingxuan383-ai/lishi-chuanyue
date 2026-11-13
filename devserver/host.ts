@@ -1,6 +1,7 @@
 // The development process shares native SQLite and execution with the app.
 // HTTP is only Vite's existing loopback bridge; the child has no TCP listener.
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { gunzipSync } from "node:zlib";
@@ -39,7 +40,9 @@ export class HostBridge {
     if (this.child && !this.child.killed) return;
     if (this.starting) return this.starting;
     this.starting = (async () => {
-      const binary = path.join(this.root, "target", "debug", process.platform === "win32" ? "story-dev-host.exe" : "story-dev-host");
+      // Honour CARGO_TARGET_DIR, e.g. build output kept off a network-mounted checkout.
+      const target = process.env.CARGO_TARGET_DIR ? path.resolve(this.root, process.env.CARGO_TARGET_DIR) : path.join(this.root, "target");
+      const binary = path.join(target, "debug", process.platform === "win32" ? "story-dev-host.exe" : "story-dev-host");
       {
         // Cargo also checks source changes on an existing checkout. Launch
         // the executable directly so Vite owns the actual host on Windows.
@@ -52,8 +55,13 @@ export class HostBridge {
         });
       }
       if (this.closed) throw new HostError("dev_host_closed", "开发宿主已关闭");
-      const child = spawn(binary, [], { cwd: this.root, windowsHide: true, env: { ...process.env, LISHI_DEV_ROOT: this.root, LISHI_PI_NODE: process.execPath }, stdio: ["pipe", "pipe", "ignore"] });
+      const child = spawn(binary, [], { cwd: this.root, windowsHide: true, env: { ...process.env, LISHI_DEV_ROOT: this.root, LISHI_PI_NODE: process.execPath }, stdio: ["pipe", "pipe", "pipe"] });
       this.child = child;
+      // Host panics and warnings go to a log instead of vanishing; a poisoned lock otherwise only shows as 文件操作失败.
+      const dir = process.env.LISHI_DEV_DATABASE_DIR ? path.resolve(this.root, process.env.LISHI_DEV_DATABASE_DIR) : path.join(this.root, ".cache", "dev-host");
+      const log = path.join(dir, "host-stderr.log");
+      fs.mkdirSync(path.dirname(log), { recursive: true });
+      child.stderr!.on("data", (chunk: Buffer) => { fs.appendFile(log, chunk, () => {}); });
       const decoder = new StringDecoder("utf8"); let buffer = "";
       child.stdout!.on("data", (chunk: Buffer) => {
         buffer += decoder.write(chunk);

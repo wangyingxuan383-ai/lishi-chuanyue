@@ -1,6 +1,7 @@
 // Optional writing tools. No story turn is generated and nothing is saved until adoption.
+import { remapContinuity, validateContinuity } from "../continuity";
 import type { Game } from "../game";
-import { ChatError, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
+import { ChatError, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
 import { isRefusal } from "../llm/refusal";
 import * as tree from "../tree";
 import type { ActionMode, FactCitation, World, WorldState, WorldSettings } from "../types";
@@ -18,7 +19,7 @@ import { isFortune } from "../fortune";
 import { parseRecord } from "../record/parse";
 
 /** writing-2: the version is kept with each adopted rewrite; it is not sent to the model. */
-export const WRITING_PROMPT_VERSION = "writing-2";
+export const WRITING_PROMPT_VERSION = "writing-3";
 export const CANON_WRITING_PROMPT_VERSION = "writing-canon-3";
 export function canonCorrectionRules(settings: WorldSettings, state: WorldState, opening = false): string {
   return `对这个回合按原著纠错。主动读取 canon-reference 技能，搜索并阅读原著原文，必要时补查邻段；核对身份、关系、称谓、时间、地点、物品和事件。玩家明确改变的事实及合理后果保留，AI自行写错不等于玩家改写。独立查证可同批完成，沿检索返回编号阅读，复用已读证据。只预览，不改当前路线。只改选中范围，允许按要求补全遗漏，不续写其后。范围外正文由程序原样保留。原回合记录默认保留，只对受改稿影响的字段返回最小recordPatch；数组只给受影响项目，不重写无关钱物/时间/目标。跨回合问题放related，资料不足放unresolved，不擅自改历史。最后只返回JSON：{"replacement":"选中范围的替换正文","recordPatch":{受影响的回合记录字段},"related":["关联问题"],"unresolved":["待核对问题"],"correctionPatch":{仅可用于校正继承的profile/people/place/places/cards，无法查证则省略},"corrections":[{"detail":"有原著依据的更正说明","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}]}。corrections只放原著更正，每项citations非空；玩家分支不是原著证据，不放进这个列表或伪造引文。原文没有依据时明确资料不足。record只记录本回合实际变化，不返回read_world的WorldState，不包含protagonist/source/facts/executionMode等整局字段。time写本回合经过多久，money写增减，choices为文字数组。字段沿用正常回合：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
@@ -130,17 +131,23 @@ export async function assertWritingAnchor(game: Game, anchor: WritingAnchor): Pr
   if (!(await game.repo.path(current.head.id)).some((n) => n.id === anchor.nodeId)) throw new WritingError(STALE_WRITING);
 }
 
-export function writingMessages(kind: "rewrite" | "polish", text: string, hint: string, context: string, mode: ActionMode): ChatMessage[] {
+export function writingMessages(kind: "rewrite" | "polish", text: string, hint: string, context: string, mode: ActionMode, range?: TextRange): ChatMessage[] {
   const task = kind === "rewrite"
     ? "只做文风润色，按玩家要求调整所选文字的措辞、节奏和描写。不改变已经发生的事实、人物决定、钱物数量、生死、时间与地点；要求涉及改事实时仍保留原事实。只输出替换这段的正文，不续写后续剧情。"
     : `润色玩家还没发送的输入（方式：${({ do: "行动", say: "说话", write: "亲手写剧情", direct: "幕后要求", skip: "过些日子", continue: "继续" })[mode]}）。保持原意与人称，不替玩家添加决定，也不写行动结果。只输出润色后的输入。`;
+  const required = `【要处理的文字】\n${text}\n\n【玩家要求】\n${hint.trim() || "让表达更自然流畅"}`;
+  // The selected text already appears in the required part. Keep just the
+  // neighbouring text as optional context.
+  const offset = range && context.slice(range.start, range.end) === text ? range.start : context.indexOf(text);
+  const nearby = offset < 0 ? context.slice(-1600) :
+    context.slice(Math.max(0, offset - 800), offset) + "\n" + context.slice(offset + text.length, offset + text.length + 800);
   return [
     { role: "system", content: `${task}不要解释，不加标题、引号包装或记录块。` },
-    { role: "user", content: `【上下文，仅供参考】\n${context}\n\n【要处理的文字】\n${text}\n\n【玩家要求】\n${hint.trim() || "让表达更自然流畅"}` },
+    { role: "user", content: nearby.trim() ? `【前后文，仅供参考】\n${nearby}\n\n${required}` : required, compactContent: required },
   ];
 }
 
-export interface WritingRequest { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; hint: string; mode: ActionMode }
+export interface WritingRequest { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; hint: string; mode: ActionMode; range?: TextRange }
 
 /** A model that answers in the turn format may append a <record> block; it never belongs in a rewrite. */
 export const withoutRecord = (text: string) => text.replace(/<record[\s\S]*$/i, "").trimEnd();
@@ -158,7 +165,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
     const llm = game.llm;
     if (!llm) throw new WritingError("先在设置里连接 AI 服务。");
     const model = llm.auxModel || llm.model;
-    const messages = writingMessages(request.kind, request.text, request.hint, request.anchor.original, request.mode);
+    let messages = writingMessages(request.kind, request.text, request.hint, request.anchor.original, request.mode, request.range);
     // Each actual attempt has its own usage row, including failed or cancelled attempts.
     for (let attempt = 1; ; attempt++) {
       if (cancelled) throw new ChatError("cancelled");
@@ -186,9 +193,9 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
       } catch (error) {
         if (cancelled || (error instanceof ChatError && error.kind === "cancelled")) outcome = "cancelled";
         else if (error instanceof WritingError && error.message === STALE_WRITING) outcome = "stale";
-        const retry = !cancelled && attempt === 1 && error instanceof ChatError && !error.partial &&
-          (error.kind === "network" || error.kind === "timeout_first" || (error.kind === "http" && (error.status === 429 || (error.status ?? 0) >= 500)));
-        if (!retry) throw error;
+        const decision = retryDecision(error, attempt, messages);
+        if (cancelled || !decision.retry) throw error;
+        messages = decision.messages;
       } finally {
         const finished = handle;
         if (finished) void finished.streamId.then((id) => game.platform.llm.ack(id)).catch(() => {});
@@ -218,6 +225,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
 export function writingError(error: unknown): string {
   if (error instanceof WritingError) return error.message;
   if (error instanceof ChatError) {
+    if (isContextWindowError(error)) return CONTEXT_WINDOW_MESSAGE;
     if (error.kind === "cancelled") return "已取消，原文没有改动。";
     if (error.kind === "empty") return "AI 没有返回文字，请再试一次。";
     if (error.kind.startsWith("timeout")) return "等得有些久了，请稍后再试。";
@@ -333,8 +341,13 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
   const fortune = isFortune(parent?.meta.fortune) ? parent.meta.fortune : undefined;
   const result = await game.settleRecord(baseline, record, { mode: target.actionMode ?? "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock, fortune }, target.parentId ? undefined : { advanceTime: false });
   const nodeId = newId();
+  if (normalized.continuity) {
+    normalized.continuity = remapContinuity(normalized.continuity, id => id === target.id ? nodeId : id);
+    normalized.continuity = (await validateContinuity(game.repo, anchor.worldId, target.parentId, nodeId, preview.narrative, `${target.actionText ?? ""}\n${target.directorNote ?? ""}`, result.state, normalized.continuity, false)).changes;
+    if (!Object.keys(normalized.continuity).length) delete normalized.continuity;
+  }
+
   result.state.source = structuredClone(reference.binding);
-  result.state.executionMode = current.executionMode ?? "classic";
   result.state.facts = [...result.state.facts ?? [], ...preview.corrections.map((c) => ({ id: newId(), detail: c.detail, origin: "correction" as const, citations: structuredClone(c.citations), nodeId }))];
   try {
     return await tree.forkRevision(game.repo, { ...anchor, sourceGuard: preview.sourceGuard }, {

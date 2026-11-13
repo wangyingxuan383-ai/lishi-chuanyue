@@ -74,6 +74,7 @@ mod tests {
     #[test]
     fn revoking_current_scope_blocks_a_frozen_task_without_granting_new_tools(){
         let store=Store(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));
+        crate::migration::migrate(&mut store.lock().unwrap(),None).unwrap();
         crate::pi_store::PiStore(store.clone()).initialize().unwrap();
         let raw=json!({"mode":"configured","mcps":[{"id":"source","url":"https://source.invalid/mcp","enabled":true,"allowedTools":["read"],"readOnlyTools":["read"],"allowResources":true}]});
         let authorized=authorize_network(&store,&raw).unwrap()["network"].clone();

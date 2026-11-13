@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
 import { Game, nativeFailReason } from "./game";
-import { fakeLlm, RECORD } from "./testing/fakeLlm";
+import { fakeLlm } from "./testing/fakeLlm";
 import { newBinding } from "./sources/types";
 import { saveBook } from "./sources/library";
 import { exportWorldFile } from "./archive";
@@ -29,18 +29,6 @@ describe("opening and recovery contracts", () => {
     expect(source.through).toBe(0);
   });
 
-  it("takes the opening title from its existing response and preserves explicit titles", async () => {
-    for (const [title, titlePolicy, expected] of [["", "auto", "青桥灯影"], ["我写的名字", "manual", "我写的名字"]] as const) {
-      const llm = fakeLlm([{ text: "书铺刚开门。" + RECORD({ time: 0, log: "开门", choices: [], ...({ storyTitle: "青桥灯影" } as object) }) }]);
-      const game = await Game.open(await createMemoryPlatform(llm), model);
-      const id = await game.createWorld({ title, titlePolicy, eraId: null, settings: { mode: "free", choiceCount: 0 }, protagonist: { name: "旅人", gender: "男", age: 20, identity: "书铺来客" }, arrival: "不穿越", origin: "", opening: { mode: "ai", hint: "" } }, () => {});
-      expect(id).toBeTruthy();
-      expect((await game.repo.getWorld(id!))!.title).toBe(expected);
-      expect(llm.calls).toHaveLength(1);
-      const [row] = await game.platform.sql.query("SELECT record_json FROM nodes WHERE world_id=?", [id]);
-      expect(String(row.record_json)).not.toContain("storyTitle");
-    }
-  });
 
   it("native archive errors stay actionable and never fall back to a second full export", async () => {
     const game = await Game.open(await createMemoryPlatform(), model);
@@ -57,5 +45,23 @@ describe("opening and recovery contracts", () => {
     expect(nativeFailReason("failed", "原著核对：AI服务拒绝本次内容")).toBe("refused");
     expect(nativeFailReason("failed", "写作：connection timeout")).toBe("timeout");
     expect(nativeFailReason("cancelled", "")).toBe("cancelled");
+  });
+
+  it.each([
+    ["auth", "auth"], ["quota", "quota"], ["network", "network"], ["timeout", "timeout"],
+    ["http", "http"], ["refused", "refused"], ["cancelled", "cancelled"], ["no_record", "no_record"],
+    ["context", "config"], ["limit", "config"], ["stale", "config"], ["config", "config"], ["future-kind", "config"],
+  ])("uses structured %s without guessing from contradictory text", (kind, expected) => {
+    expect(nativeFailReason("failed", "拒绝 timeout HTTP 401 429 network 记录不完整", kind)).toBe(expected);
+    expect(nativeFailReason("failed", null, kind)).toBe(expected);
+  });
+
+  it("preserves native detail and the old-record fallback in the shared failed event", async () => {
+    const game = await Game.open(await createMemoryPlatform(), model);
+    const snapshot = { id: "failed-run", worldId: "w", status: "failed", budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 10 },
+      draft: {}, result: null, error: "原著核对：上下文窗口不足，服务拒绝输入", errorKind: "context", events: [] };
+    expect(game["nativeFailure"](snapshot, "备用提示")).toEqual({ type: "failed", reason: "config", runId: "failed-run", detail: snapshot.error, partialSaved: false });
+    expect(game["nativeFailure"]({ ...snapshot, errorKind: null, error: "连接中断" }, "备用提示").reason).toBe("network");
+    expect(game["nativeFailure"]({ ...snapshot, error: null }, "备用提示").detail).toBe("备用提示");
   });
 });

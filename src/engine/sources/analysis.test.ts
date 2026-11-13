@@ -79,7 +79,7 @@ describe("structured source analysis", () => {
     const state = sampleState(); state.source = { ...binding, method: "analysis", analysisId: job.id };
     const { world } = await repo.createWorld({ title: "资料归档", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "山门相逢。", state } });
     const archive = await exportWorld(repo, world.id);
-    expect(archive.version).toBe(4); expect(archiveProblems(archive)).toEqual([]);
+    expect(archive.version).toBe(7); expect(archiveProblems(archive)).toEqual([]);
     const imported = await importWorld(repo, archive, "new");
     const copy = await exportWorld(repo, imported), copyBook = copy.books![0];
     expect(copyBook.book.id).not.toBe(book.id); expect(copyBook.jobs[0].id).not.toBe(job.id);

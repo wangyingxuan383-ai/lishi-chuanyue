@@ -8,22 +8,11 @@ import { EMPTY, fromChallenge, fromSetup, fromTemplate, normalizeOpeningDraft, p
 const daughter = TEMPLATES.find((t) => t.id === "tang-chancellor-daughter")!;
 
 describe("opening drafts", () => {
-  it("keeps ordinary play classic while accepting legacy Agent preferences", () => {
-    expect(EMPTY.executionMode).toBe("classic");
-    expect(toNewWorld(fromTemplate(daughter, EMPTY)).executionMode).toBe("classic");
-    const draft = { ...fromTemplate(daughter, EMPTY), executionMode: "agent" as const };
-    expect(parseShare(shareText(draft))?.executionMode).toBe("agent");
-    expect(toNewWorld(draft).executionMode).toBe("classic");
-    expect(fromSetup(toNewWorld(draft)).executionMode).toBe("classic");
-    expect(toNewWorld(draft).settings).not.toHaveProperty("executionMode");
+  it("ignores legacy executionMode in drafts and shared openings", () => {
+    const draft = { ...fromTemplate(daughter, EMPTY), executionMode: "agent" } as ReturnType<typeof fromTemplate>;
+    expect(toNewWorld(draft)).not.toHaveProperty("executionMode");
+    expect(parseShare(JSON.stringify({ premise: "汉末", executionMode: "agent" }))).not.toHaveProperty("executionMode");
     expect(shareText(draft)).not.toContain("执行方式：");
-  });
-
-  it("uses classic for missing or unknown legacy opening preferences", () => {
-    const setup = { ...toNewWorld(fromTemplate(daughter, EMPTY)), executionMode: undefined };
-    expect(fromSetup(setup).executionMode).toBe("classic");
-    expect(parseShare(JSON.stringify({ premise: "汉末" }))?.executionMode).toBe("classic");
-    expect(parseShare(JSON.stringify({ premise: "汉末", executionMode: "unknown" }))?.executionMode).toBe("classic");
   });
 
   it("keeps free worlds, custom notes and long-lived protagonists through sharing and replay", () => {

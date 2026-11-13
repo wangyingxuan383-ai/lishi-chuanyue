@@ -289,9 +289,6 @@ pub fn apply_record(before: &Value, record: &Value, options: &Value) -> Result<V
     let free = text(&s["era"]["mode"]) == "free";
     let (mut chips, mut notes, mut log) = (Vec::new(), Vec::<String>::new(), Vec::<String>::new());
     if !playing {
-        if matches!(text(&record["executionSet"]), "agent" | "classic") {
-            s["executionMode"] = record["executionSet"].clone();
-        }
         if let Some(binding) = record.get("sourceSet") {
             if binding.is_null() || valid_binding(binding) {
                 s["source"] = binding.clone();
@@ -878,7 +875,7 @@ pub fn apply_record(before: &Value, record: &Value, options: &Value) -> Result<V
     }
     me["statuses"] = json!(statuses);
     apply_goals(&mut s, record, now, &mut chips, &mut log);
-    apply_rules(&mut s, record, free, clock, &mut log);
+    apply_rules(&mut s, record, free, clock, &mut log)?;
     apply_cards(&mut s, record, &mut log);
     apply_places(&mut s, record, &mut log);
     apply_modes(&mut s, record, playing, &mut chips, &mut log);
@@ -1128,7 +1125,10 @@ fn apply_goals(
     }
     s["goals"] = json!(goals);
 }
-fn apply_rules(s: &mut Value, record: &Value, free: bool, clock: &Value, log: &mut Vec<String>) {
+fn apply_rules(s: &mut Value, record: &Value, free: bool, clock: &Value, log: &mut Vec<String>) -> Result<(), String> {
+    if let Some(changes) = record["rules"].get("clock") {
+        *s = super::clock::apply_display(s, changes)?;
+    }
     let rules = &record["rules"];
     if rules["currency"].is_array() {
         let problems = money::currency_issues(values(&rules["currency"]));
@@ -1204,6 +1204,7 @@ fn apply_rules(s: &mut Value, record: &Value, free: bool, clock: &Value, log: &m
         let c = json!({"date":start,"hour":s["time"].get("startHour").or_else(||clock.get("hour")).cloned().unwrap_or(json!(8)),"label":s["time"]["start"],"rules":calendar});
         s["timeline"] = json!(calendar::retime(values(&s["timeline"]), &c));
     }
+    Ok(())
 }
 fn apply_cards(s: &mut Value, record: &Value, log: &mut Vec<String>) {
     let mut cards = values(&s["cards"]).to_vec();

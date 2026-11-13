@@ -66,9 +66,9 @@ export function BackupRestore({ refresh = "" }: { refresh?: string | number }) {
   if (backups === null) return null;
   if (backups.length === 0) return <p className="settings-note">还没有备份。</p>;
   return (
-    <div className="stack" style={{ gap: 0 }}>
+    <div className="stack gap-0">
       {backups.map((b) => (
-        <div key={b.name} className="item-row" style={{ alignItems: "center" }}>
+        <div key={b.name} className="item-row center">
           <div>
             <span>{when(b.at)}</span>
             <small>{kind(b.name)} · {size(b.size)}</small>

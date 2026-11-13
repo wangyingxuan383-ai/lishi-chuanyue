@@ -1,4 +1,5 @@
 // Character & world panel (PLAN_V3 §4.5); the 设定 tab is the 设定集 (§4.14).
+import { KnowledgeRecords } from "./Continuity";
 import { useState } from "react";
 import type { EraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
@@ -19,7 +20,7 @@ const TABS = ["我", "行囊", "人物", "目标", "记事", "设定"] as const;
 /** Tabs with their own editors instead of the panel-wide 修改. */
 const OWN_EDITOR: readonly string[] = ["行囊", "人物", "目标", "记事", "设定"];
 type Tab = (typeof TABS)[number];
-type Save = (patch: TurnRecord, summary: string) => Promise<void>;
+type Save = (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
 
 /** The words the panel shows for each stat, best first (AUDIT_V4 8.3). */
 const LEVELS = {
@@ -66,7 +67,7 @@ function HeroPanel({ text }: { text: string }) {
       {lines.length ? lines.map((line, i) => {
         const pair = line.match(/^([^：:]{1,8})[：:]\s*(.+)$/);
         return pair ? <p key={i} className="bio-line"><span>{pair[1]}</span>{pair[2]}</p> : <p key={i} className="bio-line">{line}</p>;
-      }) : <p className="muted" style={{ margin: 0 }}>在“本局设置”里写下想随时看到的境界、本事或约定。</p>}
+      }) : <p className="muted m-0">在“本局设置”里写下想随时看到的境界、本事或约定。</p>}
     </section>
   );
 }
@@ -105,7 +106,7 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
 
   return (
     <Sheet title="人物小传" onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
+      <div className="stack gap-10">
         <div className="row bio-fields">
           <label className="grow">名字
             <span className="field-line">
@@ -121,8 +122,8 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
         <label>身份与处境<textarea rows={3} value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder="你是谁、身处什么境地" /></label>
         <label>穿越前<input value={origin} onChange={(e) => setOrigin(e.target.value)} placeholder="穿越前你是谁；本来就是这个时代的人可不填" /></label>
         <label>金手指<input value={cheat} onChange={(e) => setCheat(e.target.value)} placeholder="带过来的本事或知识，如：熟读唐史、会做外科手术" /></label>
-        <p className="muted" style={{ margin: 0 }}>AI 每回合都会看到这些。保存后可以撤销。</p>
-        {problem && <p className="notice" style={{ margin: 0 }}>{problem}</p>}
+        <p className="muted m-0">AI 每回合都会看到这些。保存后可以撤销。</p>
+        {problem && <p className="notice m-0">{problem}</p>}
         <button className="primary" disabled={saving || !!nameBad || ageBad} onClick={() => void save()}>保存</button>
       </div>
     </Sheet>
@@ -168,7 +169,7 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
 
   return (
     <Sheet title={item ? item.name : "添加物品"} onClose={onClose}>
-      <div className="stack" style={{ gap: 10 }}>
+      <div className="stack gap-10">
         <label>名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：紫毫笔" /></label>
         <div className="row">
           <label className="grow">数量<input aria-label="数量" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/\D/g, "").slice(0, 6))} /></label>
@@ -177,7 +178,7 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
         <label>放在哪<input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="不填就是带在身上" /></label>
         <label>备注<input value={note} onChange={(e) => setNote(e.target.value)} placeholder="来历、用处" /></label>
         {same && <p className="field-hint warn">行囊里已经有“{same.name}”，保存时会问你要不要合并。</p>}
-        {problem && <p className="notice" style={{ margin: 0 }}>{problem}</p>}
+        {problem && <p className="notice m-0">{problem}</p>}
         <div className="row">
           {item && <button className="danger-text" disabled={saving} onClick={() => void remove()}>去掉</button>}
           <button className="primary grow" disabled={saving || !clean || (!item && count === 0)} onClick={() => void save()}>保存</button>
@@ -187,8 +188,9 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
   );
 }
 
-export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, busy, docked = false }: {
+export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false }: {
   worldId: string; headId: string; chapterEvery: number;
+  onContinuitySaved?: () => void | Promise<void>;
   settings?: WorldSettings;
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
@@ -280,7 +282,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
               <p className="bio-line"><span>此时此地</span>{now.text}{place ? ` · ${place}` : ""}</p>
             </section>
             {settings?.heroPanelEnabled && <HeroPanel text={me.panel ?? ""} />}
-            {editing ? <div className="stack" style={{ gap: 12 }}>
+            {editing ? <div className="stack gap-3">
               <label>钱
                 <span className="field-line">
                   <input aria-label="钱" inputMode="numeric" value={String(me.stats.money)} onChange={(e) => change((s) => { s.protagonist.stats.money = Number(e.target.value.replace(/\D/g, "").slice(0, 12) || 0); })} />
@@ -291,7 +293,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
                 const words = LEVELS[key];
                 const at = levelIndex(me.stats[key], words.length);
                 return (
-                  <div key={key} className="stack" style={{ gap: 6 }}>
+                  <div key={key} className="stack gap-2">
                     <span className="field-label">{STAT_LABEL[key]}</span>
                     <div className="segmented level-buttons" role="group" aria-label={STAT_LABEL[key]}>
                       {words.map((w, i) => <button key={w} aria-pressed={at === i} onClick={() => change((s) => {
@@ -322,7 +324,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
               )) : <p className="muted">无</p>}
               {editing && <button onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}><Icon name="plus" size={18} />添加状况</button>}
             </div>
-            {problem && <p className="notice" style={{ margin: 0 }}>{problem}</p>}
+            {problem && <p className="notice m-0">{problem}</p>}
           </div>
         )}
         {tab === "行囊" && <div className="stack">
@@ -334,12 +336,13 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
           )) : <p className="muted">行囊空空。</p>}
           <button disabled={busy} onClick={() => setItem({ item: null })}><Icon name="plus" size={18} />添加物品</button>
         </div>}
-        {tab === "人物" && <People state={state} era={era} busy={busy} onSave={onSave} />}
-        {tab === "记事" && <Journal worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
-        {tab === "设定" && <Codex state={state} era={era} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
+        {tab === "我" && <KnowledgeRecords worldId={worldId} headId={headId} person={{ id: "protagonist", name: me.name, aliases: me.aliases }} busy={busy} onSaved={onContinuitySaved} />}
+        {tab === "人物" && <People worldId={worldId} headId={headId} onContinuitySaved={onContinuitySaved} state={state} era={era} busy={busy} onSave={onSave} />}
+        {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
+        {tab === "设定" && <Codex state={state} era={era} headId={headId} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && <Goals state={state} era={era} busy={busy} onSave={onSave} />}
       </div>
-      {editing && <div className="dock row" style={{ justifyContent: "space-between" }}>
+      {editing && <div className="dock row between">
         <button disabled={saving} onClick={() => setDraft(null)}>取消</button>
         <button className="primary" disabled={saving || busy} onClick={() => void save()}>{busy ? "等这段写完" : "保存修改"}</button>
       </div>}

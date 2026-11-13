@@ -7,17 +7,12 @@
 // player or a built-in pack wrote is never changed. Changes are logged in
 // ./CHANGES.md.
 import type { ChatMessage } from "../llm/chat";
-import { lenientJson } from "../record/parse";
-import type { CardPatch, PlacePatch, TurnRecord } from "../state/apply";
-import { matchName } from "../state/names";
-import type { CardKind, StoryNode, WorldState } from "../types";
+import type { StoryNode, WorldState } from "../types";
 
 export const UPKEEP_PROMPT_VERSION = "upkeep-3";
 export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-4";
 /** Turns between two passes. */
 export const UPKEEP_EVERY = 6;
-/** Most new cards, updates and places taken from one pass. */
-const MAX_EACH = 3;
 const STORY_CHARS = 5000;
 const SOURCE_TEXT = { 卡组: "内置卡组", AI: "AI 整理", 玩家: "玩家写的" } as const;
 
@@ -96,86 +91,4 @@ ${places.join("\n") || "（无）"}
 ${storyBlock(input.turns)}`,
     },
   ];
-}
-
-const KINDS: CardKind[] = ["势力", "物品", "设定"];
-const text = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
-const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === "object") : []);
-const names = (v: unknown) => (Array.isArray(v) ? v.map((k) => text(k, 20)).filter(Boolean).slice(0, 4) : []);
-
-/**
- * Turns the model's answer into an edit patch against the current state.
- * New names must not already be a card, place or person, nor something the
- * player deleted; updates only touch what the AI wrote. Null when nothing is left.
- */
-export function upkeepPatch(raw: string, state: Pick<WorldState, "cards" | "places" | "people" | "dismissed" | "protagonist">): TurnRecord | null {
-  const value = lenientJson(raw) as { cards?: unknown; places?: unknown; updates?: unknown; people?: unknown; deaths?: unknown; statusRemove?: unknown } | null;
-  if (!value || typeof value !== "object") return null;
-  const dismissed = new Set(state.dismissed ?? []);
-  const cardNames = state.cards.filter((c) => c.kind !== "时代").map((c) => ({ id: c.id, name: c.name, aliases: c.keys }));
-  const known = (name: string) => dismissed.has(name) || !!matchName(cardNames, name) || !!matchName(state.people, name, { partial: false }) || !!matchName(state.places, name);
-  const cards: CardPatch[] = [];
-  const places: PlacePatch[] = [];
-  const people: NonNullable<TurnRecord["people"]> = [];
-
-  for (const item of list(value.cards)) {
-    if (cards.length >= MAX_EACH) break;
-    const name = text(item.name, 20);
-    const content = text(item.content, 200);
-    if (!name || !content || known(name) || cards.some((c) => c.name === name)) continue;
-    const kind = KINDS.includes(item.kind as CardKind) ? (item.kind as CardKind) : "设定";
-    cards.push({ op: "add", kind, name, keys: names(item.keys), content, source: "AI" });
-  }
-  let updates = 0;
-  for (const item of list(value.updates)) {
-    if (updates >= MAX_EACH) break;
-    const name = text(item.name, 20);
-    const found = matchName(cardNames, name);
-    const card = found && state.cards.find((c) => c.id === found.id);
-    const content = text(item.content, 200);
-    if (!content) continue;
-    if (card) {
-      if (card.source !== "AI" || content === card.content) continue;
-      cards.push({ op: "update", id: card.id, name: card.name, content, source: "AI" });
-      updates++;
-      continue;
-    }
-    // An outdated place the AI described before can be updated the same way.
-    const place = matchName(state.places, name);
-    if (place?.source === "AI" && content !== place.description && !places.some((p) => p.id === place.id)) {
-      places.push({ op: "update", id: place.id, name: place.name, description: content, source: "AI" });
-      updates++;
-    }
-  }
-  for (const item of list(value.places)) {
-    if (places.length >= MAX_EACH) break;
-    const name = text(item.name, 20);
-    const description = text(item.description, 200);
-    if (!name || !description || dismissed.has(name)) continue;
-    const place = matchName(state.places, name);
-    if (place) {
-      // Only fill a blank description or update one the AI wrote.
-      if ((place.description.trim() && place.source !== "AI") || place.description === description) continue;
-      places.push({ op: "update", id: place.id, name: place.name, aliases: [...(place.aliases ?? []), ...names(item.aliases)], description, source: "AI" });
-    } else if (!known(name) && !places.some((p) => p.name === name)) {
-      places.push({ op: "add", name, aliases: names(item.aliases), description, source: "AI" });
-    }
-  }
-  for (const item of list(value.people)) {
-    if (people.length >= MAX_EACH) break;
-    const name = text(item.name, 20);
-    if (!name || known(name) || people.some((p) => p.name === name)) continue;
-    people.push({ name, role: text(item.role, 30), ...(text(item.attitude, 6) ? { attitude: text(item.attitude, 6) } : {}), note: text(item.note, 80) });
-  }
-  // Deaths the ledger missed: only people already listed and still alive.
-  for (const name of Array.isArray(value.deaths) ? value.deaths.map((n) => text(n, 20)).filter(Boolean) : []) {
-    const person = matchName(state.people, name, { partial: false });
-    if (person?.alive && !people.some((p) => p.id === person.id)) people.push({ id: person.id, name: person.name, alive: false });
-  }
-  // Statuses that are not (or no longer) the protagonist's condition.
-  const status = (Array.isArray(value.statusRemove) ? value.statusRemove.map((n) => text(n, 30)).filter(Boolean) : [])
-    .filter((name, i, all) => all.indexOf(name) === i && state.protagonist.statuses.some((x) => x.name === name) && name !== "垂危")
-    .map((name) => ({ op: "remove", name }));
-  if (!cards.length && !places.length && !people.length && !status.length) return null;
-  return { ...(cards.length ? { cards } : {}), ...(places.length ? { places } : {}), ...(people.length ? { people } : {}), ...(status.length ? { status } : {}) };
 }

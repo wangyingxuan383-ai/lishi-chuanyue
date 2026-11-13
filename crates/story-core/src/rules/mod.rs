@@ -2,6 +2,7 @@
 //! Their JSON boundary is the same snapshot/record boundary used by the UI.
 pub mod apply;
 pub mod calendar;
+pub mod clock;
 pub mod money;
 pub mod record;
 

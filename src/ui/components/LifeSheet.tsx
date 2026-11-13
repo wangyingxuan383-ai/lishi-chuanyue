@@ -60,7 +60,7 @@ export function LifeSheet({ world, state, headId, dead, onClose }: { world: Worl
             <Stat label="最常用" value={stats.modes.length ? stats.modes.slice(0, 2).map((m) => `${m.label} ${m.count} 次`).join("，") : "还没有"} />
           </div>
         ) : <p className="muted">正在统计…</p>}
-        <p className="muted" style={{ margin: 0, fontSize: 13 }}>“大约玩了”按每回合之间的间隔估算，停下超过十分钟的只算十分钟。</p>
+        <p className="muted m-0 small">“大约玩了”按每回合之间的间隔估算，停下超过十分钟的只算十分钟。</p>
 
         <h4 className="section-title">印谱 <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}>{seals.filter((s) => earned.has(s.id)).length} / {seals.length}</span></h4>
         <div className="seal-book">
@@ -104,7 +104,7 @@ export function EndingCard({ state, world, now, turns, onLife, onBack, onLines, 
         <button onClick={onLines}>看看别的路线</button>
         <button className="ghost" onClick={onAgain}>同样设定再开一局</button>
       </div>
-      <p className="muted" style={{ margin: 0, fontSize: 13 }}>{world.settings.difficulty === "残酷" ? "残酷难度下，重伤可能直接丧命。" : "长按任意一段，也可以回到那时。"}</p>
+      <p className="muted m-0 small">{world.settings.difficulty === "残酷" ? "残酷难度下，重伤可能直接丧命。" : "长按任意一段，也可以回到那时。"}</p>
     </div>
   );
 }

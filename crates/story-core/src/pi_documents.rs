@@ -85,7 +85,9 @@ mod tests {
     use std::sync::{Arc,Mutex};
     #[test]
     fn frozen_grant_cursor_and_current_revocation_share_one_scope(){
-        let store=Store(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));crate::pi_store::PiStore(store.clone()).initialize().unwrap();
+        let store=Store(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));
+        crate::migration::migrate(&mut store.lock().unwrap(),None).unwrap();
+        crate::pi_store::PiStore(store.clone()).initialize().unwrap();
         let public=register(&store,&json!({"path":"private-native-location","name":"资料目录","directory":true}),true).unwrap();assert!(!public.to_string().contains("private-native-location"));
         let task=json!({"id":"task","world_id":"world","metadata_json":json!({"fileGrants":pin(&*store.lock().unwrap()).unwrap()}).to_string()});
         let plan:RunPlan=serde_json::from_value(json!({"id":"task","worldId":"world","lineId":"line","headId":"head","kind":"pi_task","model":{"slot":"","url":"","model":"","includeUsage":false},"messages":[],"extractMessages":[],"state":{},"settings":{},"options":{},"action":{},"meta":{"agent":{"readOnly":true}}})).unwrap();

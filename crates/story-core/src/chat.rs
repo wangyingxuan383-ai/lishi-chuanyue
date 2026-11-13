@@ -48,6 +48,11 @@ pub struct Accumulator {
     malformed_call: bool,
 }
 impl Accumulator {
+    /// Reasoning/usage alone do not count as body or tool output.
+    pub fn has_content(&self) -> bool {
+        !self.result.text.is_empty() || !self.calls.is_empty()
+    }
+
     /// Some compatible services emit an empty argument string for a complete
     /// zero-argument call. Only normalize when the actually sent schema makes
     /// an empty object legal; incomplete JSON and required fields stay errors.
@@ -187,6 +192,27 @@ pub fn assistant_message(reply: &Completion) -> Value {
     message
 }
 
+pub fn provider_context_rejected(status: Option<u16>, detail: &str) -> bool {
+    if status == Some(413) {
+        return true;
+    }
+    if !matches!(status, Some(400 | 422)) {
+        return false;
+    }
+    let detail = detail.to_ascii_lowercase();
+    ["context_length_exceeded", "maximum context length", "exceeds the context window", "prompt is too long", "上下文窗口"]
+        .iter().any(|marker| detail.contains(marker))
+}
+
+pub(crate) fn wire_messages(messages: &[Value]) -> Vec<Value> {
+    messages.iter().cloned().map(|mut message| {
+        if let Some(fields) = message.as_object_mut() {
+            fields.remove("compactContent");
+        }
+        message
+    }).collect()
+}
+
 pub fn request(config: &ModelConfig, messages: &[Value], tools: &[Value], aux: bool) -> Value {
     let mut body = Value::Object(config.extra.clone());
     for key in ["protocol", "contextWindowTokens", "maxOutputTokens"] {
@@ -199,7 +225,7 @@ pub fn request(config: &ModelConfig, messages: &[Value], tools: &[Value], aux: b
     }
     .clone()
     .into();
-    body["messages"] = Value::Array(messages.to_vec());
+    body["messages"] = Value::Array(wire_messages(messages));
     body["max_tokens"] = config.max_output_tokens().into();
     body["stream"] = true.into();
     if config.include_usage {
@@ -293,6 +319,18 @@ pub fn wire_chat_body(mut body: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_output_counts_body_and_tool_deltas_but_not_reasoning_or_usage() {
+        let mut text = Accumulator::default();
+        text.push(r#"{"choices":[{"delta":{"reasoning_content":"思考中"}}],"usage":{"prompt_tokens":1}}"#);
+        assert!(!text.has_content());
+        text.push(r#"{"choices":[{"delta":{"content":"正文"}}]}"#);
+        assert!(text.has_content());
+        let mut tool = Accumulator::default();
+        tool.push(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"read","function":{"name":"read_original","arguments":"{"}}]}}]}"#);
+        assert!(tool.has_content());
+    }
+
     #[test]
     fn empty_arguments_are_only_normalized_for_a_sent_schema_accepting_an_empty_object(){
         let tools=json!([{"type":"function","function":{"name":"validate_changes","parameters":{"type":"object","properties":{},"required":[]}}},{"type":"function","function":{"name":"stage_edit","parameters":{"type":"object","required":["kind"]}}}]);

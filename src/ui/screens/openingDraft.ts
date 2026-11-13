@@ -6,7 +6,7 @@ import { templateName, type Arrival, type OpeningTemplate } from "../../content/
 import { challengeName, type ChallengeCard } from "../../content/challenges";
 import type { NewWorld } from "../../engine/game";
 import type { FortuneMode } from "../../engine/fortune";
-import { DEFAULT_SETTINGS, type ExecutionMode, type Intensity, type Perspective, type WorldSettings } from "../../engine/types";
+import { DEFAULT_SETTINGS, type Intensity, type Perspective, type WorldSettings } from "../../engine/types";
 import { validBinding, type SourceBinding } from "../../engine/sources/types";
 
 /**
@@ -20,7 +20,6 @@ export interface ChallengeDraft { goal: string; limit: string; failIf: string }
 export const MAX_BEATS = 12;
 
 export interface Draft {
-  executionMode: ExecutionMode;
   fanfic?: boolean;
   source?: SourceBinding | null;
   templateId: string | null;
@@ -40,7 +39,7 @@ export interface Draft {
   openingText: string;
   /** Without a built-in pack: let the AI organize the 设定集 from the premise. */
   organize: boolean;
-  settings: Pick<WorldSettings, "perspective" | "style" | "length" | "choiceCount" | "intensity" | "essentials" | "rules" | "mode" | "clockStyle" | "heroPanel" | "heroPanelEnabled">;
+  settings: Pick<WorldSettings, "perspective" | "style" | "length" | "choiceCount" | "intensity" | "essentials" | "directive" | "rules" | "mode" | "clockStyle" | "heroPanel" | "heroPanelEnabled">;
   play: PlayStyle;
   /** 剧本 / 挑战 with the protagonist played by the AI. */
   aiPilot: boolean;
@@ -57,14 +56,13 @@ export const EMPTY_SCRIPT: ScriptDraft = { line: "", beats: ["", "", ""], ending
 export const EMPTY_CHALLENGE: ChallengeDraft = { goal: "", limit: "", failIf: "" };
 
 export const EMPTY: Draft = {
-  executionMode: "classic",
   templateId: null, lockedGender: null, title: "", titlePolicy: "auto", eraId: null, premise: "", name: "", gender: "男", age: "",
   identity: "", arrival: "魂穿", origin: "历史系研究生", openingMode: "ai", hint: "", openingText: "", organize: true,
   play: "plain", aiPilot: false, script: EMPTY_SCRIPT, challenge: EMPTY_CHALLENGE, challengeId: null, fortune: null,
   settings: {
     mode: "history", clockStyle: "era", heroPanelEnabled: false, heroPanel: "",
     perspective: DEFAULT_SETTINGS.perspective, style: DEFAULT_SETTINGS.style, length: DEFAULT_SETTINGS.length,
-    choiceCount: DEFAULT_SETTINGS.choiceCount, intensity: DEFAULT_SETTINGS.intensity, essentials: "", rules: "",
+    choiceCount: DEFAULT_SETTINGS.choiceCount, intensity: DEFAULT_SETTINGS.intensity, essentials: "", directive: "", rules: "",
   },
 };
 
@@ -126,15 +124,13 @@ export const draftPilot = (d: Pick<Draft, "play" | "aiPilot">) => (d.play === "w
 /** 运势 for the new world: the player's choice, else 有影响 for a challenge, else the play default. */
 export const draftFortune = (d: Pick<Draft, "play" | "fortune">, fallback: FortuneMode = DEFAULT_SETTINGS.fortune): FortuneMode => d.fortune ?? (d.play === "challenge" ? "on" : fallback);
 /** Retained only for reading old opening drafts. Ordinary play is always classic. */
-export const draftExecutionMode = (value: unknown): ExecutionMode => value === "agent" ? "agent" : "classic";
 
 export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints">>): NewWorld {
   const pilot = draftPilot(d);
   const fortune = d.fortune ?? (d.play === "challenge" ? "on" : null);
   const beats = filledBeats(d.script);
   return {
-    executionMode: "classic",
-    title: d.title,
+      title: d.title,
     titlePolicy: d.titlePolicy ?? (d.title.trim() ? "manual" : "auto"),
     source: d.source,
     eraId: d.settings.mode === "free" ? null : d.eraId,
@@ -160,7 +156,6 @@ export function fromSetup(setup: NewWorld): Draft {
   const gender = setup.protagonist.gender === "女" ? "女" : "男";
   return normalizeOpeningDraft({
     ...EMPTY,
-    executionMode: setup.executionMode ?? "classic",
     source: setup.source,
     fanfic: setup.source?.fanfic,
     title: setup.title, titlePolicy: "manual", eraId: setup.eraId, premise: s.premise ?? "",
@@ -225,7 +220,6 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
   const beats = Array.isArray(script.beats) ? script.beats.filter((b): b is string => typeof b === "string").slice(0, MAX_BEATS) : [];
   const challenge = (raw.challenge && typeof raw.challenge === "object" ? raw.challenge : {}) as Record<string, unknown>;
   return {
-    executionMode: draftExecutionMode(raw.executionMode),
     templateId: null,
     ...(raw.source !== undefined ? { source: validBinding(raw.source) ? raw.source : null } : {}),
     ...(raw.fanfic !== undefined ? { fanfic: raw.fanfic === true } : {}),
@@ -264,7 +258,7 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
         romance: oneOf(intensity.romance, levels, EMPTY.settings.intensity.romance),
         darkness: oneOf(intensity.darkness, levels, EMPTY.settings.intensity.darkness),
       },
-      essentials: str(s.essentials),
+      essentials: str(s.essentials), directive: str(s.directive),
       rules: str(s.rules),
     },
   };

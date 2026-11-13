@@ -13,17 +13,19 @@ import "./agent.css";
 import { AgentToolPackages } from "./AgentToolPackages";
 import { AgentSources } from "./AgentSources";
 import { AgentDocuments } from "./AgentDocuments";
+import { AGENT_TASK_RECIPES, taskRecipe, taskRecipeText, type AgentTaskRecipe } from "../../content/agentTasks";
 
 type AgentRoute = Extract<Route, { name: "agent" }>;
+type AgentSettingsSection = "execution" | "skills" | "network" | "limits";
 const POLICIES: [AgentPolicy, string, string][] = [
   ["auto-reversible", "自动执行、可撤回", "修改直接生效，保留本次任务恢复点。"],
   ["preview", "预览后采用", "准备好整批修改后，由你采用。"],
   ["auto", "自动执行、不可撤回", "修改直接生效，不另留本次任务的撤销副本。"],
 ];
-const STATUSES: Record<string, string> = { running: "执行中", committing: "正在保存", committed: "修改已采用", completed: "执行已结束", answered: "已答复", partial: "部分完成", blocked: "仍有问题受阻", previewed: "预览已准备好", paused: "进度已保存", cancelled: "已停止", interrupted: "执行中断", failed: "未完成", stale: "故事已有变化", undone: "已撤回", archived: "导入的任务记录", waiting_user: "等待你补充", waiting_approval: "等待授权", compacting: "正在整理上下文", queued: "已排队" };
+const STATUSES: Record<string, string> = { running: "执行中", committing: "正在保存", committed: "修改已采用", completed: "执行已结束", answered: "已答复", partial: "部分完成", blocked: "仍有问题受阻", previewed: "预览已准备好", paused: "进度已保存", cancelled: "已停止", interrupted: "执行中断", failed: "未完成", stale: "故事已有变化", undone: "已撤回", archived: "导入的任务记录", waiting_user: "等待你补充", waiting_approval: "等待授权", compacting: "正在整理记忆", queued: "已排队" };
 const inFlight = (status: string) => ["running", "committing", "compacting", "stopping"].includes(status);
 const canCompact = (status: string) => ["running", "paused", "failed", "cancelled", "interrupted", "blocked"].includes(status);
-const TOOL_LABELS: Record<string, string> = { list_resources: "查看本局资料", read_resource: "读取本局资料", search_resources: "搜索本局资料", stage_edit: "准备修改", stage_story_turn: "准备正式剧情", finish_task: "完成任务", list_skills: "查看可用技能", read_skill: "读取技能", read_world: "读取本局设定", check_draft: "核对草稿", search_original: "检索原著", read_original: "阅读原著", read_canon_facts: "查证原著事实", web_search: "联网搜索", read_webpage: "阅读网页", list_remote_tools: "查看 MCP 工具", call_remote_tool: "调用 MCP 工具" };
+const TOOL_LABELS: Record<string, string> = { list_resources: "查看本局资料", read_resource: "读取本局资料", search_resources: "搜索本局资料", stage_edit: "准备修改", stage_story_turn: "准备正式剧情", finish_task: "完成任务", list_skills: "查看可用技能", read_skill: "读取技能", read_world: "读取本局设定", check_draft: "核对草稿", search_original: "检索原著", read_original: "阅读原著", read_canon_facts: "查证原著事实", web_search: "联网搜索", read_webpage: "阅读网页", list_remote_tools: "查看外部工具", call_remote_tool: "调用外部工具" };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 function modelFor(profile: Profile, override: string, preferences?: AgentPreferences | null): LlmConfig & { protocol: AgentProtocol; contextWindowTokens?: number; maxOutputTokens?: number } {
   const model = override.trim() || profile.mainModel, protocol = preferences?.protocol ?? "chat-completions";
@@ -41,7 +43,7 @@ function modelFor(profile: Profile, override: string, preferences?: AgentPrefere
   }
   return { slot: profile.keySlot, url: preferences?.modelUrl?.trim() || url, model, auxModel: profile.auxModel ?? undefined, includeUsage: profile.includeUsage, contextTokens: preferences?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, protocol, ...(preferences?.contextWindowTokens ? { contextWindowTokens: preferences.contextWindowTokens } : {}), ...(preferences?.maxOutputTokens ? { maxOutputTokens: preferences.maxOutputTokens, maxTokens: preferences.maxOutputTokens } : {}) };
 }
-const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "正在思考", compacting: "正在整理上下文", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
+const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "正在思考", compacting: "正在整理记忆", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
 const TASK_NAMES: Record<string, string> = { ...TOOL_LABELS, browser_open:"打开资料网页",browser_read:"读取网页正文",browser_find:"查找网页内容",browser_follow:"阅读网页链接",browser_close:"关闭资料网页",list_documents:"查看资料文件",read_document:"读取资料文件",find_document:"查找资料文件",write_document:"写出资料笔记",call_tool_package:"运行工具包",draft_tool_package:"准备工具包草稿", discover_tools: "查找可用工具", read_tool_result: "读取已保存结果", update_plan: "更新任务进度", ask_user: "请你补充信息", search_agent_history: "查找助手对话", validate_changes: "检查修改影响", read_clock: "查看故事时间", stage_clock: "调整故事时间", stage_route: "准备故事路线", run_script: "处理资料", delegate_readonly: "分工查证", read_skill_resource: "读取技能资料", draft_skill: "准备常用技能", list_mcp_resources: "查看服务资料", read_mcp_resource: "读取服务资料" };
 const statusOf = agentTaskStatus;
 const pendingQuestion = (task: AgentTask): AgentQuestion | undefined => task.status!=="waiting_user" ? undefined : task.question && !["answered", "cancelled", "done"].includes(task.question.status ?? "") ? task.question : task.questions?.find((question) => !["answered", "cancelled", "done"].includes(question.status ?? ""));
@@ -119,12 +121,20 @@ function sourceLinks(value: unknown): { url: string; title: string }[] {
   return [...found].map(([url, title]) => ({ url, title }));
 }
 function ContextDetails({ task }: { task: AgentTask }) {
+  const { devMode } = useApp();
   const contextValue = task.contextCheckpoint ?? task.context;
   const context = contextValue && typeof contextValue === "object" && !Array.isArray(contextValue) ? contextValue : {};
   const inputTokens = task.inputTokens ?? task.model?.contextTokens;
   const budget = task.inputBudget ?? (inputTokens === undefined ? undefined : { ...agentInputBudget({ inputTokens, contextWindowTokens: task.model?.contextWindowTokens, maxOutputTokens: task.model?.maxOutputTokens ?? task.model?.maxTokens }), legacy: true });
   const state=task.contextState, used=state?.usedTokens, capacity=state?.effectiveInputBudgetTokens ?? budget?.effectiveTokens;
-  return <details><summary>上下文用量{typeof used==="number" && capacity ? ` · 约${Math.round(used/capacity*100)}%` : ""}</summary><div className="stack">
+  const percent = typeof used==="number" && capacity ? Math.round(used/capacity*100) : null;
+  if (!devMode) return <details><summary>记忆占用{percent !== null ? ` · 约${percent}%` : ""}</summary><div className="stack">
+    <p>{percent !== null ? `助手当前记住的内容约占可用容量的 ${percent}%。` : state?.measurement==="pending" ? "正在整理记忆，稍后更新。" : "暂未取得占用情况，继续执行后更新。"}</p>
+    {typeof state?.compactions==="number" && state.compactions > 0 && <p className="muted">已整理 {state.compactions} 次，较早的过程已压缩，原始要求保留。</p>}
+    {typeof context.warning === "string" && <p className="field-hint warn">{context.warning}</p>}
+    {typeof context.summary === "string" && <details><summary>已保存的执行摘要</summary><StoryText emphasizeDate={false} text={context.summary} /></details>}
+  </div></details>;
+  return <details><summary>记忆占用（开发者）{percent !== null ? ` · 约${percent}%` : ""}</summary><div className="stack">
     {state && <p aria-live="polite">当前上下文：{typeof used==="number" ? `约 ${used.toLocaleString()} / ${capacity?.toLocaleString()} tokens（估算），剩余约 ${Math.max(0,(capacity??0)-used).toLocaleString()} tokens` : state.measurement==="pending" ? "正在整理，等待重新估算" : "暂未取得当前占用"}</p>}
     {!state && <p className="muted">暂未取得当前上下文占用；继续执行后更新，下面是配置的预算。</p>}
     {typeof state?.lastRequestInputTokens==="number" && <p>最近服务报告输入：{state.lastRequestInputTokens.toLocaleString()} tokens（含缓存，为单次请求，非累计消耗）</p>}
@@ -134,7 +144,7 @@ function ContextDetails({ task }: { task: AgentTask }) {
     {typeof state?.tokensBefore==="number" && <p>最近整理前：约 {state.tokensBefore.toLocaleString()} tokens{typeof used==="number" ? `；当前约 ${used.toLocaleString()} tokens` : ""}</p>}
     {state?.updatedAt && <p className="muted">统计更新：{new Date(state.updatedAt).toLocaleString("zh-CN")}</p>}
     {budget && <p>{budget.legacy ? "旧任务记录的输入预算" : "本次输入预算"}：{budget.requestedTokens.toLocaleString()} tokens</p>}
-    {budget?.legacy && <p className="muted">此旧任务仍使用旧的字符估算；继续时可采用当前 Agent 输入预算，已用次数不清零。</p>}
+    {budget?.legacy && <p className="muted">此旧任务仍使用旧的字符估算；继续时可采用当前助手输入预算，已用次数不清零。</p>}
     {budget && !budget.legacy && <p>实际可用输入：{budget.effectiveTokens.toLocaleString()} tokens</p>}
     {budget?.contextWindowTokens ? <p>模型总窗口：{budget.contextWindowTokens.toLocaleString()} tokens；输出预留：{budget.outputReserveTokens.toLocaleString()} tokens</p> : <p className="muted">模型总窗口未填写，不按模型名称猜测容量。</p>}
     {budget && !budget.legacy && budget.effectiveTokens < budget.requestedTokens && <p className="field-hint">已按模型总窗口扣除输出预留，因此本次可用输入小于所填预算。</p>}
@@ -158,17 +168,24 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   const [olderLoading, setOlderLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(route.sessionId ?? null);
   const sessionRef = useRef<string | null>(route.sessionId ?? null);
+  const draftOwner = useRef<string | null>(route.initialText ? route.sessionId ?? null : null);
   const [detail, setDetail] = useState<AgentSessionDetail | null>(null);
   const [prefs, setPrefs] = useState<AgentPreferences | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [model, setModel] = useState("");
   const [input, setInput] = useState(route.initialText ?? "");
+  const [draftRecipeId, setDraftRecipeId] = useState<string | null>(null);
+  const draftRecipe = taskRecipe(draftRecipeId);
+  const [recipeId, setRecipeId] = useState(AGENT_TASK_RECIPES[0].id);
+  const [recipeScope, setRecipeScope] = useState(AGENT_TASK_RECIPES[0].scope);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const inputRevision = useRef(0);
-  const changeInput = (value: string) => { inputRevision.current++; setInput(value); };
+  const changeInput = (value: string) => { draftOwner.current = sessionRef.current; inputRevision.current++; setInput(value); };
   const [target, setTarget] = useState(route.target);
   const [sourceUrl, setSourceUrl] = useState<string>();
-  const [sheet, setSheet] = useState<"sessions" | "settings" | "actions" | "question" | "model" | "packages" | "documents" | "sources" | null>(null);
+  const [sheet, setSheet] = useState<"sessions" | "settings" | "actions" | "question" | "model" | "packages" | "documents" | "sources" | "tasks" | null>(null);
+  const [settingsSection, setSettingsSection] = useState<AgentSettingsSection>("execution");
+  const openSettings = (section: AgentSettingsSection = "execution") => { setSettingsSection(section); setSheet("settings"); };
   const [questionTaskId, setQuestionTaskId] = useState<string | null>(null);
   const [sessionQuery, setSessionQuery] = useState("");
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<string, string>>>({});
@@ -208,11 +225,14 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   },[reading.autoScroll]);
 
   const [atBottom, setAtBottom] = useState(true);
-  const inputDraft = useRef({ sessionId, input });
-  inputDraft.current = { sessionId, input };
+  const inputDraft = useRef({ sessionId, owner: draftOwner.current, input, recipeId: draftRecipeId });
+  inputDraft.current = { sessionId, owner: draftOwner.current, input, recipeId: draftRecipeId };
   useEffect(() => () => {
     const saved = inputDraft.current;
-    if (saved.sessionId && !deletedSessions.current.has(saved.sessionId)) void game.repo.setSetting(`agent:input:${saved.sessionId}`, saved.input);
+    if (saved.sessionId && saved.owner === saved.sessionId && !deletedSessions.current.has(saved.sessionId)) {
+      void game.repo.setSetting(`agent:input:${saved.sessionId}`, saved.input);
+      void game.repo.setSetting(`agent:input-recipe:${saved.sessionId}`, saved.recipeId);
+    }
   }, [game]);
   const activeTasks = conversation?.tasks.filter((task) => inFlight(statusOf(task)) || task.status === "waiting_user") ?? [];
   const busy = activeTasks.length > 0;
@@ -242,29 +262,37 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     let live = true;
     const draftRevision = inputRevision.current;
     void (async () => {
-      const [saved, available, existing, world] = await Promise.all([getAgentPreferences(game), listProfiles(game.repo), readSessions(""), game.repo.getWorld(route.worldId)]);
+      // Settings do not depend on the assistant runtime: load them first, so the
+      // settings sheet still opens when sessions cannot be read.
+      const [saved, available, world] = await Promise.all([getAgentPreferences(game), listProfiles(game.repo), game.repo.getWorld(route.worldId)]);
       if (!live) return;
       saved.skills = [...new Set([...saved.skills, ...requestedSkills.current])];
       setPrefs(saved); setProfiles(available); setWorldTitle(world?.title ?? "");
+      const existing = await readSessions("");
+      if (!live) return;
       const id = route.sessionId ?? existing[0]?.id ?? (await client.create(route.worldId, route.lineId)).id;
       if (!live) return;
       sessionRef.current = id; setSessionId(id);
+      if (route.initialText || inputRevision.current !== draftRevision) draftOwner.current = id;
       const next = await refresh(id);
       const lastModel = next.tasks.at(-1)?.model?.model;
       const chosenProfile = available.find((item) => item.id === saved.profileId) ?? profile ?? available[0];
       setModel(saved.modelName ?? (next.tasks.at(-1)?.model?.slot === chosenProfile?.keySlot ? lastModel : undefined) ?? chosenProfile?.mainModel ?? "");
       if (!route.initialText) {
-        const savedInput = await game.repo.getSetting<string>(`agent:input:${id}`, "");
-        if (live && sessionRef.current === id && inputRevision.current === draftRevision) setInput(savedInput);
+        const [savedInput, savedRecipe] = await Promise.all([game.repo.getSetting<string>(`agent:input:${id}`, ""), game.repo.getSetting<string | null>(`agent:input-recipe:${id}`, null)]);
+        if (live && sessionRef.current === id && inputRevision.current === draftRevision) { draftOwner.current = id; setInput(savedInput); setDraftRecipeId(taskRecipe(savedRecipe)?.id ?? null); }
       }
     })().catch((failure) => { if (live) setError(errorText(failure)); });
     return () => { live = false; alive.current = false; };
   }, [client, game, route.worldId, route.lineId, route.sessionId, refresh, readSessions]);
   useEffect(() => {
-    if (!sessionId) return;
-    const timer = setTimeout(() => { if (!deletedSessions.current.has(sessionId)) void game.repo.setSetting(`agent:input:${sessionId}`, input); }, 250);
+    if (!sessionId || draftOwner.current !== sessionId) return;
+    const timer = setTimeout(() => { if (!deletedSessions.current.has(sessionId)) {
+      void game.repo.setSetting(`agent:input:${sessionId}`, input);
+      void game.repo.setSetting(`agent:input-recipe:${sessionId}`, draftRecipeId);
+    } }, 250);
     return () => clearTimeout(timer);
-  }, [game, sessionId, input]);
+  }, [game, sessionId, input, draftRecipeId]);
   useLayoutEffect(() => {
     const element = textarea.current;
     if (!element) return;
@@ -334,10 +362,10 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     catch (failure) { if (alive.current && controlRevision===stopRevision.current) setError(errorText(failure)); }
     finally { if (alive.current) setPending(false); }
   };
-  const makeRequest = () => sessionId && prefs && selected ? { ...prefs, sessionId, text: input.trim(), model: modelFor(selected, model, prefs), ...(target ? { target } : {}) } : null;
+  const makeRequest = () => sessionId && prefs && selected ? { ...prefs, skills: [...new Set([...prefs.skills, ...(draftRecipe?.skills ?? [])])], readOnly: !!prefs.readOnly || !!draftRecipe?.readOnly, sessionId, text: input.trim(), model: modelFor(selected, model, prefs), ...(target ? { target } : {}) } : null;
   const clearSentInput = async () => {
-    setTarget(undefined); changeInput("");
-    if (sessionId) await game.repo.setSetting(`agent:input:${sessionId}`, "");
+    setTarget(undefined); changeInput(""); setDraftRecipeId(null);
+    if (sessionId) await Promise.all([game.repo.setSetting(`agent:input:${sessionId}`, ""), game.repo.setSetting(`agent:input-recipe:${sessionId}`, null)]);
   };
   const send = (delivery: "steer" | "queued" = "steer") => void act(async () => {
     const request = makeRequest();
@@ -346,19 +374,19 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     if (busy && !active) throw new Error("请先完成或停止上次的生成");
     if (active?.status === "waiting_user") throw new Error("请先回答助手的问题，或停止这项任务后再发送新要求");
     if (active) {
-      const actualDelivery = active.execution?.phase === "closing" ? "queued" : delivery;
+      const actualDelivery = draftRecipe || active.execution?.phase === "closing" ? "queued" : delivery;
       const accepted = await client.enqueue(active.id, input.trim(), actualDelivery, request);
       toast((accepted.delivery ?? delivery) === "queued" ? "已排队，当前任务完成后执行" : "补充已接收，将在下一步处理");
     } else await client.start(request);
     await clearSentInput();
   });
   const changeSession = async (id: string, savePreviousDraft = true) => {
-    if (sessionId && savePreviousDraft) await game.repo.setSetting(`agent:input:${sessionId}`, input);
+    if (sessionId && draftOwner.current === sessionId && savePreviousDraft) await Promise.all([game.repo.setSetting(`agent:input:${sessionId}`, input), game.repo.setSetting(`agent:input-recipe:${sessionId}`, draftRecipeId)]);
     const draftRevision = ++inputRevision.current;
     historyRevision.current++; prependPosition.current = null; setOlderLoading(false);
-    sessionRef.current = id; setSessionId(id); setDetail(null); setSnapshots({}); snapshotCache.current = {}; snapshotVersions.current = {}; setError("");
-    const savedInput = await game.repo.getSetting<string>(`agent:input:${id}`, "");
-    if (sessionRef.current === id && inputRevision.current === draftRevision) setInput(savedInput);
+    sessionRef.current = id; draftOwner.current = null; setSessionId(id); setDetail(null); setDraftRecipeId(null); setSnapshots({}); snapshotCache.current = {}; snapshotVersions.current = {}; setError("");
+    const [savedInput, savedRecipe] = await Promise.all([game.repo.getSetting<string>(`agent:input:${id}`, ""), game.repo.getSetting<string | null>(`agent:input-recipe:${id}`, null)]);
+    if (sessionRef.current === id && inputRevision.current === draftRevision) { draftOwner.current = id; setInput(savedInput); setDraftRecipeId(taskRecipe(savedRecipe)?.id ?? null); }
     const loaded = await refresh(id);
     if (!alive.current || sessionRef.current !== id || inputRevision.current !== draftRevision) return;
     setModel(prefs?.modelName ?? (loaded.tasks.at(-1)?.model?.slot === selected?.keySlot ? loaded.tasks.at(-1)?.model?.model : undefined) ?? selected?.mainModel ?? "");
@@ -412,6 +440,8 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     finally { if (alive.current && sessionRef.current === id && historyRevision.current === revision) setOlderLoading(false); }
   };
   const turns = agentConversationTurns(conversation?.messages ?? [], tasks);
+  const selectedRecipe = taskRecipe(recipeId) ?? AGENT_TASK_RECIPES[0];
+  const selectedSkillCount = new Set([...(prefs?.skills ?? []), ...(draftRecipe?.skills ?? [])]).size;
   const queue = pendingInputs(detail?.inputs ?? tasks.flatMap((task) => task.inputs ?? []));
   const questionTask = tasks.find((task) => task.id === questionTaskId);
   const question = questionTask ? pendingQuestion(questionTask) : undefined;
@@ -425,7 +455,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     const deleted = await client.delete(session.id);
     if (!deleted.deleted) throw new Error("对话尚未删除，请稍后重试");
     deletedSessions.current.add(session.id);
-    await game.repo.setSetting(`agent:input:${session.id}`, "");
+    await Promise.all([game.repo.setSetting(`agent:input:${session.id}`, ""), game.repo.setSetting(`agent:input-recipe:${session.id}`, null)]);
     const remaining = await readSessions("");
     if (sessionRef.current === session.id) {
       const next = remaining[0] ?? await client.create(route.worldId, route.lineId);
@@ -447,14 +477,14 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     const check=await client.resumeCheck(task.id,prefs?.limits);
     if(check.routeChanged){setRouteChoice({task,currentLineId:check.currentLineId});return;}
     if(!check.canContinue && !check.needsRebase) {
-      if(check.reasonCode==="budget_exhausted")setSheet("settings");
+      if(check.reasonCode==="budget_exhausted")openSettings("limits");
       throw new Error(check.message);
     }
 
     await client.continue(task.id,input.trim()||undefined,prefs?.limits,prefs?.inputTokens??DEFAULT_AGENT_INPUT_TOKENS,prefs&&selected?modelFor(selected,model,prefs):task.model,prefs?.modelUrl,check.needsRebase);
     changeInput("");
   });
-  const compactTask = (task: AgentTask) => void act(async () => { await client.compact(task.id, prefs?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, prefs && selected ? modelFor(selected, model, prefs) : task.model, prefs?.limits, prefs?.modelUrl); toast("已安排整理上下文"); });
+  const compactTask = (task: AgentTask) => void act(async () => { await client.compact(task.id, prefs?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, prefs && selected ? modelFor(selected, model, prefs) : task.model, prefs?.limits, prefs?.modelUrl); toast("已安排整理记忆"); });
   const inspectTask = (task: AgentTask) => {
     const previous = snapshotCache.current[task.runId];
     if ((previous && !previous.hasMore) || task.runId.startsWith("imported:") || task.status === "archived") return;
@@ -473,18 +503,18 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   return <div className="play agent-conversation">
     <div className="topbar">
       <button className="icon-btn" aria-label="返回故事" onClick={pop}><Icon name="back" /></button>
-      <div className="title"><h1>Agent 助手</h1><div className="subtitle">{worldTitle}</div></div>
-      <button className="icon-btn" aria-label="Agent 对话记录" onClick={() => { setSheet("sessions"); querySessions(""); }}><Icon name="book" /></button>
-      <button className="icon-btn" aria-label="Agent 执行设置" onClick={() => setSheet("settings")}><Icon name="settings" /></button>
+      <div className="title"><h1>助手</h1><div className="subtitle">{worldTitle}</div></div>
+      <button className="icon-btn" aria-label="助手对话记录" onClick={() => { setSheet("sessions"); querySessions(""); }}><Icon name="book" /></button>
+      <button className="icon-btn" aria-label="助手设置" onClick={() => openSettings()}><Icon name="settings" /></button>
     </div>
     <div className="agent-reading"><div className="story agent-messages" ref={scroller} onScroll={onScroll}><div className="story-inner">
       {detail?.nextOffset != null && <button className="ghost" disabled={olderLoading} onClick={() => void loadOlder()}>{olderLoading ? "正在读取…" : "更早的对话"}</button>}
-      {!conversation?.messages.length && <p className="muted">告诉助手要查什么、改什么。它可以按需读取和修改本局；这里只保存助手对话，正式修改会回到故事中。</p>}
+      {!conversation?.messages.length && <><p className="muted">告诉助手要查什么、改什么。它可以按需读取和修改本局；这里只保存助手对话，正式修改会回到故事中。</p><h3 className="settings-sub">常用任务</h3><div className="sheet-menu agent-recipes">{AGENT_TASK_RECIPES.slice(0, 6).map(recipe => <button key={recipe.id} className="mode-option" disabled={pending} onClick={() => { setRecipeId(recipe.id); setRecipeScope(recipe.scope); setSheet("tasks"); }}><b>{recipe.name}</b><small>{recipe.description}</small></button>)}<button className="ghost t-left" disabled={pending} onClick={() => setSheet("tasks")}>更多常用任务…</button></div></>}
       {target && <p className="muted">已带入要修改的{target.paragraph === undefined ? "回合" : `第 ${target.paragraph + 1} 段`}，正文由助手按需读取。</p>}
       {turns.map((turn) => <section className="agent-turn" data-task-id={turn.task?.id} key={turn.id}>
         {!turn.messages.length && turn.task?.text && <div className="agent-message user"><small className="muted">你</small><StoryText emphasizeDate={false} text={turn.task.text} /></div>}
         {turn.messages.map((message) => <div className={`agent-message ${message.role}`} data-message-id={message.id} key={message.id}>
-          <div className="agent-message-head"><small className="muted">{message.role === "user" ? "你" : "Agent 助手"}</small><button className="ghost" aria-label="从这条另起对话" onClick={() => forkAt(message)} disabled={pending}><Icon name="share" size={16} /></button></div>
+          <div className="agent-message-head"><small className="muted">{message.role === "user" ? "你" : "助手"}</small><button className="ghost" aria-label="从这条另起对话" onClick={() => forkAt(message)} disabled={pending}><Icon name="share" size={16} /></button></div>
           <MessageBody message={message} latest={message.id === conversation?.messages.filter(item => item.role === "assistant").at(-1)?.id} preserve={rememberPosition} />
         </div>)}
         {turn.task && <TaskCard task={turn.task} snapshot={snapshots[turn.task.runId]} toolMessages={turn.toolMessages} replies={turn.messages.filter((message) => message.role === "assistant").map((message) => message.content)} pending={pending} onStop={() => void stopTask(turn.task!)} onApply={() => void act(async () => { await client.apply(turn.task!.id); game.notifyAgentChange(route.worldId); toast("修改已采用"); })} onUndo={() => void act(async () => { await client.undo(turn.task!.id); game.notifyAgentChange(route.worldId); toast("本次修改已撤回"); })} onContinue={() => continueTask(turn.task!)} onQuestion={() => openQuestion(turn.task!)} onCompact={() => compactTask(turn.task!)} onInspect={() => inspectTask(turn.task!)} onSource={url => { setSourceUrl(url); setSheet("sources"); }} />}
@@ -492,31 +522,41 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
       {error && <p className="field-hint warn" role="alert">{error}</p>}
     </div></div>{!atBottom && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = reading.autoScroll; scrollBottom(true); }}><Icon name="arrow-down" size={22} /></button>}</div>
     <div className="dock agent-dock">
-      <div className="agent-toolbar"><button className="ghost agent-model-button" aria-label={`切换 Agent 模型，当前 ${model || selected?.mainModel || "未选择"}`} title={model || selected?.mainModel} disabled={!prefs || !selected} onClick={() => setSheet("model")}><span>{model || selected?.mainModel || "选择模型"}</span><Icon name="forward" size={14} /></button><button className="ghost" onClick={() => setSheet("settings")}>{prefs?.skills.length ? `技能 ${prefs.skills.length}` : "技能"} · {prefs?.network.mode === "off" ? "不联网" : "联网"}{prefs?.readOnly ? " · 只读" : ""}</button>{liveTask && <button className="ghost danger-text" disabled={statusOf(liveTask, snapshots[liveTask.runId]) === "stopping"} onClick={() => void stopTask(liveTask)}>停止</button>}<button className="icon-btn" aria-label="助手更多操作" onClick={() => setSheet("actions")}><Icon name="more" size={20} /></button></div>
+      <div className="agent-toolbar"><button className="ghost agent-model-button" aria-label={`切换助手模型，当前 ${model || selected?.mainModel || "未选择"}`} title={model || selected?.mainModel} disabled={!prefs || !selected} onClick={() => setSheet("model")}><span>{model || selected?.mainModel || "选择模型"}</span><Icon name="forward" size={14} /></button><button className="ghost" aria-label="助手技能设置" onClick={() => openSettings("skills")}>{selectedSkillCount ? `技能 ${selectedSkillCount}` : "技能"}</button><button className="ghost" aria-label="助手联网设置" onClick={() => openSettings("network")}>{prefs?.network.mode === "off" ? "不联网" : "联网"}{prefs?.readOnly || draftRecipe?.readOnly ? " · 只读" : ""}</button>{liveTask && <button className="ghost danger-text" disabled={statusOf(liveTask, snapshots[liveTask.runId]) === "stopping"} onClick={() => void stopTask(liveTask)}>停止</button>}<button className="icon-btn" aria-label="助手更多操作" onClick={() => setSheet("actions")}><Icon name="more" size={20} /></button></div>
+      {draftRecipe && <div className="row field-hint"><span className="grow">{draftRecipe.name}{busy ? " · 发送后排队" : ""}</span><button className="ghost" onClick={() => { changeInput(input); setDraftRecipeId(null); }}>取消任务选择</button></div>}
       {!!queue.length && <details className="agent-queue"><summary>等待处理 · {queue.length}条</summary>{queue.map((queued) => <div className="row" key={queued.id}><span className="grow">{queued.text}</span><button className="ghost" disabled={pending} onClick={() => void act(() => client.cancelQueued(queued.id))}>取消</button></div>)}</details>}
-      <div className="inputbar"><textarea ref={textarea} aria-label="给 Agent 助手的任务" rows={1} value={input} disabled={pending} placeholder={busy ? "补充当前任务…" : "告诉助手要完成什么…"} onChange={(event) => changeInput(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} /><button className={`send-btn ${input.trim() ? "primary" : ""}`} disabled={pending || (!busy && (!input.trim() || !selected || !sessionId || !prefs))} onClick={() => liveTask && !input.trim() ? void stopTask(liveTask) : send()}>{busy ? input.trim() ? "补充" : "停止" : "发送"}</button></div>
+      <div className="inputbar"><textarea ref={textarea} aria-label="给助手的任务" rows={1} value={input} disabled={pending} placeholder={busy ? "补充当前任务…" : "告诉助手要完成什么…"} onChange={(event) => changeInput(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} /><button className={`send-btn ${input.trim() ? "primary" : ""}`} disabled={pending || (!busy && (!input.trim() || !selected || !sessionId || !prefs))} onClick={() => liveTask && !input.trim() ? void stopTask(liveTask) : send()}>{busy ? input.trim() ? draftRecipe ? "排队" : "补充" : "停止" : "发送"}</button></div>
     </div>
     {sheet === "actions" && <MenuSheet title="助手操作" onClose={() => setSheet(null)} items={[
+      { label: "常用任务", onSelect: () => setSheet("tasks") },
       { label: "故事修改恢复点", onSelect: () => void act(async()=>{setSheet(null);setRecoveries(await client.recoveryPoints(route.worldId));}) },
-      { label: "执行设置", onSelect: () => setSheet("settings") },
+      { label: "执行设置", onSelect: () => openSettings() },
       { label: "工具包", onSelect: () => setSheet("packages") },
       { label: "资料文件", onSelect: () => setSheet("documents") },
       { label: "资料来源", onSelect: () => { setSourceUrl(undefined); setSheet("sources"); } },
       { label: "做完当前任务后再执行", hidden: !busy || !input.trim() || !liveTask, onSelect: () => send("queued") },
-      { label: "整理当前上下文", hidden: !last || !canCompact(statusOf(last, snapshots[last.runId])), onSelect: () => last && compactTask(last) },
+      { label: "整理助手记忆", hidden: !last || !canCompact(statusOf(last, snapshots[last.runId])), onSelect: () => last && compactTask(last) },
       { label: "新建对话", onSelect: newSession },
       { label: "重命名对话", hidden: !detail, onSelect: () => detail && renameSession(detail.session) },
       { label: "删除当前对话", danger: true, hidden: !detail, onSelect: () => detail && deleteSession(detail.session) },
     ]} />}
+    {sheet === "tasks" && <Sheet title="常用任务" onClose={() => setSheet(null)}><div className="stack">
+      <p className="muted">选择后只填入草稿，你可以修改再发送。现有输入会作为补充要求保留。{busy ? "新任务会排在当前任务之后执行。" : ""}</p>
+      <label>要做什么<select value={recipeId} onChange={event => { const next = taskRecipe(event.target.value)!; setRecipeId(next.id); setRecipeScope(next.scope); }}>{AGENT_TASK_RECIPES.map(recipe => <option key={recipe.id} value={recipe.id}>{recipe.name}</option>)}</select></label>
+      <p className="muted">{selectedRecipe.description}{selectedRecipe.readOnly ? "本次只读，不修改故事。" : "修改仍按当前采用策略处理。"}</p>
+      <label>处理范围<textarea rows={2} value={recipeScope} onChange={event => setRecipeScope(event.target.value)} /></label>
+      <details><summary>任务要求与技能</summary><div className="stack"><p>{selectedRecipe.request}</p><p className="muted">指定技能：{selectedRecipe.skills.map(id => BUILTIN_AGENT_SKILLS.find(skill => skill.id === id)?.name ?? id).join("、")}</p></div></details>
+      <button className="primary" disabled={pending || !sessionId || !prefs} onClick={() => { changeInput(taskRecipeText(selectedRecipe, recipeScope, input)); setDraftRecipeId(selectedRecipe.id); setSheet(null); textarea.current?.focus(); }}>填入任务草稿</button>
+    </div></Sheet>}
     {routeChoice && <Sheet title="选择继续的路线" onClose={()=>setRouteChoice(null)}><div className="stack"><p>故事已切换路线，旧要求、回答和草稿仍保留。请选择在哪里继续核对。</p><button disabled={pending} onClick={()=>void act(async()=>{await client.selectOriginalRoute(routeChoice.task.id,routeChoice.currentLineId);game.notifyAgentChange(route.worldId);setRouteChoice(null);toast("已回到原路线，请继续执行并重新核对");})}>回到原路线继续</button><button disabled={pending} onClick={()=>void act(async()=>{const made=await client.create(route.worldId,routeChoice.currentLineId,"重新核对");const answers=detail?.messages.filter(m=>m.taskId===routeChoice.task.id&&m.delivery==="answer").map(messageText).join("\n")??"";changeInput([routeChoice.task.text,answers].filter(Boolean).join("\n\n"));setRouteChoice(null);await readSessions("");await changeSession(made.id);toast("已另起对话，旧草稿没有跨路线采用");})}>在当前路线另起核对</button></div></Sheet>}
     {recoveries && <Sheet title="故事修改恢复点" onClose={()=>setRecoveries(null)}><div className="stack"><p className="muted">删除对话后，已经建立的恢复点仍在这里。撤回会检查故事是否已有新进展。</p>{recoveries.map(point=><button key={point.id} disabled={pending} onClick={()=>void act(async()=>{if(!await ask({title:"撤回这批故事修改？",message:"本批采用后的故事有新进展时会停止撤回，保留现有数据。",confirm:"撤回",danger:true}))return;await client.restoreRecovery(point.id);game.notifyAgentChange(route.worldId);setRecoveries(await client.recoveryPoints(route.worldId));toast("这批修改已撤回");})}>{new Date(point.createdAt).toLocaleString("zh-CN")} · 撤回</button>)}{!recoveries.length&&<p className="muted">暂无可用恢复点。</p>}</div></Sheet>}
-    {sheet === "sessions" && <Sheet title="Agent 对话记录" onClose={() => setSheet(null)}><div className="stack"><label>搜索对话<input value={sessionQuery} onChange={(event) => querySessions(event.target.value)} placeholder="名称或对话内容" /></label><button className="primary" disabled={pending} onClick={newSession}>新建对话</button><div className="settings-list">{sessions.map((session) => <div className="row agent-session" key={session.id}><button className="settings-entry grow" aria-pressed={session.id === sessionId} onClick={() => void act(() => changeSession(session.id))}><span><b>{session.title || "Agent 对话"}</b><small>{new Date(session.updatedAt).toLocaleString("zh-CN")}</small></span><span>›</span></button><button className="ghost" onClick={() => renameSession(session)} aria-label={`重命名${session.title}`}>改名</button></div>)}{!sessions.length && <p className="muted">{sessionsLoading ? "正在读取…" : "没有找到相关对话。"}</p>}</div>{nextSessionOffset != null && <button className="ghost" disabled={sessionsLoading} onClick={() => { const revision = sessionQueryRevision.current; void readSessions(sessionQuery, nextSessionOffset).catch(failure => { if (alive.current && revision === sessionQueryRevision.current) setError(errorText(failure)); }); }}>{sessionsLoading ? "正在读取…" : "更多会话"}</button>}</div></Sheet>}
+    {sheet === "sessions" && <Sheet title="助手对话记录" onClose={() => setSheet(null)}><div className="stack"><label>搜索对话<input value={sessionQuery} onChange={(event) => querySessions(event.target.value)} placeholder="名称或对话内容" /></label><button className="primary" disabled={pending} onClick={newSession}>新建对话</button><div className="settings-list">{sessions.map((session) => <div className="row agent-session" key={session.id}><button className="settings-entry grow" aria-pressed={session.id === sessionId} onClick={() => void act(() => changeSession(session.id))}><span><b>{session.title || "助手对话"}</b><small>{new Date(session.updatedAt).toLocaleString("zh-CN")}</small></span><span>›</span></button><button className="ghost" onClick={() => renameSession(session)} aria-label={`重命名${session.title}`}>改名</button></div>)}{!sessions.length && <p className="muted">{sessionsLoading ? "正在读取…" : "没有找到相关对话。"}</p>}</div>{nextSessionOffset != null && <button className="ghost" disabled={sessionsLoading} onClick={() => { const revision = sessionQueryRevision.current; void readSessions(sessionQuery, nextSessionOffset).catch(failure => { if (alive.current && revision === sessionQueryRevision.current) setError(errorText(failure)); }); }}>{sessionsLoading ? "正在读取…" : "更多会话"}</button>}</div></Sheet>}
     {sheet === "question" && question && questionTask && <QuestionSheet question={question} answers={questionAnswers[question.id] ?? {}} pending={pending} onChange={(answers) => setQuestionAnswers({ ...questionAnswers, [question.id]: answers })} onClose={() => setSheet(null)} onSubmit={(cancelled) => void act(async () => { await client.answer(questionTask.id, question.id, questionAnswers[question.id] ?? {}, cancelled); setSheet(null); })} />}
-    {sheet === "model" && prefs && selected && <AgentModelPicker profiles={profiles} selected={selected} current={model || selected.mainModel} running={busy} onClose={() => setSheet(null)} onPick={async (chosen, nextModel) => { const changedService = chosen.id !== selected.id; const next = { ...prefs, profileId: chosen.id, modelName: nextModel, ...((changedService || nextModel !== model) ? { contextWindowTokens: undefined } : {}), ...(changedService ? { modelUrl: undefined, protocol: "chat-completions" as const } : {}) }; await saveAgentPreferences(game, next); setPrefs(next); setModel(nextModel); setSheet(null); toast(busy ? "已选择，下一项任务使用此模型" : "Agent 模型已切换"); }} />}
+    {sheet === "model" && prefs && selected && <AgentModelPicker profiles={profiles} selected={selected} current={model || selected.mainModel} running={busy} onClose={() => setSheet(null)} onPick={async (chosen, nextModel) => { const changedService = chosen.id !== selected.id; const next = { ...prefs, profileId: chosen.id, modelName: nextModel, ...((changedService || nextModel !== model) ? { contextWindowTokens: undefined } : {}), ...(changedService ? { modelUrl: undefined, protocol: "chat-completions" as const } : {}) }; await saveAgentPreferences(game, next); setPrefs(next); setModel(nextModel); setSheet(null); toast(busy ? "已选择，下一项任务使用此模型" : "助手模型已切换"); }} />}
     {sheet === "packages" && <AgentToolPackages client={client} onClose={() => setSheet(null)} />}
     {sheet === "sources" && sessionId && <AgentSources client={client} sessionId={sessionId} worldId={route.worldId} initialUrl={sourceUrl} onClose={() => setSheet(null)} />}
     {sheet === "documents" && <AgentDocuments client={client} onClose={() => setSheet(null)} />}
-    {sheet === "settings" && prefs && <AgentSettings client={client} preferences={prefs} profiles={profiles} profileId={selected?.id} model={model} onClose={() => setSheet(null)} onAdopt={(skill) => setPrefs((current) => current ? { ...current, customSkills: [...current.customSkills.filter((entry) => entry.id !== skill.id), skill] } : current)} onSave={async (next, nextModel) => { const saved = { ...next, modelName: nextModel }; await saveAgentPreferences(game, saved); setPrefs(saved); setModel(nextModel); setSheet(null); toast("Agent 设置已保存"); }} />}
+    {sheet === "settings" && prefs && <AgentSettings client={client} initialSection={settingsSection} preferences={prefs} recipe={draftRecipe} profiles={profiles} profileId={selected?.id} model={model} onClose={() => setSheet(null)} onAdopt={(skill) => setPrefs((current) => current ? { ...current, customSkills: [...current.customSkills.filter((entry) => entry.id !== skill.id), skill] } : current)} onSave={async (next, nextModel) => { const saved = { ...next, modelName: nextModel }; await saveAgentPreferences(game, saved); setPrefs(saved); setModel(nextModel); setSheet(null); toast("助手设置已保存"); }} />}
 
   </div>;
 }
@@ -562,7 +602,7 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
         return <details key={typeof subtask.id === "string" ? subtask.id : index}><summary>{String(subtask.name ?? subtask.title ?? subtask.task ?? "资料核对")} · {STATUSES[String(subtask.status)] ?? "已记录"}</summary><StoryText emphasizeDate={false} text={pretty(subtask.summary ?? subtask.result)} /></details>;
       })}</div>}
       {budget && <p className="muted">模型 {budget.modelRequests}次{task.limits?.modelRequests === 0 ? "（不限制）" : task.limits?.modelRequests ? ` / ${task.limits.modelRequests}次` : ""} · 工具 {budget.toolCalls}次{task.limits?.toolCalls === 0 ? "（不限制）" : task.limits?.toolCalls ? ` / ${task.limits.toolCalls}次` : ""} · 用时 {Math.ceil(budget.activeMs / 60000)}分钟{task.limits?.activeMs === 0 ? "（不限制）" : task.limits?.activeMs ? ` / ${Math.ceil(task.limits.activeMs / 60000)}分钟` : ""}</p>}
-      {budget?.usage && <p className="muted">已报告输入 {budget.usage.input?.toLocaleString() ?? "未知"} tokens · 输出 {budget.usage.output?.toLocaleString() ?? "未知"} tokens{budget.usageKnown === false ? "，部分请求尚未报告完整用量" : ""}</p>}
+      {devMode && budget?.usage && <p className="muted">已报告输入 {budget.usage.input?.toLocaleString() ?? "未知"} tokens · 输出 {budget.usage.output?.toLocaleString() ?? "未知"} tokens{budget.usageKnown === false ? "，部分请求尚未报告完整用量" : ""}</p>}
       {budget && <p className="muted">{budget.priceKnown && typeof budget.estimatedCost === "number" ? `预计费用 ${budget.estimatedCost.toLocaleString("zh-CN", { maximumFractionDigits: 6 })}${budget.currency ? ` ${budget.currency}` : ""}` : "金额未知"}</p>}
       {task.model?.model && <p className="muted">本次模型：{task.model.model}</p>}
       {(task.contextState || task.contextCheckpoint || task.context || task.inputBudget || task.inputTokens || task.model?.contextTokens) && <ContextDetails task={task} />}
@@ -618,20 +658,24 @@ function AgentModelPicker({ profiles, selected, current, running, onClose, onPic
     try { await onPick(chosen, value.trim()); }
     catch (failure) { setNote(errorText(failure)); setSaving(false); }
   };
-  return <Sheet title="Agent 使用的模型" onClose={onClose}><div className="stack">
-    <p className="muted" style={{ margin: 0 }}>{running ? "下一项任务使用所选模型，正在执行的任务继续使用原模型。" : "只用于 Agent 助手，不改变普通游玩的 AI 服务。"}</p>
+  return <Sheet title="助手使用的模型" onClose={onClose}><div className="stack">
+    <p className="muted m-0">{running ? "下一项任务使用所选模型，正在执行的任务继续使用原模型。" : "只用于助手，不改变普通游玩的 AI 服务。"}</p>
     <label>AI 服务<select value={chosen.id} disabled={saving} onChange={(event) => { setProfileId(event.target.value); setQuery(""); setTyped(""); }}>{profiles.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
-    <div className="row"><input className="grow" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索模型" aria-label="搜索 Agent 模型" autoCapitalize="off" /><button className="link" disabled={loading || saving} onClick={() => setRefresh((value) => value + 1)}>{loading ? "正在获取…" : "刷新列表"}</button></div>
+    <div className="row"><input className="grow" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索模型" aria-label="搜索助手模型" autoCapitalize="off" /><button className="link" disabled={loading || saving} onClick={() => setRefresh((value) => value + 1)}>{loading ? "正在获取…" : "刷新列表"}</button></div>
     <div className="sheet-menu model-list">{shown.map((value) => <button key={value} className="mode-option" aria-pressed={chosen.id === selected.id && value === current} disabled={saving} onClick={() => void pick(value)}><b>{value}</b>{value === chosen.mainModel ? <small>服务主模型</small> : value === chosen.auxModel ? <small>服务辅助模型</small> : null}</button>)}{!shown.length && <p className="muted">没有找到“{query}”。</p>}</div>
     {note && <p className="field-hint" role="status">{note}</p>}
-    <details><summary className="muted">列表里没有？手动填写</summary><div className="row" style={{ marginTop: 8 }}><input className="grow" value={typed} onChange={(event) => setTyped(event.target.value)} placeholder="模型名" aria-label="手动填写 Agent 模型名" autoCapitalize="off" spellCheck={false} /><button className="primary" disabled={saving || !typed.trim()} onClick={() => void pick(typed)}>用这个</button></div></details>
+    <details><summary className="muted">列表里没有？手动填写</summary><div className="row mt-2"><input className="grow" value={typed} onChange={(event) => setTyped(event.target.value)} placeholder="模型名" aria-label="手动填写助手模型名" autoCapitalize="off" spellCheck={false} /><button className="primary" disabled={saving || !typed.trim()} onClick={() => void pick(typed)}>用这个</button></div></details>
   </div></Sheet>;
 }
 
-function AgentSettings({ client, preferences, profiles, profileId, model, onClose, onSave, onAdopt }: { client: AgentClient; preferences: AgentPreferences; profiles: Profile[]; profileId?: string; model: string; onClose: () => void; onSave: (preferences: AgentPreferences, model: string) => Promise<void>; onAdopt: (skill: AgentSkill) => void }) {
+function AgentSettings({ client, initialSection, preferences, recipe, profiles, profileId, model, onClose, onSave, onAdopt }: { client: AgentClient; initialSection: AgentSettingsSection; preferences: AgentPreferences; recipe?: AgentTaskRecipe; profiles: Profile[]; profileId?: string; model: string; onClose: () => void; onSave: (preferences: AgentPreferences, model: string) => Promise<void>; onAdopt: (skill: AgentSkill) => void }) {
   const { platform, toast } = useApp();
   const [draft, setDraft] = useState<AgentPreferences>(() => structuredClone(preferences));
   const [nextModel, setNextModel] = useState(model);
+  // The session resolves its model asynchronously; until the player edits the field it follows that
+  // value, so opening settings early never reads as an unsaved change (R26 UI check).
+  const modelTouched = useRef(false);
+  useEffect(() => { if (!modelTouched.current) setNextModel(model); }, [model]);
   const [mcpImport, setMcpImport] = useState("");
   const [mcpImportNote, setMcpImportNote] = useState<string[]>([]);
   const [keys, setKeys] = useState<Record<string, string>>({});
@@ -641,6 +685,18 @@ function AgentSettings({ client, preferences, profiles, profileId, model, onClos
   const [mcp, setMcp] = useState({ name: "", url: "", key: "" });
   const [packages, setPackages] = useState<AgentSkillDraft[]>([]);
   const [remoteTools, setRemoteTools] = useState<Record<string, { name: string; title?: string; description?: string }[]>>({});
+  const settingsBody = useRef<HTMLDivElement>(null);
+  const positioned = useRef(false);
+  useLayoutEffect(() => {
+    if (positioned.current) return;
+    const target = settingsBody.current?.querySelector<HTMLElement>(`[data-agent-settings-section="${initialSection}"]`);
+    const container = target?.closest<HTMLElement>(".sheet");
+    if (!target || !container) return;
+    positioned.current = true;
+    if (target instanceof HTMLDetailsElement) target.open = true;
+    // Move only this sheet once; preference refreshes never move the reader.
+    container.scrollTop += target.getBoundingClientRect().top - container.getBoundingClientRect().top - 48;
+  }, [initialSection]);
   useEffect(() => { void client.packageDrafts().then(setPackages).catch((failure) => setError(errorText(failure))); }, [client]);
   const importPackage = async () => {
     setSaving(true); setError("");
@@ -721,11 +777,12 @@ function AgentSettings({ client, preferences, profiles, profileId, model, onClos
     } catch (failure) { setError(errorText(failure)); }
     finally { setSaving(false); }
   };
-  return <Sheet title="Agent 执行设置" onClose={onClose} dirty={dirty}><div className="stack agent-settings">
-    <label>AI 服务<select value={draft.profileId ?? profileId ?? ""} onChange={(event) => { const chosen = profiles.find((entry) => entry.id === event.target.value); setDraft({ ...draft, profileId: event.target.value }); setNextModel(chosen?.mainModel ?? ""); }}><option value="" disabled>选择已连接的 AI 服务</option>{profiles.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
-    <label>本次使用的模型<input value={nextModel} onChange={(event) => setNextModel(event.target.value)} placeholder="留空使用服务的主模型" /></label>
+  return <Sheet title="助手设置" onClose={onClose} dirty={dirty}><div ref={settingsBody} className="stack agent-settings">
+    {recipe && <p className="field-hint">当前草稿“{recipe.name}”额外指定{recipe.skills.map(id => BUILTIN_AGENT_SKILLS.find(skill => skill.id === id)?.name ?? id).join("、")}。{recipe.readOnly ? "这条任务只读。" : ""}下面仍是常用设置；可回到输入栏取消任务选择。</p>}
+    <label>AI 服务<select value={draft.profileId ?? profileId ?? ""} onChange={(event) => { const chosen = profiles.find((entry) => entry.id === event.target.value); setDraft({ ...draft, profileId: event.target.value }); modelTouched.current = true; setNextModel(chosen?.mainModel ?? ""); }}><option value="" disabled>选择已连接的 AI 服务</option>{profiles.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
+    <label>本次使用的模型<input value={nextModel} onChange={(event) => { modelTouched.current = true; setNextModel(event.target.value); }} placeholder="留空使用服务的主模型" /></label>
     <p className="muted">助手单独保存模型选择，不改变普通游玩的 AI 服务。</p>
-    <details><summary>接口与上下文</summary><div className="stack">
+    <details><summary>接口与记忆容量（高级）</summary><div className="stack">
       <label>接口类型<select value={draft.protocol ?? "chat-completions"} onChange={(event) => setDraft({ ...draft, protocol: event.target.value as AgentProtocol })}><option value="chat-completions">Chat Completions（兼容接口）</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
       <label>完整接口地址（可不填）<input value={draft.modelUrl ?? ""} onChange={(event) => setDraft({ ...draft, modelUrl: event.target.value.trim() || undefined })} placeholder="留空使用所选服务的标准接口" /></label>
       <p className="muted">自定义服务的路径与标准接口不同时，在这里填写完整地址。</p>
@@ -736,19 +793,19 @@ function AgentSettings({ client, preferences, profiles, profileId, model, onClos
       {inputBudget.contextWindowTokens != null ? <p className="muted">按所填模型总窗口 {inputBudget.contextWindowTokens.toLocaleString()} tokens 扣除输出预留 {inputBudget.outputReserveTokens.toLocaleString()} tokens。{inputBudget.effectiveTokens < inputBudget.requestedTokens ? "实际输入小于所填预算。" : ""}</p> : <p className="muted">尚未填写模型总窗口；输入预算不代表服务一定支持该容量，不按模型名称猜测。</p>}
       <p className="muted">默认输入预算为475,000 tokens，与普通游玩分开保存。字符仅用于内部估算；继续任务时保留已用次数。</p>
     </div></details>
-    <div className="setting"><Switch label="只读分析" note="只查资料和提出建议，不修改本局或外部服务。" checked={draft.readOnly ?? false} onChange={(readOnly) => setDraft({ ...draft, readOnly })} /></div>
+    <div className="setting" data-agent-settings-section="execution"><Switch label="只读分析" note="只查资料和提出建议，不修改本局或外部服务。" checked={draft.readOnly ?? false} onChange={(readOnly) => setDraft({ ...draft, readOnly })} /></div>
     <div className="setting"><div className="setting-head"><b>修改如何生效</b><small>{POLICIES.find(([value]) => value === draft.policy)?.[2]}</small></div><div className="segmented">{POLICIES.map(([value, label]) => <button key={value} aria-pressed={draft.policy === value} onClick={() => setDraft({ ...draft, policy: value })}>{label}</button>)}</div></div>
-    <details><summary>本次指定技能{draft.skills.length ? ` · ${draft.skills.length}个` : ""}</summary><div className="stack"><p className="muted">未指定时由助手自行选择；指定后，本次必须读取并执行。</p>{[...BUILTIN_AGENT_SKILLS, ...draft.customSkills].map((skill) => <div key={skill.id} className="setting"><Switch label={skill.name} note={skill.description} checked={draft.skills.includes(skill.id)} onChange={() => toggleSkill(skill.id)} /></div>)}</div></details>
-    <details><summary>我的技能</summary><div className="stack"><button disabled={saving} onClick={() => void importPackage()}>从文件导入技能包</button><p className="muted">支持说明、参考资料、模板与受控 JavaScript。导入后先看内容，采用后保存为常用；不会自动选中或扩大权限。</p>{packages.map((entry) => <div className="setting agent-package" key={entry.id}><b>{entry.name} · {entry.version}</b><p>{entry.description}</p>{entry.source && <small className="muted">来源：{entry.source}</small>}{entry.capabilities?.length ? <p className="muted">所需能力：{entry.capabilities.join("、")}</p> : null}{entry.compatibility && <p className="muted">{skillCompatibility(entry.compatibility)}</p>}{entry.warnings?.map((warning) => <p className="field-hint warn" key={warning}>{warning}</p>)}<details><summary>查看说明与文件</summary><StoryText emphasizeDate={false} text={entry.content} />{Object.keys(entry.files ?? {}).filter((path) => path !== "SKILL.md").map((path) => <details key={path}><summary>{path}</summary><pre className="raw">{entry.files![path]}</pre></details>)}</details><button disabled={saving} onClick={() => void adoptPackage(entry.id)}>采用为常用技能</button></div>)}{draft.customSkills.map((skill) => <div className="writing-saved-row" key={skill.id}><span className="grow">{skill.name} · {skill.version}</span><button className="ghost" aria-label={`删除技能 ${skill.name}`} onClick={() => setDraft({ ...draft, customSkills: draft.customSkills.filter((entry) => entry.id !== skill.id), skills: draft.skills.filter((id) => id !== skill.id) })}>删除</button></div>)}<label>技能名称<input value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /></label><label>适用情景<input value={custom.description} onChange={(event) => setCustom({ ...custom, description: event.target.value })} /></label><label>技能说明（SKILL.md）<textarea rows={7} value={custom.content} onChange={(event) => setCustom({ ...custom, content: event.target.value })} placeholder="写下这个技能的做法、需要读取的资料和完成条件" /></label><button disabled={!custom.name.trim() || !custom.content.trim()} onClick={() => { const id = `user-skill-${crypto.randomUUID().slice(0, 12)}`; setDraft({ ...draft, customSkills: [...draft.customSkills, { id, name: custom.name.trim(), description: custom.description.trim(), content: custom.content, version: "1.0.0" }] }); setCustom({ name: "", description: "", content: "" }); }}>保存为我的技能</button></div></details>
-    <details><summary>联网与已配置工具</summary><div className="stack">
-      <div className="segmented">{([["off", "不联网"], ["auto", "自动选择"], ["native", "当前模型联网"], ["configured", "搜索服务／MCP"]] as const).map(([value, label]) => <button key={value} aria-pressed={draft.network.mode === value} onClick={() => network({ mode: value, ...(value === "native" ? { native: { ...native, binding: "task", enabled: true } } : {}) })}>{label}</button>)}</div>
-      <p className="muted">自动选择优先使用当前任务模型的原生搜索，其次使用已配置的搜索服务或 MCP；接口不支持时会明确说明，不根据模型名称猜测。</p>
+    <details data-agent-settings-section="skills"><summary>本次指定技能{draft.skills.length ? ` · ${draft.skills.length}个` : ""}</summary><div className="stack"><p className="muted">未指定时由助手自行选择；指定后，本次必须读取并执行。</p>{[...BUILTIN_AGENT_SKILLS, ...draft.customSkills].map((skill) => <div key={skill.id} className="setting"><Switch label={skill.name} note={skill.description} checked={draft.skills.includes(skill.id)} onChange={() => toggleSkill(skill.id)} /></div>)}</div></details>
+    <details><summary>我的技能</summary><div className="stack"><button disabled={saving} onClick={() => void importPackage()}>从文件导入技能包</button><p className="muted">支持说明、参考资料、模板与受控 JavaScript。导入后先看内容，采用后保存为常用；不会自动选中或扩大权限。</p>{packages.map((entry) => <div className="setting agent-package" key={entry.id}><b>{entry.name} · {entry.version}</b><p>{entry.description}</p>{entry.source && <small className="muted">来源：{entry.source}</small>}{entry.capabilities?.length ? <p className="muted">所需能力：{entry.capabilities.join("、")}</p> : null}{entry.compatibility && <p className="muted">{skillCompatibility(entry.compatibility)}</p>}{entry.warnings?.map((warning) => <p className="field-hint warn" key={warning}>{warning}</p>)}<details><summary>查看说明与文件</summary><StoryText emphasizeDate={false} text={entry.content} />{Object.keys(entry.files ?? {}).filter((path) => path !== "SKILL.md").map((path) => <details key={path}><summary>{path}</summary><pre className="raw">{entry.files![path]}</pre></details>)}</details><button disabled={saving} onClick={() => void adoptPackage(entry.id)}>采用为常用技能</button></div>)}{draft.customSkills.map((skill) => <div className="writing-saved-row" key={skill.id}><span className="grow">{skill.name} · {skill.version}</span><button className="ghost" aria-label={`删除技能 ${skill.name}`} onClick={() => setDraft({ ...draft, customSkills: draft.customSkills.filter((entry) => entry.id !== skill.id), skills: draft.skills.filter((id) => id !== skill.id) })}>删除</button></div>)}<label>技能名称<input value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /></label><label>适用情景<input value={custom.description} onChange={(event) => setCustom({ ...custom, description: event.target.value })} /></label><label>技能说明<textarea rows={7} value={custom.content} onChange={(event) => setCustom({ ...custom, content: event.target.value })} placeholder="写下这个技能的做法、需要读取的资料和完成条件" /></label><button disabled={!custom.name.trim() || !custom.content.trim()} onClick={() => { const id = `user-skill-${crypto.randomUUID().slice(0, 12)}`; setDraft({ ...draft, customSkills: [...draft.customSkills, { id, name: custom.name.trim(), description: custom.description.trim(), content: custom.content, version: "1.0.0" }] }); setCustom({ name: "", description: "", content: "" }); }}>保存为我的技能</button></div></details>
+    <details data-agent-settings-section="network"><summary>联网与已配置工具</summary><div className="stack">
+      <div className="segmented">{([["off", "不联网"], ["auto", "自动选择"], ["native", "当前模型联网"], ["configured", "搜索服务／外部工具"]] as const).map(([value, label]) => <button key={value} aria-pressed={draft.network.mode === value} onClick={() => network({ mode: value, ...(value === "native" ? { native: { ...native, binding: "task", enabled: true } } : {}) })}>{label}</button>)}</div>
+      <p className="muted">自动选择优先使用当前任务模型的原生搜索，其次使用已配置的搜索服务或外部工具服务；接口不支持时会明确说明，不根据模型名称猜测。</p>
       <details><summary>独立搜索服务</summary><div className="stack"><label>Tavily 搜索地址<input value={search.url ?? "https://api.tavily.com/search"} onChange={(event) => network({ search: { ...search, url: event.target.value } })} /></label><label>搜索服务 Key<input type="password" autoComplete="off" value={keys[search.slot] ?? ""} placeholder="留空保留已保存的 Key" onChange={(event) => { network({ search }); setKeys({ ...keys, [search.slot]: event.target.value }); }} /></label><button onClick={() => network({ search })}>使用此搜索服务</button></div></details>
       <div className="setting"><Switch label="跟随当前任务模型" note={`跟随：${nextModel || "所选服务的主模型"}，不需要重复填写地址或密钥。切换模型对下一次执行生效。`} checked={inheritsSearch} onChange={(follow) => network({ native: follow ? { ...native, binding: "task", enabled: true } : { ...native, binding: "profile" }, ...(!follow ? { mode: "auto" as const } : {}) })} /></div>
       {!inheritsSearch && <details><summary>独立搜索模型（高级）</summary><div className="stack"><p className="muted">这是一套独立搜索配置，不会随任务模型切换；原有配置保留。</p><Switch label="启用独立搜索模型" checked={native.enabled} onChange={(enabled) => network({ native: { ...native, binding: "profile", enabled } })} /><label>接口类型<select value={native.protocol} onChange={(event) => network({ native: { ...native, binding: "profile", protocol: event.target.value as typeof native.protocol } })}><option value="openai-responses">OpenAI Responses</option><option value="gemini">Gemini</option><option value="anthropic">Anthropic</option></select></label><label>联网接口地址<input value={native.url} onChange={(event) => network({ native: { ...native, binding: "profile", url: event.target.value } })} /></label><label>联网模型<input value={native.model} onChange={(event) => network({ native: { ...native, binding: "profile", model: event.target.value } })} /></label><label>联网接口 Key<input type="password" autoComplete="off" value={keys[native.slot] ?? ""} placeholder="留空保留已保存的 Key" onChange={(event) => { network({ native: { ...native, binding: "profile" } }); setKeys({ ...keys, [native.slot]: event.target.value }); }} /></label></div></details>}
-      <details><summary>MCP 服务</summary><div className="stack"><details><summary>导入服务配置</summary><div className="stack"><label>JSON 配置<textarea rows={4} value={mcpImport} onChange={event => setMcpImport(event.target.value)} autoComplete="off" spellCheck={false} placeholder="粘贴包含 mcpServers 的配置" /></label><div className="row"><button disabled={saving || !mcpImport.trim()} onClick={() => void importRemoteConfig()}>读取配置</button><button disabled={saving} onClick={() => void importRemoteConfig(true)}>从文件读取</button></div>{mcpImportNote.map((note, index) => <p className="field-hint" key={index}>{note}</p>)}</div></details><p className="muted">按服务预先授权，允许范围内自动执行。外部修改不随本局预览或撤回恢复。</p>{(draft.network.mcps ?? []).map((entry) => <div className="setting agent-mcp" key={entry.id}><Switch label={entry.name} note={entry.url} checked={entry.enabled} onChange={(enabled) => changeMcp(entry.id, { enabled })} /><details><summary>工具与授权</summary><div className="stack"><label>服务地址<input value={entry.url} onChange={(event) => { changeMcp(entry.id, { url: event.target.value, allowedTools: [], readOnlyTools: [] }); setRemoteTools((current) => ({ ...current, [entry.id]: [] })); }} /></label><Switch label="允许读取服务资料" note="允许助手读取这个服务提供的资料，仍遵守只读任务和服务端权限。" checked={entry.allowResources ?? false} onChange={(allowResources) => changeMcp(entry.id, { allowResources })} /><button disabled={saving} onClick={() => void discoverRemoteTools(entry.id)}>查看服务提供的工具</button>{remoteTools[entry.id]?.map((tool) => <div className="setting" key={tool.name}><Switch label={tool.title || tool.name} note={tool.description} checked={entry.allowedTools?.includes(tool.name) ?? false} onChange={(allowed) => changeMcp(entry.id, { allowedTools: allowed ? [...(entry.allowedTools ?? []), tool.name] : (entry.allowedTools ?? []).filter((name) => name !== tool.name), readOnlyTools: allowed ? entry.readOnlyTools : entry.readOnlyTools?.filter((name) => name !== tool.name) })} /><Switch label="允许只读子任务使用" checked={entry.readOnlyTools?.includes(tool.name) ?? false} onChange={(allowed) => changeMcp(entry.id, { allowedTools: allowed ? [...new Set([...(entry.allowedTools ?? []), tool.name])] : entry.allowedTools, readOnlyTools: allowed ? [...(entry.readOnlyTools ?? []), tool.name] : entry.readOnlyTools?.filter((name) => name !== tool.name) })} /></div>)}<label>允许调用的工具（每行一个名称）<textarea rows={3} value={(entry.allowedTools ?? []).join("\n")} onChange={(event) => changeMcp(entry.id, { allowedTools: [...new Set(event.target.value.split("\n"))] })} /></label><label>确认只读、可供只读任务使用的工具<textarea rows={2} value={(entry.readOnlyTools ?? []).join("\n")} onChange={(event) => changeMcp(entry.id, { readOnlyTools: [...new Set(event.target.value.split("\n"))] })} /></label><p className="muted">名单为空时不授权调用。修改地址后需重新选择工具；服务的只读标注仍需你确认。</p></div></details><button className="ghost" onClick={() => removeMcp(entry.id, entry.slot)}>移除服务</button></div>)}<label>服务名称<input value={mcp.name} onChange={(event) => setMcp({ ...mcp, name: event.target.value })} /></label><label>Streamable HTTP 地址<input value={mcp.url} onChange={(event) => setMcp({ ...mcp, url: event.target.value })} placeholder="https://…/mcp" /></label><label>访问令牌（没有可留空）<input type="password" autoComplete="off" value={mcp.key} onChange={(event) => setMcp({ ...mcp, key: event.target.value })} /></label><button disabled={!mcp.name.trim() || !mcp.url.trim()} onClick={() => { const id = crypto.randomUUID().slice(0, 12), slot = `agent-mcp-${id}`; network({ mcps: [...(draft.network.mcps ?? []), { id, name: mcp.name.trim(), url: mcp.url.trim(), ...(mcp.key.trim() ? { slot } : {}), enabled: true, allowedTools: [], readOnlyTools: [], authorizationVersion: 1 }] }); if (mcp.key.trim()) setKeys({ ...keys, [slot]: mcp.key.trim() }); setMcp({ name: "", url: "", key: "" }); }}>添加服务并选择授权</button></div></details>
+      <details><summary>外部工具服务（MCP）</summary><div className="stack"><details><summary>导入服务配置</summary><div className="stack"><label>JSON 配置<textarea rows={4} value={mcpImport} onChange={event => setMcpImport(event.target.value)} autoComplete="off" spellCheck={false} placeholder="粘贴包含 mcpServers 的配置" /></label><div className="row"><button disabled={saving || !mcpImport.trim()} onClick={() => void importRemoteConfig()}>读取配置</button><button disabled={saving} onClick={() => void importRemoteConfig(true)}>从文件读取</button></div>{mcpImportNote.map((note, index) => <p className="field-hint" key={index}>{note}</p>)}</div></details><p className="muted">按服务预先授权，允许范围内自动执行。外部修改不随本局预览或撤回恢复。</p>{(draft.network.mcps ?? []).map((entry) => <div className="setting agent-mcp" key={entry.id}><Switch label={entry.name} note={entry.url} checked={entry.enabled} onChange={(enabled) => changeMcp(entry.id, { enabled })} /><details><summary>工具与授权</summary><div className="stack"><label>服务地址<input value={entry.url} onChange={(event) => { changeMcp(entry.id, { url: event.target.value, allowedTools: [], readOnlyTools: [] }); setRemoteTools((current) => ({ ...current, [entry.id]: [] })); }} /></label><Switch label="允许读取服务资料" note="允许助手读取这个服务提供的资料，仍遵守只读任务和服务端权限。" checked={entry.allowResources ?? false} onChange={(allowResources) => changeMcp(entry.id, { allowResources })} /><button disabled={saving} onClick={() => void discoverRemoteTools(entry.id)}>查看服务提供的工具</button>{remoteTools[entry.id]?.map((tool) => <div className="setting" key={tool.name}><Switch label={tool.title || tool.name} note={tool.description} checked={entry.allowedTools?.includes(tool.name) ?? false} onChange={(allowed) => changeMcp(entry.id, { allowedTools: allowed ? [...(entry.allowedTools ?? []), tool.name] : (entry.allowedTools ?? []).filter((name) => name !== tool.name), readOnlyTools: allowed ? entry.readOnlyTools : entry.readOnlyTools?.filter((name) => name !== tool.name) })} /><Switch label="允许只读子任务使用" checked={entry.readOnlyTools?.includes(tool.name) ?? false} onChange={(allowed) => changeMcp(entry.id, { allowedTools: allowed ? [...new Set([...(entry.allowedTools ?? []), tool.name])] : entry.allowedTools, readOnlyTools: allowed ? [...(entry.readOnlyTools ?? []), tool.name] : entry.readOnlyTools?.filter((name) => name !== tool.name) })} /></div>)}<label>允许调用的工具（每行一个名称）<textarea rows={3} value={(entry.allowedTools ?? []).join("\n")} onChange={(event) => changeMcp(entry.id, { allowedTools: [...new Set(event.target.value.split("\n"))] })} /></label><label>确认只读、可供只读任务使用的工具<textarea rows={2} value={(entry.readOnlyTools ?? []).join("\n")} onChange={(event) => changeMcp(entry.id, { readOnlyTools: [...new Set(event.target.value.split("\n"))] })} /></label><p className="muted">名单为空时不授权调用。修改地址后需重新选择工具；服务的只读标注仍需你确认。</p></div></details><button className="ghost" onClick={() => removeMcp(entry.id, entry.slot)}>移除服务</button></div>)}<label>服务名称<input value={mcp.name} onChange={(event) => setMcp({ ...mcp, name: event.target.value })} /></label><label>Streamable HTTP 地址<input value={mcp.url} onChange={(event) => setMcp({ ...mcp, url: event.target.value })} placeholder="https://…/mcp" /></label><label>访问令牌（没有可留空）<input type="password" autoComplete="off" value={mcp.key} onChange={(event) => setMcp({ ...mcp, key: event.target.value })} /></label><button disabled={!mcp.name.trim() || !mcp.url.trim()} onClick={() => { const id = crypto.randomUUID().slice(0, 12), slot = `agent-mcp-${id}`; network({ mcps: [...(draft.network.mcps ?? []), { id, name: mcp.name.trim(), url: mcp.url.trim(), ...(mcp.key.trim() ? { slot } : {}), enabled: true, allowedTools: [], readOnlyTools: [], authorizationVersion: 1 }] }); if (mcp.key.trim()) setKeys({ ...keys, [slot]: mcp.key.trim() }); setMcp({ name: "", url: "", key: "" }); }}>添加服务并选择授权</button></div></details>
     </div></details>
-    <details><summary>执行上限</summary><div className="stack">
+    <details data-agent-settings-section="limits"><summary>执行上限</summary><div className="stack">
       <p className="muted">默认不限制任务次数和活动时长，任务完成或你点停止时结束。内部调用和失败重试仍记录用量，继续时不清零。</p>
       <div className="setting"><Switch label="限制模型请求次数" note={draft.limits.modelRequests > 0 ? "累计达到所填次数时保存进度。" : "不限制"} checked={draft.limits.modelRequests > 0} onChange={(enabled) => setLimit("modelRequests", enabled ? 30 : 0)} />{draft.limits.modelRequests > 0 && <label>最多模型请求次数<input type="number" min={1} max={300} value={draft.limits.modelRequests} onChange={(event) => setLimit("modelRequests", Number(event.target.value))} /></label>}</div>
       <div className="setting"><Switch label="限制工具调用次数" note={draft.limits.toolCalls > 0 ? "累计达到所填次数时保存进度。" : "不限制"} checked={draft.limits.toolCalls > 0} onChange={(enabled) => setLimit("toolCalls", enabled ? 100 : 0)} />{draft.limits.toolCalls > 0 && <label>最多工具调用次数<input type="number" min={1} max={1000} value={draft.limits.toolCalls} onChange={(event) => setLimit("toolCalls", Number(event.target.value))} /></label>}</div>

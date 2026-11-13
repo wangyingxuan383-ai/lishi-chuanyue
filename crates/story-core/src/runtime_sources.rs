@@ -312,10 +312,6 @@ fn window(text: &str, keys: &Keys, cap: usize) -> (String, usize, usize) {
 }
 
 fn budget(plan: &RunPlan) -> usize {
-    if plan.kind == "agent_task" && crate::agent_budget::token_units(plan) {
-        return (crate::agent_budget::input(plan).estimated_chars / 4).min(usize::MAX as u64)
-            as usize;
-    }
     ((plan.meta["budgetChars"].as_u64().unwrap_or(12000) / 4).min(8000)) as usize
 }
 fn cost(value: &Value) -> usize {
@@ -372,7 +368,25 @@ fn analysis_locator(
 
 /// Source ranges and temporal note ranges are checked before any ranking.
 pub fn read(store: &Store, plan: &RunPlan, name: &str, args: &Value) -> Result<Value> {
-    read_db(&*store.lock()?, plan, name, args)
+    let db=store.lock()?;
+    // Only immutable, explicitly versioned reads are reusable. The result is still
+    // returned through the ordinary tool message and normal evidence-delivery gate.
+    if name=="read_original" && args["ref"]["bookVersion"].is_string() {
+        let book=plan.state["source"]["bookId"].as_str().unwrap_or("");
+        let has_index=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='reference_index_versions'",[],|r|r.get::<_,i64>(0))?>0;
+        let revision=if has_index{db.query_row("SELECT revision FROM reference_index_versions WHERE book_id=?",[book],|r|r.get::<_,i64>(0)).optional()?.unwrap_or(1)}else{1};
+        let version=format!("{book}:{revision}");
+        let has_run=db.query_row("SELECT EXISTS(SELECT 1 FROM execution_runs WHERE id=?)",[&plan.id],|r|r.get::<_,bool>(0))?;
+        if has_run && db.query_row("SELECT EXISTS(SELECT 1 FROM source_books WHERE id=?)",[book],|r|r.get::<_,bool>(0))? && args["ref"]["bookId"]==book && args["ref"]["bookVersion"]==version {
+            let key=format!("source-read:{}",crate::pi_store::arguments_hash(&json!([plan.state["source"],version,plan.meta["budgetChars"],args])));
+            let cached:Option<String>=db.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done'",params![plan.id,key],|r|r.get(0)).optional()?;
+            if let Some(raw)=cached{let mut value:Value=serde_json::from_str(&raw)?;value["cacheHit"]=true.into();return Ok(value);}
+            let value=read_db(&db,plan,name,args)?;
+            db.execute("INSERT OR REPLACE INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES(?,?,'source-read','done',?,?)",params![plan.id,key,args.to_string(),value.to_string()])?;
+            return Ok(value);
+        }
+    }
+    read_db(&db, plan, name, args)
 }
 
 /// Shared source reader for native callers already holding a guarded story
@@ -545,13 +559,11 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         }
         let overhead = cost(&excerpt) + 12;
         let mut cap = remaining.saturating_sub(overhead);
-        if !(plan.kind == "agent_task" && crate::agent_budget::token_units(plan)) {
-            cap = cap.min(if name == "search_original" {
-                1600
-            } else {
-                2400
-            });
-        }
+        cap = cap.min(if name == "search_original" {
+            1600
+        } else {
+            2400
+        });
         if cap < units(&text).min(80) {
             budget_limited = true;
             break;
@@ -667,6 +679,18 @@ mod tests {
     }
 
     #[test]
+    fn versioned_source_reads_reuse_only_the_same_run_and_chapter_scope() {
+        let (store,mut plan)=setup(&["甲在桥边交回密信。".into()]);
+        store.lock().unwrap().execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at) VALUES(?,'world','line','head','running','{}','{}','{}','test','test')",[&plan.id]).unwrap();
+        let args=json!({"ref":{"bookId":"book","bookVersion":"book:1","section":0,"chunk":0}});
+        let first=read(&store,&plan,"read_original",&args).unwrap();assert_ne!(first["cacheHit"],true);
+        let second=read(&store,&plan,"read_original",&args).unwrap();assert_eq!(second["cacheHit"],true);assert_eq!(first["excerpts"],second["excerpts"]);
+        plan.state["source"]["through"]=0.into();assert_ne!(read(&store,&plan,"read_original",&args).unwrap()["cacheHit"],true);
+        store.lock().unwrap().execute_batch("CREATE TABLE IF NOT EXISTS reference_index_versions(book_id TEXT PRIMARY KEY,revision INTEGER);INSERT OR REPLACE INTO reference_index_versions(book_id,revision) VALUES('book',2)").unwrap();
+        assert!(read(&store,&plan,"read_original",&args).is_err());
+    }
+
+    #[test]
     fn cached_candidates_keep_scope_and_reject_stale_or_incomplete_refs() {
         let (store,mut plan)=setup(&["青玉佩藏在竹匣。".into(),"后日青玉佩交给掌门。".into()]);
         plan.state["source"]["through"]=0.into();
@@ -679,29 +703,6 @@ mod tests {
         assert!(read(&store,&plan,"read_original",&json!({"ref":{"bookId":"book"}})).is_err());
         assert!(read(&store,&plan,"prepare_reference_check",&json!({"claims":["青玉佩",null]})).is_err());
     }
-    #[test]
-    fn agent_token_budget_keeps_later_chunk_facts_without_expanding_classic_reference_limits() {
-        let text = format!(
-            "{}终段事实：青铜钥匙已经移到竹匣。",
-            "原著日常背景。".repeat(700)
-        );
-        let (store, mut plan) = setup(&[text.clone()]);
-        let classic = read(&store, &plan, "read_original", &json!({"section":0})).unwrap();
-        assert!(!classic.to_string().contains("终段事实"));
-        plan.kind = "agent_task".into();
-        plan.options = crate::agent_budget::new_options(&json!({})).unwrap();
-        let agent = read(&store, &plan, "read_original", &json!({"section":0})).unwrap();
-        assert!(agent.to_string().contains("终段事实：青铜钥匙已经移到竹匣"));
-        let chars: usize = agent["excerpts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v["text"].as_str().unwrap().encode_utf16().count())
-            .sum();
-        assert_eq!(chars, text.encode_utf16().count());
-        assert_eq!(agent["excerpts"].as_array().unwrap().len(), 3);
-    }
-
     #[test]
     fn late_priority_hit_keeps_utf16_offsets_and_respects_the_quarter_budget() {
         let text = format!(

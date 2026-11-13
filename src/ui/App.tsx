@@ -118,7 +118,13 @@ export default function App() {
   const [dialog, setDialog] = useState<DialogRequest | null>(null);
   const exitArmed = useRef(false);
 
+  // Startup runs once. React's dev double-run would otherwise boot twice in parallel:
+  // the second boot could read the "welcomed" mark the first-run page had just
+  // written and drop that page, and the database and backup would start twice.
+  const booted = useRef(false);
   useEffect(() => {
+    if (booted.current) return;
+    booted.current = true;
     void (async () => {
       const platform = await getPlatform();
       const game = await Game.open(platform);

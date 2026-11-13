@@ -1,3 +1,4 @@
+import { normalizeContinuity, remapContinuity } from "./continuity";
 // One world as a single JSON file (R08-T001): every node with its state, the
 // lines and bookmarks, the pins and the chapters. Import checks the whole file
 // before touching the database and writes it in one transaction; a world that
@@ -162,6 +163,22 @@ export function archiveProblems(raw: unknown): string[] {
   if (a.lines.some((l) => !nodes.has(l.node_id as string))) problems.push("有的世界线指向不存在的回合");
   if (!a.lines.some((l) => l.id === a.world!.current_line_id)) problems.push("找不到当前世界线");
   if (a.pins.some((p) => p.origin_node_id != null && !nodes.has(p.origin_node_id as string))) problems.push("有的要点指向不存在的回合");
+  const nodeRows = new Map(a.nodes.map(node => [String(node.id), node]));
+  for (const row of a.nodes) {
+    const record = parseJson(row.record_json);
+    if (record.continuity === undefined) continue;
+    const issues: string[] = [], clean = normalizeContinuity(record.continuity, issues);
+    if (issues.length) { problems.push("有的知情或线索记录损坏"); continue; }
+    const allowed = new Set<string>(); let cursor: any = row;
+    while (cursor && !allowed.has(String(cursor.id))) { allowed.add(String(cursor.id)); cursor = nodeRows.get(String(cursor.parent_id)); }
+    for (const item of [...clean.knowledge ?? [], ...clean.threads ?? []]) {
+      const sourceNode = item.source.nodeId ? nodeRows.get(item.source.nodeId) : row;
+      const body = item.source.from === "narrative" ? sourceNode?.narrative : `${sourceNode?.action_text ?? ""}\n${sourceNode?.director_note ?? ""}`;
+      // An existing passage can be hand-rewritten after annotation. Preserve
+      // its old quote for review; projection will exclude it until rechecked.
+      if (!sourceNode || !allowed.has(String(sourceNode.id)) || typeof body !== "string") problems.push("有的知情或线索出处不属于当时路线");
+    }
+  }
   if (a.version >= 3) {
     if (!Array.isArray(a.books)) problems.push("文件缺少参考书籍清单");
     else {
@@ -214,7 +231,6 @@ export function archiveProblems(raw: unknown): string[] {
         && (c.start === undefined && c.end === undefined || Number.isInteger(c.start) && Number.isInteger(c.end) && c.start >= 0 && c.end > c.start && chunk.text.slice(c.start, c.end) === c.quote);
     };
     const checkState = (state: any) => {
-      if (state.executionMode !== undefined && !["classic", "agent"].includes(state.executionMode)) problems.push("有的路线的执行方式无效");
       if (state.source != null) {
         const b = bundles.get(state.source.bookId)?.book;
         if (!validBinding(state.source) || !b || state.source.position >= b.sections.length || state.source.through !== null && (state.source.through >= b.sections.length || state.source.position > state.source.through)) problems.push("初始信息或路线中的参考书籍无效");
@@ -233,8 +249,9 @@ export function archiveProblems(raw: unknown): string[] {
         else checkState(seed);
       }
       const revision = meta.revision;
-      if (revision !== undefined && (!revision || revision.kind !== "canonCorrection" || !nodes.has(revision.nodeId) || !lines.has(revision.lineId)
-        || !Array.isArray(revision.corrections) || revision.corrections.some((c: any) => typeof c?.detail !== "string" || !Array.isArray(c.citations) || !c.citations.length || c.citations.some((v: any) => !citationValid(v))))) problems.push("有的修订路线引用无效");
+      if (revision !== undefined && (!revision || !["canonCorrection", "manualDuration"].includes(revision.kind) || !nodes.has(revision.nodeId) || !lines.has(revision.lineId)
+        || revision.kind === "canonCorrection" && (!Array.isArray(revision.corrections) || revision.corrections.some((c: any) => typeof c?.detail !== "string" || !Array.isArray(c.citations) || !c.citations.length || c.citations.some((v: any) => !citationValid(v))))
+        || revision.kind === "manualDuration" && (![revision.before, revision.after].every(n => typeof n === "number" && Number.isSafeInteger(n) && n >= 0)))) problems.push("有的修订路线引用无效");
     }
   }
   if (a.version >= 7) {
@@ -267,13 +284,18 @@ function remap(a: WorldArchive): WorldArchive {
     const meta = JSON.parse(String(text));
     if (meta.openingSeed) meta.openingSeed = mapState(meta.openingSeed);
     if (meta.revision) meta.revision = { ...meta.revision, nodeId: id(meta.revision.nodeId), lineId: id(meta.revision.lineId) };
+    if (Array.isArray(meta.carriedEdits)) for (const edit of meta.carriedEdits) if (edit.record?.continuity) edit.record.continuity = remapContinuity(edit.record.continuity, old => id(old)!);
     return JSON.stringify(meta);
   };
   const sourceIds=(value:any):any=>Array.isArray(value)?value.map(sourceIds):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([key,v])=>[key,["nodeId","lineId","taskId","sessionId"].includes(key)&&typeof v==="string"?id(v):key==="playerReferenceId"&&typeof v==="string"&&v.includes(":")?`${id(v.slice(0,v.lastIndexOf(":")))}${v.slice(v.lastIndexOf(":"))}`:sourceIds(v)])):value;
   return {
     ...a,
     world: { ...a.world, id: worldId, current_line_id: id(a.world.current_line_id), title: `${a.world.title as string}（导入）` },
-    nodes: a.nodes.map((n) => ({ ...n, id: id(n.id), world_id: worldId, parent_id: id(n.parent_id), last_child_id: n.last_child_id == null ? null : id(n.last_child_id), meta_json: mapMeta(n.meta_json) })),
+    nodes: a.nodes.map((n) => {
+      const record = parseJson(n.record_json);
+      if (record.continuity) record.continuity = remapContinuity(record.continuity, old => id(old)!);
+      return { ...n, id: id(n.id), world_id: worldId, parent_id: id(n.parent_id), last_child_id: n.last_child_id == null ? null : id(n.last_child_id), meta_json: mapMeta(n.meta_json), ...(n.record_json != null ? { record_json: JSON.stringify(record) } : {}) };
+    }),
     states: a.states.map((s) => ({ ...s, node_id: id(s.node_id), state_json: JSON.stringify(mapState(JSON.parse(String(s.state_json)))) })),
     lines: a.lines.map((l) => ({ ...l, id: id(l.id), world_id: worldId, node_id: id(l.node_id) })),
     pins: a.pins.map((p) => ({ ...p, id: id(p.id), world_id: worldId, origin_node_id: id(p.origin_node_id) })),
@@ -302,10 +324,9 @@ function cleanModes(a: WorldArchive): WorldArchive {
     : { ...a.world, settings_json: JSON.stringify({ ...settings, pilot: undefined }) };
   const states = a.states.map((row) => {
     const json = row.state_json as string;
-    if (!json.includes('"script"') && !json.includes('"challenge"') && !json.includes('"executionMode"')) return row;
-    const state = JSON.parse(json) as { script?: unknown; challenge?: unknown; executionMode?: unknown };
+    if (!json.includes('"script"') && !json.includes('"challenge"')) return row;
+    const state = JSON.parse(json) as { script?: unknown; challenge?: unknown };
     let changed = false;
-    if (state.executionMode !== undefined && state.executionMode !== "classic" && state.executionMode !== "agent") { delete state.executionMode; changed = true; }
     for (const [key, check] of [["script", checkScript], ["challenge", checkChallenge]] as const) {
       if (state[key] == null) continue;
       const checked = check(state[key]);
