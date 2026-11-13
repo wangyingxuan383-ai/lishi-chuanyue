@@ -100,9 +100,9 @@ export function RulesSheet({ state: liveState, era: liveEra, headId, busy, onSav
         <p className="field-hint m-0">沿用十二个月，不含闰月或闰日；纪年名可自定。</p>
         <label>当前纪年<input aria-label="纪年名称" maxLength={12} value={form.eraName} onChange={e => set("eraName", e.target.value)} placeholder="如：斗罗历、天宝、公元" /></label>
         <div className="row wrap">
-          <input aria-label="当前年" style={{ flex: "1 1 96px", minWidth: 0 }} inputMode="numeric" value={form.year} onChange={e => set("year", e.target.value.replace(/\D/g, ""))} placeholder="年" />
-          <select aria-label="当前月" style={{ flex: "1 1 80px", minWidth: 0 }} value={form.month} onChange={e => set("month", Number(e.target.value))}>{Array.from({ length: 12 }, (_, i) => <option key={i} value={i + 1}>{form.lunar ? LUNAR_MONTHS[i] : `${i + 1}月`}</option>)}</select>
-          <input aria-label="当前日" style={{ flex: "1 1 64px", minWidth: 0 }} inputMode="numeric" value={form.day} onChange={e => set("day", e.target.value.replace(/\D/g, ""))} placeholder="日" />
+          <input aria-label="当前年" className="date-y" inputMode="numeric" value={form.year} onChange={e => set("year", e.target.value.replace(/\D/g, ""))} placeholder="年" />
+          <select aria-label="当前月" className="date-m" value={form.month} onChange={e => set("month", Number(e.target.value))}>{Array.from({ length: 12 }, (_, i) => <option key={i} value={i + 1}>{form.lunar ? LUNAR_MONTHS[i] : `${i + 1}月`}</option>)}</select>
+          <input aria-label="当前日" className="date-d" inputMode="numeric" value={form.day} onChange={e => set("day", e.target.value.replace(/\D/g, ""))} placeholder="日" />
         </div>
       </>}
       <span className="muted">时间显示</span>

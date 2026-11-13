@@ -1,6 +1,7 @@
-import { Fragment, useRef, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useApp, useBack } from "../app/context";
+import { EXIT_MS, motionOn } from "../app/motion";
 import { Icon } from "./Icon";
 
 /**
@@ -19,12 +20,25 @@ import { Icon } from "./Icon";
 export function Sheet({ title, onClose, dirty = false, children }: { title?: string; onClose: () => void; dirty?: boolean; children: ReactNode }) {
   const { ask } = useApp();
   const asking = useRef(false);
+  // Dismissing (back, backdrop, ×) lets the sheet sink away before it is removed.
+  // Anything that unmounts the sheet first (a save, a menu choice) cancels the timer.
+  const [closing, setClosing] = useState(false);
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const dismiss = () => {
+    if (closing) return;
+    if (!motionOn()) { latest.current(); return; }
+    setClosing(true);
+    timer.current = setTimeout(() => latest.current(), EXIT_MS);
+  };
   const requestClose = () => {
-    if (!dirty) { onClose(); return; }
+    if (!dirty) { dismiss(); return; }
     if (asking.current) return;
     asking.current = true;
     void ask({ title: "放弃修改？", message: "刚才改的内容还没有保存。", confirm: "放弃", danger: true })
-      .then((ok) => { if (ok) onClose(); })
+      .then((ok) => { if (ok) dismiss(); })
       .finally(() => { asking.current = false; });
   };
   useBack(() => {
@@ -32,7 +46,7 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
     return true;
   });
   return createPortal(
-    <div className="sheet-layer">
+    <div className={`sheet-layer${closing ? " closing" : ""}`}>
       <div className="backdrop" onClick={requestClose} />
       <div className="sheet" role="dialog" aria-label={title}>
         <div className="sheet-handle" />

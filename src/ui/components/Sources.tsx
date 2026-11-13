@@ -25,7 +25,7 @@ export function SourceSummary({ value, label = "参考书籍" }: { value: Source
     return () => { live = false; };
   }, [game, value?.bookId]);
   const selected = book?.id === value?.bookId ? book : null;
-  return <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{label}{value && <small className="muted" style={{ display: "block", lineHeight: 1.6 }}>
+  return <span className="source-name">{label}{value && <small className="muted" style={{ display: "block", lineHeight: 1.6 }}>
     {selected?.title ?? (loaded ? "书籍暂不可读，请重新选择" : "正在读取书名…")} · {value.through === null ? "全书" : `截至第 ${value.through + 1} 节`} · {!value.fanfic ? "只作资料" : value.plot === "canon" ? "尽量沿原剧情" : "允许改写原著"} · {value.method === "analysis" ? "通读整理与原文" : "直接检索引用"}
   </small>}</span>;
 }

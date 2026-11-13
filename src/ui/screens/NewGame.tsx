@@ -404,7 +404,7 @@ export default function NewGame() {
         <div className="topbar"><div className="title"><h1>{draft.title || "新的故事"}</h1></div></div>
         <div className="screen-body">
           {!text ? (
-            <div className="hero"><p style={{ fontSize: 20, letterSpacing: 4 }}>{phase === "organizing" ? "整理中…" : "落笔中…"}</p><p className="muted">{tip}</p></div>
+            <div className="hero"><p className="hero-title">{phase === "organizing" ? "整理中…" : "落笔中…"}</p><p className="muted">{tip}</p></div>
           ) : <StoryText text={text} streaming={phase === "writing"} />}
           {text && phase === "organizing" && <p className="status-line">整理人物与设定…</p>}
         </div>
@@ -421,7 +421,7 @@ export default function NewGame() {
 
   const intensity = (key: keyof WorldSettings["intensity"], label: string) => (
     <div className="row wrap">
-      <span className="muted" style={{ minWidth: 84 }}>{label}</span>
+      <span className="muted label-col">{label}</span>
       <div className="segmented">
         {(["含蓄", "写实", "浓烈"] as Intensity[]).map((l) => <button key={l} aria-pressed={draft.settings.intensity[key] === l} onClick={() => setS("intensity", { ...draft.settings.intensity, [key]: l })}>{l}</button>)}
       </div>
@@ -544,7 +544,7 @@ export default function NewGame() {
               <input ref={nameBox} className={missing === "名字" ? "wanted" : ""} value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="名字" aria-label="名字" />
               <span className={`field-suffix${nameLength > NAME_MAX ? " over" : ""}`}>{nameLength}/{NAME_MAX}</span>
             </span>
-            <input ref={ageBox} style={{ width: 84 }} className={ageProblem(draft.age, free) ? "wanted" : ""} value={draft.age} onChange={(e) => set("age", e.target.value.replace(/\D/g, "").slice(0, free ? 6 : 3))} placeholder="年龄" inputMode="numeric" aria-label="年龄" />
+            <input ref={ageBox} className={`age-box${ageProblem(draft.age, free) ? " wanted" : ""}`} value={draft.age} onChange={(e) => set("age", e.target.value.replace(/\D/g, "").slice(0, free ? 6 : 3))} placeholder="年龄" inputMode="numeric" aria-label="年龄" />
           </div>
           {(nameLength > NAME_MAX || ageProblem(draft.age, free)) && <p className="field-hint warn m-0">{nameLength > NAME_MAX ? `名字最多 ${NAME_MAX} 个字，现在 ${nameLength} 个` : ageProblem(draft.age, free)}</p>}
           {draft.lockedGender ? (
@@ -674,7 +674,7 @@ function Fold({ id, title, summary, open, onToggle, children }: {
   return (
     <section className={`fold${open[id] ? " open" : ""}`}>
       <button className="fold-head" aria-expanded={!!open[id]} onClick={() => onToggle(id)}>
-        <span><b>{title}</b>{!open[id] && <small>{summary}</small>}</span><span aria-hidden="true">{open[id] ? "收起" : "改"}</span>
+        <span><b>{title}</b>{!open[id] && <small>{summary}</small>}</span><span aria-hidden="true">{open[id] ? "收起" : "改"}<i className="fold-chevron">›</i></span>
       </button>
       {open[id] && <div className="stack fold-body">{children}</div>}
     </section>

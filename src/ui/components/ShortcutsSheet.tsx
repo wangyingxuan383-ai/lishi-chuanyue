@@ -25,7 +25,7 @@ export function ShortcutsSheet({ onClose }: { onClose: () => void }) {
     <Sheet title="快捷键" onClose={onClose}>
       <dl className="facts shortcut-list">
         {SHORTCUTS.map(([keys, what]) => (
-          <div key={keys} style={{ display: "contents" }}>
+          <div key={keys} className="contents">
             <dt><kbd style={KBD}>{keys}</kbd></dt>
             <dd>{what}</dd>
           </div>

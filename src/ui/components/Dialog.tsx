@@ -3,6 +3,7 @@
 // opened from anywhere through useApp().ask / useApp().askName.
 import { useEffect, useRef, useState } from "react";
 import { useBack } from "../app/context";
+import { EXIT_MS, motionOn } from "../app/motion";
 
 export interface ConfirmRequest {
   kind: "confirm";
@@ -29,19 +30,29 @@ export type DialogRequest = ConfirmRequest | NameRequest;
 export function Dialog({ request, onDone }: { request: DialogRequest; onDone: () => void }) {
   const [name, setName] = useState(request.kind === "name" ? request.initial : "");
   const input = useRef<HTMLInputElement>(null);
-  const cancel = () => { if (request.kind === "confirm") request.resolve(false); else request.resolve(null); onDone(); };
+  // The answer goes back at once; the dialog then fades out before it is removed.
+  const [closing, setClosing] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const finish = () => {
+    if (!motionOn()) { onDone(); return; }
+    setClosing(true);
+    timer.current = setTimeout(onDone, EXIT_MS);
+  };
+  const cancel = () => { if (closing) return; if (request.kind === "confirm") request.resolve(false); else request.resolve(null); finish(); };
   const ok = () => {
+    if (closing) return;
     if (request.kind === "confirm") request.resolve(true);
     else { if (!name.trim()) return; request.resolve(name.trim()); }
-    onDone();
+    finish();
   };
   useBack(() => { cancel(); return true; });
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => { if (request.kind === "name") { input.current?.focus(); input.current?.select(); } else box.current?.focus(); }, []);
   return (
     <>
-      <div className="backdrop dialog-backdrop" onClick={cancel} />
-      <div ref={box} tabIndex={-1} className="dialog" role="alertdialog" aria-modal="true" aria-label={request.title}>
+      <div className={`backdrop dialog-backdrop${closing ? " closing" : ""}`} onClick={cancel} />
+      <div ref={box} tabIndex={-1} className={`dialog${closing ? " closing" : ""}`} role="alertdialog" aria-modal="true" aria-label={request.title}>
         <h2>{request.title}</h2>
         {request.kind === "confirm" && request.message && <p>{request.message}</p>}
         {request.kind === "name" && (

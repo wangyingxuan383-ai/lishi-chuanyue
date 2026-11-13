@@ -135,8 +135,12 @@ export function newer(a: string, b: string): boolean {
   return !!pa && !!pb && compareVersion(pa, pb) > 0;
 }
 
-/** The newest release, pre-releases included (this is a personal build line). */
-export async function latestRelease(platform: Platform): Promise<ReleaseInfo | null> {
+/**
+ * The newest release, pre-releases included (this is a personal build line).
+ * `needPackage` (Android, D158): skip releases published with source only, whose
+ * installers come later, so the phone is not told about an update it cannot install.
+ */
+export async function latestRelease(platform: Platform, { needPackage = false }: { needPackage?: boolean } = {}): Promise<ReleaseInfo | null> {
   const response = await platform.llm.getPublic(LATEST, 12_000);
   if (response.status !== 200) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
   let list: unknown;
@@ -157,7 +161,8 @@ export async function latestRelease(platform: Platform): Promise<ReleaseInfo | n
     } }];
   });
   // Equal precedence returns 0: keep the API's order, including metadata-only differences.
-  const release = releases.sort((a, b) => compareVersion(b.version, a.version))[0]?.release;
+  const release = releases.sort((a, b) => compareVersion(b.version, a.version))
+    .find((item) => !needPackage || androidPackage(item.release))?.release;
   if (!release) return null;
   return release;
 }

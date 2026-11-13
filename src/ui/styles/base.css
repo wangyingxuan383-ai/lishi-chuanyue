@@ -17,6 +17,10 @@
   --warn: #7d560c;
   --chip: #6b4e33;
   --shadow: rgba(90, 60, 30, 0.1);
+  /* Overlays: backdrop dims the page; the toast is ink on paper (reversed at night). */
+  --backdrop: rgba(20, 14, 8, 0.38);
+  --toast-bg: rgba(42, 32, 25, 0.92); --toast-fg: #f6eedc;
+  --dock: var(--surface); --dock-line: var(--line); --dock-field: var(--raised);
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .32 0 0 0 0 .18 0 0 0 .075 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   --glow: radial-gradient(140% 70% at 50% 0%, rgba(255, 250, 238, 0.55), transparent 70%);
   --divider: "◇";
@@ -30,6 +34,9 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
   --radius-card: 3px; --radius-dialog: 6px; --radius-sheet: 10px;
   --z-bar: 5; --z-backdrop: 20; --z-sheet: 21; --z-dialog: 31; --z-toast: 40;
+  /* Motion (DESIGN_SPEC §6): short, light, never in the way. */
+  --dur-fast: 150ms; --dur: 200ms; --dur-slow: 260ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1); --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --serif: "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
   --sans: system-ui, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   font-family: var(--sans);
@@ -42,6 +49,7 @@
 :root[data-theme="day"] {
   --bg: #faf7f0; --surface: #ffffff; --raised: #ffffff; --fg: #26201a; --muted: #6b5f50; --line: #e6dccb;
   --accent-soft: #f3e1d6; --chip: #6b4e33; --shadow: rgba(60, 40, 20, 0.08); --grain: none; --glow: none;
+  --dock: #f4efe4; --dock-line: #ddd0b8; --dock-field: #fffdf8;
 }
 
 /* 夜间: ink-dark paper, candle-warm text, gold instead of cinnabar. */
@@ -50,6 +58,7 @@
   --bg: #131518; --surface: #1b1e22; --raised: #1f2226; --fg: #e9dcc5; --muted: #9a9183; --line: #2b2f35;
   --accent: #d4a04c; --on-accent: #1c1508; --accent-soft: #33291b;
   --gain: #9fcf95; --loss: #e7896b; --warn: #e6b450; --chip: #d8c6a4; --shadow: rgba(0, 0, 0, 0.35);
+  --backdrop: rgba(0, 0, 0, 0.55); --toast-bg: rgba(233, 220, 197, 0.95); --toast-fg: #15171b;
   --grain: none; --glow: radial-gradient(130% 55% at 50% -10%, rgba(212, 160, 76, 0.13), transparent 62%);
   --divider: "✦";
 }
@@ -99,7 +108,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 input.check-20 { width: 20px; min-height: 20px; }
 summary { min-height: var(--tap); display: flex; align-items: center; cursor: pointer; }
 details > summary { list-style: none; }
-details > summary::before { content: "›"; display: inline-block; width: 1em; color: var(--accent); transition: transform 0.15s; }
+details > summary::before { content: "›"; display: inline-block; width: 1em; color: var(--accent); transition: transform var(--dur-fast) var(--ease-out); }
 details[open] > summary::before { transform: rotate(90deg); }
 details > summary::-webkit-details-marker { display: none; }
 label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
@@ -112,6 +121,14 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .gap-0 { gap: 0 !important; } .gap-10 { gap: 10px !important; } .gap-1 { gap: var(--s1) !important; } .gap-2 { gap: var(--s2) !important; } .gap-3 { gap: var(--s3) !important; } .gap-4 { gap: var(--s4) !important; }
 .m-0 { margin: 0 !important; } .mt-0 { margin-top: 0 !important; } .mb-0 { margin-bottom: 0 !important; } .small { font-size: 13px !important; } .center { align-items: center !important; } .warn-text { color: var(--warn) !important; } .mt-1 { margin-top: var(--s1) !important; } .mt-2 { margin-top: var(--s2) !important; } .mt-3 { margin-top: var(--s3) !important; } .mt-4 { margin-top: var(--s4) !important; }
 .between { justify-content: space-between !important; } .wrap { flex-wrap: wrap !important; } .start { align-self: flex-start !important; }
+.mb-1 { margin-bottom: var(--s1) !important; } .contents { display: contents; } .tap-row { min-height: var(--tap); }
+/* Fixed sizes that used to be inline styles (R28). */
+.hero-title { font-size: 20px; letter-spacing: 4px; }
+.label-col { min-width: 84px; } .age-box { width: 84px; } .stat-label { width: 92px; }
+.story-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.source-name { min-width: 0; overflow-wrap: anywhere; }
+.date-y { flex: 1 1 96px; min-width: 0; } .date-m { flex: 1 1 80px; min-width: 0; } .date-d { flex: 1 1 64px; min-width: 0; }
+.codex-note { margin: 2px 0 6px; }
 .t-left { text-align: left !important; } .t-center { text-align: center !important; } .t-right { text-align: right !important; }
 
 /* ---------- the seal: boot screen, empty home, app icon ---------- */
@@ -130,6 +147,11 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 
 /* ---------- screens ---------- */
 .screen { min-height: 100%; display: flex; flex-direction: column; }
+/* Entering a screen (App.tsx sets data-nav): forward slides in a little from the right, back only fades.
+   No fill mode, so no transform stays behind once it has played. */
+:root[data-nav="push"] .screen, :root[data-nav="push"] .agent-conversation, :root[data-nav="push"] .preserved-play:not([data-inactive]) > .play-layout { animation: screen-in var(--dur-slow) var(--ease-out); }
+:root[data-nav="pop"] .screen, :root[data-nav="pop"] .agent-conversation, :root[data-nav="pop"] .preserved-play:not([data-inactive]) > .play-layout { animation: fade var(--dur) var(--ease-out); }
+@keyframes screen-in { from { opacity: 0; transform: translateX(14px); } }
 .screen-body { flex: 1; padding: 16px; max-width: 640px; width: 100%; margin: 0 auto; }
 .topbar {
   position: sticky; top: 0; z-index: 5;
@@ -295,13 +317,14 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .turn-tools { display: flex; justify-content: flex-end; align-items: center; gap: 4px; font-size: 14px; color: var(--muted); }
 .turn-tools button { min-height: var(--tap); min-width: var(--tap); padding: 4px 10px; font-size: 14px; background: transparent; border-color: transparent; color: color-mix(in srgb, var(--fg) 70%, var(--muted)); }
 .status-line { font-size: 14px; color: var(--muted); padding: 6px 0; }
+.status-line .waited { margin-left: 10px; font-size: 13px; font-variant-numeric: tabular-nums; opacity: 0.8; }
 .notice {
   margin: 10px 0; padding: 12px 14px; border-radius: 3px; border-left: 3px solid var(--accent);
   background: var(--accent-soft); font-size: 14px; line-height: 1.6; animation: fade-up 0.24s ease-out both;
 }
 .notice .row { margin-top: 8px; flex-wrap: wrap; }
 .ending-card { margin: 18px 0 8px; padding: 22px 18px 16px; text-align: center; border: 1px solid var(--line); border-top: 3px double var(--line); border-bottom: 3px double var(--line); background: var(--surface); display: grid; gap: 8px; justify-items: center; animation: fade-up 0.4s ease-out both; }
-.ending-seal { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 4px; background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 26px; font-weight: 700; box-shadow: inset 0 0 0 3px var(--accent), inset 0 0 0 4px color-mix(in srgb, var(--on-accent) 55%, transparent); }
+.ending-seal { width: 52px; height: 52px; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.05; border-radius: 4px; background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 20px; font-weight: 700; box-shadow: inset 0 0 0 3px var(--accent), inset 0 0 0 4px color-mix(in srgb, var(--on-accent) 55%, transparent); }
 .ending-card h2 { margin: 4px 0 0; font-family: var(--serif); font-size: 21px; letter-spacing: 0.12em; }
 .ending-line { margin: 0; font-family: var(--serif); font-size: 16px; line-height: 1.8; }
 .ending-card .muted { margin: 0; }
@@ -313,13 +336,15 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .to-bottom {
   position: absolute; right: 16px; bottom: 12px; width: var(--tap); height: var(--tap); min-height: var(--tap); padding: 0;
   border-radius: 999px; display: grid; place-items: center; color: var(--accent);
-  box-shadow: 0 2px 10px var(--shadow); animation: fade 0.2s ease-out both;
+  box-shadow: 0 2px 10px var(--shadow); animation: fade var(--dur) ease-out both;
 }
+/* New words are arriving below while the reader stays put (R28): a breathing dot on the arrow. */
+.to-bottom.fresh::after { content: ""; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: breathe 1.4s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: 0.35; transform: scale(0.8); } }
 
-.dock { position: relative; border-top: 3px double var(--line); background-color: var(--surface); background-image: var(--grain); padding: 8px 10px 10px; }
-/* 白天: a slightly deeper cream than the page so the dock still reads as paper (AUDIT_V4 10.2). */
-:root[data-theme="day"] .dock { background-color: #f4efe4; border-top-color: #ddd0b8; }
-:root[data-theme="day"] .dock textarea, :root[data-theme="day"] .dock input { background: #fffdf8; }
+.dock { position: relative; border-top: 3px double var(--dock-line); background-color: var(--dock); background-image: var(--grain); padding: 8px 10px 10px; }
+/* 白天 gives the dock a slightly deeper cream than the page so it still reads as paper (AUDIT_V4 10.2; --dock in the theme). */
+.dock textarea, .dock input { background: var(--dock-field); }
 .choices { display: grid; gap: 0; margin-bottom: 8px; max-height: 34vh; overflow-y: auto; counter-reset: choice; animation: fade-up 0.22s ease-out both; }
 .dying-note { margin: 0 0 8px; padding: 7px 12px; border-radius: 3px; border-left: 3px solid var(--loss); background: var(--accent-soft); color: var(--loss); font-size: 14px; animation: fade-up 0.24s ease-out both; }
 .choice {
@@ -338,7 +363,7 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .director-row { margin-bottom: 6px; gap: 4px; }
 .director-note { font-size: 14px; min-height: var(--tap); }
 .tip { margin: 8px 0 2px; padding: 8px 4px 8px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 14px; line-height: 1.6; display: flex; align-items: center; gap: 6px; animation: fade-up 0.24s ease-out both; }
-.tip button { flex-shrink: 0; min-height: 36px; color: var(--accent); }
+.tip button { position: relative; flex-shrink: 0; min-height: 36px; color: var(--accent); }
 .mode-option { display: grid; gap: 2px; }
 .mode-option b { font-family: var(--serif); font-size: 16px; font-weight: 600; }
 .mode-option small { color: var(--muted); font-size: 13px; }
@@ -347,7 +372,11 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 /* ---------- overlays ---------- */
 /* A sheet's layer on <body> (Sheet.tsx): above the screens and the character panel, below dialogs and toasts. */
 .sheet-layer { position: fixed; inset: 0; z-index: 21; }
-.backdrop { position: fixed; inset: 0; z-index: 20; background: rgba(20, 14, 8, 0.38); animation: fade 0.16s ease-out both; }
+.backdrop { position: fixed; inset: 0; z-index: 20; background: var(--backdrop); animation: fade var(--dur-fast) ease-out both; }
+/* Closing overlays (Sheet.tsx, Dialog.tsx): sink and fade, ignore taps meanwhile. */
+.sheet-layer.closing { pointer-events: none; }
+.sheet-layer.closing .backdrop, .backdrop.closing { animation: fade-out var(--dur-fast) var(--ease-in) both; }
+.sheet-layer.closing .sheet { animation: sink var(--dur-fast) var(--ease-in) both; }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
   max-height: 85vh; overflow-y: auto;
@@ -355,10 +384,10 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
   background-color: var(--surface); background-image: var(--grain);
   border-radius: 10px 10px 0 0; border-top: 3px double var(--line);
   box-shadow: 0 -6px 24px var(--shadow);
-  animation: rise 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: rise var(--dur) var(--ease-out) both;
 }
 .sheet-handle { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 10px; }
-.sheet h2 { font-size: 17px; margin: 4px 0 12px; font-family: var(--serif); letter-spacing: 0.06em; }
+.sheet h2 { font-size: 17px; margin: 4px 0 12px; padding-right: 40px; font-family: var(--serif); letter-spacing: 0.06em; }
 .sheet-menu { display: grid; gap: 2px; }
 .sheet-menu button { text-align: left; border: none; background: transparent; font-size: 16px; padding: 12px 8px; }
 .sheet-menu button.danger { color: var(--loss); }
@@ -368,8 +397,11 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
   width: min(88vw, 400px); padding: 20px 20px 16px;
   background-color: var(--surface); background-image: var(--grain);
   border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 6px;
-  box-shadow: 0 10px 32px var(--shadow); animation: fade 0.16s ease-out both;
+  box-shadow: 0 10px 32px var(--shadow); animation: dialog-in var(--dur) var(--ease-out) both;
 }
+.dialog.closing { pointer-events: none; animation: dialog-out var(--dur-fast) var(--ease-in) both; }
+@keyframes dialog-in { from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); } }
+@keyframes dialog-out { to { opacity: 0; transform: translate(-50%, -50%) scale(0.98); } }
 .dialog h2 { margin: 0 0 8px; font-size: 18px; font-family: var(--serif); letter-spacing: 0.04em; }
 .dialog p { margin: 0 0 16px; color: var(--muted); font-size: 15px; line-height: 1.7; }
 .dialog input { margin: 4px 0 16px; }
@@ -377,7 +409,6 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .dialog-actions button { min-width: 88px; }
 .sheet-close { position: absolute; top: 6px; right: 6px; width: var(--tap); height: var(--tap); padding: 0; display: grid; place-items: center; border: none; background: transparent; color: var(--muted); }
 .sheet-close:hover { color: var(--fg); }
-.sheet h2 { padding-right: 40px; }
 /* A sheet without a title: keep its first row clear of the close button. */
 .sheet-close + :not(h2) { margin-top: 30px; }
 /* Rewriting a passage looks like the passage (AUDIT_V4 6.6): story font and size, growing with the text. */
@@ -387,15 +418,19 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 }
 .sheet[aria-label="改我的行动"] textarea { min-height: 3lh; }
 @keyframes rise { from { transform: translateY(28px); opacity: 0; } }
+@keyframes sink { to { transform: translateY(32px); opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
 @keyframes fade { from { opacity: 0; } }
 @keyframes fade-up { from { opacity: 0; transform: translateY(4px); } }
 
 .panel {
   position: fixed; inset: 0; z-index: 21; display: flex; flex-direction: column;
   background-color: var(--bg); background-image: var(--glow), var(--grain);
-  animation: slide 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: slide var(--dur) var(--ease-out) both;
 }
 @keyframes slide { from { transform: translateX(28px); opacity: 0; } }
+.panel.leaving { pointer-events: none; animation: slide-out var(--dur-fast) var(--ease-in) both; }
+@keyframes slide-out { to { transform: translateX(28px); opacity: 0; } }
 .tabs { display: flex; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tabs button { border: none; background: transparent; min-height: var(--tap); padding: 6px 11px; border-radius: 0; white-space: nowrap; font-family: var(--serif); transition: color 0.15s, box-shadow 0.15s; }
 .tabs button[aria-selected="true"] { color: var(--accent); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
@@ -415,12 +450,13 @@ button:has(> .icon) { display: inline-flex; align-items: center; justify-content
 .toast {
   position: fixed; left: 0; right: 0; top: calc(60px + env(safe-area-inset-top)); z-index: 40;
   width: fit-content; max-width: min(90vw, 560px); margin: 0 auto; display: flex; align-items: center; gap: 12px;
-  padding: 9px 16px; border-radius: 6px; background: rgba(42, 32, 25, 0.92); color: #f6eedc; font-size: 14px; text-align: center;
+  padding: 9px 16px; border-radius: 6px; background: var(--toast-bg); color: var(--toast-fg); font-size: 14px; text-align: center;
   box-shadow: 0 4px 16px var(--shadow); animation: toast 0.18s ease-out both;
 }
-:root[data-theme="night"] .toast { background: rgba(233, 220, 197, 0.95); color: #15171b; }
 @keyframes toast { from { opacity: 0; transform: translateY(-6px); } }
-.toast-action { min-height: 32px; padding: 2px 10px; border: 1px solid currentColor; border-radius: 3px; background: transparent; color: inherit; font-size: 14px; white-space: nowrap; }
+.toast.leaving { animation: toast-out var(--dur-fast) var(--ease-in) both; }
+@keyframes toast-out { to { opacity: 0; transform: translateY(-4px); } }
+.toast-action { position: relative; min-height: 32px; padding: 2px 10px; border: 1px solid currentColor; border-radius: 3px; background: transparent; color: inherit; font-size: 14px; white-space: nowrap; }
 .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
 .segmented button { min-height: var(--tap); padding: 6px 14px; }
 .segmented button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
@@ -437,7 +473,7 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; backgro
 .picker small { color: var(--muted); font-size: 13px; }
 .picker > span:last-child { color: var(--accent); font-size: 18px; }
 .links { margin: 0; font-size: 14px; color: var(--muted); }
-button.link { min-height: 32px; padding: 0 2px; border: none; background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+button.link { position: relative; min-height: 32px; padding: 0 2px; border: none; background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 .input-tools { display: flex; gap: 4px; align-items: stretch; }
 .input-tools input { flex: 1; min-width: 0; }
 /* Our own 看 button shows the key; Edge's built-in eye would be a second one. */
@@ -483,6 +519,12 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 .settings .field-line > input { padding-right: 40px; }
 .steps { margin: 0; padding-left: 22px; color: var(--fg); font-size: 14px; line-height: 1.8; }
 .theme-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+/* 字号与主题 (play/ReadingQuick.tsx). */
+.reading-btn span { font-family: var(--serif); font-size: 17px; letter-spacing: 0.02em; }
+.size-stepper { display: flex; align-items: center; gap: 12px; }
+.size-stepper button { flex: 1; display: inline-flex; align-items: baseline; justify-content: center; gap: 2px; font-size: 16px; }
+.size-a { font-family: var(--serif); font-size: 20px; } .size-a.small-a { font-size: 15px; }
+.size-now { min-width: 3em; text-align: center; font-family: var(--serif); font-size: 16px; }
 .theme-card { display: grid; justify-items: center; gap: 6px; padding: 10px 4px; font-size: 14px; }
 .theme-card[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .theme-card .swatch { width: 36px; height: 24px; border-radius: 3px; border: 1px solid var(--line); }
@@ -513,13 +555,11 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 
 /* ---------- new game ---------- */
 .sticky-bar { position: sticky; bottom: 0; z-index: 2; padding: 10px 0 calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 3px double var(--line); box-shadow: 0 -12px 12px -6px color-mix(in srgb, var(--bg) 90%, transparent); }
-.template-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.template-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .template-card { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 3px; }
-.template-card b { font-size: 15px; font-weight: 600; font-family: var(--serif); }
+.template-card b { font-size: 15px; font-weight: 600; font-family: var(--serif); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .template-card small { font-size: 12px; color: var(--muted); }
 .template-card .hook { font-size: 13px; color: var(--fg); font-family: var(--serif); line-height: 1.5; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.template-card b { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.template-row { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important; }
 .random-card { display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; padding: 16px; border: 1px solid var(--accent); border-left-width: 5px; background: var(--surface); min-height: 76px; }
 .random-card b { display: block; font-family: var(--serif); font-size: 19px; letter-spacing: 0.1em; color: var(--accent); }
 .random-card small { color: var(--muted); font-size: 14px; }
@@ -529,7 +569,15 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 .fold-head b { font-family: var(--serif); font-weight: 600; font-size: 15px; }
 .fold-head small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fold-head > span:last-child { color: var(--accent); font-size: 14px; flex-shrink: 0; }
-.fold-body { padding: 0 14px 14px; }
+.fold-body { padding: 0 14px 14px; animation: fade-up var(--dur) var(--ease-out); }
+.fold-chevron { display: inline-block; margin-left: 4px; font-style: normal; transition: transform var(--dur-fast) var(--ease-out); }
+.fold.open .fold-chevron { transform: rotate(90deg); }
+/* Small-looking controls still get a 44px touch area (DESIGN_SPEC §4). */
+.toast-action::after, button.link::after, .tip button::after { content: ""; position: absolute; inset: -6px -2px; }
+/* Press feedback (DESIGN_SPEC §6): rows and cards answer a touch the way 建议选项 do. */
+.sheet-menu button:active:not(:disabled), .mode-option:active:not(:disabled), .world-open:active, .fold-head:active { background: var(--accent-soft); }
+.icon-btn:active:not(:disabled) { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.sheet-menu button, .mode-option, .fold-head, .icon-btn { transition: background-color var(--dur-fast) ease-out; }
 .wanted { border-color: var(--warn) !important; }
 button.primary.soft { background: color-mix(in srgb, var(--accent) 70%, var(--line)); border-color: transparent; }
 .template-card.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
@@ -579,7 +627,6 @@ button.danger-text { color: var(--loss); }
 .recap-card p { margin: 4px 0 0; }
 .recap-label { display: inline-block; margin-right: 8px; font-size: 13px; color: var(--muted); font-family: var(--sans); }
 /* ---------- 完整感 (PLAN_V4 direction G): 书摘卡, 这一世小传, 行状, 印谱 ---------- */
-.ending-seal { display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 20px; line-height: 1.05; }
 .ending-seal span { display: block; }
 .ending-life { min-height: var(--tap); padding: 0 18px; font-family: var(--serif); letter-spacing: 0.08em; border-color: var(--accent); color: var(--accent); background: transparent; }
 .share-preview { display: grid; place-items: center; min-height: 240px; max-height: 52vh; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--fg) 5%, transparent); }

@@ -49,7 +49,9 @@ export class HostBridge {
         await new Promise<void>((resolve, reject) => {
           const build = spawn("cargo", ["build", "-p", "story-dev-host"], { cwd: this.root, windowsHide: true, stdio: "ignore" });
           this.build = build;
-          const timer = setTimeout(() => { build.kill(); reject(new HostError("dev_host_build", "开发宿主构建超时，请运行 cargo build -p story-dev-host")); }, 180000);
+          // Slow machines can raise the limit with LISHI_DEV_HOST_BUILD_TIMEOUT_MS (or build first by hand).
+          const limit = Number(process.env.LISHI_DEV_HOST_BUILD_TIMEOUT_MS) || 180000;
+          const timer = setTimeout(() => { build.kill(); reject(new HostError("dev_host_build", "开发宿主构建超时，请运行 cargo build -p story-dev-host")); }, limit);
           build.once("error", () => { clearTimeout(timer); reject(new HostError("dev_host_build", "无法构建开发宿主，请先运行开发环境脚本和 cargo build -p story-dev-host")); });
           build.once("close", (code) => { if (this.build === build) this.build = null; clearTimeout(timer); code === 0 ? resolve() : reject(new HostError("dev_host_build", "开发宿主尚未构建，请运行 cargo build -p story-dev-host")); });
         });

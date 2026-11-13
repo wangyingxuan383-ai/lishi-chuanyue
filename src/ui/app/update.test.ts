@@ -104,6 +104,19 @@ describe("latestRelease without network", () => {
     expect((await latestRelease(api(JSON.stringify([release("v0.11.0", { assets: "none" })])).platform))?.assets).toEqual([]);
   });
 
+  it("on Android skips a newer release published with source only (D158)", async () => {
+    const apk = (version: string) => ({ name: `chuanyue-${version}.apk`, size: 1000, state: "uploaded", digest: null,
+      browser_download_url: `${REPO_URL}/releases/download/v${version}/chuanyue-${version}.apk` });
+    const items = [
+      release("v0.13.0", { prerelease: true, assets: [] }),
+      release("v0.12.1", { prerelease: true, assets: [] }),
+      release("v0.11.17", { prerelease: true, assets: [apk("0.11.17")] }),
+    ];
+    expect((await latestRelease(api(JSON.stringify(items)).platform))?.version).toBe("0.13.0");
+    expect((await latestRelease(api(JSON.stringify(items)).platform, { needPackage: true }))?.version).toBe("0.11.17");
+    expect(await latestRelease(api(JSON.stringify(items.slice(0, 2))).platform, { needPackage: true })).toBeNull();
+  });
+
   it("filters invalid tags, drafts and malformed entries before choosing a version", async () => {
     const items = [
       null, false, 123, [], {}, release(99), release(null), release("999.0.0-rc.01"),

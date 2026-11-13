@@ -153,10 +153,10 @@ export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganiz
           <button className="ghost" disabled={busy || organizing} onClick={() => open({ type: "card", kind: "时代", card: eraCard })}>{eraCard ? "编辑" : "写一张"}</button>
         </div>
         {eraCard ? <>
-          <p className="muted" style={{ margin: "2px 0 6px" }}>{eraCard.name}{eraCard.source ? ` · ${SOURCE[eraCard.source]}` : ""} · 每回合都交给 AI</p>
+          <p className="muted codex-note">{eraCard.name}{eraCard.source ? ` · ${SOURCE[eraCard.source]}` : ""} · 每回合都交给 AI</p>
           <p className="codex-text">{expanded ? eraCard.content : preview(eraCard.content, 90)}</p>
           {eraCard.content.length > 90 && <button className="ghost" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : "展开"}</button>}
-        </> : <p className="muted" style={{ margin: "2px 0 0" }}>还没有{eraLabel}，AI 只按故事设定来写。可以写下这个世界的称谓、货币、风俗和其他背景。</p>}
+        </> : <p className="muted codex-note mb-0">还没有{eraLabel}，AI 只按故事设定来写。可以写下这个世界的称谓、货币、风俗和其他背景。</p>}
       </section>
       <button className="ghost t-left" onClick={onOpenStory}>故事设定与要点 ›</button>
       <button className="ghost t-left" disabled={busy || organizing || deleting} onClick={() => setBuiltin(true)}>内置资料与灵感 ›</button>
@@ -194,7 +194,7 @@ export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganiz
         );
         return (
           <section key={kind}>
-            <div className="row" style={{ justifyContent: "space-between", minHeight: "var(--tap)" }}>
+            <div className="row between tap-row">
               <b>{kind}{list.length ? ` ${list.length}` : ""}</b>
               {!selecting && (
                 <button className="ghost" aria-label={`新建${kind}`} disabled={busy} onClick={() => open(kind === "地点" ? { type: "place", place: null } : { type: "card", kind, card: null })}>
@@ -203,7 +203,7 @@ export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganiz
               )}
             </div>
             {list.length ? list.map(selecting ? pick : row)
-              : <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>{query.trim() ? "没有找到匹配的设定" : hint}</p>}
+              : <p className="muted small mt-1 mb-0">{query.trim() ? "没有找到匹配的设定" : hint}</p>}
           </section>
         );
       })}

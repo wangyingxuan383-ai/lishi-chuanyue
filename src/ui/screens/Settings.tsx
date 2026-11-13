@@ -29,8 +29,8 @@ const TITLES: Record<Page, string> = {
   home: "设置", services: "AI 服务", writing: "写作与叙事（新开一局的默认）", memory: "记忆与整理", play: "游玩默认",
   reading: "阅读与外观", notify: "通知与提醒", data: "存档与数据", network: "网络与代理", about: "关于与更新", dev: "开发者",
 };
-const THEMES: [Reading["theme"], string][] = [["auto", "跟随系统"], ["paper", "纸张"], ["day", "白天"], ["night", "夜间"]];
-const SIZES: [number, string][] = [[16, "小"], [18, "中"], [20, "大"], [22, "特大"]];
+export const THEMES: [Reading["theme"], string][] = [["auto", "跟随系统"], ["paper", "纸张"], ["day", "白天"], ["night", "夜间"]];
+export const SIZES: [number, string][] = [[16, "小"], [18, "中"], [20, "大"], [22, "特大"]];
 // Search only these public descriptions, never service addresses or credentials.
 const FIND_WORDS: Record<string, string> = {
   services: "连接 模型 服务 Key 密钥 主模型 辅助模型",
@@ -133,7 +133,7 @@ export default function Settings() {
 }
 
 /** One labelled choice row: a name, a line on what it does, the options. */
-function Choice<T extends string | number | boolean>({ label, note, value, options, onChange }: {
+export function Choice<T extends string | number | boolean>({ label, note, value, options, onChange }: {
   label: string; note?: string; value: T; options: [T, string][]; onChange: (v: T) => void;
 }) {
   return (
@@ -290,7 +290,7 @@ function ReadingPage() {
       <h3 className="settings-sub">更多</h3>
       <Choice label="生成时自动滚动" note="打开后，跟着新写出的内容往下读" value={reading.autoScroll} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ autoScroll: v })} />
       <Choice label="动画" note="弹层、标签出现时的轻微动画" value={reading.motion} options={[["system", "跟随系统"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />
-      <Choice label="触感" note="长按时轻轻振一下" value={reading.haptics} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ haptics: v })} />
+      <Choice label="触感" note="长按、发送和写完一段时轻轻振一下" value={reading.haptics} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ haptics: v })} />
       <Choice label="阅读时不锁屏" note="只在读故事时生效" value={reading.keepAwake} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ keepAwake: v })} />
     </>
   );

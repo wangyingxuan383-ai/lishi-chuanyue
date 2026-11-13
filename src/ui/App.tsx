@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { markNavigation } from "./app/motion";
 import { getPlatform, type Platform } from "../platform";
 import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
@@ -152,9 +153,10 @@ export default function App() {
   }, []);
 
   // A message belongs to the screen it was shown on (AUDIT_V4 1.10): moving on clears it.
-  const push = useCallback((r: Route) => { clearToast(); setStack((s) => [...s, r]); }, [clearToast]);
-  const replace = useCallback((r: Route) => { clearToast(); setStack((s) => [...s.slice(0, -1), r]); }, [clearToast]);
-  const pop = useCallback(() => { clearToast(); setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)); }, [clearToast]);
+  // The direction picks the screen entry animation (base.css, :root[data-nav]).
+  const push = useCallback((r: Route) => { clearToast(); markNavigation("push"); setStack((s) => [...s, r]); }, [clearToast]);
+  const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); setStack((s) => [...s.slice(0, -1), r]); }, [clearToast]);
+  const pop = useCallback(() => { clearToast(); markNavigation("pop"); setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)); }, [clearToast]);
   // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
   // a new request answers the one it replaces as cancelled.
   const dialogId = useRef(0);
@@ -248,7 +250,7 @@ export default function App() {
       {route.name === "settings" && <Settings />}
       {route.name === "guide" && <Guide />}
       {toastState && (
-        <div className="toast" role="status">
+        <div className={`toast${toastState.leaving ? " leaving" : ""}`} role="status">
           <span>{toastState.text}</span>
           {toastState.action && <button className="toast-action" onClick={() => { const run = toastState.action!.run; clearToast(); run(); }}>{toastState.action.label}</button>}
         </div>

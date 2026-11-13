@@ -64,7 +64,8 @@ export function createUpdateStore(repo: Repo, platform: Platform) {
         try {
           await repo.setSetting("updateCheckedAt", checkedAt);
           set({ checkedAt });
-          const release = await latestRelease(platform);
+          // Android installs in the app, so a release without its package does not count yet (D158).
+          const release = await latestRelease(platform, { needPackage: platform.name === "android" });
           await repo.setSetting("updateLatestRelease", release);
           set({ release });
         } catch {

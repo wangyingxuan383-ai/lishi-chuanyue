@@ -25,6 +25,8 @@ import { PassageCardSheet } from "../components/ShareCard";
 import { useShortcuts } from "../components/useShortcuts";
 import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { Icon } from "../components/Icon";
+import { buzz } from "../app/motion";
+import { ReadingQuickSheet } from "./play/ReadingQuick";
 import { adoptRewrite, adoptCanonCorrection, assertWritingAnchor, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview } from "../../engine/writing/assist";
 import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
 import { WritingDesk } from "../components/WritingDesk";
@@ -90,7 +92,11 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const modeList = watch ? WATCH_MODES : MODES;
   const currentMode = modeList[modeIndex] ?? modeList[0];
   // Switching who plays the protagonist starts again from the first way of writing.
-  useEffect(() => { setModeIndex(0); }, [watch]);
+  useEffect(() => { if (draftLoaded.current) setModeIndex(0); }, [watch]);
+  // The words in the box, the 幕后要求 and the way of writing are kept per story (R28):
+  // leaving the story or closing the app does not lose them; sending clears them.
+  const draftLoaded = useRef(false);
+  const draftTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [writing, setWriting] = useState<WritingDraft | null>(null);
   const [desk, setDesk] = useState(false);
   const writingScope = useRef({ worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active: true });
@@ -99,6 +105,26 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   useEffect(() => { setWriting(null); setDesk(false); }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
+  useEffect(() => {
+    if (!world || draftLoaded.current) return;
+    void game.repo.getSetting<{ text?: string; note?: string; mode?: string } | null>(`draft:${worldId}`, null).then((saved) => {
+      draftLoaded.current = true;
+      if (!saved) return;
+      if (saved.text) setInput((current) => current || saved.text!);
+      if (saved.note) { setNote(saved.note); setNoteOpen(true); }
+      const index = modeList.findIndex((m) => m.mode === saved.mode);
+      if (index > 0) setModeIndex(index);
+    }).catch(() => { draftLoaded.current = true; });
+  }, [world, worldId]);
+  useEffect(() => {
+    if (!draftLoaded.current) return;
+    clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      const text = input.trim() ? input : "", kept = noteOpen && note.trim() ? note : "";
+      void game.repo.setSetting(`draft:${worldId}`, text || kept || currentMode.mode !== modeList[0].mode ? { text, note: kept, mode: currentMode.mode } : null).catch(() => {});
+    }, 500);
+    return () => clearTimeout(draftTimer.current);
+  }, [input, note, noteOpen, currentMode.mode, worldId]);
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [menuMore, setMenuMore] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
@@ -106,7 +132,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "reading" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
   const wide = useWide();
@@ -202,9 +228,13 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   }, [game, worldId, pop]);
 
   // No new words for 8 seconds while writing: say so, rather than a silent cursor (AUDIT 5.5).
+  // Before the first words, the waiting line counts the seconds (R28).
+  const [waited, setWaited] = useState(0);
   useEffect(() => {
-    if (!gen) { setSlow(false); return; }
-    const id = setInterval(() => setSlow(Date.now() - lastWords.current > 8000), 1000);
+    if (!gen) { setSlow(false); setWaited(0); return; }
+    const started = Date.now();
+    setWaited(0);
+    const id = setInterval(() => { setSlow(Date.now() - lastWords.current > 8000); setWaited(Math.floor((Date.now() - started) / 1000)); }, 1000);
     return () => clearInterval(id);
   }, [!!gen]);
   // After the third turn, once ever: everything a passage can do is behind a long press (AUDIT 4.2).
@@ -361,6 +391,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       showSaved(e.node);
       if (!resumedAutoplay.current) handle.current = null;
       failures.current = 0;
+      buzz(game.platform);
       void refresh();
       void countTurn();
     } else if (e.type === "failed") {
@@ -382,6 +413,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
         }
         if (e.reason === "cancelled") { if (e.runId) void inspectSavedExecution(e.detail, e.runId); return; }
         failures.current++;
+        buzz(game.platform);
         const actions: { label: string; run: () => void }[] = [];
         if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup", profileId: profile?.id }) });
         else {
@@ -468,7 +500,8 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     void beforeGenerating(() => {
       const mode = override?.mode ?? (input.trim() ? currentMode.mode : "continue");
       const text = override?.text ?? (mode === "continue" ? "" : input.trim());
-      const directorNote = overrideNote !== undefined ? overrideNote : !override && !watch && noteOpen && note.trim() ? note.trim() : null;
+      // An open 幕后要求 goes with a typed action and with a tapped choice alike.
+      const directorNote = overrideNote !== undefined ? overrideNote : !watch && noteOpen && note.trim() ? note.trim() : null;
       lastWords.current = Date.now();
       setSlow(false);
       retry.current = () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); };
@@ -478,7 +511,9 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       setInput("");
       setNote("");
       setNoteOpen(false);
-      setModeIndex(0);
+      // 做/说 stay for the next turn; 写 and 幕后 are one-off ways of writing.
+      if (mode === "write" || (mode === "direct" && !watch)) setModeIndex(0);
+      buzz(game.platform);
       // A failure gives the words back to the box (and 再试一次 sends them again), choices included.
       handle.current = game.play(worldId, { mode, text, directorNote }, onEvent(mode === "continue" || mode === "skip" ? null : { mode, text, note: directorNote ?? "" }));
     });
@@ -762,11 +797,12 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           <div className="subtitle">{now.text}</div>
         </button>
         {!wide && <button className="icon-btn" aria-label="角色" title="角色" onClick={() => setPanel(true)}><span className="name-seal" aria-hidden="true">{(state.protagonist.name.trim() || "我")[0]}</span></button>}
+        <button className="icon-btn reading-btn" aria-label="字号与主题" title="字号与主题" onClick={() => setSheet("reading")}><span aria-hidden="true">Aa</span></button>
         <button className="icon-btn" aria-label="更多" title="更多" onClick={() => setSheet("more")}><Icon name="more" /></button>
       </div>
       <ModeBanner state={state} onScript={() => setSheet("script")} onChallenge={() => setSheet("challenge")} />
 
-      <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
+      <div className="story-wrap">
         <div className="story" ref={scroller} onScroll={onScroll}>
           <div className="story-inner" style={(gen?.minHeight ?? agentFloor) === undefined ? undefined : { minHeight: gen?.minHeight ?? agentFloor }}>
             {hasMore && <button className="load-more ghost" onClick={loadMore}>加载更早的剧情</button>}
@@ -789,6 +825,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
                       )}
                       <RegenButton title={mouse ? "重说（Ctrl+R），右键选重说的要求" : undefined} onTap={() => regenerate(null)} onLong={() => setSheet("hints")} />
                       <button className="ghost" title="重说时提个要求" onClick={() => setSheet("hints")}>换个写法</button>
+                      {node.parentId && <button className="ghost" title={mouse ? "撤销这一段（Ctrl+Z）" : "撤销这一段"} onClick={() => void undo()}>撤销</button>}
                       <button className="ghost" aria-label="这一段还能做什么" title={mouse ? "这一段还能做什么（也可以右键点这一段）" : undefined} onClick={() => setMenuNode(node)}><Icon name="more" size={20} /></button>
                     </div>
                   )}
@@ -802,9 +839,10 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
               <div className="turn">
                 {gen.action?.mode === "write" && gen.action.text && <div className="turn-written"><StoryText text={gen.action.text} /></div>}
                 {gen.action && gen.action.mode !== "continue" && gen.action.mode !== "write" && gen.action.text && <div className={`turn-action ${gen.action.mode}`}>{gen.action.text}</div>}
-                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line"><span className="cursor-blink">{statusText || waitingLine(place, now.hour)}</span></p>}
+                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line"><span className="cursor-blink">{statusText || waitingLine(place, now.hour)}</span>{waited >= 2 && <span className="waited">{waited} 秒</span>}</p>}
                 {gen.text && statusText && <p className="status-line">{statusText}</p>}
-                {slow && <p className="status-line">还在写，稍等…（不想等可以点“停止”）</p>}
+                {slow && gen.text && <p className="status-line">还在写，稍等…（不想等可以点“停止”）</p>}
+                {slow && !gen.text && waited >= 8 && <p className="status-line">还没收到回复，稍等…（不想等可以点“停止”）</p>}
               </div>
             )}
             {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
@@ -829,7 +867,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
             {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
           </div>
         </div>
-        {!atBottom && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
+        {!atBottom && <button className={`to-bottom${gen?.text ? " fresh" : ""}`} aria-label={gen?.text ? "下面有新写的内容，回到底部" : "回到底部 ↓"} onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
       </div>
 
       <PlayDock dead={dead} state={state} watch={watch} auto={auto} showChoices={showChoices} input={input} typing={typing}
@@ -889,6 +927,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       {sheet === "life" && <LifeSheet world={world} state={state} headId={head.id} dead={dead} onClose={() => setSheet(null)} />}
       {cardNode && <PassageCardSheet world={world} node={cardNode} onClose={() => setCardNode(null)} />}
       {sheet === "keys" && <ShortcutsSheet onClose={() => setSheet(null)} />}
+      {sheet === "reading" && <ReadingQuickSheet onClose={() => setSheet(null)} />}
       {sheet === "ask" && <AskSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (

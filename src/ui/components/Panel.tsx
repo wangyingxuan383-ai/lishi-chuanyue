@@ -1,6 +1,6 @@
 // Character & world panel (PLAN_V3 §4.5); the 设定 tab is the 设定集 (§4.14).
 import { KnowledgeRecords } from "./Continuity";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
 import { rejectedReason } from "../../engine/game";
@@ -9,6 +9,7 @@ import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
 import type { Item, WorldSettings, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
+import { EXIT_MS, motionOn } from "../app/motion";
 import { Codex } from "./Codex";
 import { Goals } from "./Goals";
 import { Journal } from "./Journal";
@@ -114,7 +115,7 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
               <span className="field-suffix">{[...clean].length}/{NAME_MAX}</span>
             </span>
           </label>
-          <label style={{ width: 92 }}>年龄
+          <label className="stat-label">年龄
             <input aria-label="年龄" inputMode="numeric" value={age} placeholder="不详" className={ageBad ? "wanted" : ""} onChange={(e) => setAge(e.target.value.replace(/\D/g, "").slice(0, state.era.mode === "free" ? 6 : 3))} />
           </label>
         </div>
@@ -207,11 +208,21 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   const [item, setItem] = useState<{ item: Item | null } | null>(null);
   const editing = draft !== null;
   const change = (fn: (s: WorldState) => void) => setDraft((s) => { const next = structuredClone(s!); fn(next); return next; });
+  // Closing slides the panel back out to the right before it is removed (R28).
+  const [leaving, setLeaving] = useState(false);
+  const leaveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(leaveTimer.current), []);
+  const close = () => {
+    if (leaving) return;
+    if (!motionOn()) { onClose(); return; }
+    setLeaving(true);
+    leaveTimer.current = setTimeout(onClose, EXIT_MS);
+  };
   useBack(() => {
     if (saving) return true;
     if (editing) { setDraft(null); return true; }
     if (docked) return false;
-    onClose();
+    close();
     return true;
   });
   const shown = draft ?? state;
@@ -258,9 +269,9 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   };
 
   return (
-    <div className={`panel${docked ? " docked" : ""}`} role={docked ? "complementary" : "dialog"} aria-label="角色">
+    <div className={`panel${docked ? " docked" : ""}${leaving ? " leaving" : ""}`} role={docked ? "complementary" : "dialog"} aria-label="角色">
       <div className="topbar">
-        {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={onClose}><Icon name="back" /></button>}
+        {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={close}><Icon name="back" /></button>}
         <div className="title"><h1>{tab === "我" ? "我" : me.name}</h1>{tab !== "我" && <div className="subtitle">{[me.gender, me.age ? `${me.age} 岁` : ""].filter(Boolean).join(" · ")}</div>}</div>
         {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => { setProblem(null); setBase(state); setDraft(structuredClone(state)); }}>修改</button>}
       </div>

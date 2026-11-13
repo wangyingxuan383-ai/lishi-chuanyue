@@ -30,6 +30,7 @@ const titles = [
   "纸张、白天、夜间主题",
   "20px 系统字号与菜单按钮溢出",
   "流式生成时既有回合的 DOM 稳定性",
+  "动效退场、草稿与输入方式、字号快捷与撤销",
 ];
 const results = [];
 const pageErrors = [];
@@ -60,7 +61,8 @@ const clean = (text) => String(text).replaceAll("|", "／").replaceAll("\n", " "
 const loopback = (hostname) => ["127.0.0.1", "localhost", "[::1]"].includes(hostname);
 const play = () => page.locator(".play:visible:not(.agent-conversation)");
 const story = () => play().locator(".story");
-const sheet = () => page.locator(".sheet:visible").last();
+// A closing sheet (R28 exit animation) still shows for a moment; only open ones count.
+const sheet = () => page.locator(".sheet-layer:not(.closing) .sheet:visible").last();
 
 function verify(name, ok, detail = "") {
   const check = { name, status: ok ? "PASS" : "FAIL", detail };
@@ -106,8 +108,10 @@ async function step(id, work) {
 
 async function closeSheets() {
   for (let count = 0; count < 8; count++) {
-    if (!await page.locator(".sheet:visible").count()) return;
+    await page.locator(".sheet-layer.closing").first().waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+    if (!await page.locator(".sheet-layer:not(.closing) .sheet:visible").count()) return;
     await sheet().locator(".sheet-close").first().click();
+    await page.locator(".sheet-layer.closing").first().waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
     await settle();
   }
   throw new Error("弹层未能关闭，无法继续独立检查");
@@ -483,6 +487,69 @@ async function main() {
           delete window.__playProbe;
         });
       }
+    });
+    await step(13, async () => {
+      await ensurePlay();
+      // Exit motion: a dismissed sheet stays a moment with .closing, then is removed.
+      await play().locator(".topbar").getByRole("button", { name: "更多", exact: true }).click();
+      await sheet().locator(".sheet-menu").waitFor();
+      // Watch inside the page: a round trip from the test can take longer than the animation.
+      await page.evaluate(() => {
+        const watch = { closingAt: 0, removedAt: 0, clickAt: 0 };
+        watch.observer = new MutationObserver(() => {
+          const now = performance.now();
+          if (!watch.closingAt && document.querySelector(".sheet-layer.closing")) watch.closingAt = now;
+          if (watch.closingAt && !watch.removedAt && !document.querySelector(".sheet-layer")) watch.removedAt = now;
+        });
+        watch.observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
+        document.addEventListener("click", () => { watch.clickAt ||= performance.now(); }, { capture: true, once: true });
+        window.__exitWatch = watch;
+      });
+      await page.locator(".sheet-layer:not(.closing) .backdrop").last().click({ position: { x: 20, y: 20 } });
+      await page.waitForTimeout(600);
+      const exit = await page.evaluate(() => { const w = window.__exitWatch; w.observer.disconnect(); delete window.__exitWatch;
+        return { closing: w.closingAt > 0, stay: w.removedAt && w.closingAt ? Math.round(w.removedAt - w.closingAt) : -1, left: document.querySelectorAll(".sheet-layer").length }; });
+      verify("弹层关闭时先播放退场，约 0.2 秒后移除", exit.closing && exit.stay >= 100 && exit.stay <= 450 && exit.left === 0, `退场 ${exit.closing ? "有" : "无"}；停留 ${exit.stay}ms；剩 ${exit.left} 个`);
+      await page.evaluate(() => { document.documentElement.dataset.motion = "off"; });
+      await play().locator(".topbar").getByRole("button", { name: "更多", exact: true }).click();
+      await sheet().locator(".sheet-menu").waitFor();
+      await page.locator(".sheet-layer .backdrop").last().click({ position: { x: 20, y: 20 } });
+      const immediate = await page.locator(".sheet-layer").count();
+      verify("关闭动效时弹层立即移除", immediate === 0, `点击后剩 ${immediate} 个`);
+      await page.evaluate(() => { document.documentElement.dataset.motion = "system"; });
+
+      // 字号与主题: A+ changes the story size at once; A− brings it back.
+      const size = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--story-size").trim());
+      const before = await size();
+      await play().locator(".topbar").getByRole("button", { name: "字号与主题", exact: true }).click();
+      await sheet().getByRole("button", { name: "字号大一些", exact: true }).click();
+      const bigger = await size();
+      await shot("reading-quick");
+      await sheet().getByRole("button", { name: "字号小一些", exact: true }).click();
+      const back = await size();
+      verify("字号快捷弹层改字号立即生效并可改回", bigger !== before && back === before, `${before} → ${bigger} → ${back}`);
+      await closeSheets();
+
+      // Undo sits beside 重说 on the latest passage.
+      verify("最新一段的工具行有撤销", await story().locator(".turn-tools").getByRole("button", { name: "撤销", exact: true }).isVisible());
+
+      // Draft and way of writing survive leaving the story.
+      await play().locator(".inputbar .mode-btn").click();
+      await sheet().locator(".mode-option", { hasText: /^说/ }).first().click();
+      await page.locator(".sheet-layer.closing").first().waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+      await play().locator(".inputbar textarea").fill("先别急着走，草稿留着");
+      await page.waitForTimeout(900);
+      await play().locator(".topbar").getByRole("button", { name: "返回", exact: true }).click();
+      await page.locator(".world-open:visible").first().click();
+      await play().waitFor();
+      await page.waitForFunction(() => document.querySelector(".preserved-play:not([data-inactive]) .inputbar textarea")?.value === "先别急着走，草稿留着", null, { timeout: 15_000 }).catch(() => {});
+      const restored = await play().locator(".inputbar textarea").inputValue();
+      const modeLabel = (await play().locator(".inputbar .mode-btn").textContent())?.trim();
+      verify("离开再回到故事，输入框草稿恢复", restored === "先别急着走，草稿留着", restored || "（空）");
+      verify("离开再回到故事，输入方式仍是“说”", !!modeLabel?.startsWith("说"), modeLabel ?? "");
+      await shot("draft-restored");
+      await play().locator(".inputbar textarea").fill("");
+      await page.waitForTimeout(700);
     });
   } catch (error) {
     fatal = shortError(error);

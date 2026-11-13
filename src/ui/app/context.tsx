@@ -1,5 +1,6 @@
 // App-wide services, navigation stack and the Android back chain.
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { EXIT_MS, motionOn } from "./motion";
 import type { Platform } from "../../platform";
 import type { Game } from "../../engine/game";
 import type { Profile } from "../../engine/llm/providers";
@@ -64,7 +65,7 @@ export interface AppValue {
 }
 
 export interface ToastAction { label: string; run: () => void }
-export interface ToastState { text: string; action?: ToastAction }
+export interface ToastState { text: string; action?: ToastAction; /** Fading out (R28); removed a moment later. */ leaving?: boolean }
 
 const AppContext = createContext<AppValue | null>(null);
 
@@ -95,7 +96,12 @@ export function useToast(): [ToastState | null, (text: string, action?: ToastAct
   const show = useCallback((text: string, action?: ToastAction) => {
     setToast({ text, action });
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => setToast(null), action ? 5000 : 2200);
+    timer.current = setTimeout(() => {
+      // Fade out first, then remove; a new toast in between replaces it.
+      if (!motionOn()) { setToast(null); return; }
+      setToast((t) => t && { ...t, leaving: true });
+      timer.current = setTimeout(() => setToast(null), EXIT_MS);
+    }, action ? 5000 : 2200);
   }, []);
   const clear = useCallback(() => { clearTimeout(timer.current); setToast(null); }, []);
   return [toast, show, clear];

@@ -74,7 +74,7 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
         <input type="search" aria-label="搜索" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜正文、人物、设定、回目" />
         {query.trim() ? (
           <section className="stack gap-0" aria-label="搜索结果">
-            <p className="muted" style={{ margin: "0 0 4px" }}>{hits.length ? `找到 ${hits.length} 处${hits.filter((h) => h.kind === "正文").length >= 60 ? "（正文只列最近 60 段）" : ""}` : "没有找到。换个词试试，如人名、地名。"}</p>
+            <p className="muted m-0 mb-1">{hits.length ? `找到 ${hits.length} 处${hits.filter((h) => h.kind === "正文").length >= 60 ? "（正文只列最近 60 段）" : ""}` : "没有找到。换个词试试，如人名、地名。"}</p>
             {hits.map((hit, i) => {
               const content = (
                 <div className="grow">

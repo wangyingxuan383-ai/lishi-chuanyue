@@ -60,7 +60,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android-agent-host"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "book-pdf",
@@ -2179,7 +2179,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lishi-app"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "book-pdf",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "pi-host"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3962,7 +3962,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "story-core"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3988,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "story-dev-host"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "book-pdf",

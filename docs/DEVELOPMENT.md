@@ -119,6 +119,7 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 - `rust-toolchain.toml` 要求两个安卓 target，没有安卓工具时 rustup 会尝试下载它们。只做前端、核心和开发台时，可以先设 `RUSTUP_TOOLCHAIN=1.99.0`，直接用已装好的工具链。
 - 仓库放在网络挂载的目录（如 sshfs）上时，把编译产物放到本地盘：`CARGO_TARGET_DIR=~/lishi-target`。开发台和检查脚本都会按这个变量找 `story-dev-host`。
 - 内存小的机器：`CARGO_BUILD_JOBS=2`、`CARGO_PROFILE_DEV_DEBUG=0` 能明显降低编译时的内存占用；前端测试可用 `pnpm exec vitest run --maxWorkers=1`，避免超时。
+- 开发台每次启动都会先 `cargo build -p story-dev-host`，超过 3 分钟就放弃，页面停在“正在打开…”。改过 Rust 代码或版本号之后，先手动构建一次，或用 `LISHI_DEV_HOST_BUILD_TIMEOUT_MS` 放宽时限。
 - 界面检查用 Chromium：`LISHI_BROWSER=/usr/bin/chromium`。冷启动慢时用 `LISHI_UI_TIMEOUT_MS=45000` 放宽等待时间。
 - 浏览器开发台里的助手需要固定版本的 Node 与 SDK（`LISHI_PI_NODE`），没准备时助手页会提示运行环境未准备；其他功能不受影响。
 
