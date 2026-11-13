@@ -140,7 +140,7 @@ impl Fixture {
         }
     }
     async fn settled(&self) -> RunSnapshot {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let s = self.engine.snapshot("auto", 0).unwrap();
                 if s.status != "running" && self.leases.load(Ordering::SeqCst) == 0 {
@@ -219,22 +219,26 @@ async fn native_sequence_finishes_without_reader_and_uses_new_state() {
 }
 
 #[tokio::test]
-async fn whole_sequence_budget_pauses_and_resume_never_bypasses_it() {
+async fn whole_sequence_budget_pauses_and_continuing_grants_one_more_allowance() {
+    // D159: the run pauses at its allowance (30 requests); 接着写完 continues the same
+    // run with one more allowance, and the totals already used stay recorded.
     let f = Fixture::new(false);
-    f.engine.start(f.plan(12)).unwrap();
+    f.engine.start(f.plan(34)).unwrap();
     let saved = f.settled().await;
     assert_eq!(saved.status, "paused", "{:?}", saved.error);
-    assert_eq!(saved.draft["steps"], 10);
-    assert_eq!(saved.budget.model_requests, 10);
-    assert_eq!(f.model.requests.lock().unwrap().len(), 10);
-    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 10);
-    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 11);
+    assert_eq!(saved.draft["steps"], 30);
+    assert_eq!(saved.budget.model_requests, 30);
+    assert_eq!(f.model.requests.lock().unwrap().len(), 30);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 30);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 31);
     f.engine.resume("auto").unwrap();
     let again = f.settled().await;
-    assert_eq!(again.status, "paused");
-    assert_eq!(again.draft["steps"], 10);
-    assert_eq!(f.model.requests.lock().unwrap().len(), 10);
-    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 10);
+    assert_eq!(again.status, "committed", "{:?}", again.error);
+    assert_eq!(again.result.as_ref().unwrap()["steps"], 34);
+    assert_eq!(again.budget.model_requests, 34);
+    assert_eq!(f.model.requests.lock().unwrap().len(), 34);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 34);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 35);
 }
 
 #[tokio::test]

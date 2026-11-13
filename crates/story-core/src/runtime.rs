@@ -41,8 +41,16 @@ impl Context {
     }
     fn step_budget(&mut self)->RunBudget {
         let mut used=self.budget();
-        if self.plan.meta["autoplayBudgetVersion"]=="per-passage-1"&&self.plan.meta["parentRun"].is_string(){
-            let base=&self.plan.meta["stepBudgetBase"];
+        // A run continued after a pause counts from that point (resumeBudgetBase, D159);
+        // an autoplay passage counts from its own start (stepBudgetBase).
+        // When both apply, the later point wins (counters only grow).
+        let resume=&self.plan.meta["resumeBudgetBase"];
+        let passage=self.plan.meta["autoplayBudgetVersion"]=="per-passage-1"&&self.plan.meta["parentRun"].is_string();
+        let step=&self.plan.meta["stepBudgetBase"];
+        let later=|a:&Value,b:&Value| a["modelRequests"].as_u64().unwrap_or(0)>=b["modelRequests"].as_u64().unwrap_or(0);
+        let chosen=match (resume.is_object(),passage&&step.is_object()) {(true,true)=>Some(if later(resume,step){resume}else{step}),(true,false)=>Some(resume),(false,true)=>Some(step),(false,false)=>None};
+        if let Some(base)=chosen.cloned(){
+            let base=&base;
             used.model_requests=used.model_requests.saturating_sub(base["modelRequests"].as_u64().unwrap_or(0) as u32);
             used.tool_calls=used.tool_calls.saturating_sub(base["toolCalls"].as_u64().unwrap_or(0) as u32);
             used.corrections=used.corrections.saturating_sub(base["corrections"].as_u64().unwrap_or(0) as u32);
@@ -134,7 +142,12 @@ impl Engine {
         if matches!(snapshot.status.as_str(), "committed" | "previewed") {
             return Ok(());
         }
-        let plan = self.store.plan(id)?;
+        let mut plan = self.store.plan(id)?;
+        // A run paused at its allowance continues with the same allowance again;
+        // the totals already used stay recorded (D159).
+        if snapshot.status == "paused" {
+            plan.meta["resumeBudgetBase"] = serde_json::to_value(&snapshot.budget)?;
+        }
         // Store::resume acquires ownership before changing a running flag.
         // A second process cannot mark the first owner's active run stopped.
         self.store.resume(id)?;
@@ -148,7 +161,10 @@ impl Engine {
     ) -> Result<()> {
         // Registration persists its fencing ticket. Do not run using the
         // caller's earlier copy, or a restarted process's former ownership.
-        let plan = self.store.activate_lease(&plan.id)?;
+        let resume_base = plan.meta["resumeBudgetBase"].clone();
+        let mut plan = self.store.activate_lease(&plan.id)?;
+        // The stored plan does not carry the pause point; keep the one resume() set (D159).
+        if resume_base.is_object() { plan.meta["resumeBudgetBase"] = resume_base; }
         let execution_ticket = execution_lease::ticket(&plan)?.ok_or(Error::Stale)?;
         let token = CancellationToken::new();
         let id = plan.id.clone();
@@ -160,10 +176,12 @@ impl Engine {
         drop(active);
         let engine = self.clone();
         let active_before = budget.active_ms;
+        // Time already spent before a pause does not count against the continued run.
+        let counted_before = active_before.saturating_sub(plan.meta["resumeBudgetBase"]["activeMs"].as_u64().unwrap_or(0));
         let total_ms = if plan.kind=="autoplay" && plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
-            300_000 * plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100)
+            crate::types::RUN_TIME_LIMIT_MS * plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100)
         } else {
-            300_000
+            crate::types::RUN_TIME_LIMIT_MS
         };
         let context = Arc::new(Mutex::new(Context {
             plan,
@@ -174,7 +192,7 @@ impl Engine {
             cancel: token.clone(),
         }));
         // The lease exists until settlement, including tools, extraction and commit.
-        let lease = (self.lease)(total_ms.saturating_sub(active_before));
+        let lease = (self.lease)(total_ms.saturating_sub(counted_before));
         tokio::spawn(async move {
             let _lease = lease;
             let heartbeat_done = CancellationToken::new();
@@ -196,12 +214,12 @@ impl Engine {
                     }
                 }
             });
-            let remaining = total_ms.saturating_sub(active_before);
+            let remaining = total_ms.saturating_sub(counted_before);
             let outcome = tokio::select! {
                     _=token.cancelled()=>Err(Error::Cancelled),
                     result=tokio::time::timeout(std::time::Duration::from_millis(remaining),engine.execute(context.clone()))=>match result {
                         Ok(result)=>result,
-                        Err(_)=>{token.cancel();Err(Error::Limit(if total_ms == 300_000 {"本次运行已达到 5 分钟上限"} else {"已达到本次时长上限"}))}
+                        Err(_)=>{token.cancel();Err(Error::Limit(if total_ms == crate::types::RUN_TIME_LIMIT_MS {crate::types::RUN_TIME_LIMIT_TEXT} else {"已达到本次时长上限"}))}
                     }
             };
             // An expired process may finish after another process resumed the
@@ -291,7 +309,7 @@ impl Engine {
         execution_lease::guard_plan(&*self.store.lock()?, &c.plan)?;
         let budget = c.budget();
         if c.plan.kind=="autoplay"&&c.plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
-            if budget.active_ms>=300_000*c.plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100){Err(Error::Limit("连播已达到各段合计的时间保护上限"))}else{Ok(())}
+            if budget.active_ms>=crate::types::RUN_TIME_LIMIT_MS*c.plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100){Err(Error::Limit("连播已达到各段合计的时间保护上限"))}else{Ok(())}
         } else {
             c.step_budget().time()
         }
@@ -321,14 +339,14 @@ impl Engine {
         }
         let request_limit = plan.meta["modelRequestLimit"]
             .as_u64()
-            .unwrap_or(10)
-            .clamp(1, 10) as u32;
+            .unwrap_or(crate::types::RUN_REQUEST_LIMIT as u64)
+            .clamp(1, crate::types::RUN_REQUEST_LIMIT as u64) as u32;
         {
             let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
             c.budget();
             if c.step_budget().model_requests >= request_limit {
-                return Err(Error::Limit(if request_limit == 10 {
-                    "本次已达到 10 次模型请求上限"
+                return Err(Error::Limit(if request_limit == crate::types::RUN_REQUEST_LIMIT {
+                    "本次生成用到的模型请求较多，已先停下"
                 } else {
                     "本次模型请求额度已用完"
                 }));
@@ -339,7 +357,7 @@ impl Engine {
                     .as_array()
                     .map(Vec::len)
                     .unwrap_or(0);
-                messages.insert(0,json!({"role":"system","content":format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次（内部写作、校核也计数）；工具还可调用{}次；尚余约{}秒。此前已实际读取原文{originals}段。独立查证可同批调用，优先使用已获得的原文和本批工具结果，不重复查询相同证据。额度不足时停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；Agent用commit_turn，原著改稿返回要求的完整JSON。",24u32.saturating_sub(local_used.tool_calls),300_000u64.saturating_sub(local_used.active_ms)/1000)}));
+                messages.insert(0,json!({"role":"system","content":format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次（内部写作、校核也计数）；工具还可调用{}次。此前已实际读取原文{originals}段。独立查证可同批调用，优先使用已获得的原文和本批工具结果，不重复查询相同证据。额度不足时停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；Agent用commit_turn，原著改稿返回要求的完整JSON。",crate::types::RUN_TOOL_LIMIT.saturating_sub(local_used.tool_calls))}));
             }
         }
         let before=crate::stage_context::report(&plan,purpose,&messages,&tools);
@@ -366,8 +384,8 @@ impl Engine {
                 let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
                 c.budget();
                 if c.step_budget().model_requests >= request_limit {
-                    return Err(Error::Limit(if request_limit == 10 {
-                        "本次已达到 10 次模型请求上限"
+                    return Err(Error::Limit(if request_limit == crate::types::RUN_REQUEST_LIMIT {
+                        "本次生成用到的模型请求较多，已先停下"
                     } else {
                         "本次模型请求额度已用完"
                     }));
@@ -376,7 +394,7 @@ impl Engine {
                 (
                     format!("model:{}", c.budget.model_requests),
                     c.cancel.clone(),
-                    300_000u64.saturating_sub(c.step_budget().active_ms),
+                    crate::types::RUN_TIME_LIMIT_MS.saturating_sub(c.step_budget().active_ms),
                 )
             };
             self.checkpoint(shared)?;
@@ -413,7 +431,7 @@ impl Engine {
                 _ = token.cancelled() => Err(Error::Cancelled),
                 result = tokio::time::timeout(std::time::Duration::from_millis(remaining), future) => match result {
                     Ok(value) => value,
-                    Err(_) => { token.cancel(); Err(Error::Limit("本次运行已达到 5 分钟上限")) }
+                    Err(_) => { token.cancel(); Err(Error::Limit(crate::types::RUN_TIME_LIMIT_TEXT)) }
                 }
             };
             self.checkpoint(shared)?;

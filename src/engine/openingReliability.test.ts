@@ -45,12 +45,15 @@ describe("opening and recovery contracts", () => {
     expect(nativeFailReason("failed", "原著核对：AI服务拒绝本次内容")).toBe("refused");
     expect(nativeFailReason("failed", "写作：connection timeout")).toBe("timeout");
     expect(nativeFailReason("cancelled", "")).toBe("cancelled");
+    // A run that used its own allowance is paused and can be continued, not a settings problem (D159).
+    expect(nativeFailReason("paused", "本次生成用到的模型请求较多，已先停下")).toBe("limit");
+    expect(nativeFailReason("paused", "x", "limit")).toBe("limit");
   });
 
   it.each([
     ["auth", "auth"], ["quota", "quota"], ["network", "network"], ["timeout", "timeout"],
     ["http", "http"], ["refused", "refused"], ["cancelled", "cancelled"], ["no_record", "no_record"],
-    ["context", "config"], ["limit", "config"], ["stale", "config"], ["config", "config"], ["future-kind", "config"],
+    ["context", "config"], ["limit", "limit"], ["stale", "config"], ["config", "config"], ["future-kind", "config"],
   ])("uses structured %s without guessing from contradictory text", (kind, expected) => {
     expect(nativeFailReason("failed", "拒绝 timeout HTTP 401 429 network 记录不完整", kind)).toBe(expected);
     expect(nativeFailReason("failed", null, kind)).toBe(expected);

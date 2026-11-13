@@ -62,17 +62,19 @@ export interface ContextPreview {
   calibrated: boolean;
 }
 
-export type FailReason = "network" | "timeout" | "http" | "auth" | "quota" | "empty" | "refused" | "cancelled" | "config" | "no_record";
+/** `limit`: the run used its own allowance and paused; it can be continued (D159). */
+export type FailReason = "network" | "timeout" | "http" | "auth" | "quota" | "empty" | "refused" | "cancelled" | "config" | "no_record" | "limit";
 
 export function nativeFailReason(status: string, message: string | null, errorKind?: string | null): FailReason {
   if (errorKind != null) {
     switch (errorKind) {
       case "cancelled": case "timeout": case "network": case "auth": case "quota":
-      case "http": case "refused": case "no_record": case "empty": return errorKind;
+      case "http": case "refused": case "no_record": case "empty": case "limit": return errorKind;
       default: return "config";
     }
   }
   if (status === "cancelled") return "cancelled";
+  if (status === "paused") return "limit";
   const text = message ?? "";
   if (/拒绝|refus|safety|blocked/i.test(text)) return "refused";
   if (/timeout|timed out|超时|流空闲/i.test(text)) return "timeout";

@@ -406,12 +406,19 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
         if (e.reason !== "cancelled") setNotice({ text: `${e.detail ?? explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
       } else {
         setGen(null);
-        if (restore) {
+        // A paused run still holds the action; giving it back would invite sending it twice.
+        if (restore && e.reason !== "limit") {
           setInput(restore.text);
           setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === restore.mode)));
           if (restore.note) { setNote(restore.note); setNoteOpen(true); }
         }
         if (e.reason === "cancelled") { if (e.runId) void inspectSavedExecution(e.detail, e.runId); return; }
+        // Paused at its allowance: offer to continue that run (not a new one), via the saved run.
+        if (e.reason === "limit") {
+          setNotice({ text: explainFailure("limit"), actions: e.runId ? [{ label: "接着写完", run: () => resumeExecution(e.runId!, true) }] : [] });
+          if (e.runId) void inspectSavedExecution(e.detail, e.runId);
+          return;
+        }
         failures.current++;
         buzz(game.platform);
         const actions: { label: string; run: () => void }[] = [];
@@ -437,12 +444,13 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     handle.current = game.followExecution(id, onEvent(null), resume);
   };
   const showSavedExecution = (run: { id: string; status: string; error: string | null; kind?: string; steps?: number; total?: number; hasText?: boolean }, fallback?: string) => {
-    const detail = run.error?.trim() || fallback?.trim() || (run.status === "paused" ? "上次生成已达到本次运行上限，进度已保存" : "");
+    const detail = run.error?.trim() || fallback?.trim() || (run.status === "paused" ? "这段写得比较久，已先停下，进度已保存" : "");
     const saved = run.kind === "autoplay" ? `连播已完成 ${run.steps ?? 0}/${run.total ?? 0} 段。` : "上次生成的进度已保存。";
     const text = detail ? `${detail}${/[。！？]$/.test(detail) ? "" : "。"}${detail.includes("进度已保存") ? "" : ` ${saved}`}` : saved;
-    // A paused run retains its counters; opening this page never resets a
-    // reached budget or silently starts another request.
-    setNotice({ text, actions: run.status === "paused" ? [] : [{ label: run.kind === "autoplay" ? run.hasText ? "续写并继续连播" : "重试剩余连播" : "继续上次生成", run: () => resumeExecution(run.id, true) }] });
+    // Opening the page never starts a request by itself. A paused run (its allowance
+    // used) continues only when the player asks, with the same allowance again (D159).
+    const label = run.kind === "autoplay" ? run.hasText ? "续写并继续连播" : "重试剩余连播" : run.status === "paused" ? "接着写完" : "继续上次生成";
+    setNotice({ text, actions: [{ label, run: () => resumeExecution(run.id, true) }] });
   };
   const inspectSavedExecution = async (fallback?: string, expectedId?: string) => {
     const version = ++recoveryNoticeVersion.current;

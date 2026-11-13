@@ -31,7 +31,9 @@ impl Engine {
         loop {
             self.check(&shared)?;
             let persisted = self.store.snapshot(&initial.id, 0)?;
-            let plan = self.store.plan(&initial.id)?;
+            let mut plan = self.store.plan(&initial.id)?;
+            // The stored plan does not carry a continued run's pause point (D159).
+            if initial.meta["resumeBudgetBase"].is_object() { plan.meta["resumeBudgetBase"] = initial.meta["resumeBudgetBase"].clone(); }
             let steps = persisted.draft["steps"].as_u64().unwrap_or(0);
             merge_budget(&shared, &persisted.budget)?;
             {
@@ -98,6 +100,9 @@ impl Engine {
                 self.store.register(&child)?;
                 (child, json!({}), RunBudget::default())
             };
+            // A sequence continued after a pause hands its new starting point to each passage (D159).
+            let mut child_plan = child_plan;
+            if initial.meta["resumeBudgetBase"].is_object() { child_plan.meta["resumeBudgetBase"] = initial.meta["resumeBudgetBase"].clone(); }
             merge_budget(&shared, &previous_budget)?;
             let (budget, cancel) = {
                 let mut parent = shared.lock().map_err(|_| Error::Cancelled)?;

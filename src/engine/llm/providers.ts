@@ -167,6 +167,7 @@ export function explainFailure(kind: string, status?: number): string {
   if (kind === "empty") return "服务没有写出内容，再试一次？";
   if (kind === "no_record") return "开场没准备好，再试一次？";
   if (kind === "cancelled") return "已停止。";
+  if (kind === "limit") return "这段写得比较久，已先停下并保存进度，可以接着写完。";
   return "连不上服务，请检查网络和服务地址。";
 }
 

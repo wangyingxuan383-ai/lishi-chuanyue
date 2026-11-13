@@ -88,16 +88,16 @@ impl Default for RunBudget {
 impl RunBudget {
     pub fn request(&mut self) -> Result<()> {
         self.time()?;
-        if self.model_requests >= 10 {
-            return Err(Error::Limit("本次已达到 10 次模型请求上限"));
+        if self.model_requests >= RUN_REQUEST_LIMIT {
+            return Err(Error::Limit("本次生成用到的模型请求较多，已先停下"));
         }
         self.model_requests += 1;
         Ok(())
     }
     pub fn tool(&mut self) -> Result<()> {
         self.time()?;
-        if self.tool_calls >= 24 {
-            return Err(Error::Limit("本次已达到 24 次工具调用上限"));
+        if self.tool_calls >= RUN_TOOL_LIMIT {
+            return Err(Error::Limit("本次生成查阅资料的次数较多，已先停下"));
         }
         self.tool_calls += 1;
         Ok(())
@@ -111,12 +111,25 @@ impl RunBudget {
         Ok(())
     }
     pub fn time(&self) -> Result<()> {
-        if self.active_ms >= 300_000 {
-            return Err(Error::Limit("本次运行已达到 5 分钟上限"));
+        if self.active_ms >= RUN_TIME_LIMIT_MS {
+            return Err(Error::Limit(RUN_TIME_LIMIT_TEXT));
         }
         Ok(())
     }
 }
+
+/// Backstop for one run (D159). Each model request already stops on its own after
+/// 120 seconds without a first word or without new words, and requests and tool
+/// calls are counted, so this only catches a run that is stuck some other way.
+/// It used to be 5 minutes, which cut off slow services and original-book checks.
+pub const RUN_TIME_LIMIT_MS: u64 = 30 * 60 * 1000;
+pub const RUN_TIME_LIMIT_TEXT: &str = "本次生成超过 30 分钟仍未完成，已停止";
+/// Model requests and tool calls one run may use before it pauses (D159). Writing with
+/// read-only tools, completing the record and checking a bound original book share them;
+/// 10 requests was often not enough for a long passage checked against the book.
+/// "接着写完" on a paused run grants the same allowance again.
+pub const RUN_REQUEST_LIMIT: u32 = 30;
+pub const RUN_TOOL_LIMIT: u32 = 60;
 
 #[derive(Debug, Clone)]
 pub struct ModelConfig {

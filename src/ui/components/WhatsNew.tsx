@@ -8,13 +8,14 @@ import { Sheet } from "./Sheet";
 
 /** What this version adds, in the player's words: a name and one line each. Update with the version. */
 const NOTES: [string, string][] = [
+  ["不再半途停下", "生成不再受 5 分钟和 10 次请求限制；万一先停下，点“接着写完”从原处继续。"],
   ["更顺滑", "弹层、对话框和提示关闭时轻轻退下，进入新页面时从右侧滑入；关掉动画即全部取消。"],
   ["字号快捷", "游玩页右上角的“Aa”随手调字号、主题和行距。"],
   ["草稿不丢", "没发出去的字、幕后要求和输入方式按故事保存，回来还在。"],
   ["撤销与等待", "最新一段旁边可以直接撤销；等第一个字时显示秒数，下面有新字时箭头会提示。"],
   ["更贴手", "点建议选项会带上幕后要求；发送、写完和出错时轻轻振一下。"],
 ];
-const SUMMARY = "更顺滑的动效、字号快捷与草稿保存";
+const SUMMARY = "不再半途停下、更顺滑的动效与草稿保存";
 
 export function WhatsNewSheet({ onClose }: { onClose: () => void }) {
   return (
