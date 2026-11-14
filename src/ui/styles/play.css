@@ -96,7 +96,6 @@
 .to-bottom.fresh::after { content: ""; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: breathe 1.4s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: 0.35; transform: scale(0.8); } }
 
-.dock { position: relative; border-top: 3px double var(--dock-line); background-color: var(--dock); background-image: var(--grain); padding: 8px 10px 10px; }
 /* 白天 gives the dock a slightly deeper cream than the page so it still reads as paper (AUDIT_V4 10.2; --dock in the theme). */
 .dock textarea, .dock input { background: var(--dock-field); }
 .dying-note { margin: 0 0 8px; padding: 7px 12px; border-radius: 3px; border-left: 3px solid var(--loss); background: var(--accent-soft); color: var(--loss); font-size: 14px; animation: fade-up 0.24s ease-out both; }
@@ -201,3 +200,8 @@ button.turn-changes {
 @keyframes brush-turn { to { transform: rotate(360deg); } }
 @keyframes ink-drop { 50% { transform: scale(0.45); opacity: 0.35; } }
 .ink-wait .status-line { padding: 0; }
+
+/* 每段用量 (components/TurnUsage.tsx): one quiet line under the latest passage. */
+.usage-line { display: block; margin: 2px 0 0; padding: 4px 0; min-height: 28px; border: 0; background: none; box-shadow: none; color: var(--muted); font-size: 12px; font-family: var(--sans); letter-spacing: 0.02em; text-align: left; opacity: 0.8; justify-content: flex-start; }
+.usage-line:hover, .usage-line:focus-visible { opacity: 1; color: var(--fg); }
+.usage-facts dd { font-variant-numeric: tabular-nums; }

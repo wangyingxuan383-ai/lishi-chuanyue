@@ -2,6 +2,10 @@
 // a home list in three groups — AI, 游戏, 应用 — each entry a page of its own,
 // with the current state on the entry. What used to be one long page is split
 // so each part can grow without the whole getting noisy.
+import { DEFAULT_NOTIFY, loadNotifyPrefs, saveNotifyPrefs } from "../app/notifyPrefs";
+import type { NotifyPrefs } from "../../platform";
+import { DEPTH_LABEL } from "../../engine/depth";
+import { DepthCards } from "./play/DepthSheet";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../engine/llm/providers";
 import type { Intensity, Perspective } from "../../engine/types";
@@ -12,7 +16,7 @@ import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults
 import { REPO_URL, openLink, newer, plainNotes } from "../app/update";
 import { useUpdateNotice } from "../app/updateStore";
 import { exportWorldFile } from "../../engine/archive";
-import { PURPOSES } from "../components/Usage";
+import { purposeLabel } from "../../engine/usage";
 import { Seal } from "../components/Seal";
 import { BackupRestore } from "../components/BackupRestore";
 import { Icon, type IconName } from "../components/Icon";
@@ -78,7 +82,7 @@ export default function Settings() {
       { page: "memory", label: "记忆与整理", icon: "memo", state: `${({ 8000: "省一些", 12000: "标准", 16000: "记得更多" } as Record<number, string>)[profile?.contextTokens ?? 12000] ?? `${profile?.contextTokens?.toLocaleString()} tokens`} · ${defaults.chapterEvery ? `每 ${defaults.chapterEvery} 回合一章` : "不写章节"}` },
     ] },
     { group: "游戏", items: [
-      { page: "play", label: "游玩默认", icon: "dice", state: `难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
+      { page: "play", label: "游玩默认", icon: "dice", state: `${DEPTH_LABEL[defaults.depth]}档 · 难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
       { page: "reading", label: "阅读与外观", icon: "palette", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
       { page: "sources" as Page, label: "参考书籍", icon: "book", state: "导入、查看与管理，各个故事都能选用" },
       { page: "guide" as Page, label: "游玩指南", icon: "info", state: "怎么玩、各个功能在哪、常见问题" },
@@ -263,6 +267,10 @@ function PlayPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: (d
   );
   return (
     <>
+      <div className="setting">
+        <div className="setting-head"><b>生成档位</b><small>新开一局用哪一档；故事里点“Aa”旁边的小字随时换</small></div>
+        <DepthCards value={defaults.depth} onChange={(depth) => onChange({ ...defaults, depth })} />
+      </div>
       <Choice label="难度" value={defaults.difficulty}
         note={defaults.difficulty === "宽松" ? "运气偏好；受了重伤也只是昏过去，不会死。" : defaults.difficulty === "残酷" ? "运气偏差；重伤可能直接丧命。" : "运气平常；伤重时先“垂危”，剧情真写到才会死。"}
         options={[["宽松", "宽松"], ["标准", "标准"], ["残酷", "残酷"]]} onChange={(v) => onChange({ ...defaults, difficulty: v })} />
@@ -276,7 +284,7 @@ function PlayPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: (d
       {intensity("romance", "感情与亲密")}
       {intensity("darkness", "黑暗与压抑")}
       <Note>“浓烈”仍受所用 AI 服务自己的规则限制。这些是新开一局的默认，已经开始的故事在“本局设置”里改。</Note>
-      <button className="ghost reset" onClick={() => onChange({ ...defaults, difficulty: BUILTIN_DEFAULTS.difficulty, fortune: BUILTIN_DEFAULTS.fortune, tabooHints: BUILTIN_DEFAULTS.tabooHints, intensity: BUILTIN_DEFAULTS.intensity })}>恢复默认</button>
+      <button className="ghost reset" onClick={() => onChange({ ...defaults, depth: BUILTIN_DEFAULTS.depth, difficulty: BUILTIN_DEFAULTS.difficulty, fortune: BUILTIN_DEFAULTS.fortune, tabooHints: BUILTIN_DEFAULTS.tabooHints, intensity: BUILTIN_DEFAULTS.intensity })}>恢复默认</button>
     </>
   );
 }
@@ -325,6 +333,7 @@ function ReadingPage() {
       <div className="story-text reading-preview" aria-label="效果预览"><p>西市的鼓声一声接一声，你裹紧单衣，跟着人流走进坊门。</p><p>“郎君，买胡饼么？”炉边的老汉抬起头。</p></div>
       <h3 className="settings-sub">更多</h3>
       <Choice label="生成时自动滚动" note="打开后，跟着新写出的内容往下读" value={reading.autoScroll} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ autoScroll: v })} />
+      <Choice label="显示每段用量" note="最新一段下面一行小字：请求几次、多少 tokens、大约多少钱、多少秒" value={reading.usageLine} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ usageLine: v })} />
       <Choice label="动画" note="华丽：页面、回合和印章都有动效；简洁：只留轻微的淡入淡出。系统设置了减少动态效果时一律关闭" value={reading.motion} options={[["rich", "华丽"], ["simple", "简洁"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />
       <Choice label="触感" note="长按、发送和写完一段时轻轻振一下" value={reading.haptics} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ haptics: v })} />
       <Choice label="阅读时不锁屏" note="只在读故事时生效" value={reading.keepAwake} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ keepAwake: v })} />
@@ -334,9 +343,15 @@ function ReadingPage() {
 
 function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled: boolean } | null; onRefresh: () => void }) {
   const { game } = useApp();
+  const system = game.platform.system;
+  const [background, setBackground] = useState<{ ignoringBattery: boolean; xiaomi: boolean } | null>(null);
+  const [prefs, setPrefs] = useState<NotifyPrefs>(DEFAULT_NOTIFY);
+  const readBackground = () => void system.backgroundStatus?.().then(setBackground).catch(() => setBackground(null));
+  useEffect(() => { readBackground(); void loadNotifyPrefs(game.repo).then(setPrefs); }, []);
+  const change = (patch: Partial<NotifyPrefs>) => { const next = { ...prefs, ...patch }; setPrefs(next); void saveNotifyPrefs(game.repo, next, system.setNotifyPrefs); };
   // Coming back from the system screen: read the switch again.
   useEffect(() => {
-    const again = () => { if (document.visibilityState === "visible") onRefresh(); };
+    const again = () => { if (document.visibilityState === "visible") { onRefresh(); readBackground(); } };
     document.addEventListener("visibilitychange", again);
     return () => document.removeEventListener("visibilitychange", again);
   }, []);
@@ -350,11 +365,23 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
           <button className="primary" onClick={async () => { const granted = await game.platform.system.requestNotifications().catch(() => false); if (!granted) await game.platform.system.openSystemSettings("notifications"); onRefresh(); }}>打开通知</button>
         </div>}
       </div>
+      <h3 className="settings-sub">通知里显示什么</h3>
+      <Choice label="写的时候显示进度" note={prefs.progress ? "通知栏显示故事名、正在构思还是在写、已写多少字和用时，可以直接停止" : "只显示“正在写下一段”"} value={prefs.progress} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ progress: v })} />
+      <Choice label="写好了显示第一句" note={prefs.excerpt ? "提醒里带上新一段的第一句，点开直接回到那个故事" : "只提醒写好了"} value={prefs.excerpt} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ excerpt: v })} />
+      <Choice label="锁屏上也显示第一句" note={prefs.lockscreen ? "锁屏时也能看到第一句" : "锁屏时只显示故事名"} value={prefs.lockscreen} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ lockscreen: v })} />
+      <Note>没写完（比如服务出错、用到的请求太多先停下）也会提醒你，点“接着写完”回到那个故事。</Note>
       <h3 className="settings-sub">在后台被系统停掉？</h3>
-      <Note>小米、华为等手机为了省电，可能在后台停掉应用，故事写到一半就断了。可以在系统设置里给“穿越小说模拟”放行：</Note>
+      {system.backgroundStatus && <div className={`status-card${background?.ignoringBattery ? " ok" : ""}`}>
+        <b>{background?.ignoringBattery ? "已放行：省电不会停掉写作" : "可能被省电停掉"}</b>
+        <small>{background?.ignoringBattery ? "切到后台、锁屏时，正在写的一段会继续写完。" : "手机为了省电，可能在后台停掉应用，故事写到一半就断了。放行后会稳很多。"}</small>
+        <div className="row wrap">
+          {!background?.ignoringBattery && <button className="primary" onClick={() => void system.requestBatteryExemption?.()}>放行，不限制省电</button>}
+          {background?.xiaomi && <button onClick={() => void system.openAutostart?.()}>打开自启动设置</button>}
+        </div>
+      </div>}
+      <Note>小米、华为等手机还可以在系统设置里多做两步：</Note>
       <ol className="steps">
-        <li>省电策略选“无限制”（应用信息 → 省电策略）。</li>
-        <li>打开“自启动”。</li>
+        <li>{background?.xiaomi ? "在“自启动管理”里打开“穿越小说模拟”。" : "打开“自启动”（应用信息里，或手机管家里）。"}</li>
         <li>在最近任务里下拉锁定“穿越小说模拟”。</li>
       </ol>
       <button onClick={() => void game.platform.system.openSystemSettings("app")}>打开应用信息</button>
@@ -513,7 +540,7 @@ function DevPage() {
       <UpdateDevSource />
       <p className="muted">调用记录</p>
       {calls.map((c) => <div className="item-row" key={String(c.id)}><div className="grow">
-        <b>{new Date(String(c.at)).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).replaceAll("/", "-")} · {PURPOSES[String(c.purpose)] ?? String(c.purpose)}</b>
+        <b>{new Date(String(c.at)).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).replaceAll("/", "-")} · {purposeLabel(String(c.purpose))}</b>
         <small>{String(c.model)}</small>
         <small>输入 {String(c.prompt_tokens ?? "未知")} / 输出 {String(c.completion_tokens ?? "未知")} token</small>
         <small>首字 {String(c.first_token_ms ?? "未知")} 毫秒 · 总计 {String(c.total_ms ?? "未知")} 毫秒</small>

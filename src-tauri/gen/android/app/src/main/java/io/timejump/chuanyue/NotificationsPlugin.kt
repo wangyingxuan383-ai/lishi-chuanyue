@@ -3,10 +3,12 @@ package io.timejump.chuanyue
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.view.WindowManager
@@ -32,7 +34,19 @@ class SystemBarsArgs {
 }
 
 @InvokeArg
-class CompletionArgs { var completionId: String = "" }
+class CompletionArgs {
+    var completionId: String = ""
+    var worldId: String = ""
+    var title: String = ""
+    var excerpt: String = ""
+}
+
+@InvokeArg
+class NotifyPrefsArgs {
+    var progress: Boolean = true
+    var excerpt: Boolean = true
+    var lockscreen: Boolean = false
+}
 
 @InvokeArg
 class AwakeArgs { var enabled: Boolean = false }
@@ -41,11 +55,78 @@ class AwakeArgs { var enabled: Boolean = false }
 class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun story_committed(invoke: Invoke) {
-        val id = invoke.parseArgs(CompletionArgs::class.java).completionId
+        val args = invoke.parseArgs(CompletionArgs::class.java)
+        val id = args.completionId
         if (id.isBlank() || id.length > 256) { invoke.reject("invalid completion id"); return }
-        GenerationService.storyCommitted(activity, id)
+        GenerationService.storyCommitted(activity, id, args.worldId.take(128), args.title.take(60), args.excerpt.take(120))
         invoke.resolve()
     }
+
+    /** R29-T006: whether Android may stop the app in the background, and whether this is a Xiaomi phone. */
+    @Command
+    fun background_status(invoke: Invoke) {
+        val power = activity.getSystemService(PowerManager::class.java)
+        val ignoring = power?.isIgnoringBatteryOptimizations(activity.packageName) ?: false
+        invoke.resolve(JSObject().put("ignoringBattery", ignoring).put("xiaomi", isXiaomi()))
+    }
+
+    /** Asks Android to let the app keep writing in the background (the system shows its own dialog). */
+    @Command
+    fun request_battery_exemption(invoke: Invoke) {
+        try {
+            activity.startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${activity.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (error: Exception) {
+            // Some ROMs refuse the direct request: the list of apps is the next best place.
+            try {
+                activity.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (fallback: Exception) {
+                activity.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        }
+        invoke.resolve()
+    }
+
+    /** Xiaomi's 自启动管理; elsewhere, or when it is missing, the app's details page. */
+    @Command
+    fun open_autostart_settings(invoke: Invoke) {
+        val miui = Intent().setComponent(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            if (!isXiaomi()) throw IllegalStateException("not xiaomi")
+            activity.startActivity(miui)
+        } catch (error: Exception) {
+            activity.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        invoke.resolve()
+    }
+
+    @Command
+    fun set_notify_prefs(invoke: Invoke) {
+        val args = invoke.parseArgs(NotifyPrefsArgs::class.java)
+        GenerationService.prefs(activity).edit()
+            .putBoolean(GenerationService.PREF_PROGRESS, args.progress)
+            .putBoolean(GenerationService.PREF_EXCERPT, args.excerpt)
+            .putBoolean(GenerationService.PREF_LOCKSCREEN, args.lockscreen)
+            .apply()
+        invoke.resolve()
+    }
+
+    /** The story a tapped notification asked for, once. */
+    @Command
+    fun take_launch_target(invoke: Invoke) {
+        val target = LaunchTarget.take()
+        invoke.resolve(JSObject().put("worldId", target?.first).put("action", target?.second))
+    }
+
+    private fun isXiaomi(): Boolean =
+        listOf("xiaomi", "redmi", "poco").any { Build.MANUFACTURER.lowercase().contains(it) || Build.BRAND.lowercase().contains(it) }
 
     @Command
     fun set_keep_awake(invoke: Invoke) {

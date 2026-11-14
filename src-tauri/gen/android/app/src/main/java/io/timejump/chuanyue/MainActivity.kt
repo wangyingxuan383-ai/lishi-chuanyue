@@ -1,5 +1,6 @@
 package io.timejump.chuanyue
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
@@ -45,6 +46,14 @@ class MainActivity : TauriActivity() {
     content.post { ViewCompat.requestApplyInsets(content) }
     // Bars in the app's theme from the first frame (the page sets them again once loaded).
     SystemBars.restore(this)
+    LaunchTarget.capture(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    // A tapped "写好了" or "没写完": the page asks for it on resume (take_launch_target).
+    LaunchTarget.capture(intent)
   }
 
   override fun onDestroy() {

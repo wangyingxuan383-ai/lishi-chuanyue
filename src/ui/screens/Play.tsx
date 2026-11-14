@@ -47,6 +47,11 @@ import { StorySheet } from "./play/StorySheet";
 import { TurnView } from "./play/TurnView";
 import type { Gen, WritingSettings } from "./play/types";
 import { WorldSettingsSheet } from "./play/WorldSettingsSheet";
+import { DepthSheet } from "./play/DepthSheet";
+import { CanonNotesSheet } from "../components/CanonNotes";
+import { PassageUsageSheet, TurnUsageLine, WorldUsageSheet } from "../components/TurnUsage";
+import { listNotes } from "../../engine/sources/notes";
+import { DEPTH_LABEL, DEPTH_MARK, depthOf } from "../../engine/depth";
 import { useGeneration } from "./play/useGeneration";
 import { usePlayDraft } from "./play/usePlayDraft";
 import { useAssistantBusy } from "./play/useAssistantBusy";
@@ -83,7 +88,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "reading" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "reading" | "depth" | "notes" | "usage" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
   const openPanel = useCallback(() => setPanel(true), []);
@@ -230,6 +235,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   useEffect(() => { setWriting(null); setDesk(false); }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
   // After the third turn, once ever: everything a passage can do is behind a long press (AUDIT 4.2).
   const [pressTip, setPressTip] = useState(false);
+  const [usageNode, setUsageNode] = useState<string | null>(null);
   const countTurn = async () => {
     if (await game.repo.getSetting("tip:longPress", false)) return;
     const n = (await game.repo.getSetting<number>("tip:turns", 0)) + 1;
@@ -237,6 +243,21 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     if (n >= 3) { setPressTip(true); await game.repo.setSetting("tip:longPress", true); }
   };
   const [modePicker, setModePicker] = useState(false);
+  // 同人 with no 原著札记 yet: suggest digesting the main plot once (R29-T003).
+  const [notesTip, setNotesTip] = useState(false);
+  const fanficBook = state?.source?.fanfic ? state.source.bookId : null;
+  useEffect(() => {
+    setNotesTip(false);
+    if (!fanficBook) return;
+    let live = true;
+    void (async () => {
+      if (await game.repo.getSetting(`tip:notes:${worldId}`, false)) return;
+      const notes = await listNotes(game.repo, fanficBook, worldId);
+      if (live && !notes.length) setNotesTip(true);
+    })();
+    return () => { live = false; };
+  }, [fanficBook, worldId]);
+  const dismissNotesTip = () => { setNotesTip(false); void game.repo.setSetting(`tip:notes:${worldId}`, true); };
   // The AI filed new cards in the background: show its line and the new 设定集.
   useEffect(() => game.subscribe((id) => { if (id === worldId && shownPage.current) void refresh(); }), [game, worldId, refresh]);
   useEffect(() => {
@@ -549,8 +570,8 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const panelProps = {
     worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy,
     onContinuitySaved: refresh, onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
-    onOrganize: async (replaceOwnEra: boolean) => {
-      const c = await game.organize(worldId, { replaceOwnEra });
+    onOrganize: async (replaceOwnEra: boolean, useSource?: boolean) => {
+      const c = await game.organize(worldId, { replaceOwnEra, useSource });
       if (!c) { toast("这次没整理出来，稍后再试"); return false; }
       await refresh();
       toast("已整理设定集，可以接着修改");
@@ -570,6 +591,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           <div className="subtitle">{now.text}</div>
         </button>
         {!wide && <button className="icon-btn" aria-label="角色" title="角色" onClick={() => setPanel(true)}><span className="name-seal" aria-hidden="true">{(state.protagonist.name.trim() || "我")[0]}</span></button>}
+        <button className={`icon-btn depth-btn depth-${depthOf(world.settings)}`} aria-label={`生成档位：${DEPTH_LABEL[depthOf(world.settings)]}`} title={`生成档位：${DEPTH_LABEL[depthOf(world.settings)]}`} onClick={() => setSheet("depth")}><span aria-hidden="true">{DEPTH_MARK[depthOf(world.settings)]}</span></button>
         <button className="icon-btn reading-btn" aria-label="字号与主题" title="字号与主题" onClick={() => setSheet("reading")}><span aria-hidden="true">Aa</span></button>
         <button className="icon-btn" aria-label="更多" title="更多" onClick={() => setSheet("more")}><Icon name="more" /></button>
       </div>
@@ -590,6 +612,10 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
                   {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
                     <HeadTools node={node} variants={variants} mouse={mouse} onSwitch={(d) => void switchVariant(d)}
                       onRegen={() => regenerate(null)} onHints={() => setSheet("hints")} onUndo={() => void undo()} onMenu={() => setMenuNode(node)} />
+                  )}
+                  {isHead && reading.usageLine && node.kind !== "edit" && node.status !== "interrupted" && <TurnUsageLine nodeId={node.id} />}
+                  {isHead && notesTip && !pressTip && (
+                    <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
                   )}
                   {isHead && pressTip && (
                     <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
@@ -632,7 +658,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       {menuNode && <PassageMenu menuNode={menuNode} head={head} busy={busy} setMenuNode={setMenuNode}
         openWriting={openWriting} setRemember={setRemember} goBack={goBack} toast={toast} setMenuMore={setMenuMore} />}
       {menuMore && <PassageMoreMenu menuMore={menuMore} busy={busy} devMode={devMode} game={game} setMenuMore={setMenuMore}
-        setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode} setRawNode={setRawNode} />}
+        setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode} setRawNode={setRawNode} setUsageNode={setUsageNode} />}
       {writing && <WritingAssist draft={writing} onClose={() => setWriting(null)} onAdopt={adoptWriting} />}
       {desk && <WritingDesk text={input} mode={mode.mode} onClose={() => setDesk(false)} onDone={(text, nextMode) => {
         // 旁观 has only 幕后 and 写: 做 / 说 written in the big box go in as a 幕后 note.
@@ -681,7 +707,8 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
       {cardNode && <PassageCardSheet world={world} node={cardNode} onClose={() => setCardNode(null)} />}
       {sheet === "keys" && <ShortcutsSheet onClose={() => setSheet(null)} />}
       {sheet === "reading" && <ReadingQuickSheet onClose={() => setSheet(null)} />}
-      {sheet === "ask" && <AskSheet worldId={worldId} onClose={() => setSheet(null)} />}
+      {sheet === "depth" && <DepthSheet value={depthOf(world.settings)} onChange={(depth) => { void updateSettings({ depth }).then(() => toast(`已换成${DEPTH_LABEL[depth]}档，从下一段起生效`)); }} onClose={() => setSheet(null)} />}
+      {sheet === "ask" && <AskSheet worldId={worldId} bookId={state.source?.bookId} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
         <Sheet title="重说时希望…" onClose={() => setSheet(null)}>
@@ -704,9 +731,12 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
           <button disabled={busy} onClick={() => setSheet("rules")}>{(world.settings as WritingSettings).mode === "free" ? "修改时间与货币" : "修改纪年与货币"}</button>
         </Sheet>
       )}
-      {sheet === "rules" && <RulesSheet state={state} era={era} headId={head.id} busy={busy} onClose={() => setSheet(null)} onCorrectDuration={() => setSheet("duration")} onSave={async (patch, summary, expectedHeadId) => { await game.editState(worldId, patch, summary, undefined, expectedHeadId); await refresh(); toast("已保存时间与货币，可在 ⋯ 中撤销"); }} />}
+      {sheet === "rules" && <RulesSheet worldId={worldId} state={state} era={era} headId={head.id} busy={busy} onClose={() => setSheet(null)} onCorrectDuration={() => setSheet("duration")} onSave={async (patch, summary, expectedHeadId) => { await game.editState(worldId, patch, summary, undefined, expectedHeadId); await refresh(); toast("已保存时间与货币，可在 ⋯ 中撤销"); }} />}
       {sheet === "duration" && <TimeCorrectionSheet worldId={worldId} headId={head.id} busy={busy} onClose={() => setSheet(null)} onSaved={refresh} />}
       {sheet === "reference" && state.source && <ReferenceSheet worldId={worldId} binding={state.source} onClose={() => setSheet(null)} />}
+      {sheet === "usage" && <WorldUsageSheet worldId={worldId} onClose={() => setSheet(null)} />}
+      {usageNode && <PassageUsageSheet nodeId={usageNode} onClose={() => setUsageNode(null)} />}
+      {sheet === "notes" && state.source && <CanonNotesSheet bookId={state.source.bookId} worldId={worldId} position={state.source.position} onClose={() => setSheet(null)} />}
       {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
         onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
         onBookmark={(line) => void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); })} />}

@@ -20,3 +20,27 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 .model-list { max-height: 50vh; overflow-y: auto; }
 .model-list b, .picker b.model { font-family: var(--sans); font-weight: 500; font-size: 15px; word-break: break-all; }
 .model-list small { color: var(--gain); }
+
+/* 原著札记 (components/CanonNotes.tsx). */
+.note-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.note-row { width: 100%; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "tag title" "tag status"; align-items: center; column-gap: 10px; row-gap: 2px; padding: 10px 12px; text-align: left; justify-content: stretch; }
+.note-row .tag { grid-area: tag; align-self: center; }
+.note-row b { grid-area: title; font-family: var(--serif); font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-status { grid-area: status; font-size: 12px; color: var(--muted); }
+.note-status.running { color: var(--accent); }
+.note-status.failed { color: var(--loss); }
+.note-kinds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.note-kind { display: grid; gap: 2px; justify-items: start; padding: 10px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); }
+.note-kind:last-child { grid-column: 1 / -1; }
+.note-kind b { font-family: var(--serif); font-size: 15px; }
+.note-kind small { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.note-kind[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.note-kind[aria-checked="true"] b { color: var(--accent); }
+.note-estimate { font-size: 13px; }
+.note-text { font-family: var(--serif); font-size: 15px; line-height: 1.75; }
+button.small { min-height: 32px; padding: 2px 10px; font-size: 13px; align-self: flex-start; }
+
+/* 让 AI 改 (Codex editor, RulesSheet). */
+.ai-revise { border: 1px dashed var(--line); border-radius: var(--radius-lg, 8px); padding: 6px 10px; }
+.ai-revise > summary { cursor: pointer; color: var(--accent); font-family: var(--serif); padding: 4px 0; }
+.ai-revise[open] > summary { margin-bottom: 6px; }

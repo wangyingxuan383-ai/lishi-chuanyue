@@ -118,6 +118,91 @@ pub(crate) async fn story_committed<R: Runtime>(
     }
 }
 
+/// R29-T006: the engine's commit with the story's title and first line, so
+/// "写好了" can name the story and open it.
+pub(crate) async fn story_ready<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    completion_id: String,
+    notice: Option<story_core::notice::Notice>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let (world, title, excerpt) = notice.map(|n| (n.world_id, n.title, n.excerpt)).unwrap_or_default();
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>(
+                "story_committed",
+                serde_json::json!({ "completionId": completion_id, "worldId": world, "title": title, "excerpt": excerpt }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, completion_id, notice);
+        Ok(())
+    }
+}
+
+/// Battery optimisation state, and the notification preferences the service reads.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct Background {
+    ignoring_battery: bool,
+    xiaomi: bool,
+}
+
+async fn android_call<R: Runtime, T: serde::de::DeserializeOwned + Default>(app: tauri::AppHandle<R>, command: &str, args: serde_json::Value) -> Result<T, String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<T>(command, args)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, command, args);
+        Ok(T::default())
+    }
+}
+
+#[tauri::command]
+async fn background_status<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Background, String> {
+    android_call(app, "background_status", serde_json::json!({})).await
+}
+
+#[tauri::command]
+async fn request_battery_exemption<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    android_call::<R, serde_json::Value>(app, "request_battery_exemption", serde_json::json!({})).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn open_autostart_settings<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    android_call::<R, serde_json::Value>(app, "open_autostart_settings", serde_json::json!({})).await.map(|_| ())
+}
+
+/// `progress`: the live notification while writing; `excerpt`: the first line in "写好了"; `lockscreen`: that line on the lock screen too.
+#[tauri::command]
+async fn set_notify_prefs<R: Runtime>(app: tauri::AppHandle<R>, progress: bool, excerpt: bool, lockscreen: bool) -> Result<(), String> {
+    android_call::<R, serde_json::Value>(app, "set_notify_prefs", serde_json::json!({ "progress": progress, "excerpt": excerpt, "lockscreen": lockscreen })).await.map(|_| ())
+}
+
+/// The story a tapped notification asked to open, once: `{worldId, action}` or nulls.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct LaunchTarget {
+    world_id: Option<String>,
+    action: Option<String>,
+}
+
+#[tauri::command]
+async fn take_launch_target<R: Runtime>(app: tauri::AppHandle<R>) -> Result<LaunchTarget, String> {
+    android_call(app, "take_launch_target", serde_json::json!({})).await
+}
+
 #[tauri::command]
 async fn set_keep_awake<R: Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "android")]
@@ -245,7 +330,12 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             set_keep_awake,
             open_url,
             set_system_bars,
-            haptic
+            haptic,
+            background_status,
+            request_battery_exemption,
+            open_autostart_settings,
+            set_notify_prefs,
+            take_launch_target
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]

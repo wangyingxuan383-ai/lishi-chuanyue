@@ -59,17 +59,22 @@ pub fn run() {
                 streams: services.2.clone(),
             });
             let application = app.handle().clone();
+            let notices = services.0.shared();
             let engine = Arc::new(story_core::runtime::Engine::new(
                 services.0.shared(),
                 model,
                 Arc::new(|remaining| Box::new(keep_alive::shared().acquire_for(remaining))),
                 Arc::new(move |id| {
                     let app = application.clone();
+                    // R29-T006: the story's title and the passage's first line for "写好了".
+                    let notice = story_core::notice::committed(&notices, &id);
                     tauri::async_runtime::spawn(async move {
-                        let _ = notifications::story_committed(app, id).await;
+                        let _ = notifications::story_ready(app, id, notice).await;
                     });
                 }),
             ));
+            // Phase, words written and stops for the progress notification.
+            engine.observe(Arc::new(keep_alive::signal));
             let weak = Arc::downgrade(&engine);
             engine
                 .recover_on_start()

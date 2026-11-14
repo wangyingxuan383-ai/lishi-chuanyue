@@ -103,6 +103,15 @@ pub extern "system" fn Java_io_timejump_chuanyue_GenerationService_nativeTimeout
     }
 }
 
+/// R29-T006: what the generation notification shows, and a notice when a run
+/// stopped without a passage. Elsewhere there is nothing to show.
+pub fn signal(signal: story_core::runtime::RunSignal) {
+    #[cfg(target_os = "android")]
+    android::signal(signal);
+    #[cfg(not(target_os = "android"))]
+    let _ = signal;
+}
+
 fn platform_transition(running: bool, remaining: u64) {
     #[cfg(target_os = "android")]
     android::transition(running, remaining);
@@ -195,6 +204,47 @@ mod android {
             .is_err()
         {
             warn(c"generation service initialization: dispatch failed");
+        }
+    }
+
+    pub fn signal(signal: story_core::runtime::RunSignal) {
+        use story_core::runtime::RunSignal;
+        let Some(bridge) = BRIDGE.get() else { return };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            warn(c"generation service: JNI attachment failed");
+            return;
+        };
+        let result = (|| -> Result<(), jni21::errors::Error> {
+            match signal {
+                RunSignal::Phase { title, phase, chars, .. } => {
+                    let phase = env.new_string(phase)?;
+                    let title = env.new_string(title)?;
+                    env.call_static_method(
+                        &bridge.class,
+                        "update",
+                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;I)V",
+                        &[bridge.context.as_obj().into(), (&phase).into(), (&title).into(), (chars.min(i32::MAX as usize) as i32).into()],
+                    )?;
+                }
+                RunSignal::Ended { world_id, title, status, reason, .. } => {
+                    let line = story_core::notice::reason(status, &reason);
+                    let world = env.new_string(world_id)?;
+                    let title = env.new_string(title)?;
+                    let status = env.new_string(status)?;
+                    let line = env.new_string(line)?;
+                    env.call_static_method(
+                        &bridge.class,
+                        "storyIssue",
+                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                        &[bridge.context.as_obj().into(), (&world).into(), (&title).into(), (&status).into(), (&line).into()],
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = env.exception_clear();
+            warn(c"generation service: progress JNI call failed");
         }
     }
 

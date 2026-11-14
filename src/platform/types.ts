@@ -103,6 +103,8 @@ export interface AgentExecutionSnapshot<TTask = Json> {
   hasMore?: boolean; nextAfter?: number; nextCallAfter?: number; hasMoreCalls?: boolean; incremental?: boolean;
 }
 
+export interface NotifyPrefs { progress: boolean; excerpt: boolean; lockscreen: boolean }
+
 export interface Platform {
   readonly name: "android" | "windows" | "web-dev" | "other";
   /** Runs survive page suspension; unsubscribe by stopping polling, never by cancelling. */
@@ -191,6 +193,15 @@ export interface Platform {
     openSystemSettings(which: "notifications" | "app"): Promise<void>;
     /** Opens an https page in the system browser. */
     openUrl(url: string): Promise<void>;
+    /** R29-T006: battery optimisation and phone make, for keeping a passage writing in the background (Android). */
+    backgroundStatus?(): Promise<{ ignoringBattery: boolean; xiaomi: boolean }>;
+    requestBatteryExemption?(): Promise<void>;
+    /** Xiaomi's 自启动管理, else the app's details page. */
+    openAutostart?(): Promise<void>;
+    /** What the notifications show: live progress, the passage's first line, that line on the lock screen. */
+    setNotifyPrefs?(prefs: NotifyPrefs): Promise<void>;
+    /** The story a tapped notification asked to open, once. */
+    takeLaunchTarget?(): Promise<{ worldId: string | null; action: "read" | "resume" | null }>;
     /** The handler returns true when it consumed the back press. */
     onBack(handler: () => boolean): () => void;
     /**

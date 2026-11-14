@@ -17,6 +17,22 @@ use tokio_util::sync::CancellationToken;
 
 pub type LeaseFactory = Arc<dyn Fn(u64) -> Box<dyn Send> + Send + Sync>;
 pub type CompletionSink = Arc<dyn Fn(String) + Send + Sync>;
+/// What a host shows while a story is being written (R29-T006): the phone's
+/// progress notification, and a notice when a run stops without a passage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunSignal {
+    /// `phase`: thinking, writing, organizing or checking; `chars`: words written so far.
+    Phase { run_id: String, world_id: String, title: String, phase: &'static str, chars: usize },
+    /// `status`: paused, failed or cancelled; `reason` is player-facing.
+    Ended { run_id: String, world_id: String, title: String, status: &'static str, reason: String },
+}
+pub type RunObserver = Arc<dyn Fn(RunSignal) + Send + Sync>;
+/// The phase a request stands for, for the progress notification.
+pub fn signal_phase(purpose: &str) -> &'static str {
+    if purpose.starts_with("reference-review") { "checking" }
+    else if purpose.starts_with("writing:") || purpose.starts_with("tool:compose_draft") || purpose.starts_with("tool:check_draft") { "thinking" }
+    else { "organizing" }
+}
 
 /// Owns whole runs, never a UI subscription. Model waits hold no SQLite lock.
 pub struct Engine {
@@ -25,6 +41,7 @@ pub struct Engine {
     active: Mutex<HashMap<String, CancellationToken>>,
     lease: LeaseFactory,
     pub(crate) committed: CompletionSink,
+    observer: Mutex<Option<RunObserver>>,
 }
 pub(crate) struct Context {
     pub(crate) plan: RunPlan,
@@ -76,6 +93,24 @@ impl Engine {
             active: Mutex::new(HashMap::new()),
             lease,
             committed,
+            observer: Mutex::new(None),
+        }
+    }
+    /// Progress and stop signals for a host's notifications; one observer at a time.
+    pub fn observe(&self, observer: RunObserver) {
+        if let Ok(mut slot) = self.observer.lock() { *slot = Some(observer); }
+    }
+    fn observer(&self) -> Option<RunObserver> {
+        self.observer.lock().ok().and_then(|o| o.clone())
+    }
+    /// The story's name for a notification: the new world's title, else the saved one.
+    fn signal_title(&self, plan: &RunPlan) -> String {
+        if let Some(world) = &plan.new_world { return world["title"].as_str().unwrap_or("").to_owned(); }
+        self.store.lock().ok().and_then(|db| db.query_row("SELECT title FROM worlds WHERE id=?", [&plan.world_id], |r| r.get::<_, String>(0)).optional().ok().flatten()).unwrap_or_default()
+    }
+    fn signal_phase(&self, plan: &RunPlan, phase: &'static str, chars: usize) {
+        if let Some(observer) = self.observer() {
+            observer(RunSignal::Phase { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: self.signal_title(plan), phase, chars });
         }
     }
     /// Only called once by a fresh native process, before accepting requests.
@@ -249,6 +284,9 @@ impl Engine {
                 }) {
                     let _ = engine.flush_usage(&id, status);
                     let _ = engine.store.event(&id, json!({"type":"failed","reason":if matches!(error, Error::Cancelled) {"cancelled"} else {"config"},"detail":error.to_string(),"partialSaved":false}));
+                    if let (Some(observer), Some(plan)) = (engine.observer(), context.lock().ok().map(|c| c.plan.clone())) {
+                        observer(RunSignal::Ended { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: engine.signal_title(&plan), status, reason: error.to_string() });
+                    }
                 }
             }
             token.cancel();
@@ -318,15 +356,28 @@ impl Engine {
         self: &Arc<Self>,
         shared: &Shared,
         purpose: &str,
-        mut messages: Vec<Value>,
+        messages: Vec<Value>,
         tools: Vec<Value>,
         aux: bool,
+    ) -> Result<Completion> {
+        self.complete_with(shared, purpose, messages, tools, aux, false).await
+    }
+    /// `final_only`: the tier's lookup rounds are spent; the tools stay defined
+    /// (the history holds their calls) but the model is asked to write now.
+    async fn complete_with(
+        self: &Arc<Self>,
+        shared: &Shared,
+        purpose: &str,
+        messages: Vec<Value>,
+        tools: Vec<Value>,
+        aux: bool,
+        final_only: bool,
     ) -> Result<Completion> {
         self.check(shared)?;
         let plan = shared.lock().map_err(|_| Error::Cancelled)?.plan.clone();
         // Cache identity includes the actual task inputs, model and source scope.
         // A resumed, reassembled stage must never consume another request's result.
-        let fingerprint=format!("{:x}",Sha256::digest(json!({"purpose":purpose,"model":plan.model,"messages":messages,"tools":tools,"state":plan.state,"base":plan.base_id,"source":plan.reference}).to_string()));
+        let fingerprint=format!("{:x}",Sha256::digest(json!({"purpose":purpose,"model":plan.model,"messages":messages,"tools":tools,"state":plan.state,"base":plan.base_id,"source":plan.reference,"finalOnly":final_only.then_some(true)}).to_string()));
         let cached: Option<(String,String)> = self.store.lock()?.query_row("SELECT input_json,output_json FROM execution_steps WHERE run_id=? AND kind=? AND status='done' ORDER BY rowid DESC LIMIT 1", params![plan.id,purpose], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
         if let Some((input,cached))=cached {
             let input:Value=serde_json::from_str(&input)?;
@@ -337,6 +388,7 @@ impl Engine {
             });
             if same {self.note_reading(shared,input["request"]["messages"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;return Ok(serde_json::from_str(&cached)?);}
         }
+        let mut allowance: Option<String> = None;
         let request_limit = plan.meta["modelRequestLimit"]
             .as_u64()
             .unwrap_or(crate::types::RUN_REQUEST_LIMIT as u64)
@@ -351,13 +403,14 @@ impl Engine {
                     "本次模型请求额度已用完"
                 }));
             }
+            // run-budget-3 (D161): the allowance is a backstop, so it is only
+            // mentioned when almost spent, and at the end of the request: a
+            // changing first message would defeat the service's prefix cache.
             if purpose != "capability" {
                 let local_used=c.step_budget();let left = request_limit - local_used.model_requests;
-                let originals = c.draft["originalPassages"]
-                    .as_array()
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                messages.insert(0,json!({"role":"system","content":format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次（内部写作、校核也计数）；工具还可调用{}次。此前已实际读取原文{originals}段。独立查证可同批调用，优先使用已获得的原文和本批工具结果，不重复查询相同证据。额度不足时停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；Agent用commit_turn，原著改稿返回要求的完整JSON。",crate::types::RUN_TOOL_LIMIT.saturating_sub(local_used.tool_calls))}));
+                if left <= 3 {
+                    allowance = Some(format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次；工具还可调用{}次。停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；Agent用commit_turn，原著改稿返回要求的完整JSON。",crate::types::RUN_TOOL_LIMIT.saturating_sub(local_used.tool_calls)));
+                }
             }
         }
         let before=crate::stage_context::report(&plan,purpose,&messages,&tools);
@@ -375,11 +428,17 @@ impl Engine {
         }
         self.checkpoint(shared)?;self.store.run_event(&plan,json!({"type":"request-context","report":report}))?;
         let mut messages=bounded.map_err(|e|Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),e)))?;
+        if final_only {
+            messages.push(json!({"role":"system","content":"【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本次的完整结果，不要再调用工具；资料不足之处按已知写，不编造原著细节。"}));
+        }
+        if let Some(note) = allowance {
+            messages.push(json!({"role":"system","content":note}));
+        }
         let mut tools = tools;
         let mut retried = false;
         loop {
             self.check(shared)?;
-            let body = chat::request(&plan.model, &messages, &tools, aux);
+            let body = chat::request_with(&plan.model, &messages, &tools, aux, final_only);
             let (key, token, remaining) = {
                 let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
                 c.budget();
@@ -400,6 +459,7 @@ impl Engine {
             self.checkpoint(shared)?;
             self.store.lock()?.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
             self.store.run_event(&plan, json!({"type":"thinking"}))?;
+            self.signal_phase(&plan, signal_phase(purpose), 0);
             let store = self.store.clone();
             let id = plan.id.clone();
             let parent_run = plan.meta["parentRun"].as_str().map(str::to_owned);
@@ -411,11 +471,24 @@ impl Engine {
             let show_text = purpose.starts_with("writing:")
                 || purpose.starts_with("tool:compose_draft")
                 || purpose.starts_with("tool:check_draft");
+            let progress = self.observer().filter(|_| show_text).map(|observer| {
+                let (run_id, world_id, title) = (plan.id.clone(), plan.world_id.clone(), self.signal_title(&plan));
+                let last = Mutex::new((Instant::now(), 0usize));
+                move |chars: usize| {
+                    let Ok(mut last) = last.lock() else { return };
+                    // About once a second, or every 120 words: enough for a notification.
+                    if (last.1 == 0 && chars > 0) || chars >= last.1 + 120 || (chars > last.1 && last.0.elapsed().as_millis() >= 1000) {
+                        *last = (Instant::now(), chars);
+                        observer(RunSignal::Phase { run_id: run_id.clone(), world_id: world_id.clone(), title: title.clone(), phase: "writing", chars });
+                    }
+                }
+            });
             let sink: TextSink = Arc::new(move |text| {
                 if !show_text {
                     return;
                 }
                 let visible = narrative_part(&text);
+                if let Some(progress) = &progress { progress(visible.chars().count()); }
                 if !visible.is_empty() {
                     let event = json!({"type":"text","delta":"","full":format!("{original}{visible}")});
                     let _ = store.event(&id, event.clone());
@@ -574,7 +647,11 @@ impl Engine {
         // Ordinary passages already carry the world, rules and recalled facts in
         // their context: telling the model to read skills first cost two extra
         // requests per turn. Checks and corrections keep the full instruction.
-        let rules = if matches!(plan.kind.as_str(), "turn" | "variant" | "continue" | "opening" | "autoplay") { format!("{}\n{}", crate::skills::catalog_brief(), ORDINARY_RULES) } else { format!("{}\n{}", crate::skills::catalog_text(), CLASSIC_RULES) };
+        // Generation tier (D161). Plans written before tiers keep the old
+        // behaviour; checks, corrections and questions are not tiered.
+        let ordinary = matches!(plan.kind.as_str(), "turn" | "variant" | "continue" | "opening" | "autoplay");
+        let tier = Tier::of(&plan);
+        let rules = if ordinary { match tier { Tier::Fast => ORDINARY_RULES_FAST.to_owned(), Tier::Standard => ORDINARY_RULES_STANDARD.to_owned(), Tier::Deep => format!("{}\n{}", crate::skills::catalog_brief(), ORDINARY_RULES) } } else { format!("{}\n{}", crate::skills::catalog_text(), CLASSIC_RULES) };
         messages.insert(0,json!({"role":"system","content":rules}));
         if let Some(saved) = shared
             .lock()
@@ -586,8 +663,10 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"));
-        let support = if modern {
+        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"));
+        let support = if tier == Tier::Fast {
+            false
+        } else if modern {
             self.cached_tool_support(&plan)?.unwrap_or(true)
         } else if has_book {
             self.tool_capability(&shared).await?
@@ -597,7 +676,10 @@ impl Engine {
         if plan.kind == "correction" && !support {
             return Err(Error::Invalid("这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用".into()));
         }
-        let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
+        let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t["function"]["name"].as_str().unwrap_or(""))).filter(|t|tier!=Tier::Standard||STANDARD_TOOLS.contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
+        // Lookup rounds before the model must write; questions and checks keep
+        // the open loop, bounded only by the run allowance.
+        let tool_rounds = if ordinary { tier.tool_rounds() } else { None };
         // The native validator owns machine-width bounds. Avoid repeating the
         // 16-digit JS safe-integer ceiling for every locator in each request;
         // meaningful limits (neighbours, batch sizes, text) remain visible.
@@ -607,13 +689,18 @@ impl Engine {
             .unwrap_or(0);
         let result = loop {
             self.check(&shared)?;
-            let attempt=self.complete(&shared,&format!("writing:{round}"),messages.clone(),active_tools.clone(),false).await;
+            let final_only = !active_tools.is_empty() && tool_rounds.is_some_and(|n| round >= n);
+            let attempt=self.complete_with(&shared,&format!("writing:{round}"),messages.clone(),active_tools.clone(),false,final_only).await;
             let response=match attempt {
                 Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{self.save_tool_support(&plan,false)?;active_tools.clear();continue;},
                 other=>other?,
             };
             if !response.tool_calls.is_empty(){self.save_tool_support(&plan,true)?;}
-            if response.tool_calls.is_empty() {
+            if response.tool_calls.is_empty() || final_only {
+                // A service that ignores tool_choice "none" still ends here:
+                // whatever text came back is the passage.
+                let mut response = response;
+                response.tool_calls.clear();
                 break response;
             }
             messages.push(chat::assistant_message(&response));
@@ -776,7 +863,9 @@ impl Engine {
                 ["insufficientRead"]
                 .as_bool()
                 .unwrap_or(false);
-            if !read && !supplied && !insufficient {
+            // Fast and standard tiers write from the context and notes (D162);
+            // only the deep tier insists on having read the original.
+            if tier == Tier::Deep && !read && !supplied && !insufficient {
                 return Err(Error::Invalid(
                     "没有可核实的原文依据，资料不足，未提交本次正文".into(),
                 ));
@@ -809,6 +898,10 @@ impl Engine {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
+        } else if has_book && plan.meta["referenceReviewVersion"]=="reference-review-lite-1" && !plan.meta["playerNarrative"].is_string() {
+            let (revised,report)=self.review_reference_lite(&shared,&plan,&narrative).await?;
+            narrative=revised;
+            shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report;
         }
         let mut options = plan.options.clone();
         options["advanceTime"] = true.into();
@@ -925,6 +1018,23 @@ impl Engine {
         Ok(())
     }
 
+    /// reference-review-lite-1 (D161): one helper-model request without tools.
+    /// It lists sentences that contradict the supplied original; each fix is
+    /// applied locally only where its quote occurs exactly once. Anything that
+    /// goes wrong keeps the passage as written: the check never stops a turn.
+    async fn review_reference_lite(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, narrative:&str)->Result<(String,Value)>{
+        self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
+        let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
+        let messages=lite_review_messages(plan,narrative,cap);
+        let result=match self.complete(shared,"reference-review-lite",messages,vec![],true).await {
+            Ok(result)=>result,
+            Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
+            Err(error)=>return Ok((narrative.to_owned(),json!({"version":"reference-review-lite-1","status":"skipped","reason":error.to_string()}))),
+        };
+        let issues=rules::record::lenient_json(&result.text).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
+        let (revised,applied,skipped)=apply_lite_fixes(narrative,&issues);
+        Ok((revised,json!({"version":"reference-review-lite-1","status":if issues.is_array(){"reviewed"}else{"skipped"},"issues":applied,"skipped":skipped})))
+    }
     async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
         let parts=crate::stage_context::parts(narrative,(cap/6).clamp(256,2400));
@@ -1466,6 +1576,7 @@ impl Engine {
                 let chapters = rows.collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(history_excerpts(&plan, turns, chapters, query))
             }
+            "read_canon_notes" => crate::runtime_sources::read_notes(&*self.store.lock()?, &plan, args["query"].as_str().unwrap_or("")),
             "search_original" | "read_original" | "read_canon_facts" | "locate_original_event" | "prepare_reference_check" | "preview_turn_record" => {
                 let value = crate::runtime_sources::read(&self.store, &plan, &name, &args)?;
                 let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
@@ -1495,6 +1606,7 @@ fn is_read_tool(name: &str) -> bool {
             | "search_original"
             | "read_original"
             | "read_canon_facts"
+            | "read_canon_notes"
             | "list_skills"
             | "read_skill"
             | "read_skill_resource"
@@ -1624,6 +1736,9 @@ fn compact_locator_schema(schema:&mut Value){
 /// minutes before seeing a failure, so only quick transient errors retry.
 fn transient_retry_delay(error: &Error) -> Option<std::time::Duration> {
     match error {
+        // The service broke off mid-stream with an error event (D164): the
+        // passage was not finished, so one fresh attempt replaces the partial text.
+        Error::Provider { kind, .. } if kind == "stream" => Some(std::time::Duration::from_secs(1)),
         Error::Provider { kind, status, partial: false, .. }
             if kind == "network"
                 || (kind == "http" && status.is_some_and(|s| s == 429 || s >= 500)) =>
@@ -1759,6 +1874,64 @@ pub(crate) fn write_usage(
     }
     Ok(())
 }
+/// The lite check's request: the passage, what the player asked, and the
+/// original already supplied to the writer (about a fifth of the budget).
+fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Vec<Value>{
+    let mut left=cap/5;
+    let mut evidence=String::new();
+    // The search spans the whole book, but later chapters describe what has not
+    // happened yet: a passage from far past the reading position once "corrected"
+    // two servants at 双叉岭 into 八戒 and 沙僧. Keep the check to what is known by now.
+    let position=plan.state["source"]["position"].as_u64().unwrap_or(0);
+    let known=|p:&&Value|p["section"].as_u64().is_none_or(|s|s<=position+LITE_REVIEW_AHEAD);
+    for p in plan.reference.as_ref().and_then(|r|r["passages"].as_array()).into_iter().flatten().filter(|p|p["kind"]=="original").filter(known) {
+        let text=p["text"].as_str().unwrap_or("");
+        let line=format!("\n[第{}节·{}·片段{}]\n{}\n",p["section"].as_u64().unwrap_or(0)+1,p["title"].as_str().unwrap_or(""),p["chunk"].as_u64().unwrap_or(0)+1,text);
+        let cost=line.encode_utf16().count();
+        if cost>left {break;}
+        left-=cost;evidence.push_str(&line);
+    }
+    let notes=plan.reference.as_ref().and_then(|r|r["notes"].as_str()).unwrap_or("");
+    let source=&plan.state["source"];
+    let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
+    vec![
+        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。不改文风，不增删情节，不引入正文里没有的人物。只返回JSON：{\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄，尽量短\",\"problem\":\"与原著哪里不符（写明依据的节）\",\"fix\":\"改正后的这句\"}]}，最多5条；没有问题返回{\"issues\":[]}。"}),
+        json!({"role":"user","content":format!("【当前位置】原著第{}节前后\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（只含当前位置及之前不远的片段）{}\n【待校对正文】\n{narrative}",position+1,source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到当前位置之前的原文）".to_owned()}else{evidence})}),
+    ]
+}
+
+/// How many sections past the player's reading position the lite check may cite:
+/// the story moves on from where it started, but not by a book's worth.
+const LITE_REVIEW_AHEAD: u64 = 3;
+
+/// Local, conservative application: a fix is used only when its quote occurs
+/// exactly once and the replacement stays about the same size.
+fn apply_lite_fixes(narrative:&str, issues:&Value)->(String,Vec<Value>,usize){
+    let mut text=narrative.to_owned();let mut applied=vec![];let mut skipped=0;
+    for issue in issues.as_array().into_iter().flatten().take(5) {
+        let quote=issue["quote"].as_str().unwrap_or("").trim();
+        let fix=issue["fix"].as_str().unwrap_or("").trim();
+        let fits=!quote.is_empty()&&!fix.is_empty()&&quote!=fix&&text.matches(quote).count()==1&&fix.chars().count()<=quote.chars().count()*2+40;
+        if fits {text=text.replacen(quote,fix,1);applied.push(json!({"quote":quote,"problem":issue["problem"],"fix":fix}));} else {skipped+=1;}
+    }
+    (text,applied,skipped)
+}
+
+/// Generation tiers (D161): how much the writer may look up before writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tier { Fast, Standard, Deep }
+impl Tier {
+    pub(crate) fn of(plan: &RunPlan) -> Self {
+        match plan.meta["depth"].as_str() { Some("fast") => Tier::Fast, Some("standard") => Tier::Standard, _ => Tier::Deep }
+    }
+    fn tool_rounds(self) -> Option<u64> {
+        match self { Tier::Fast => Some(0), Tier::Standard => Some(1), Tier::Deep => Some(4) }
+    }
+}
+/// The standard tier's lookups: notes first, then the original and the story so far.
+const STANDARD_TOOLS: [&str; 4] = ["read_canon_notes", "search_original", "read_original", "read_history"];
+const ORDINARY_RULES_FAST:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料都已在上下文中，直接写本回合正文及<record>。";
+const ORDINARY_RULES_STANDARD:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料已在上下文中，直接写本回合正文及<record>。只有上下文确实缺少某个具体的原著细节或旧事时才查阅，需要查的几项在同一批里一起查，查完就写；不要例行检查，不要调用写入工具。";
 const ORDINARY_RULES:&str="普通回合：本回合所需的世界、规则、人物和旧事已在上下文中，直接写本回合正文及<record>。只有在需要核实上下文里没有的具体人物、设定或原著细节时才调用只读工具，不要为了例行检查读取技能或世界资料；不要调用写入工具。";
 const CLASSIC_RULES:&str="经典模式：生成和整理顺序由程序安排。你可以读取技能并调用只读工具核实资料。绑定参考书且任务需要原著细节时，按遵循原著技能读取原文，不用模型记忆补齐事实。最后返回本回合正文及<record>；不要调用写入工具。";
 
@@ -1797,5 +1970,30 @@ mod correction_notes_tests {
             &json!({"facts":[{"id":"ai","origin":"ai","detail":"自行写错"}]})
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod lite_review_tests {
+    use super::*;
+    #[test]
+    fn the_lite_check_sees_where_the_story_is_and_not_far_later_chapters() {
+        let mut plan: RunPlan = serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"turn","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[],"state":{"source":{"bookId":"b","fanfic":true,"plot":"canon","position":12,"instructions":"沿原著"}},"settings":{},"options":{},"action":{"text":"上前行礼"},"meta":{}})).unwrap();
+        plan.reference = Some(json!({"passages":[
+            {"kind":"original","section":12,"chunk":40,"title":"双叉岭","text":"两个从者挑着担子"},
+            {"kind":"original","section":26,"chunk":99,"title":"白虎岭","text":"八戒沙僧护着师父"}
+        ]}));
+        let messages = lite_review_messages(&plan, "两个从人上前。", 12000);
+        let user = messages[1]["content"].as_str().unwrap();
+        assert!(user.contains("【当前位置】原著第13节") && user.contains("[第13节·双叉岭") && user.contains("两个从者"), "{user}");
+        assert!(!user.contains("八戒沙僧"), "{user}");
+        assert!(messages[0]["content"].as_str().unwrap().contains("还没有发生"));
+    }
+    #[test]
+    fn fixes_apply_only_where_the_quote_is_unique_and_the_size_is_close() {
+        let issues = json!([{"quote":"三文","problem":"x","fix":"两文"},{"quote":"纸","problem":"y","fix":"布"},{"quote":"一句","problem":"z","fix":"很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长"}]);
+        let (text, applied, skipped) = apply_lite_fixes("一张纸三文，又一张纸。一句", &issues);
+        assert_eq!(text, "一张纸两文，又一张纸。一句");
+        assert_eq!((applied.len(), skipped), (1, 2));
     }
 }

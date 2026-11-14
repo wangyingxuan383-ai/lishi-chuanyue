@@ -45,7 +45,7 @@ pub fn failure_kind(error: &Error) -> &'static str {
         Error::Refused(_) => "refused",
         Error::Provider { kind, status, .. } => match kind.as_str() {
             k if k.starts_with("timeout") => "timeout",
-            "network" => "network",
+            "network" | "stream" => "network",
             "http" => match status {
                 Some(401 | 403) => "auth",
                 Some(402 | 429) => "quota",

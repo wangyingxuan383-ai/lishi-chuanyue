@@ -4,17 +4,26 @@
 
 /* ---------- page changes (View Transitions; App.tsx) ---------- */
 ::view-transition-group(*) { animation-duration: 420ms; animation-timing-function: var(--ease-out); }
-:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 380ms var(--ease-in) both; }
-:root[data-vt="push"]::view-transition-new(root) { animation: vt-ink-open 520ms var(--ease-out) both; }
-:root[data-vt="pop"]::view-transition-old(root) { animation: vt-slide-away 360ms var(--ease-in) both; }
-:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 420ms var(--ease-out) both; }
+:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 520ms var(--ease-in) both; }
+/* R29: the new page blooms out of an ink blot with ragged edges and splashes (D163). */
+:root[data-vt="push"]::view-transition-new(root) {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E"); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: 50% 62%; mask-position: 50% 62%;
+  animation: vt-ink-bloom 760ms cubic-bezier(0.25, 0.75, 0.2, 1) both;
+}
+:root[data-vt="pop"]::view-transition-old(root) { animation: vt-pop-away 440ms var(--ease-in) both; z-index: 2; }
+:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 520ms var(--spring-soft) both; }
 /* Opening a book: its cover grows into the story (shared element “story-card”). */
 ::view-transition-group(story-card) { animation-duration: 520ms; animation-timing-function: var(--spring-soft); z-index: 2; }
 ::view-transition-old(story-card), ::view-transition-new(story-card) { height: 100%; object-fit: cover; }
-@keyframes vt-recede { to { opacity: 0.4; transform: scale(0.94); filter: blur(2px); } }
-@keyframes vt-ink-open { from { clip-path: circle(0% at 50% 85%); filter: saturate(0.4); } to { clip-path: circle(150% at 50% 85%); } }
-@keyframes vt-slide-away { to { opacity: 0; transform: translateX(28%) rotate(1.5deg); } }
-@keyframes vt-come-back { from { opacity: 0; transform: scale(0.96); } }
+@keyframes vt-recede { to { opacity: 0.25; transform: scale(0.9) translateY(2%); filter: blur(6px) brightness(0.75); } }
+@keyframes vt-ink-bloom {
+  0% { -webkit-mask-size: 0% 0%; mask-size: 0% 0%; filter: saturate(0.2) brightness(0.85) contrast(1.15); }
+  35% { -webkit-mask-size: 120% 120%; mask-size: 120% 120%; filter: saturate(0.6) brightness(0.95); }
+  100% { -webkit-mask-size: 520% 520%; mask-size: 520% 520%; filter: none; }
+}
+@keyframes vt-pop-away { to { opacity: 0; transform: scale(0.84) translateY(4%); filter: blur(8px); } }
+@keyframes vt-come-back { from { opacity: 0.3; transform: scale(1.05); filter: blur(4px); } }
 /* With View Transitions running, the CSS screen entry would play twice. */
 :root[data-vt] .screen, :root[data-vt] .agent-conversation, :root[data-vt] .play-layout { animation: none !important; }
 
@@ -128,3 +137,17 @@
 :root[data-motion="rich"] .hero .seal { animation: stamp-arrive 900ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
 @keyframes stamp-arrive { 0% { opacity: 0; transform: scale(2.2) rotate(-20deg); filter: blur(4px); } 60% { opacity: 1; transform: scale(0.94) rotate(-3deg); filter: blur(0); } }
 :root[data-motion="rich"] .play { overflow: hidden; }
+
+/* ---------- gold dust (motion.ts burstDust): an opened book, a milestone ---------- */
+.dust-burst { position: fixed; z-index: 60; width: 0; height: 0; pointer-events: none; }
+.dust-burst i { position: absolute; left: -2px; top: -2px; width: 4px; height: 4px; border-radius: 50%;
+  background: radial-gradient(circle, #fff6d8, #e8b85c 60%, transparent 70%); box-shadow: 0 0 8px 2px rgba(232, 184, 92, 0.75);
+  animation: dust-fly 1100ms cubic-bezier(0.1, 0.8, 0.3, 1) both; }
+@keyframes dust-fly {
+  0% { opacity: 0; transform: rotate(var(--a)) translateX(0) scale(var(--s)); }
+  12% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(var(--a)) translateX(var(--d)) translateY(-26px) scale(calc(var(--s) * 0.4)); }
+}
+/* A small landscape card lifts toward you before its story opens. */
+.strip-card.opening { animation: strip-lift 420ms var(--ease-out) forwards; z-index: 3; }
+@keyframes strip-lift { to { transform: translateY(-10px) scale(1.06); box-shadow: 0 18px 40px var(--shadow); } }

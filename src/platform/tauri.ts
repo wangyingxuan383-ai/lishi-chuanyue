@@ -1,7 +1,7 @@
 import {assertSqlWritable,restoreWithFence} from "./sql-maintenance";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
-import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText } from "./types";
+import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText, type NotifyPrefs } from "./types";
 import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
 import { cancellable } from "./bookFiles";
 
@@ -135,6 +135,13 @@ export async function createTauriPlatform(): Promise<Platform> {
       notificationStatus: () => call("plugin:notifications|notification_status"),
       openSystemSettings: (which) => call(which === "notifications" ? "plugin:notifications|open_notification_settings" : "plugin:notifications|open_app_settings"),
       openUrl: (url) => call("plugin:notifications|open_url", { url }),
+      ...(name === "android" ? {
+        backgroundStatus: () => call<{ ignoringBattery: boolean; xiaomi: boolean }>("plugin:notifications|background_status"),
+        requestBatteryExemption: () => call<void>("plugin:notifications|request_battery_exemption"),
+        openAutostart: () => call<void>("plugin:notifications|open_autostart_settings"),
+        setNotifyPrefs: (prefs: NotifyPrefs) => call<void>("plugin:notifications|set_notify_prefs", { ...prefs }),
+        takeLaunchTarget: () => call<{ worldId: string | null; action: "read" | "resume" | null }>("plugin:notifications|take_launch_target"),
+      } : {}),
       setSystemBars: (background, dark) =>
         name === "android" ? call("plugin:notifications|set_system_bars", { background, dark }) : Promise.resolve(),
       // Android: a native haptic, which needs no VIBRATE permission and follows the

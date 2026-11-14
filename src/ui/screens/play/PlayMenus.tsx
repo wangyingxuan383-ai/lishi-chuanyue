@@ -39,9 +39,10 @@ interface PassageMoreMenuProps {
   setBookmark: (value: { node: StoryNode; name: string }) => void;
   setCardNode: (node: StoryNode) => void;
   setRawNode: (node: StoryNode) => void;
+  setUsageNode: (id: string) => void;
 }
 
-export function PassageMoreMenu({ menuMore, busy, devMode, game, setMenuMore, setEditing, refresh, toast, setBookmark, setCardNode, setRawNode }: PassageMoreMenuProps) {
+export function PassageMoreMenu({ menuMore, busy, devMode, game, setMenuMore, setEditing, refresh, toast, setBookmark, setCardNode, setRawNode, setUsageNode }: PassageMoreMenuProps) {
   return (
     <MenuSheet
       title="这一段还可以"
@@ -52,6 +53,7 @@ export function PassageMoreMenu({ menuMore, busy, devMode, game, setMenuMore, se
         { icon: "feather", label: "改我的行动", hidden: !menuMore.actionText || menuMore.actionMode === "continue" || menuMore.actionMode === "skip" || busy, onSelect: () => setEditing({ node: menuMore, field: "action", text: menuMore.actionText ?? "" }) },
         { icon: "bookmark", label: "加书签", hidden: menuMore.kind === "edit", onSelect: () => setBookmark({ node: menuMore, name: menuMore.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
         { icon: "share", label: "做成书摘卡", hidden: menuMore.kind === "edit" || !menuMore.narrative.trim(), onSelect: () => setCardNode(menuMore) },
+        { icon: "coin", label: "这一段的用量", hidden: menuMore.kind === "edit", onSelect: () => setUsageNode(menuMore.id) },
         { icon: "key", label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuMore) },
       ]}
     />
@@ -62,7 +64,7 @@ interface MoreMenuProps {
   mouse: boolean; busy: boolean; state: WorldState; dead: boolean; watch?: boolean;
   head: StoryNode; cursor: tree.Cursor; noteOpen: boolean; devMode: boolean;
   game: AppValue["game"]; worldId: string;
-  setSheet: (sheet: "toc" | "ask" | "reference" | "life" | "autoplay" | "skip" | "lines" | "story" | "settings" | "keys" | null) => void;
+  setSheet: (sheet: "toc" | "ask" | "reference" | "notes" | "usage" | "life" | "autoplay" | "skip" | "lines" | "story" | "settings" | "keys" | null) => void;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   setNoteOpen: (open: boolean) => void;
@@ -78,6 +80,7 @@ export function MoreMenu({ mouse, busy, state, dead, watch, head, cursor, noteOp
       items={[
         { icon: "list", group: "阅读", label: "目录与搜索", onSelect: () => setSheet("toc") },
         { icon: "search", group: "阅读", label: mouse ? "查一查（Ctrl+F）" : "查一查", hidden: busy, onSelect: () => setSheet("ask") },
+        { icon: "memo", group: "阅读", label: "原著札记", hidden: !state.source, onSelect: () => setSheet("notes") },
         { icon: "book", group: "阅读", label: "参考资料", hidden: !state.source, onSelect: () => setSheet("reference") },
         { icon: "person", group: "阅读", label: "这一世小传", onSelect: () => setSheet("life") },
         { icon: "play", group: "推进", label: "连播", hidden: busy || dead || watch, onSelect: () => setSheet("autoplay") },
@@ -87,6 +90,7 @@ export function MoreMenu({ mouse, busy, state, dead, watch, head, cursor, noteOp
         { icon: "branch", group: "推进", label: "世界线", onSelect: () => setSheet("lines") },
         { icon: "memo", group: "本局", label: "故事设定与要点", onSelect: () => setSheet("story") },
         { icon: "settings", group: "本局", label: "本局设置", onSelect: () => setSheet("settings") },
+        { icon: "coin", group: "本局", label: "本局用量", onSelect: () => setSheet("usage") },
         { icon: "feather", group: "本局", label: "幕后要求", hidden: noteOpen || watch, onSelect: () => setNoteOpen(true) },
         { icon: "info", group: "其他", label: mouse ? "游玩指南（F1）" : "游玩指南", onSelect: () => push({ name: "guide" }) },
         { icon: "key", group: "其他", label: "快捷键", hidden: !mouse, onSelect: () => setSheet("keys") },

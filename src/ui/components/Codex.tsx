@@ -9,6 +9,7 @@ import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { Card, CardKind, Place, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { Switch } from "./Switch";
 import { BuiltinContent } from "./BuiltinContent";
 import { Icon } from "./Icon";
 import { deletionPatch, selectionKey, type CodexKind, type CodexSelection } from "../../engine/writing/codex";
@@ -29,8 +30,8 @@ const SOURCE: Record<NonNullable<Card["source"]>, string> = { 卡组: "内置卡
 const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.trim()).filter(Boolean);
 const preview = (text: string, max = 60) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
-function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: WorldState; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void> }) {
-  const { ask, toast } = useApp();
+function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing; state: WorldState; worldId: string; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void> }) {
+  const { ask, toast, game } = useApp();
   const isEra = editing.type === "card" && editing.kind === "时代";
   const eraLabel = (state.era as { mode?: string }).mode === "free" ? "世界卡" : "时代卡";
   const original = editing.type === "card" ? editing.card : editing.place;
@@ -41,6 +42,22 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
   const [text, setText] = useState(editing.type === "card" ? editing.card?.content ?? "" : editing.place?.description ?? "");
   const [saving, setSaving] = useState(false);
   const label = editing.type === "place" ? "地点" : isEra ? eraLabel : `${editing.kind}卡`;
+  // 让 AI 改 (R29-T005): the answer fills the fields; nothing is saved until 保存.
+  const [instruction, setInstruction] = useState(""), [useSource, setUseSource] = useState(!!state.source), [revising, setRevising] = useState(false);
+  const [before, setBefore] = useState<{ name: string; aliases: string; text: string } | null>(null);
+  const revise = async () => {
+    if (!instruction.trim() || revising) return;
+    setRevising(true);
+    try {
+      const result = await game.reviseEntry(worldId, { label, name: name.trim(), aliases: splitNames(aliases), text }, instruction, { useSource: useSource && !!state.source });
+      setBefore({ name, aliases, text });
+      if (!isEra || result.name) setName(result.name);
+      if (!isEra) setAliases(result.aliases.join("、"));
+      setText(result.text);
+      toast("AI 改好了，看看再保存");
+    } catch (e) { toast(e instanceof Error ? e.message : "这次没改成，稍后再试"); }
+    finally { setRevising(false); }
+  };
   const isHere = editing.type === "place" && !!editing.place && editing.place.id === state.placeId;
   // A name another entry already has would update that entry instead (AUDIT_V4_FUNCTION F4).
   const pool = editing.type === "place" ? state.places.map((p) => ({ id: p.id, name: p.name })) : state.cards.filter((c) => c.kind !== "时代").map((c) => ({ id: c.id, name: c.name }));
@@ -77,6 +94,19 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
         </label>
         {isEra && <p className="muted m-0">{text.length} / {ERA_CARD_LIMIT} 字{text.length > ERA_CARD_LIMIT ? "，超出的部分不会交给 AI" : `。${eraLabel}每回合都会交给 AI。`}</p>}
         {taken && <p className="field-hint warn">已经有叫“{name.trim()}”的了，换个名字，或者去改那一张。</p>}
+        <details className="ai-revise" open={!!before || undefined}>
+          <summary>让 AI 改</summary>
+          <div className="stack gap-2">
+            <textarea rows={2} maxLength={500} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder={isEra ? "如：货币改成金魂币、银魂币、铜魂币；补上魂师等级的称呼" : "如：写得更具体些，补上来历和规矩"} />
+            {state.source && <Switch label="参考原著" note={useSource ? "带上原著札记和相关原文片段" : "只按故事设定改"} checked={useSource} onChange={setUseSource} />}
+            <div className="row">
+              {before && <button className="ghost" disabled={revising} onClick={() => { setName(before.name); setAliases(before.aliases); setText(before.text); setBefore(null); }}>撤回 AI 的修改</button>}
+              <span className="grow" />
+              <button disabled={!instruction.trim() || revising || saving} onClick={() => void revise()}>{revising ? "AI 正在改…" : "让 AI 改"}</button>
+            </div>
+            {before && <p className="field-hint m-0">上面已换成 AI 改过的内容，满意再点“保存”；保存后也能在 ⋯ 里撤销。</p>}
+          </div>
+        </details>
         <div className="row">
           {stored && <button className="danger-text" disabled={saving || isHere} onClick={remove}>{isHere ? "当前所在地不能删" : "删除"}</button>}
           <button className="primary grow" disabled={saving || !name.trim() || !!taken} onClick={save}>保存</button>
@@ -86,18 +116,19 @@ function Editor({ editing, state, onClose, onSave }: { editing: Editing; state: 
   );
 }
 
-export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganize }: {
-  headId: string; state: WorldState; era: EraContext; busy: boolean;
+export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, onOrganize }: {
+  worldId: string; headId: string; state: WorldState; era: EraContext; busy: boolean;
   onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
   onOpenStory: () => void;
   /** Lets the AI organize the 设定集 from the premise; true when something was added. */
-  onOrganize: (replaceOwnEra: boolean) => Promise<boolean>;
+  onOrganize: (replaceOwnEra: boolean, useSource?: boolean) => Promise<boolean>;
 }) {
   const { ask, toast } = useApp();
   const [builtin, setBuiltin] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [organizing, setOrganizing] = useState(false);
+  const [organizeSource, setOrganizeSource] = useState(true);
   const [filter, setFilter] = useState<"全部" | CodexKind>("全部");
   const [query, setQuery] = useState("");
   const [selecting, setSelecting] = useState(false);
@@ -114,7 +145,7 @@ export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganiz
     const own = eraCard?.source === "玩家";
     if (own && !await ask({ title: `让 AI 重新整理${eraLabel}？`, message: `会按故事设定重写，换掉你写的${eraLabel}。之后可以撤销。`, confirm: "重新整理" })) return;
     setOrganizing(true);
-    try { await onOrganize(own); } finally { setOrganizing(false); }
+    try { await onOrganize(own, organizeSource && !!state.source); } finally { setOrganizing(false); }
   };
   const items = (kind: "地点" | CardKind): { id: string; name: string; text: string; tag?: string; edit: Editing }[] =>
     kind === "地点"
@@ -157,6 +188,7 @@ export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganiz
           <p className="codex-text">{expanded ? eraCard.content : preview(eraCard.content, 90)}</p>
           {eraCard.content.length > 90 && <button className="ghost" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : "展开"}</button>}
         </> : <p className="muted codex-note mb-0">还没有{eraLabel}，AI 只按故事设定来写。可以写下这个世界的称谓、货币、风俗和其他背景。</p>}
+        {state.source && <Switch label="AI 整理时参考原著" note={organizeSource ? "带上原著札记和相关原文，整理出原著里的势力、地点和规矩" : "只按故事设定整理"} checked={organizeSource} onChange={setOrganizeSource} />}
       </section>
       <button className="ghost t-left" onClick={onOpenStory}>故事设定与要点 ›</button>
       <button className="ghost t-left" disabled={busy || organizing || deleting} onClick={() => setBuiltin(true)}>内置资料与灵感 ›</button>
@@ -213,7 +245,7 @@ export function Codex({ state, era, headId, busy, onSave, onOpenStory, onOrganiz
           <button className="danger-text" disabled={busy || deleting || !selected.length} onClick={() => void removeSelected()}>删除所选（{selected.length}）</button>
         </div>
       )}
-      {editing && <Editor editing={editing} state={state} onClose={() => setEditing(null)} onSave={onSave} />}
+      {editing && <Editor editing={editing} state={state} worldId={worldId} onClose={() => setEditing(null)} onSave={onSave} />}
     </div>
   );
 }

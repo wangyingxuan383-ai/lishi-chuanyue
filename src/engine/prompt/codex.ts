@@ -22,6 +22,8 @@ export interface CodexInput {
   arrival: string;
   /** Cards the world already has, so the model does not repeat them. */
   known?: string[];
+  /** 参考原著 (R29-T005): canon notes and original passages for a story bound to a book. */
+  reference?: string;
 }
 
 export function codexMessages(input: CodexInput): ChatMessage[] {
@@ -52,7 +54,7 @@ export function codexMessages(input: CodexInput): ChatMessage[] {
     },
     {
       role: "user",
-      content: `【故事设定】\n${input.premise.trim() || "（未写，请根据主角推断）"}\n\n【主角】${p.name || "未定"}，${p.gender}${p.age ? `，${p.age}岁` : ""}。${p.identity}\n穿越方式：${input.arrival}${input.known?.length ? `\n\n【已有卡片，不要重复】${input.known.join("、")}` : ""}`,
+      content: `【故事设定】\n${input.premise.trim() || "（未写，请根据主角推断）"}\n\n【主角】${p.name || "未定"}，${p.gender}${p.age ? `，${p.age}岁` : ""}。${p.identity}\n穿越方式：${input.arrival}${input.known?.length ? `\n\n【已有卡片，不要重复】${input.known.join("、")}` : ""}${input.reference ? `\n\n【参考原著】（AI 整理的札记与原文片段；只取与故事设定一致的部分，玩家写的设定优先）\n${input.reference}` : ""}`,
     },
   ];
 }

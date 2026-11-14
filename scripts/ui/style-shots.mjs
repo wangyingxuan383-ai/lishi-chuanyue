@@ -31,22 +31,26 @@ const closeSheets = async () => {
   }
 };
 
-async function setLook(style, theme, motion = "rich") {
+async function setLook(style, theme, motion = "rich", home = "scene") {
   await page.goto(`${origin}/`, { waitUntil: "domcontentloaded", timeout: 180_000 });
   await page.waitForFunction(() => window.__lishi?.game, null, { timeout: 180_000 });
-  await page.evaluate(async ({ style, theme, motion }) => {
+  await page.evaluate(async ({ style, theme, motion, home }) => {
     const repo = window.__lishi.game.repo;
     const reading = await repo.getSetting("reading", {});
     await repo.setSetting("reading", { ...reading, style, theme, motion });
     localStorage.setItem("lishi.style", style); localStorage.setItem("lishi.theme", theme);
-  }, { style, theme, motion });
+    await repo.setSetting("reading", { ...(await repo.getSetting("reading", {})), home });
+  }, { style, theme, motion, home });
   await page.reload({ waitUntil: "domcontentloaded" });
-  await page.locator(".world-open:visible").first().waitFor();
+  await page.locator(".world-open:visible, .shelf-book:visible").first().waitFor();
   await settle(900);
 }
 
 for (const [style, theme] of [["scroll", "paper"], ["ink", "paper"], ["ink", "night"], ["scroll", "night"]]) {
   const tag = `${style}-${theme}`;
+  // R29 (D163): both home designs.
+  await setLook(style, theme, "rich", "shelf");
+  await shot(`${tag}-01b-home-shelf`);
   await setLook(style, theme);
   await shot(`${tag}-01-home`);
   // Settings and the look picker.

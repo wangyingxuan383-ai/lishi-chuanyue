@@ -5,8 +5,9 @@ import { MenuSheet, Sheet } from "../../components/Sheet";
 import { StoryText } from "../../components/StoryText";
 
 /** 查一查 (R07-T001): questions about this world or the era; the story does not move. */
-export function AskSheet({ worldId, onClose }: { worldId: string; onClose: () => void }) {
-  const { game } = useApp();
+export function AskSheet({ worldId, bookId, onClose }: { worldId: string; bookId?: string; onClose: () => void }) {
+  const { game, toast } = useApp();
+  const [saved, setSaved] = useState<number[]>([]);
   const [question, setQuestion] = useState("");
   const [recipes, setRecipes] = useState(false);
   const [asked, setAsked] = useState<{ q: string; a: string; pending: boolean }[]>([]);
@@ -32,6 +33,7 @@ export function AskSheet({ worldId, onClose }: { worldId: string; onClose: () =>
           <div key={i} className="ask-item">
             <b>{x.q}</b>
             {x.a ? <StoryText text={x.a} /> : <p className="muted">查找中…</p>}
+            {bookId && !x.pending && x.a && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); })}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
           </div>
         ))}
         <button className="ghost" onClick={() => setRecipes(true)}>常用问题 ›</button>

@@ -15,7 +15,7 @@
 :root[data-style="ink"] button.ghost, :root[data-style="ink"] .icon-btn, :root[data-style="ink"] button.link,
 :root[data-style="ink"] .sheet-menu button, :root[data-style="ink"] .topbar button.title, :root[data-style="ink"] .sheet-close,
 :root[data-style="ink"] .world-open, :root[data-style="ink"] button.turn-changes, :root[data-style="ink"] .choice,
-:root[data-style="ink"] .settings-entry, :root[data-style="ink"] .tabs button, :root[data-style="ink"] .service-hero .icon-btn { box-shadow: none; background: transparent; }
+:root[data-style="ink"] .settings-entry, :root[data-style="ink"] .tabs button, :root[data-style="ink"] .service-hero .icon-btn, :root[data-style="ink"] .usage-line { box-shadow: none; background: transparent; }
 :root[data-style="ink"] button.primary {
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent));
   border-color: transparent; color: var(--on-accent); font-family: var(--sans); letter-spacing: 0.08em; font-weight: 600;
@@ -141,6 +141,11 @@
 :root[data-style="ink"] .service-hero.ok .service-hero-state { color: #9fe0b4; }
 :root[data-style="ink"] .service-hero-icon { background: linear-gradient(180deg, #d84a33, #a3241a); box-shadow: 0 0 0 2px rgba(217, 180, 106, 0.6); }
 :root[data-style="ink"] .style-card { border-color: transparent; box-shadow: var(--elev-2); }
+:root[data-style="ink"] .note-kind, :root[data-style="ink"] .note-row { border-color: transparent; box-shadow: var(--elev-1); border-radius: var(--radius-card); }
+:root[data-style="ink"] .note-kind[aria-checked="true"] { border-color: var(--fg); box-shadow: var(--elev-2), 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent); }
+:root[data-style="ink"] .note-kind[aria-checked="true"] b { color: var(--fg); }
+:root[data-style="ink"] .depth-card { border-color: transparent; box-shadow: var(--elev-1); border-radius: var(--radius-card); }
+:root[data-style="ink"] .depth-card[aria-checked="true"] { border-color: var(--fg); box-shadow: var(--elev-2), 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent); }
 :root[data-style="ink"] .style-card[aria-pressed="true"] { border-color: var(--fg); box-shadow: var(--elev-2), 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent); }
 :root[data-style="ink"] .setting { border-bottom-color: color-mix(in srgb, var(--line) 60%, transparent); }
 
@@ -157,3 +162,58 @@
 :root[data-style="ink"] .whats-new { border: none; border-radius: var(--radius-card); box-shadow: var(--elev-2); }
 :root[data-style="ink"] .whats-new-open { background: transparent; box-shadow: none; }
 :root[data-style="ink"] .whats-new-mark { border-radius: 50%; }
+
+/* ---------- R29 墨韵加厚 (D163): ink wash and paper fibre behind everything, distant
+   hills at the foot of the page, gilt hairlines and 回纹 corners on the larger cards,
+   brush-stroke underlines under headings, gilt on the big titles. ---------- */
+:root[data-style="ink"] {
+  --gilt: #b8914a; --gilt-soft: rgba(184, 145, 74, 0.28);
+  --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.5' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E"); --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.5' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
+  --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%231f1d1a' fill-opacity='0.06' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%231f1d1a' fill-opacity='0.05' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
+}
+:root[data-style="ink"][data-theme="night"] {
+  --gilt: #d9b46a; --gilt-soft: rgba(217, 180, 106, 0.22);
+  --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.42' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E"); --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.42' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
+  --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%23d9b46a' fill-opacity='0.045' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%23000000' fill-opacity='0.35' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
+}
+:root[data-style="ink"] body {
+  background-image:
+    radial-gradient(70% 45% at -6% -6%, rgba(31, 29, 26, 0.10), transparent 70%),
+    radial-gradient(55% 40% at 106% 6%, rgba(181, 40, 28, 0.06), transparent 70%),
+    radial-gradient(60% 45% at 100% 106%, rgba(31, 29, 26, 0.08), transparent 72%),
+    var(--hills), url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.3 0 0 0 0 0.27 0 0 0 0 0.22 0 0 0 0.07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-position: 0 0, 0 0, 0 0, center bottom, 0 0;
+  background-size: auto, auto, auto, 100% 32vh, 180px 180px;
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, repeat;
+  background-attachment: fixed;
+}
+:root[data-style="ink"][data-theme="night"] body {
+  background-image:
+    radial-gradient(70% 45% at -6% -6%, rgba(140, 125, 105, 0.14), transparent 70%),
+    radial-gradient(55% 40% at 106% 6%, rgba(224, 80, 60, 0.08), transparent 70%),
+    radial-gradient(60% 45% at 100% 106%, rgba(217, 180, 106, 0.07), transparent 72%),
+    var(--hills), url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.3 0 0 0 0 0.27 0 0 0 0 0.22 0 0 0 0.07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+:root[data-style="ink"] :is(.card, .status-card, .settings-list, .whats-new, .new-story, .shelf-slip, .next-choices) {
+  background-image: var(--meander), var(--meander-br);
+  background-repeat: no-repeat; background-size: 15px 15px; background-position: 9px 9px, calc(100% - 9px) calc(100% - 9px);
+  box-shadow: var(--elev-2), inset 0 0 0 1px var(--gilt-soft);
+}
+:root[data-style="ink"] :is(.settings-sub, .section-title)::after {
+  content: ""; display: block; width: 30px; height: 3px; margin-top: 7px; border-radius: 3px 1px 3px 1px;
+  background: linear-gradient(90deg, var(--gilt), color-mix(in srgb, var(--gilt) 0%, transparent));
+}
+:root[data-style="ink"] .home-topbar h1 { letter-spacing: 0.1em; }
+:root[data-style="ink"][data-theme="night"] :is(.home-topbar h1, .scene-title, .slip-head b) {
+  background: linear-gradient(180deg, #fff4dc 20%, #d9b46a 78%, #b38a46); -webkit-background-clip: text; background-clip: text; color: transparent;
+  text-shadow: none; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
+}
+:root[data-style="ink"]:not([data-theme="night"]) .scene-title {
+  background: linear-gradient(180deg, var(--title) 35%, color-mix(in srgb, var(--title) 55%, #9a7434)); -webkit-background-clip: text; background-clip: text; color: transparent;
+  text-shadow: none; filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.6));
+}
+:root[data-style="ink"] button.primary { box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent), 0 8px 20px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 0 0 1px rgba(255, 226, 170, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+:root[data-style="ink"] .home-scene { box-shadow: 0 16px 44px var(--shadow), inset 0 0 0 1px var(--gilt-soft); }
+:root[data-style="ink"] .scene-panel { border-color: var(--gilt-soft); }
+:root[data-style="ink"] .sheet { background-image: linear-gradient(90deg, transparent, var(--gilt-soft) 30%, var(--gilt-soft) 70%, transparent); background-size: 100% 1px; background-repeat: no-repeat; background-position: 0 0; }
+:root[data-style="ink"] .depth-btn span { border-color: var(--gilt); }

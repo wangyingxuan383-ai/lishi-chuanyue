@@ -58,6 +58,11 @@ function gameReply(request) {
 ${JSON.stringify(r)}
 </record>`;
   if (prompt.includes("只回复两个字")) return "你好";
+  // R29: 原著札记, 让 AI 改设定 and the lite canon check.
+  if (prompt.includes("整理“原著札记”") || prompt.includes("同一份原著札记分段整理")) return "主角在青石桥边的书铺落脚，结识阿青（第1章）。\n阿青把青铜钥匙交给阿白，二人约定救下阿兰（第2章）。\n雪夜里真相渐明，阿白身世不凡（第3章）。";
+  if (prompt.includes("修改互动小说“设定集”里的一条")) return JSON.stringify({ name: "漕帮", aliases: ["帮里", "运河帮"], text: "运河上的帮会，把持南北漕运，帮主姓沈，规矩森严：不碰官粮，不欺老弱。" });
+  if (prompt.includes("调整互动小说的时间显示与货币")) return JSON.stringify({ clockStyle: "era", eraName: "斗罗历", year: 2800, month: 3, day: 5, currency: [{ name: "金魂币", value: 10000 }, { name: "银魂币", value: 100 }, { name: "铜魂币", value: 1 }], note: "改用斗罗历，货币换成魂币" });
+  if (prompt.includes("你是原著校对")) return JSON.stringify({ issues: [] });
   if (prompt.includes("拟剧本大纲")) return JSON.stringify({ line: "落第书生在长安闯出一条生路", beats: ["邸店掌柜催讨房钱", "西市货栈谋得差事", "账目里发现蹊跷", "夜探城隍庙", "真相大白，名动西市"], ending: "还清旧债，在长安站稳脚跟" });
   if (prompt.includes("出一个开局挑战")) return JSON.stringify({ goal: "三个月内凑够三百两", limit: "三个月", failIf: "被债主告到官府" });
   if (prompt.includes("请写这部小说的开场")) return TEXT + record(prompt.includes("【挑战】") ? { ...OPENING_RECORD, challenge: { progress: "还没有头绪" } } : OPENING_RECORD);

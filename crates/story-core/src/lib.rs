@@ -58,6 +58,7 @@ pub mod world_archive;
 pub mod maintenance;
 mod pi_backup;
 pub mod rules;
+pub mod notice;
 pub mod runtime;
 pub mod runtime_sources;
 pub mod writing_context;

@@ -322,13 +322,33 @@ pub fn build(input: &Value) -> Result<Value> {
         .map(|l| l["chars"].as_u64().unwrap_or(0) as usize)
         .sum();
     // Message roles, delimiters and the small active read-only tool catalog.
+    // Generation tier (D161): absent means a caller from before tiers.
+    let depth = input["depth"].as_str().or(settings["depth"].as_str()).unwrap_or("deep");
     let overhead = input["toolOverheadChars"]
         .as_u64()
         .map(|n| n as usize)
-        .unwrap_or_else(|| {
-            crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128
+        .unwrap_or_else(|| match depth {
+            "fast" => 128,
+            "standard" => crate::tools::catalog().iter().filter(|t| ["read_canon_notes","read_history"].contains(&t.name) || (state["source"].is_object() && ["search_original","read_original"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + 128,
+            _ => crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128,
         });
-    let mut remaining = (cap / 4).min(cap.saturating_sub(fixed + overhead + 400));
+    // Canon notes (D162): the player's digests of the book, chosen by the
+    // caller for the current position and the names in play. Up to a fifth of
+    // the budget, in the fixed system part so the service can cache it.
+    let notes_room = (cap / 5).min(cap.saturating_sub(fixed + overhead + 400));
+    let mut notes = String::new();
+    for n in list(&input["canonNotes"]) {
+        let header = if notes.is_empty() { "\n【原著札记】（玩家让 AI 整理的原著梗概，可能有误；本局已发生的事实优先）" } else { "" };
+        let block = format!("\n· {}\n{}\n", text(&n["title"]), text(&n["content"]).trim());
+        if size(&notes) + size(header) + size(&block) <= notes_room {
+            notes += header;
+            notes += &block;
+        } else if notes.is_empty() && notes_room > 400 {
+            notes = format!("{header}{}\n", head(&block, notes_room - size(header) - 1));
+        }
+    }
+    layers.push(json!({"key":"canonNotes","label":"原著札记","chars":size(&notes),"content":notes,"note":"当前位置的主线与本段提到的人物、设定，最多五分之一预算"}));
+    let mut remaining = (cap / 4).min(cap.saturating_sub(fixed + overhead + size(&notes) + 400));
     let mut evidence = String::new();
     let mut fitted = vec![];
     for p in list(&reference["passages"]) {
@@ -356,7 +376,13 @@ pub fn build(input: &Value) -> Result<Value> {
         fitted.push(item);
     }
     if source.is_some() && evidence.is_empty() {
-        evidence = "\n【原著资料不足】当前未取得可核实原文，需要补查，不能声称已核对。\n".into();
+        evidence = if depth == "deep" {
+            "\n【原著资料不足】当前未取得可核实原文，需要补查，不能声称已核对。\n".into()
+        } else if !notes.is_empty() {
+            "\n【原著资料】本回合没有取到直接相关的原文片段，以上面的原著札记为准；札记没写到的细节不编造。\n".into()
+        } else {
+            "\n【原著资料】本回合没有取到直接相关的原文片段。按上文的设定与已知剧情写，不编造原著细节，也不声称已核对原文。\n".into()
+        };
     }
     if reference.is_object() {
         reference["passages"] = fitted.into();
@@ -368,7 +394,10 @@ pub fn build(input: &Value) -> Result<Value> {
         .into();
     }
     layers.push(json!({"key":"reference","label":"原著证据","content":evidence,"chars":size(&evidence),"note":"先保留原文，最多四分之一预算"}));
-    let mut room = cap.saturating_sub(fixed + overhead + size(&evidence));
+    if reference.is_object() && !notes.is_empty() {
+        reference["notes"] = notes.clone().into();
+    }
+    let mut room = cap.saturating_sub(fixed + overhead + size(&notes) + size(&evidence));
     let continuity=crate::continuity::recall(&input["continuity"],&recent,1200.min(room/4));
     room=room.saturating_sub(size(&continuity));
     if !continuity.is_empty(){layers.push(json!({"key":"recall","label":"知情与未完事项","content":continuity,"chars":size(&continuity),"note":"只取本路线相关记录，原句可只读回查"}));}
@@ -466,7 +495,7 @@ pub fn build(input: &Value) -> Result<Value> {
     }
     pairs.reverse();
     let mut messages = vec![];
-    let system = ["rules", "premise", "era", "recap", "spec"]
+    let system = ["rules", "premise", "era", "canonNotes", "recap", "spec"]
         .iter()
         .filter_map(|key| {
             layers
@@ -476,7 +505,7 @@ pub fn build(input: &Value) -> Result<Value> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let compact_system = ["rules", "premise", "era", "spec"].iter()
+    let compact_system = ["rules", "premise", "era", "canonNotes", "spec"].iter()
         .filter_map(|key| layers.iter().find(|layer| layer["key"] == *key).map(|layer| text(&layer["content"])))
         .collect::<Vec<_>>().join("\n");
     messages.push(json!({"role":"system","content":system,"compactContent":compact_system}));
@@ -484,7 +513,7 @@ pub fn build(input: &Value) -> Result<Value> {
         messages.push(json!({"role":"user","content":action}));
         messages.push(json!({"role":"assistant","content":body}));
     }
-    let user_layers = || layers.iter().filter(|l| !["rules", "premise", "era", "recap", "spec"].contains(&text(&l["key"])));
+    let user_layers = || layers.iter().filter(|l| !["rules", "premise", "era", "canonNotes", "recap", "spec"].contains(&text(&l["key"])));
     let user = user_layers().map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
     let compact_user = user_layers().filter(|l| !["cards", "recall"].contains(&text(&l["key"])))
         .map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
@@ -517,6 +546,26 @@ mod tests {
         assert!(body.contains("青色玉佩只有一枚"));
         assert!(!body.contains(&"旧备注".repeat(100)));
         assert!(body.contains("保留玩家主动改变"));
+    }
+    #[test]
+    fn canon_notes_join_the_fixed_part_within_a_fifth_of_the_budget() {
+        let mut i = input();
+        i["depth"] = "standard".into();
+        i["reference"]["passages"] = json!([]);
+        i["canonNotes"] = json!([
+            {"title":"第1～100章主线","content":"主角拜入学院，结识七怪。"},
+            {"title":"很长的札记","content":"很长".repeat(4000)},
+            {"title":"人物：小舞","content":"柔骨兔化形。"}
+        ]);
+        let context = build(&i).unwrap();
+        let system = context["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("【原著札记】") && system.contains("结识七怪") && system.contains("柔骨兔化形"), "{}", serde_json::to_string(&context["layers"].as_array().unwrap().iter().map(|l| (l["key"].clone(), l["chars"].clone())).collect::<Vec<_>>()).unwrap());
+        assert!(!system.contains(&"很长".repeat(4000)));
+        let layer = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "canonNotes").unwrap();
+        assert!(layer["chars"].as_u64().unwrap() as usize <= 14545 / 5);
+        let user = context["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(user.contains("以上面的原著札记为准") && !user.contains("需要补查"));
+        assert!(context["reference"]["notes"].as_str().unwrap().contains("结识七怪"));
     }
     #[test]
     fn fixed_player_requirements_outweigh_the_history_target() {

@@ -7,11 +7,8 @@ import type { Row } from "../../platform";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { readBudget } from "./budgetMath";
+import { PURPOSE_SQL, purposeLabel } from "../../engine/usage";
 
-export const PURPOSES: Record<string, string> = {
-  turn: "回合", opening: "开场", extract: "补记", assist: "补全", continue: "续写", codex: "整理设定", upkeep: "整理设定（游玩中）",
-  chapter: "章节摘要", ask: "查一查", test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍",
-};
 type By = "world" | "day" | "purpose";
 interface Prices { input: number | null; output: number | null }
 
@@ -21,7 +18,7 @@ const localDay = () => `${-new Date().getTimezoneOffset()} minutes`;
 const GROUP: Record<By, string> = {
   world: "COALESCE(w.title, '（没有世界）')",
   day: "date(u.at, ?)",
-  purpose: "u.purpose",
+  purpose: PURPOSE_SQL,
 };
 
 export function UsageSheet({ onClose }: { onClose: () => void }) {
@@ -57,7 +54,7 @@ export function UsageSheet({ onClose }: { onClose: () => void }) {
         {rows.map((r) => (
           <div key={String(r.label)} className="item-row">
             <div className="grow">
-              <b>{by === "purpose" ? PURPOSES[String(r.label)] ?? String(r.label) : String(r.label)}</b>
+              <b>{by === "purpose" ? purposeLabel(String(r.label)) : String(r.label)}</b>
               <small>{Number(r.calls)} 次 · 输入 {Number(r.input).toLocaleString()} · 输出 {Number(r.output).toLocaleString()}{Number(r.unknown) ? ` · 未知 ${Number(r.unknown)} 次` : ""}{r.ms != null ? ` · 平均 ${(Number(r.ms) / 1000).toFixed(1)} 秒` : ""}</small>
             </div>
             {priced && <span className="tag">{cost(r).toFixed(2)} 元</span>}

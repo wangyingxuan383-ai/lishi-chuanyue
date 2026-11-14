@@ -5,6 +5,8 @@ import { DEFAULT_SETTINGS, type WorldSettings } from "../../engine/types";
 import type { Repo } from "../../engine/db/repo";
 
 export type PlayDefaults = Pick<WorldSettings, "perspective" | "length" | "choiceCount" | "style" | "difficulty" | "intensity" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints"> & {
+  /** Generation tier for new worlds (D161). */
+  depth: NonNullable<WorldSettings["depth"]>;
   /** Extra rules every new world starts with (the world can change them). */
   rules: string;
 };
@@ -13,7 +15,7 @@ export const BUILTIN_DEFAULTS: PlayDefaults = {
   perspective: DEFAULT_SETTINGS.perspective, length: DEFAULT_SETTINGS.length, choiceCount: DEFAULT_SETTINGS.choiceCount,
   style: DEFAULT_SETTINGS.style, difficulty: DEFAULT_SETTINGS.difficulty, intensity: DEFAULT_SETTINGS.intensity,
   autoUpkeep: DEFAULT_SETTINGS.autoUpkeep, chapterEvery: DEFAULT_SETTINGS.chapterEvery,
-  fortune: DEFAULT_SETTINGS.fortune, tabooHints: DEFAULT_SETTINGS.tabooHints, rules: "",
+  fortune: DEFAULT_SETTINGS.fortune, tabooHints: DEFAULT_SETTINGS.tabooHints, depth: "standard", rules: "",
 };
 
 export async function loadPlayDefaults(repo: Repo): Promise<PlayDefaults> {

@@ -10,9 +10,12 @@ import type { TurnRecord } from "../../engine/state/apply";
 import type { WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
+import { Switch } from "./Switch";
+import { useApp } from "../app/context";
+import type { ReviseRules } from "../../engine/prompt/revise";
 
-export function RulesSheet({ state: liveState, era: liveEra, headId, busy, onSave, onClose, onCorrectDuration }: {
-  state: WorldState; era: EraContext; headId: string; busy: boolean;
+export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, busy, onSave, onClose, onCorrectDuration }: {
+  worldId?: string; state: WorldState; era: EraContext; headId: string; busy: boolean;
   onSave: (patch: TurnRecord, summary: string, expectedHeadId: string) => Promise<void>;
   onClose: () => void;
   onCorrectDuration?: () => void;
@@ -40,6 +43,26 @@ export function RulesSheet({ state: liveState, era: liveEra, headId, busy, onSav
     const editedTime = style === "era" && !date || Number(form.hour) !== previous.hour || Number(form.minute) !== previous.minute;
     setForm(v => ({ ...v, style, ...(!editedTime ? { hour: String(next.hour).padStart(2, "0"), minute: String(next.minute).padStart(2, "0") } : {}) }));
     setProblem(null);
+  };
+  // 让 AI 改 (R29-T005): the answer fills this form; the preview below shows it before 保存.
+  const { game, toast } = useApp();
+  const [instruction, setInstruction] = useState(""), [useSource, setUseSource] = useState(!!state.source), [revising, setRevising] = useState(false), [aiNote, setAiNote] = useState("");
+  const revise = async () => {
+    if (!worldId || !instruction.trim() || revising) return;
+    setRevising(true);
+    try {
+      const current: ReviseRules = { clockStyle: form.style, timeStyle: form.timeStyle, lunar: form.lunar, eraName: form.eraName, year: form.year ? Number(form.year) : null, month: form.month, day: Number(form.day) || 1,
+        displayDay: Number(form.displayDay) || 1, hour: Number(form.hour) || 0, minute: Number(form.minute) || 0, currency: units.map((u) => ({ name: u.name.trim(), value: Number(u.value) })) };
+      const r = await game.reviseRules(worldId, current, instruction, { useSource: useSource && !!state.source });
+      const two = (n: number) => String(n).padStart(2, "0");
+      setForm((v) => ({ ...v, ...(r.clockStyle ? { style: r.clockStyle } : {}), ...(r.timeStyle ? { timeStyle: r.timeStyle } : {}), ...(r.lunar !== undefined ? { lunar: r.lunar } : {}),
+        ...(r.eraName ? { eraName: r.eraName } : {}), ...(r.year ? { year: String(r.year) } : {}), ...(r.month ? { month: r.month } : {}), ...(r.day ? { day: String(r.day) } : {}),
+        ...(r.displayDay ? { displayDay: String(r.displayDay) } : {}), ...(r.hour !== undefined ? { hour: two(r.hour) } : {}), ...(r.minute !== undefined ? { minute: two(r.minute) } : {}) }));
+      if (r.currency) setUnits(r.currency.map((u) => ({ name: u.name, value: String(u.value) })));
+      setProblem(null);
+      setAiNote(r.note ? `AI：${r.note}` : "AI 改好了，看看下面“保存后”的样子再保存。");
+    } catch (e) { toast(e instanceof Error ? e.message : "这次没改成，稍后再试"); }
+    finally { setRevising(false); }
   };
   const timeDirty = JSON.stringify(form) !== JSON.stringify(initial);
   const parsedUnits = units.map(u => ({ name: u.name.trim(), value: Number(u.value) }));
@@ -89,6 +112,15 @@ export function RulesSheet({ state: liveState, era: liveEra, headId, busy, onSav
   return <Sheet title="时间与货币" onClose={onClose} dirty={dirty}>
     <div className="stack gap-10">
       <p className="muted m-0">直接校准当前显示，不改变实际经过、年龄或期限。保存后可以撤销。</p>
+      {worldId && <details className="ai-revise">
+        <summary>让 AI 改</summary>
+        <div className="stack gap-2">
+          <textarea rows={2} maxLength={500} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="如：改用斗罗历，货币换成金魂币、银魂币、铜魂币，一金魂币等于一百银魂币" />
+          {state.source && <Switch label="参考原著" note={useSource ? "带上原著札记和相关原文片段" : "只按你的要求改"} checked={useSource} onChange={setUseSource} />}
+          <div className="row"><span className="grow" /><button disabled={!instruction.trim() || revising || saving} onClick={() => void revise()}>{revising ? "AI 正在改…" : "让 AI 改"}</button></div>
+          {aiNote && <p className="field-hint m-0">{aiNote}</p>}
+        </div>
+      </details>}
       <span className="muted">日期显示</span>
       <div className="segmented">
         <button aria-pressed={form.style === "elapsed"} onClick={() => selectStyle("elapsed")}>日序</button>

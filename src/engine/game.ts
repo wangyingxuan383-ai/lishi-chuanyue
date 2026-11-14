@@ -1,5 +1,8 @@
 // Game session facade: native opening, turns, variants and recovery, plus
 // local edits, context previews and auxiliary writing jobs.
+import { depthBudget, depthOf, referenceReview } from "./depth";
+import { getNote, newNote, notesForTurn, runNote, saveNote, type CanonNote } from "./sources/notes";
+import { parseReviseEntry, parseReviseRules, reviseEntryMessages, reviseRulesMessages, type ReviseContext, type ReviseEntry, type ReviseEntryResult, type ReviseRules } from "./prompt/revise";
 import { validateContinuity, readContinuity } from "./continuity";
 import { formatDate } from "./calendar/date";
 import { eraContext, eraPack } from "./era";
@@ -12,6 +15,7 @@ import { hasChinese, isNotice, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, writingContextTemplate, renderState, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
   type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
+  canonNotesBlock,
 } from "./prompt/turn";
 import { CODEX_FREE_PROMPT_VERSION, CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
 import { UPKEEP_EVERY, UPKEEP_FREE_PROMPT_VERSION, UPKEEP_PROMPT_VERSION, upkeepMessages } from "./prompt/upkeep";
@@ -161,6 +165,8 @@ type CarriedEdit = Pick<StoryNode, "record" | "actionText">;
 
 const DEFAULT_CONTEXT_TOKENS = 12_000;
 const CODEX_TIMEOUT = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 75_000 };
+/** A note reads up to 16 000 characters and writes up to 3 000. */
+const NOTE_TIMEOUT = { firstByteMs: 60_000, idleMs: 45_000, totalMs: 240_000 };
 // Free-mode wording is applied at the call site, keeping the shared chapter helper unchanged.
 const FREE_CHAPTER_PROMPT_VERSION = "chapter-2-free";
 
@@ -397,8 +403,44 @@ export class Game {
     }
   }
 
+  /** The canon notes and a few original passages about `query`, for 参考原著 (R29-T005). */
+  private async sourceBrief(worldId: string, binding: SourceBinding | null | undefined, query: string, max = 3000): Promise<string> {
+    if (!binding) return "";
+    const notes = canonNotesBlock(await notesForTurn(this.repo, binding, worldId, query).catch(() => []), Math.floor(max / 2));
+    const passages = referenceEvidenceBlock(await referenceContext(this.repo, binding, query, max - notes.length).catch(() => undefined));
+    return `${notes}${passages}`.trim().slice(0, max);
+  }
+
+  /** 让 AI 改设定 (R29-T005): one entry of the 设定集, changed as asked; the editor shows it before saving. */
+  async reviseEntry(worldId: string, entry: ReviseEntry, instruction: string, opts: { useSource?: boolean } = {}): Promise<ReviseEntryResult> {
+    const { messages } = await this.reviseContext(worldId, `${entry.name}\n${entry.aliases.join("\n")}\n${instruction}`, opts.useSource, (c) => reviseEntryMessages(entry, instruction, c));
+    const result = await this.call(messages, { aux: true, usage: { worldId, nodeId: null, purpose: "revise" }, timeouts: CODEX_TIMEOUT });
+    const parsed = parseReviseEntry(lenientJson(result.text), entry);
+    await this.platform.sql.batch([this.usage(worldId, null, "revise", result, parsed ? "ok" : "no_record", this.auxModelName())]);
+    if (!parsed) throw new Error("AI 没有给出能用的修改，换个说法再试");
+    return parsed;
+  }
+  /** The same for the time display and currency; only the fields it changed come back. */
+  async reviseRules(worldId: string, current: ReviseRules, instruction: string, opts: { useSource?: boolean } = {}): Promise<Partial<ReviseRules> & { note?: string }> {
+    const { messages } = await this.reviseContext(worldId, `${instruction}\n纪年 历法 货币 ${current.eraName}`, opts.useSource, (c) => reviseRulesMessages(current, instruction, c));
+    const result = await this.call(messages, { aux: true, usage: { worldId, nodeId: null, purpose: "revise" }, timeouts: CODEX_TIMEOUT });
+    const parsed = parseReviseRules(lenientJson(result.text));
+    await this.platform.sql.batch([this.usage(worldId, null, "revise", result, parsed ? "ok" : "no_record", this.auxModelName())]);
+    if (!parsed) throw new Error("AI 没有给出能用的修改，换个说法再试");
+    return parsed;
+  }
+  private async reviseContext(worldId: string, query: string, useSource: boolean | undefined, build: (c: ReviseContext) => ChatMessage[]): Promise<{ messages: ChatMessage[] }> {
+    this.requireLlm();
+    const world = await this.repo.getWorld(worldId);
+    if (!world) throw new Error("故事不存在");
+    const state = await this.repo.getState((await tree.cursor(this.repo, worldId)).head.id);
+    const me = state.protagonist;
+    const source = useSource ? await this.sourceBrief(worldId, state.source, query) : "";
+    return { messages: build({ premise: world.settings.premise, protagonist: `${me.name}，${me.gender}${me.age ? `，${me.age}岁` : ""}。${me.identity}`, source: source || undefined }) };
+  }
+
   /** Organizes the 设定集 again from the current premise; an undoable edit node, or null if nothing came back. */
-  async organize(worldId: string, opts: { replaceOwnEra?: boolean } = {}): Promise<tree.Cursor | null> {
+  async organize(worldId: string, opts: { replaceOwnEra?: boolean; useSource?: boolean } = {}): Promise<tree.Cursor | null> {
     const world = await this.repo.getWorld(worldId);
     if (!world) return null;
     const state = await this.repo.getState((await tree.cursor(this.repo, worldId)).head.id);
@@ -408,6 +450,7 @@ export class Game {
       premise: world.settings.premise, protagonist: { name: me.name, gender: me.gender, age: me.age, identity: me.identity },
       arrival: (await this.setupOf(worldId))?.arrival ?? "魂穿",
       known: [...state.cards.filter((c) => c.kind !== "时代").map((c) => c.name), ...state.places.map((p) => p.name)],
+      ...(opts.useSource && state.source ? { reference: await this.sourceBrief(worldId, state.source, [world.settings.premise, me.name, me.identity].join("\n"), 4000) } : {}),
     }, { worldId, nodeId: null, purpose: "codex" });
     let patch = result ? codexPatch(result.text, state, opts) : null;
     // Great events only fill a timeline that has none from a pack or an earlier pass, on a CE-dated start.
@@ -460,10 +503,12 @@ export class Game {
     if (challenge) initial.challenge = challenge;
     const setupLog = challenge?.limit && challenge.deadlineMinute === null ? [`期限“${challenge.limit}”无法换算，按不限时处理`] : [];
     const era = eraContext(pack?.id ?? null, initial);
-    const inputBudget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
+    const depth = depthOf(settings);
+    const inputBudget = depthBudget(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value), depth);
     const openingReference = fitReference(await referenceContext(this.repo, initial.source, [settings.premise, p.name, p.identity, input.opening.mode === "ai" ? input.opening.hint : ""].join("\n"), Math.floor(inputBudget / 4)), Math.min(3000, Math.floor(inputBudget / 4)));
+    const openingNotes = initial.source ? (await notesForTurn(this.repo, initial.source, "", [settings.premise, p.name, p.identity].join("\n")).catch(() => [])) : [];
     const opening = {
-      reference: openingReference,
+      reference: openingReference, canonNotes: openingNotes,
       era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "",
       script: initial.script, challenge: initial.challenge,
     };
@@ -483,7 +528,7 @@ export class Game {
       action: { mode: "continue", text: "" }, reference: opening.reference,
       newWorld: { title: titlePolicy === "manual" ? input.title.trim() || "未命名故事" : "未命名故事", eraId: pack?.id ?? "free" },
       meta: {
-        promptVersion: PROMPT_VERSION, titlePolicy, referenceReviewVersion: "reference-review-2", budgetChars: inputBudget, startMoney: pack?.startMoney ?? 0,
+        promptVersion: PROMPT_VERSION, titlePolicy, depth, referenceReviewVersion: referenceReview(depth, initial.source), budgetChars: inputBudget, startMoney: pack?.startMoney ?? 0,
         playerWritten: input.opening.mode === "player", ...(input.opening.mode === "player" ? { playerNarrative: input.opening.text.trim() } : {}),
         setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "", organize: !pack && input.organize === true && !initial.source },
         ...(pack ? { openingTimeline: packTimeline(pack.timeline, era.clock).map((e) => ({ id: newId(), ...e })) } : {}),
@@ -662,7 +707,7 @@ export class Game {
           carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ record, actionText }) => ({ record, actionText }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
             ...(await this.nativeGuard(worldId, current.head.id)),
-            promptVersion: PROMPT_VERSION, referenceReviewVersion: "reference-review-2", budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
+            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", state.source), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
             ...(batch ? {
               autoplayCount: batch.turns, autoplayPilot: "temporary-ai", autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
@@ -755,6 +800,38 @@ export class Game {
       return preview;
     })();
     return { done, cancel() { cancelled = true; active?.cancel(); }, async catchUp() { detached = false; await active?.catchUp(); }, detach() { detached = true; active?.detach(); } };
+  }
+
+  private noteRuns = new Map<string, AbortController>();
+  /** 原著札记 (R29-T003, D162): write or resume one note on the helper model; a pause keeps finished parts. */
+  async runCanonNote(id: string, onProgress: (note: CanonNote) => void): Promise<CanonNote> {
+    const note = await getNote(this.repo, id); if (!note) throw new Error("札记不存在");
+    const [book] = await this.platform.sql.query("SELECT title FROM source_books WHERE id=?", [note.bookId]);
+    if (!book) throw new Error("书籍不存在");
+    this.requireLlm();
+    if (this.noteRuns.has(id)) throw new Error("这份札记正在整理");
+    const model = this.auxModelName(), controller = new AbortController();
+    this.noteRuns.set(id, controller);
+    try {
+      return await runNote(this.repo, note, String(book.title), {
+        model,
+        call: async (messages, signal) => {
+          const result = await this.call(messages, { aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT });
+          const usable = !!result.text.trim() && !refusedFinish(result.finishReason) && !isNotice(result.text);
+          await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result, signal.aborted ? "cancelled" : usable ? "ok" : "refused", model)]);
+          if (!usable) throw new Error("模型没有返回可用的札记，已完成的部分保留，可以接着整理");
+          return result.text;
+        },
+      }, controller.signal, onProgress);
+    } finally { this.noteRuns.delete(id); }
+  }
+  pauseCanonNote(id: string) { this.noteRuns.get(id)?.abort(); }
+  canonNoteRunning(id: string) { return this.noteRuns.has(id); }
+  /** 查一查 → 存为札记: the answer becomes a note of this story only. */
+  async saveAnswerAsNote(worldId: string, bookId: string, question: string, answer: string): Promise<CanonNote> {
+    const note = { ...newNote(bookId, "question", { question }, question.slice(0, 24), worldId), content: answer.trim().slice(0, 3000), status: "done" as const, model: this.auxModelName() };
+    await saveNote(this.repo, note);
+    return note;
   }
 
   private sourceRuns = new Map<string, AbortController>();
@@ -872,21 +949,24 @@ export class Game {
     const state = await this.repo.getState(base.id);
     const ratio = await this.tokenRatio();
     const path = await this.repo.path(base.id);
-    const budgetChars = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value);
+    const depth = depthOf(world.settings);
+    const budgetChars = depthBudget(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value), depth);
     const reference = await referenceContext(this.repo, sourceOverride === undefined ? state.source : sourceOverride, {
       text: action.text, rewriteHint: action.rewriteHint, directorNote: action.directorNote,
       recent: path.slice(-3).map((n) => n.narrative).join("\n"),
       entities: [state.protagonist, ...state.people.slice(-6)].map(({ name, aliases }) => ({ name, aliases })),
       place: state.places.find((p) => p.id === state.placeId)?.name,
     }, Math.floor(budgetChars / 4));
+    const binding = sourceOverride === undefined ? state.source : sourceOverride;
+    const canonNotes = await notesForTurn(this.repo, binding, worldId, [path.slice(-3).map((n) => n.narrative).join("\n"), action.text, action.directorNote ?? ""].join("\n")).catch(() => []);
     return {
-      reference, continuity: await readContinuity(this.repo, worldId, base.id).catch(() => undefined),
+      reference, canonNotes, continuity: await readContinuity(this.repo, worldId, base.id).catch(() => undefined),
       era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name, state,
       history: path.slice(-40), allTurns: path, notes: (base.meta.notes as string[] | undefined) ?? [],
       taboos: state.era.mode === "free" ? [] : (base.meta.taboos as TabooHit[] | undefined) ?? [],
       pins: (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text),
       chapters: await this.repo.chaptersOnPath(worldId, base.id),
-      budgetChars,
+      budgetChars, depth,
       ...action,
     };
   }

@@ -905,3 +905,157 @@ async fn continuation_cannot_commit_if_the_target_is_no_longer_interrupted() {
     assert_eq!(state["protagonist"]["stats"]["money"], 10);
     assert_eq!(fixture.committed.lock().unwrap().len(), 0);
 }
+
+// Generation tiers (D161): how many requests a bound-book turn costs.
+fn bound(fixture: &Fixture, id: &str, depth: &str) -> RunPlan {
+    let binding = json!({"bookId":"book","fanfic":true,"plot":"canon","position":0,"through":null,"instructions":"沿原著"});
+    let mut plan = fixture.plan(id);
+    plan.state["source"] = binding.clone();
+    plan.reference = Some(json!({"bookId":"book","binding":binding,"passages":[{"kind":"original","title":"第一章","section":0,"chunk":0,"text":"纸铺里一张纸卖三文。"}]}));
+    plan.meta = json!({"budgetChars":14545,"writingContext":{},"depth":depth});
+    plan
+}
+fn tool_names(body: &Value) -> Vec<String> {
+    body["tools"].as_array().into_iter().flatten().map(|t| t["function"]["name"].as_str().unwrap_or("").to_owned()).collect()
+}
+
+#[tokio::test]
+async fn fast_tier_writes_in_one_request_without_tools_or_review() {
+    let fixture = Fixture::new(vec![Step::Reply(written())]);
+    let mut plan = bound(&fixture, "fast", "fast");
+    plan.meta["referenceReviewVersion"] = Value::Null;
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("fast").await;
+    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
+    let requests = fixture.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none());
+    // The allowance is a backstop: not mentioned while plenty remains.
+    assert!(!requests[0].to_string().contains("剩余额度"));
+    assert!(!requests[0].to_string().contains("list_skills"));
+}
+
+#[tokio::test]
+async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_sentence() {
+    let fixture = Fixture::new(vec![
+        Step::Reply(calls(vec![("h", "read_history", json!({"query":"纸"}))])),
+        // A service that ignores tool_choice "none" and calls again still ends the loop.
+        Step::Reply(Completion { tool_calls: calls(vec![("again", "search_original", json!({"query":"纸"}))]).tool_calls, ..written() }),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文"},{"quote":"不存在的句子","problem":"x","fix":"y"}]}"#)),
+    ]);
+    let mut plan = bound(&fixture, "standard", "standard");
+    plan.meta["referenceReviewVersion"] = "reference-review-lite-1".into();
+    plan.model.aux_model = Some("helper".into());
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("standard").await;
+    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
+    let requests = fixture.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let offered = tool_names(&requests[0]);
+    assert!(!offered.is_empty() && offered.iter().all(|n| ["read_canon_notes", "search_original", "read_original", "read_history"].contains(&n.as_str())), "{offered:?}");
+    assert_eq!(requests[0]["tool_choice"], "auto");
+    assert_eq!(requests[1]["tool_choice"], "none");
+    assert!(requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("查阅到此为止"));
+    // The lite check: helper model, no tools.
+    assert_eq!(requests[2]["model"], "helper");
+    assert!(requests[2].get("tools").is_none());
+    let node = snapshot.result.as_ref().unwrap()["nodeId"].as_str().unwrap().to_owned();
+    drop(requests);
+    let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
+    assert_eq!(narrative, "你付了三文，收好一张纸。");
+    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-1");
+    assert_eq!(snapshot.draft["referenceReview"]["skipped"], 1);
+}
+
+#[tokio::test]
+async fn a_failed_lite_check_keeps_the_passage_and_commits() {
+    let fixture = Fixture::new(vec![Step::Reply(written()), Step::Reply(prose("我看不出问题。"))]);
+    let mut plan = bound(&fixture, "lite-skip", "standard");
+    plan.meta["referenceReviewVersion"] = "reference-review-lite-1".into();
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("lite-skip").await;
+    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
+    assert_eq!(snapshot.draft["referenceReview"]["status"], "skipped");
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes WHERE narrative LIKE '%两文%'"), 1);
+}
+
+#[tokio::test]
+async fn deep_tier_caps_lookup_rounds_and_the_allowance_goes_last_when_nearly_spent() {
+    let mut steps: Vec<Step> = (0..4).map(|i| Step::Reply(calls(vec![(["a", "b", "c", "d"][i], "read_history", json!({"query":format!("纸{i}")}))]))).collect();
+    steps.push(Step::Reply(written()));
+    let fixture = Fixture::new(steps);
+    let mut plan = bound(&fixture, "deep", "deep");
+    plan.meta["modelRequestLimit"] = 6.into();
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("deep").await;
+    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
+    let requests = fixture.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[3]["tool_choice"], "auto");
+    assert_eq!(requests[4]["tool_choice"], "none");
+    let first = requests[0]["messages"].as_array().unwrap();
+    assert!(!first[0]["content"].as_str().unwrap().contains("剩余额度"));
+    assert!(!requests[0].to_string().contains("剩余额度"), "6 left: not mentioned");
+    let last = requests[3]["messages"].as_array().unwrap();
+    assert!(last.last().unwrap()["content"].as_str().unwrap().starts_with("【本次执行剩余额度】包括当前这次，尚可请求模型3次"));
+}
+
+#[tokio::test]
+async fn standard_tier_reads_the_books_canon_notes_but_not_another_storys() {
+    let fixture = Fixture::new(vec![
+        Step::Reply(calls(vec![("n", "read_canon_notes", json!({"query":"掌柜"}))])),
+        Step::Reply(written()),
+    ]);
+    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','长篇','txt','test','{}');
+        INSERT INTO canon_notes(id,book_id,world_id,kind,title,content,status,created_at,updated_at) VALUES('a','book',NULL,'person','人物：掌柜','掌柜姓王，脾气急。','done','t','t');
+        INSERT INTO canon_notes(id,book_id,world_id,kind,title,content,status,active,created_at,updated_at) VALUES('b','book',NULL,'person','人物：掌柜（停用）','停用的札记','done',0,'t','t');").unwrap();
+    let plan = bound(&fixture, "notes", "standard");
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("notes").await;
+    assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
+    let requests = fixture.model.requests.lock().unwrap();
+    assert!(tool_names(&requests[0]).contains(&"read_canon_notes".to_owned()));
+    let result = requests[1]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == "n").unwrap()["content"].as_str().unwrap().to_owned();
+    assert!(result.contains("掌柜姓王") && !result.contains("停用的札记"), "{result}");
+}
+
+#[tokio::test]
+async fn an_observer_hears_progress_and_a_stop_without_a_passage() {
+    use story_core::runtime::RunSignal;
+    let seen = Arc::new(Mutex::new(Vec::<RunSignal>::new()));
+    let fixture = Fixture::new(vec![Step::Reply(written())]);
+    let sink = seen.clone();
+    fixture.engine.observe(Arc::new(move |signal| sink.lock().unwrap().push(signal)));
+    fixture.engine.start(fixture.plan("observed")).unwrap();
+    assert_eq!(fixture.settled("observed").await.status, "committed");
+    // A second story whose service fails before any passage.
+    let failing = Fixture::new(vec![Step::Fail(Error::Invalid("服务出错".into()))]);
+    let sink = seen.clone();
+    failing.engine.observe(Arc::new(move |signal| sink.lock().unwrap().push(signal)));
+    failing.engine.start(failing.plan("observed-fail")).unwrap();
+    assert_eq!(failing.settled("observed-fail").await.status, "failed");
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|s| matches!(s, RunSignal::Phase { phase: "thinking", title, .. } if title == "隔离故事")));
+    assert!(seen.iter().any(|s| matches!(s, RunSignal::Phase { phase: "writing", chars, .. } if *chars > 0)));
+    assert!(seen.iter().any(|s| matches!(s, RunSignal::Ended { run_id, status: "failed", .. } if run_id == "observed-fail")));
+    assert!(!seen.iter().any(|s| matches!(s, RunSignal::Ended { run_id, .. } if run_id == "observed")));
+}
+
+#[tokio::test]
+async fn a_service_error_mid_stream_is_retried_once_and_the_passage_is_written() {
+    let broke = Error::Provider { kind: "stream".into(), status: None, message: "AI 服务中途出错：upstream timeout".into(), partial: true };
+    let f = Fixture::new(vec![Step::Fail(broke), Step::Reply(written())]);
+    f.engine.start(f.plan("stream-retry")).unwrap();
+    let saved = f.settled("stream-retry").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+    // Twice in a row still stops, with the service's own words.
+    let twice = || Error::Provider { kind: "stream".into(), status: None, message: "AI 服务中途出错：upstream timeout".into(), partial: true };
+    let g = Fixture::new(vec![Step::Fail(twice()), Step::Fail(twice())]);
+    g.engine.start(g.plan("stream-twice")).unwrap();
+    let stopped = g.settled("stream-twice").await;
+    assert_eq!(stopped.status, "failed");
+    assert!(stopped.error.unwrap().contains("upstream timeout"));
+    assert_eq!(stopped.error_kind.as_deref(), Some("network"));
+}

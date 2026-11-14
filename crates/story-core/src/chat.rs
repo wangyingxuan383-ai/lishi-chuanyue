@@ -45,6 +45,8 @@ pub struct Accumulator {
     pub result: Completion,
     calls: BTreeMap<u64, Value>,
     invalid: bool,
+    /// What the service said when it broke off mid-stream (R29, D164), for the player.
+    stream_error: Option<String>,
     malformed_call: bool,
 }
 impl Accumulator {
@@ -70,11 +72,18 @@ impl Accumulator {
             Ok(v) => v,
             Err(_) => {
                 self.invalid = true;
+                self.stream_error.get_or_insert_with(|| "返回了无法解析的数据".into());
                 return None;
             }
         };
-        if value.get("error").is_some() {
+        if let Some(error) = value.get("error") {
             self.invalid = true;
+            // Relays report an upstream failure as an error event inside the stream.
+            let said = error["message"].as_str().or(error.as_str()).unwrap_or("").trim();
+            // Keep the words, not addresses: a relay may name its upstream host.
+            let said = said.split_whitespace().map(|w| if w.contains("://") || w.contains("www.") { "[链接]" } else { w }).collect::<Vec<_>>().join(" ");
+            let said: String = said.chars().filter(|c| !c.is_control()).take(120).collect();
+            self.stream_error.get_or_insert(if said.is_empty() { "返回了错误".into() } else { said });
             return None;
         }
         let choice = &value["choices"][0];
@@ -146,7 +155,13 @@ impl Accumulator {
     pub fn finish(mut self) -> Result<Completion> {
         self.result.tool_calls = self.calls.into_values().collect();
         if self.invalid {
-            return Err(crate::Error::Invalid("模型返回了无法识别的响应".into()));
+            // A transient provider failure, not a broken setup: the run retries it once (D164).
+            return Err(crate::Error::Provider {
+                kind: "stream".into(),
+                status: None,
+                message: format!("AI 服务中途出错：{}", self.stream_error.as_deref().unwrap_or("返回了无法识别的数据")),
+                partial: !self.result.text.is_empty(),
+            });
         }
         if self.malformed_call {
             return Err(crate::Error::Invalid("模型服务报告工具调用格式错误，本次没有执行工具；已保留进度，可继续或更换支持工具调用的模型".into()));
@@ -214,6 +229,12 @@ pub(crate) fn wire_messages(messages: &[Value]) -> Vec<Value> {
 }
 
 pub fn request(config: &ModelConfig, messages: &[Value], tools: &[Value], aux: bool) -> Value {
+    request_with(config, messages, tools, aux, false)
+}
+
+/// `final_only` keeps the tool definitions (earlier turns hold tool calls) but
+/// asks for a written answer now: the round limit of a generation tier.
+pub fn request_with(config: &ModelConfig, messages: &[Value], tools: &[Value], aux: bool, final_only: bool) -> Value {
     let mut body = Value::Object(config.extra.clone());
     for key in ["protocol", "contextWindowTokens", "maxOutputTokens"] {
         body.as_object_mut().unwrap().remove(key);
@@ -233,7 +254,7 @@ pub fn request(config: &ModelConfig, messages: &[Value], tools: &[Value], aux: b
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
-        body["tool_choice"] = "auto".into();
+        body["tool_choice"] = if final_only { "none" } else { "auto" }.into();
     }
     body
 }
@@ -318,6 +339,24 @@ pub fn wire_chat_body(mut body: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_error_event_mid_stream_is_a_retryable_provider_failure_with_its_message() {
+        let mut a = Accumulator::default();
+        a.push(r#"{"choices":[{"delta":{"content":"你推开门。"}}]}"#);
+        a.push(r#"{"error":{"message":"upstream request timeout at https://relay.invalid/v1","code":504}}"#);
+        match a.finish() {
+            Err(crate::Error::Provider { kind, message, partial, .. }) => {
+                assert_eq!(kind, "stream");
+                assert!(message.contains("upstream request timeout") && !message.contains("relay.invalid"), "{message}");
+                assert!(partial);
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut garbled = Accumulator::default();
+        garbled.push("{not json");
+        assert!(matches!(garbled.finish(), Err(crate::Error::Provider { partial: false, .. })));
+    }
+
     use super::*;
     #[test]
     fn partial_output_counts_body_and_tool_deltas_but_not_reasoning_or_usage() {

@@ -125,7 +125,7 @@ export const draftPilot = (d: Pick<Draft, "play" | "aiPilot">) => (d.play === "w
 export const draftFortune = (d: Pick<Draft, "play" | "fortune">, fallback: FortuneMode = DEFAULT_SETTINGS.fortune): FortuneMode => d.fortune ?? (d.play === "challenge" ? "on" : fallback);
 /** Retained only for reading old opening drafts. Ordinary play is always classic. */
 
-export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints">>): NewWorld {
+export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "difficulty" | "autoUpkeep" | "chapterEvery" | "fortune" | "tabooHints" | "depth">>): NewWorld {
   const pilot = draftPilot(d);
   const fortune = d.fortune ?? (d.play === "challenge" ? "on" : null);
   const beats = filledBeats(d.script);

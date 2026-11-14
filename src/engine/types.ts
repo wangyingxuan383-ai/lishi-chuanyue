@@ -268,6 +268,8 @@ export interface WorldSettings {
   tabooHints: boolean;
   /** 旁观 (R14); absent means "player". A world setting that can change at any time. */
   pilot?: Pilot;
+  /** Generation tier (R29, D161); absent plays at 标准. */
+  depth?: "fast" | "standard" | "deep";
 }
 
 export const DEFAULT_SETTINGS: WorldSettings = {
@@ -285,6 +287,7 @@ export const DEFAULT_SETTINGS: WorldSettings = {
   chapterEvery: 12,
   fortune: "hint",
   tabooHints: true,
+  depth: "standard",
 };
 
 export interface World {

@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{fs, path::Path};
 
-pub const LATEST_VERSION: i64 = 12;
+pub const LATEST_VERSION: i64 = 13;
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/001.sql")),
     (2, include_str!("migrations/002.sql")),
@@ -18,6 +18,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (10, include_str!("migrations/010.sql")),
     (11, include_str!("migrations/011.sql")),
     (12, include_str!("migrations/012.sql")),
+    (13, include_str!("migrations/013.sql")),
 ];
 
 pub fn version(connection: &Connection) -> Result<i64> {
@@ -188,10 +189,21 @@ mod tests {
             db.execute("INSERT INTO schema_version VALUES(?)", [v]).unwrap();
         }
         db.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,created_at,updated_at) VALUES('old','w','l','n','failed','{}','{}','{}','旧错误','test','test')", []).unwrap();
-        assert_eq!(migrate(&mut db, None).unwrap(), 12);
+        assert_eq!(migrate(&mut db, None).unwrap(), LATEST_VERSION);
         let saved: (String, Option<String>) = db.query_row("SELECT error,error_kind FROM execution_runs WHERE id='old'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(saved, ("旧错误".into(), None));
-        assert_eq!(migrate(&mut db, None).unwrap(), 12);
+        assert_eq!(migrate(&mut db, None).unwrap(), LATEST_VERSION);
         assert_eq!(db.query_row("SELECT COUNT(*) FROM schema_version WHERE version=12", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn v13_adds_canon_notes_that_go_with_their_book() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        assert_eq!(migrate(&mut db, None).unwrap(), 13);
+        db.execute_batch("INSERT INTO source_books VALUES('b','书','txt','t','{}'); INSERT INTO canon_notes(id,book_id,kind,title,created_at,updated_at) VALUES('n','b','plot','主线','t','t');").unwrap();
+        assert_eq!(db.query_row("SELECT status||active FROM canon_notes", [], |r| r.get::<_, String>(0)).unwrap(), "paused1");
+        db.execute("DELETE FROM source_books WHERE id='b'", []).unwrap();
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM canon_notes", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 }

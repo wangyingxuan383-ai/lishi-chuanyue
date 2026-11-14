@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { loadNotifyPrefs } from "./app/notifyPrefs";
 import { flushSync } from "react-dom";
 import { installRipples, markNavigation, nameForTransition, withViewTransition } from "./app/motion";
 import { getPlatform, type Platform } from "../platform";
@@ -170,6 +171,21 @@ export default function App() {
   const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); withViewTransition("push", () => flushSync(() => setStack((s) => [...s.slice(0, -1), r]))); }, [clearToast]);
   const pop = useCallback(() => { clearToast(); markNavigation("pop"); withViewTransition("pop", () => flushSync(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)))); }, [clearToast]);
   useEffect(() => installRipples(), []);
+  // R29-T006: a tapped "写好了" or "没写完" opens that story, at start and when the app comes back.
+  useEffect(() => {
+    if (!boot?.platform.system.takeLaunchTarget) return;
+    const { platform, game } = boot;
+    void loadNotifyPrefs(game.repo).then((prefs) => platform.system.setNotifyPrefs?.(prefs)).catch(() => {});
+    const take = async () => {
+      if (document.visibilityState !== "visible") return;
+      const target = await platform.system.takeLaunchTarget?.().catch(() => null);
+      if (!target?.worldId || !(await game.repo.getWorld(target.worldId))) return;
+      setStack((s) => (s[s.length - 1]?.name === "play" && (s[s.length - 1] as { worldId: string }).worldId === target.worldId ? s : [{ name: "home" }, { name: "play", worldId: target.worldId! }]));
+    };
+    void take();
+    document.addEventListener("visibilitychange", take);
+    return () => document.removeEventListener("visibilitychange", take);
+  }, [boot]);
   // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
   // a new request answers the one it replaces as cancelled.
   const dialogId = useRef(0);

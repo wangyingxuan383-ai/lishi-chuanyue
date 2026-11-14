@@ -306,6 +306,22 @@ export interface TurnPromptInput extends StoryContext {
   taboos?: TabooHit[];
   /** Rough input budget in characters (≈ tokens for Chinese). */
   budgetChars?: number;
+  /** Generation tier (D161); the native context builder sizes its tool overhead by it. */
+  depth?: "fast" | "standard" | "deep";
+  /** 原著札记 chosen for this passage (D162), most relevant first. */
+  canonNotes?: CanonNoteBrief[];
+}
+export interface CanonNoteBrief { title: string; kind: string; content: string }
+/** The notes as one block within `max` characters, most relevant first. */
+export function canonNotesBlock(notes: CanonNoteBrief[] | undefined, max: number): string {
+  let block = "";
+  for (const n of notes ?? []) {
+    const header = block ? "" : "\n【原著札记】（玩家让 AI 整理的原著梗概，可能有误；本局已发生的事实优先）";
+    const item = `\n· ${n.title}\n${n.content.trim()}\n`;
+    if (block.length + header.length + item.length <= max) block += header + item;
+    else if (!block && max > 400) block = header + item.slice(0, max - header.length);
+  }
+  return block;
 }
 
 /** Recent turns as chat history, newest kept first until the budget runs out (minimum three); `ids` are the turns it kept. */
@@ -422,7 +438,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const query = input.mode === "continue" || input.mode === "skip" ? "" : [input.text, input.directorNote ?? ""].join("\n");
   const allCards = activeCardLines(input.state, recent, undefined, query);
   let cardLines = allCards;
-  const referenceRules = referenceInstructionsBlock(input.reference);
+  const referenceRules = referenceInstructionsBlock(input.reference) + canonNotesBlock(input.canonNotes, Math.floor(target / 5));
   const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + modes.length + notes.length + action.length + referenceRules.length + (input.reference ? 6 : 0);
   const usedReference = fitReference(input.reference, Math.max(0, Math.min(Math.floor(target / 4), target - fixed)));
   const referenceEvidence = referenceEvidenceBlock(usedReference);
@@ -514,6 +530,8 @@ export type Arrival = "魂穿" | "身穿" | "投胎" | "不穿越";
 
 export interface OpeningInput extends StoryContext {
   reference?: ReferenceContext;
+  /** 原著札记 for a story bound to a book (D162). */
+  canonNotes?: CanonNoteBrief[];
   protagonist: { name: string; gender: string; age: number | null; identity: string };
   arrival: Arrival;
   origin: string;
@@ -554,7 +572,7 @@ export function openingMessages(input: OpeningInput): ChatMessage[] {
       content: `请写这部小说的开场。
 ${protagonistLine(input)}
 ${input.hint ? `玩家希望开场：${input.hint}\n` : ""}${modes ? `${modes.slice(1)}\n` : ""}从符合玩家设定的具体场景写起，${aiPilot(input.settings) ? "写到一个有意思的地方停下" : "写到需要玩家决定为止"}。
-${openingExtra(input.settings)}${packLine(input.era, input.settings)}${referenceBlock(input.reference, 3000)}`,
+${openingExtra(input.settings)}${packLine(input.era, input.settings)}${canonNotesBlock(input.canonNotes, 3000)}${referenceBlock(input.reference, 3000)}`,
     },
   ];
 }

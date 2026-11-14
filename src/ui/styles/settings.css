@@ -34,6 +34,19 @@
 .settings .field-line > input { padding-right: 40px; }
 .steps { margin: 0; padding-left: 22px; color: var(--fg); font-size: 14px; line-height: 1.8; }
 .theme-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+/* 生成档位 (play/DepthSheet.tsx): the badge beside Aa and the three cards. */
+.depth-btn span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid currentColor; font-family: var(--serif); font-size: 13px; line-height: 1; }
+.depth-btn.depth-fast span { color: var(--gain, var(--accent)); }
+.depth-btn.depth-deep span { color: var(--accent); background: var(--accent-soft); }
+.depth-cards { display: grid; gap: 10px; }
+.depth-card { display: flex; align-items: flex-start; gap: 12px; padding: 12px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); justify-content: flex-start; }
+.depth-card[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.depth-mark { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--line); font-family: var(--serif); font-size: 18px; color: var(--muted); }
+.depth-card[aria-checked="true"] .depth-mark { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.depth-text { display: grid; gap: 3px; }
+.depth-text b { font-family: var(--serif); font-size: 16px; font-weight: 600; }
+.depth-text b small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 4px; }
+.depth-text > small { font-size: 13px; color: var(--muted); line-height: 1.55; }
 /* 字号与主题 (play/ReadingQuick.tsx). */
 .reading-btn span { font-family: var(--serif); font-size: 17px; letter-spacing: 0.02em; }
 .size-stepper { display: flex; align-items: center; gap: 12px; }

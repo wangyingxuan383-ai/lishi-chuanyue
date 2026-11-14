@@ -37,13 +37,18 @@ export interface Reading {
   keepAwake: boolean;
   /** Follow newly generated story text to the bottom. */
   autoScroll: boolean;
+  /** A small line under the latest passage with what it cost (R29-T004). */
+  usageLine: boolean;
+  /** The home screen's design (R29-T007, D163): a landscape for the latest story, or a bookshelf. */
+  home: "scene" | "shelf";
 }
-export const DEFAULT_READING: Reading = { size: 18, theme: "paper", style: "scroll", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "rich", haptics: true, keepAwake: false, autoScroll: false };
+export const DEFAULT_READING: Reading = { size: 18, theme: "paper", style: "scroll", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "rich", haptics: true, keepAwake: false, autoScroll: false, usageLine: true, home: "scene" };
 /** Saved reading settings from older versions: "system" animations became "rich". */
 export function normalizeReading(saved: Partial<Reading> & { motion?: string; style?: string }): Reading {
   const r = { ...DEFAULT_READING, ...saved } as Reading;
   if (!["rich", "simple", "off"].includes(r.motion)) r.motion = "rich";
   if (r.style !== "ink") r.style = "scroll";
+  if (r.home !== "shelf") r.home = "scene";
   return r;
 }
 /** The theme a setting resolves to now. */

@@ -6,14 +6,14 @@
 // the colours live in bookArt.css so the three themes can tune them.
 import "./bookArt.css";
 
-function seedOf(text: string): number {
+export function seedOf(text: string): number {
   let seed = 2166136261;
   for (const c of text) seed = Math.imul(seed ^ c.codePointAt(0)!, 16777619);
   return seed >>> 0;
 }
 
 /** Book-cloth colours: .cover-0 … .cover-7 in bookArt.css. */
-const TONES = 8;
+export const TONES = 8;
 const HAN = /\p{Script=Han}/u;
 
 /** The characters on the title slip: the title's first five Chinese characters. */

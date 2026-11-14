@@ -36,6 +36,7 @@ pub fn catalog() -> Vec<ToolDefinition> {
         ToolDefinition { name: "read_characters", description: "读取本局人物、已知身份、别名、关系及其出处；不把原著将来的身份直接透露给人物。", parameters: object(json!({"query":text("人物名、别名或关系线索",2000),"offset":integer("起始条目",0,9007199254740991),"limit":integer("返回人数",1,20)}), &[]), read_only: true },
         ToolDefinition { name: "search_original", description: "在本局绑定书籍与允许章节范围内检索原文，返回候选位置和片段；命中并不等于已核实，随后用 read_original 阅读证据。", parameters: object(json!({"query":text("待核实的人名、别名、关系、事件或具体原著细节",4000)}), &["query"]), read_only: true },
         ToolDefinition { name: "read_original", description: "阅读命中的原著正文及邻近片段，保留书籍版本、章节、文本块和位置出处；程序执行章节边界。", parameters: object(json!({"section":integer("章节序号，从 0 开始",0,9_007_199_254_740_991),"chunk":integer("检索返回的文本块序号",0,9_007_199_254_740_991),"neighbors":integer("同时读取前后几个相邻片段，仍须遵守章节范围",0,2),"ref":object(json!({"bookId":text("书籍标识",256),"bookVersion":text("检索返回的版本",512),"section":integer("章节序号",0,9007199254740991),"chunk":integer("文本块序号",0,9007199254740991),"start":integer("UTF16起点",0,9007199254740991),"end":integer("UTF16终点",0,9007199254740991)}), &["bookId","bookVersion","section","chunk"]),"start":integer("UTF16起点",0,9007199254740991),"end":integer("UTF16终点",0,9007199254740991)}), &[]), read_only: true },
+        ToolDefinition { name: "read_canon_notes", description: "读取玩家为本书整理的原著札记（章节主线、人物、设定、时间线等，AI整理，可编辑）；按人名、设定或章节关键词查找，留空列出全部标题。札记可能有误，需要原句时再read_original。", parameters: object(json!({"query":text("人名、设定、事件或章节关键词，可留空",500)}), &[]), read_only: true },
         ToolDefinition { name: "read_canon_facts", description: "读取带原著出处的已核实资料，区分原著、玩家明确改写和模型错误；摘要与模型印象不能替代原文。", parameters: object(json!({"query":text("人物、关系、地点、规则或事件",4000)}), &[]), read_only: true },
         ToolDefinition { name: "locate_original_event", description: "按当前事件、人物和地点寻找原著候选章节；不改变开局位置，不把候选当已核实。用read_original直接回传ref读原文。", parameters:object(json!({"query":text("当前事件与具体线索",4000),"queries":{"type":"array","maxItems":8,"items":{"type":"string"}}}),&[]),read_only:true },
         ToolDefinition { name: "prepare_reference_check", description: "将最多8项具体主张批量定位到原著候选；为身份、关系、能力、物品、时点和遗漏事件分别准备资料。返回verified=false，须read_original核对原句。", parameters:object(json!({"claims":{"type":"array","maxItems":8,"items":{"type":"string"}}}),&["claims"]),read_only:true },
@@ -161,7 +162,7 @@ mod tests {
     #[test]
     fn definitions_and_validation_share_the_contract() {
         let tools = definitions();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
         assert!(catalog().iter().all(|tool| tool.read_only));
         assert!(tools
             .iter()

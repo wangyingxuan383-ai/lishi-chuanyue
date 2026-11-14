@@ -169,7 +169,7 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
             );
             if !tools.is_empty() {
                 result["tools"]=json!(tools.iter().map(|t|json!({"type":"function","name":t["name"],"description":t["description"].as_str().unwrap_or(""),"parameters":t["parameters"],"strict":t["strict"].as_bool().unwrap_or(false)})).collect::<Vec<_>>());
-                result["tool_choice"] = "auto".into();
+                result["tool_choice"] = if body["tool_choice"] == "none" { "none" } else { "auto" }.into();
             }
             Ok(result)
         }
@@ -230,6 +230,9 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
             );
             if !tools.is_empty() {
                 result["tools"]=json!(tools.iter().map(|t|json!({"name":t["name"],"description":t["description"].as_str().unwrap_or(""),"input_schema":t["parameters"]})).collect::<Vec<_>>());
+                if body["tool_choice"] == "none" {
+                    result["tool_choice"] = json!({"type":"none"});
+                }
             }
             Ok(result)
         }
@@ -306,6 +309,9 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
             );
             if !tools.is_empty() {
                 result["tools"] = json!([{"functionDeclarations":tools.iter().map(|t|json!({"name":t["name"],"description":t["description"].as_str().unwrap_or(""),"parametersJsonSchema":t["parameters"]})).collect::<Vec<_>>() }]);
+                if body["tool_choice"] == "none" {
+                    result["toolConfig"] = json!({"functionCallingConfig":{"mode":"NONE"}});
+                }
             }
             Ok(result)
         }
@@ -1031,6 +1037,26 @@ mod tests {
             next["contents"][2]["parts"][0]["functionResponse"]["id"],
             "provider-call"
         );
+    }
+    #[test]
+    fn a_final_only_request_keeps_tools_but_forbids_calls_in_every_protocol() {
+        let wire = |name: &str| {
+            let settings = config(name);
+            let mut request = body(&settings);
+            request["tool_choice"] = "none".into();
+            prepare(&settings, &request, protocol(&settings).unwrap()).unwrap()
+        };
+        assert_eq!(wire("openai-responses")["tool_choice"], "none");
+        assert_eq!(wire("anthropic")["tool_choice"], json!({"type":"none"}));
+        assert_eq!(wire("gemini")["toolConfig"], json!({"functionCallingConfig":{"mode":"NONE"}}));
+        for name in ["openai-responses", "anthropic", "gemini"] {
+            assert!(wire(name).to_string().contains("read_clock"), "{name} keeps the definitions");
+        }
+        let responses = config("openai-responses");
+        let plain = prepare(&responses, &body(&responses), Protocol::Responses).unwrap();
+        assert_eq!(plain["tool_choice"], "auto");
+        let anthropic = config("anthropic");
+        assert!(prepare(&anthropic, &body(&anthropic), Protocol::Anthropic).unwrap().get("tool_choice").is_none());
     }
     #[test]
     fn truncated_or_incomplete_tools_are_never_returned_for_execution() {

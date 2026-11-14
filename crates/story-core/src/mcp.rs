@@ -222,7 +222,7 @@ mod tests {
         let session = BuiltinMcp::open(dispatch).await.unwrap();
         assert_eq!(session.protocol_version().as_deref(), Some("2026-07-28"));
         let definitions = session.tools().await.unwrap();
-        assert_eq!(definitions.len(), 14);
+        assert_eq!(definitions.len(), 15);
         assert!(definitions
             .iter()
             .any(|tool| tool["type"] == "function" && tool["function"]["name"] == "read_original"));

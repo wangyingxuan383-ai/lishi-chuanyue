@@ -321,7 +321,7 @@ export default function NewGame() {
     setError(null);
     setText(d.openingMode === "player" ? d.openingText : "");
     setPhase(d.openingMode === "player" ? "organizing" : "loading");
-    const input = toNewWorld(d, defs ? { difficulty: defs.difficulty, autoUpkeep: defs.autoUpkeep, chapterEvery: defs.chapterEvery, fortune: defs.fortune, tabooHints: defs.tabooHints } : undefined);
+    const input = toNewWorld(d, defs ? { difficulty: defs.difficulty, autoUpkeep: defs.autoUpkeep, chapterEvery: defs.chapterEvery, fortune: defs.fortune, tabooHints: defs.tabooHints, depth: defs.depth } : undefined);
     window.scrollTo?.(0, 0);
     const onEvent = (e: TurnEvent) => {
       if (e.type === "thinking") setPhase("thinking");

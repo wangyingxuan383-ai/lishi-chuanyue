@@ -1,0 +1,91 @@
+/* 首页·书架 (HomeShelf.tsx, D163): CSS 3D books on a wooden shelf. A book is
+   a box: the spine faces you; the cover is a plane hinged on the spine's right
+   edge, turned 90° into the shelf; turning the whole box -90° shows the cover. */
+.home-shelf { display: grid; gap: 14px; }
+.shelf-case { position: relative; padding: 10px 8px 4px; border-radius: calc(var(--radius-card) + 6px);
+  --wood: #7a5232; --wood-light: #9a6c45; --wood-dark: #4f3220;
+  background:
+    repeating-linear-gradient(92deg, transparent 0 22px, rgba(0, 0, 0, 0.05) 22px 23px, transparent 23px 51px, rgba(255, 255, 255, 0.04) 51px 52px),
+    linear-gradient(180deg, var(--wood-dark), color-mix(in srgb, var(--wood-dark) 70%, var(--wood)) 40%, var(--wood-dark));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), inset 0 10px 30px rgba(0, 0, 0, 0.45), 0 14px 32px var(--shadow); }
+:root[data-theme="night"] .shelf-case { --wood: #4a3322; --wood-light: #5d4230; --wood-dark: #24170f; }
+:root[data-style="ink"] .shelf-case { --wood: #2b2a28; --wood-light: #3a3835; --wood-dark: #151413;
+  box-shadow: inset 0 0 0 1px rgba(214, 178, 106, 0.35), inset 0 10px 30px rgba(0, 0, 0, 0.6), 0 14px 32px var(--shadow); }
+.shelf-row { position: relative; }
+.shelf-books { display: flex; align-items: flex-end; gap: 4px; min-height: 186px; padding: 18px 10px 0 26px; perspective: 900px; perspective-origin: 50% 30%; overflow-x: auto; scrollbar-width: none; }
+.shelf-books::-webkit-scrollbar { display: none; }
+.shelf-plank { position: relative; height: 16px; margin: 0 -2px 10px; border-radius: 2px;
+  background: linear-gradient(180deg, var(--wood-light), var(--wood) 45%, var(--wood-dark));
+  box-shadow: 0 6px 10px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18); }
+:root[data-style="ink"] .shelf-plank { background: linear-gradient(180deg, #4a4640, #2a2826 45%, #121110); box-shadow: 0 6px 10px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(214, 178, 106, 0.55); }
+
+/* One book. --bh height, --bt spine thickness, --cw cover width. */
+.shelf-book { --cover: #34506b; --cw: 98px; position: relative; flex: none; width: var(--bt); height: var(--bh); padding: 0; min-height: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; cursor: pointer; }
+.shelf-book:active { transform: none; }
+.shelf-book.tone-1 { --cover: #8a5a3c; } .shelf-book.tone-2 { --cover: #415e52; } .shelf-book.tone-3 { --cover: #6e3b42; }
+.shelf-book.tone-4 { --cover: #55626b; } .shelf-book.tone-5 { --cover: #6b5036; } .shelf-book.tone-6 { --cover: #5b4f66; } .shelf-book.tone-7 { --cover: #6f6a3e; }
+.book3d { position: absolute; inset: 0; transform-style: preserve-3d; transform-origin: 50% 50% calc(var(--cw) / -2); transform: rotateY(-8deg); transition: transform 420ms var(--spring-soft); }
+.book-spine { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 0 8px; border-radius: 2px 3px 3px 2px; backface-visibility: hidden;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--cover) 62%, #000), var(--cover) 26%, color-mix(in srgb, var(--cover) 84%, #fff) 52%, var(--cover) 74%, color-mix(in srgb, var(--cover) 58%, #000));
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2), 0 2px 6px rgba(0, 0, 0, 0.35); }
+.spine-band { width: 100%; height: 3px; flex: none; background: linear-gradient(90deg, transparent, rgba(239, 229, 207, 0.65), transparent); }
+.spine-band.low { margin-top: auto; }
+.spine-title { display: flex; flex-direction: column; align-items: center; width: calc(100% - 10px); padding: 6px 0; background: #f4ecda; box-shadow: inset 0 0 0 1px #a8936c; }
+.spine-title b { font-family: var(--serif); font-size: 13px; line-height: 1.18; font-weight: 600; color: #2a2019; }
+.spine-seal { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 2px; background: #a83221; color: #fff; font-family: var(--serif); font-size: 10px; font-weight: 700; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6); }
+.book-front { position: absolute; top: 0; left: 100%; width: var(--cw); height: 100%; transform-origin: left center; transform: rotateY(90deg); backface-visibility: hidden; }
+.book-front .book-art { width: 100%; height: 100%; filter: none; }
+.book-pages { position: absolute; top: 3px; left: calc(100% - 2px); width: calc(var(--cw) - 4px); height: calc(100% - 6px); transform-origin: left center; transform: rotateY(90deg);
+  background: repeating-linear-gradient(180deg, #f6efdf 0 7px, #e7dcc4 7px 8px), #f6efdf; box-shadow: inset 6px 0 10px rgba(0, 0, 0, 0.18); }
+.book-top { position: absolute; left: 0; top: 0; width: 100%; height: var(--cw); transform-origin: top center; transform: rotateX(-90deg); background: repeating-linear-gradient(90deg, #efe6d2 0 2px, #ddd0b3 2px 3px); }
+.shelf-writing { position: absolute; left: 50%; top: -10px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+/* The book read last stands half out, turned to show its cover. */
+.shelf-book.featured { margin: 0 calc(var(--cw) * 0.62) 0 6px; }
+.shelf-book.featured .book3d { transform: translateZ(28px) rotateY(-52deg); }
+.shelf-book.featured::after { content: ""; position: absolute; left: -10px; right: -60px; bottom: -6px; height: 10px; border-radius: 50%; background: radial-gradient(closest-side, rgba(255, 220, 150, 0.35), transparent); pointer-events: none; }
+.shelf-book:hover .book3d, .shelf-book:focus-visible .book3d { transform: translateY(-6px) rotateY(-14deg); }
+.shelf-book.featured:hover .book3d, .shelf-book.featured:focus-visible .book3d { transform: translateZ(36px) translateY(-4px) rotateY(-58deg); }
+
+/* The slip under the shelf: where you left off. */
+.shelf-slip { position: relative; display: grid; gap: 6px; padding: 14px 16px; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1, 0 1px 3px var(--shadow)); }
+.shelf-slip::before { content: ""; position: absolute; top: -8px; left: 28px; width: 14px; height: 14px; background: var(--surface); transform: rotate(45deg); box-shadow: -1px -1px 0 color-mix(in srgb, var(--line) 60%, transparent); }
+.slip-head { display: flex; align-items: center; gap: 8px; }
+.slip-head b { flex: 1; font-family: var(--serif); font-size: 19px; letter-spacing: 0.05em; }
+.slip-head .world-menu { position: static; }
+.shelf-slip small { font-size: 13px; color: var(--muted); }
+.slip-line { margin: 2px 0 4px; padding-left: 10px; border-left: 2px solid var(--accent); font-family: var(--serif); font-size: 15px; line-height: 1.75; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.shelf-slip .continue-btn { justify-self: start; display: inline-flex; align-items: center; gap: 6px; padding: 8px 22px; }
+
+/* ---------- 华丽: books slide onto the shelf; opening pulls one out and lifts its cover ---------- */
+:root[data-motion="rich"] .shelf-book { animation: book-shelve 640ms var(--spring-soft) both; animation-delay: calc(var(--i, 0) * 55ms); }
+@keyframes book-shelve { from { opacity: 0; transform: translateY(-46px) rotate(-6deg); } }
+:root[data-motion="rich"] .shelf-slip { animation: pop-in 560ms var(--spring-soft) 300ms both; }
+.shelf-book.opening { z-index: 10; }
+.shelf-book.opening .book3d { animation: book-pull 720ms cubic-bezier(0.3, 0.7, 0.2, 1) forwards; }
+/* Pulled out toward you, carried to the middle and turned to face you, larger. */
+@keyframes book-pull {
+  0% { transform: rotateY(-8deg); }
+  25% { transform: translateZ(70px) translateY(-16px) rotateY(-20deg); }
+  65% { transform: translate3d(calc(var(--dx, 0px) * 0.8 - var(--cw) * 0.5), calc(var(--dy, 0px) * 0.8), 160px) rotateY(-90deg) scale(1.25); }
+  100% { transform: translate3d(calc(var(--dx, 0px) - var(--cw) * 0.5), var(--dy, 0px), 200px) rotateY(-90deg) scale(1.45); }
+}
+.shelf-book.featured.opening .book3d { animation-name: book-pull-featured; }
+@keyframes book-pull-featured { 0% { transform: translateZ(28px) rotateY(-52deg); } 60%, 100% { transform: translate3d(calc(var(--dx, 0px) - var(--cw) * 0.5), var(--dy, 0px), 200px) rotateY(-90deg) scale(1.45); } }
+.shelf-case { transform-style: preserve-3d; }
+.home-shelf.opening .shelf-case, .home-shelf.opening .shelf-books { overflow: visible; }
+.shelf-book.opening .book-front { animation: cover-lift 720ms cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+@keyframes cover-lift { 0%, 55% { transform: rotateY(90deg); } 100% { transform: rotateY(-70deg); } }
+.home-shelf.opening .shelf-book:not(.opening), .home-shelf.opening .shelf-slip { transition: opacity 300ms, filter 300ms; opacity: 0.35; filter: blur(2px); }
+
+/* Plain books and the empty slot for a new one, so a short shelf still looks lived in. */
+.plain-book { --cover: #6b5036; flex: none; align-self: flex-end; width: var(--bt); height: var(--bh); border-radius: 2px; transform: rotate(var(--lean)); transform-origin: bottom left;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--cover) 55%, #000), color-mix(in srgb, var(--cover) 80%, #777) 40%, color-mix(in srgb, var(--cover) 60%, #000));
+  box-shadow: inset 0 10px 0 -7px rgba(239, 229, 207, 0.35), inset 0 -12px 0 -9px rgba(239, 229, 207, 0.3), 0 2px 5px rgba(0, 0, 0, 0.35); opacity: 0.78; filter: saturate(0.55); }
+.plain-book.tone-1 { --cover: #8a5a3c; } .plain-book.tone-2 { --cover: #415e52; } .plain-book.tone-3 { --cover: #6e3b42; }
+.plain-book.tone-4 { --cover: #55626b; } .plain-book.tone-6 { --cover: #5b4f66; } .plain-book.tone-7 { --cover: #6f6a3e; }
+.new-book { flex: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 40px; height: 136px; padding: 0; min-height: 0;
+  border: 1.5px dashed color-mix(in srgb, #f3e3c0 55%, transparent); border-radius: 3px; background: color-mix(in srgb, #000 18%, transparent); color: #f3e3c0; box-shadow: none; }
+.new-book-mark { font-size: 20px; line-height: 1; }
+.new-book-text { writing-mode: vertical-rl; font-family: var(--serif); font-size: 14px; letter-spacing: 0.3em; }
+.new-book:hover, .new-book:focus-visible { background: color-mix(in srgb, #f3e3c0 12%, transparent); }
+:root[data-motion="rich"] .new-book { animation: book-shelve 640ms var(--spring-soft) 260ms both; }

@@ -196,7 +196,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
   state: WorldState; era: EraContext; onClose: () => void; onSave: Save;
-  onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean) => Promise<boolean>; busy: boolean;
+  onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean, useSource?: boolean) => Promise<boolean>; busy: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("我");
   const [draft, setDraft] = useState<WorldState | null>(null);
@@ -350,7 +350,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
         {tab === "我" && <KnowledgeRecords worldId={worldId} headId={headId} person={{ id: "protagonist", name: me.name, aliases: me.aliases }} busy={busy} onSaved={onContinuitySaved} />}
         {tab === "人物" && <People worldId={worldId} headId={headId} onContinuitySaved={onContinuitySaved} state={state} era={era} busy={busy} onSave={onSave} />}
         {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
-        {tab === "设定" && <Codex state={state} era={era} headId={headId} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
+        {tab === "设定" && <Codex worldId={worldId} state={state} era={era} headId={headId} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && <Goals state={state} era={era} busy={busy} onSave={onSave} />}
       </div>
       {editing && <div className="dock row between">

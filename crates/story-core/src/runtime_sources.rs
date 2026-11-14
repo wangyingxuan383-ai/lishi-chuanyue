@@ -311,6 +311,42 @@ fn window(text: &str, keys: &Keys, cap: usize) -> (String, usize, usize) {
     best.unwrap_or_else(|| slice(text, 0, cap))
 }
 
+/// Canon notes (D162): the player's AI digests of the bound book. They guide
+/// writing but never enter `excerpts`, so reading one is not reading the original.
+pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value> {
+    let Some(book) = plan.state["source"]["bookId"].as_str() else {
+        return Ok(json!({"notes":[],"reason":"未绑定参考书籍"}));
+    };
+    let mut statement = db.prepare("SELECT id,kind,title,scope_json,content FROM canon_notes WHERE book_id=? AND active=1 AND status='done' AND content<>'' AND (world_id IS NULL OR world_id=?) ORDER BY updated_at DESC")?;
+    let rows = statement
+        .query_map(params![book, plan.world_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let query = query.trim();
+    let words: Vec<&str> = query.split(|c: char| c.is_whitespace() || "，、,；;。".contains(c)).filter(|w| !w.is_empty()).collect();
+    let total = rows.len();
+    let mut remaining = budget(plan);
+    let mut notes = vec![];
+    for (id, kind, title, scope, content) in rows {
+        let haystack = format!("{title}\n{scope}\n{content}");
+        if !words.is_empty() && !words.iter().any(|w| haystack.contains(w)) {
+            continue;
+        }
+        // An empty query lists what exists; a query returns the notes themselves.
+        let body = if words.is_empty() { slice(&content, 0, 160).0 } else { content.clone() };
+        let value = json!({"id":id,"kind":kind,"title":title,"content":body,"partial":units(&body) < units(&content)});
+        let size = cost(&value);
+        if size > remaining {
+            if notes.is_empty() && remaining > 400 {
+                notes.push(json!({"id":id,"kind":kind,"title":title,"content":slice(&content, 0, remaining - 200).0,"partial":true}));
+            }
+            break;
+        }
+        remaining -= size;
+        notes.push(value);
+    }
+    Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记是玩家让 AI 整理的原著梗概，可能有误，不等于已读原文；需要原句或与原文冲突时以原文为准。"}))
+}
+
 fn budget(plan: &RunPlan) -> usize {
     ((plan.meta["budgetChars"].as_u64().unwrap_or(12000) / 4).min(8000)) as usize
 }

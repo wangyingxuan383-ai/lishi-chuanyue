@@ -8,7 +8,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -109,8 +111,10 @@ class GenerationService : Service() {
         }
     }
 
+    /** R29-T006: the story's name, the phase, words so far, a running timer and 停止. */
     private fun notification(): Notification {
         val manager = getSystemService(NotificationManager::class.java)
+        val detailed = prefs(this).getBoolean(PREF_PROGRESS, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "生成进度", NotificationManager.IMPORTANCE_LOW).apply {
@@ -128,6 +132,19 @@ class GenerationService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val stop = PendingIntent.getBroadcast(
+            this,
+            REQUEST_STOP,
+            Intent(this, GenerationActionReceiver::class.java).setAction(GenerationActionReceiver.ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val title = if (detailed && storyTitle.isNotBlank()) "《$storyTitle》" else "穿越小说模拟"
+        val text = if (!detailed) "正在写下一段…" else when (phase) {
+            "writing" -> if (chars > 0) "正在写 · 已写 $chars 字" else "正在写…"
+            "organizing" -> "正在整理这一段…"
+            "checking" -> "正在对照原著…"
+            else -> "正在构思下一段…"
+        }
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -135,14 +152,19 @@ class GenerationService : Service() {
         }
         builder
             .setSmallIcon(R.drawable.ic_stat_seal)
-            .setContentTitle("穿越小说模拟")
-            .setContentText("正在写下一段…")
+            .setContentTitle(title)
+            .setContentText(text)
             .setContentIntent(openApp)
+            .setWhen(if (startedAt > 0) startedAt else System.currentTimeMillis())
+            .setShowWhen(true)
+            .setUsesChronometer(true)
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setSound(null)
+        if (detailed && phase != "writing") builder.setProgress(0, 0, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
         }
@@ -156,6 +178,25 @@ class GenerationService : Service() {
         /** Default importance so it shows in the drawer and on the lock screen (the progress channel is silent). */
         private const val DONE_CHANNEL_ID = "story_ready"
         private const val DONE_NOTIFICATION_ID = 1002
+        /** "没写完": a run stopped without a passage while the player was away. */
+        private const val ISSUE_CHANNEL_ID = "story_issue"
+        private const val GROUP_STORIES = "io.timejump.chuanyue.stories"
+        private const val REQUEST_STOP = 7
+        const val EXTRA_WORLD = "io.timejump.chuanyue.WORLD"
+        const val EXTRA_ACTION = "io.timejump.chuanyue.ACTION"
+        private const val PREFS = "notify"
+        const val PREF_PROGRESS = "progress"
+        const val PREF_EXCERPT = "excerpt"
+        const val PREF_LOCKSCREEN = "lockscreen"
+        /** What the progress notification shows (R29-T006), set from the Rust engine. */
+        private var phase = "thinking"
+        private var storyTitle = ""
+        private var chars = 0
+        private var startedAt = 0L
+        /** Notification ids of "写好了" and "没写完", cleared when the player comes back. */
+        private val shown = LinkedHashSet<Int>()
+
+        fun prefs(context: Context): SharedPreferences = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         /** The Rust whole-run lease covers model gaps and settlement. */
         private const val STOP_DELAY_MS = 0L
         @JvmStatic private external fun nativeTimeout()
@@ -178,13 +219,84 @@ class GenerationService : Service() {
         }
 
         /** Called only after the selected passage was saved, never by the stream timer. */
-        fun storyCommitted(context: Context, completionId: String) {
+        fun storyCommitted(context: Context, completionId: String, worldId: String = "", title: String = "", excerpt: String = "") {
             synchronized(lock) {
                 if (!committed.add(completionId)) return
                 if (committed.size > 256) committed.remove(committed.first())
-                if (inBackground()) notifyReady(context.applicationContext)
+                if (inBackground()) notifyReady(context.applicationContext, worldId, title, excerpt)
             }
         }
+
+        /** The engine's phase and words so far; refreshes the live notification. */
+        @JvmStatic
+        fun update(context: Context, newPhase: String, title: String, written: Int) {
+            synchronized(lock) {
+                phase = newPhase
+                if (title.isNotBlank()) storyTitle = title
+                chars = written
+                val service = current ?: return
+                if (!prefs(context).getBoolean(PREF_PROGRESS, true)) return
+                try {
+                    service.getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, service.notification())
+                } catch (error: Exception) {
+                    warn("progress update", error)
+                }
+            }
+        }
+
+        /** A run stopped without a passage. Shown only while the player is away, never for their own 停止. */
+        @JvmStatic
+        fun storyIssue(context: Context, worldId: String, title: String, status: String, line: String) {
+            if (status == "cancelled" || !inBackground()) return
+            val app = context.applicationContext
+            try {
+                val manager = app.getSystemService(NotificationManager::class.java) ?: return
+                if (!manager.areNotificationsEnabled()) return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    manager.createNotificationChannel(
+                        NotificationChannel(ISSUE_CHANNEL_ID, "没写完提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                            description = "切到后台时，一段没写完会提醒你回来接着写"
+                        }
+                    )
+                }
+                val id = storyNotificationId(worldId, 1)
+                val resume = storyIntent(app, worldId, "resume", id)
+                val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(app, ISSUE_CHANNEL_ID) else Notification.Builder(app)
+                builder.setSmallIcon(R.drawable.ic_stat_seal)
+                    .setContentTitle(if (title.isNotBlank()) "《$title》没写完" else "这一段没写完")
+                    .setContentText(line)
+                    .setContentIntent(resume)
+                    .addAction(Notification.Action.Builder(Icon.createWithResource(app, R.drawable.ic_stat_seal), "接着写完", resume).build())
+                    .setAutoCancel(true)
+                    .setGroup(GROUP_STORIES)
+                    .setCategory(Notification.CATEGORY_ERROR)
+                synchronized(lock) { shown.add(id) }
+                manager.notify(id, builder.build())
+            } catch (error: Exception) {
+                warn("issue notification", error)
+            }
+        }
+
+        /** Stop from the notification: the same as a timeout, progress is kept. */
+        @JvmStatic
+        fun stopFromNotification() {
+            synchronized(lock) { stopNativeRuns() }
+        }
+
+        /** One notification per story and kind, so two stories never replace each other. */
+        private fun storyNotificationId(worldId: String, kind: Int): Int =
+            if (worldId.isBlank()) DONE_NOTIFICATION_ID + kind else 2000 + ((worldId.hashCode() and 0x3fffffff) % 100000) * 2 + kind
+
+        /** Opens the app on that story; `action` "resume" asks it to finish the passage. */
+        private fun storyIntent(context: Context, worldId: String, action: String, request: Int): PendingIntent =
+            PendingIntent.getActivity(
+                context, request,
+                Intent(context, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    .putExtra(EXTRA_WORLD, worldId)
+                    .putExtra(EXTRA_ACTION, action),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
 
         /** True when the app is not on screen; then a finished passage is worth a notification. */
         private fun inBackground(): Boolean {
@@ -193,8 +305,8 @@ class GenerationService : Service() {
             return state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
         }
 
-        /** "写好了" when a passage finished while the player was away (ANDROID_COMPAT F2). */
-        private fun notifyReady(context: Context) {
+        /** "写好了" when a passage finished while the player was away (ANDROID_COMPAT F2): the story, its first line, straight back to it. */
+        private fun notifyReady(context: Context, worldId: String, title: String, excerpt: String) {
             try {
                 val manager = context.getSystemService(NotificationManager::class.java) ?: return
                 if (!manager.areNotificationsEnabled()) return
@@ -205,32 +317,44 @@ class GenerationService : Service() {
                         }
                     )
                 }
-                val open = PendingIntent.getActivity(
-                    context, 1,
-                    Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
+                val id = storyNotificationId(worldId, 0)
+                val open = storyIntent(context, worldId, "read", id)
+                val settings = prefs(context)
+                val line = if (settings.getBoolean(PREF_EXCERPT, true) && excerpt.isNotBlank()) excerpt else "下一段写好了，回来看看"
+                val heading = if (title.isNotBlank()) "《$title》写好了" else "穿越小说模拟"
                 val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, DONE_CHANNEL_ID) else Notification.Builder(context)
-                manager.notify(
-                    DONE_NOTIFICATION_ID,
-                    builder.setSmallIcon(R.drawable.ic_stat_seal)
-                        .setContentTitle("穿越小说模拟")
-                        .setContentText("下一段有结果了，回来看看")
-                        .setContentIntent(open)
-                        .setAutoCancel(true)
-                        .setCategory(Notification.CATEGORY_STATUS)
-                        .build()
-                )
+                // The lock screen shows the story's name only, unless the player allowed the line too.
+                val lockVersion = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, DONE_CHANNEL_ID) else Notification.Builder(context))
+                    .setSmallIcon(R.drawable.ic_stat_seal)
+                    .setContentTitle(heading)
+                    .setContentText("下一段写好了")
+                    .build()
+                builder.setSmallIcon(R.drawable.ic_stat_seal)
+                    .setContentTitle(heading)
+                    .setContentText(line)
+                    .setStyle(Notification.BigTextStyle().bigText(line))
+                    .setContentIntent(open)
+                    .addAction(Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_seal), "继续读", open).build())
+                    .setAutoCancel(true)
+                    .setGroup(GROUP_STORIES)
+                    .setCategory(Notification.CATEGORY_STATUS)
+                    .setVisibility(if (settings.getBoolean(PREF_LOCKSCREEN, false)) Notification.VISIBILITY_PUBLIC else Notification.VISIBILITY_PRIVATE)
+                    .setPublicVersion(lockVersion)
+                synchronized(lock) { shown.add(id) }
+                manager.notify(id, builder.build())
             } catch (error: Exception) {
                 warn("ready notification", error)
             }
         }
 
-        /** Clears the "写好了" notification once the player is back. */
+        /** Clears "写好了" and "没写完" once the player is back. */
         @JvmStatic
         fun clearReady(context: Context) {
             try {
-                context.getSystemService(NotificationManager::class.java)?.cancel(DONE_NOTIFICATION_ID)
+                val manager = context.getSystemService(NotificationManager::class.java) ?: return
+                manager.cancel(DONE_NOTIFICATION_ID)
+                val ids = synchronized(lock) { shown.toList().also { shown.clear() } }
+                for (id in ids) manager.cancel(id)
             } catch (error: Exception) {
                 warn("ready notification removal", error)
             }
@@ -254,6 +378,10 @@ class GenerationService : Service() {
                     return
                 }
                 requested = true
+                phase = "thinking"
+                chars = 0
+                storyTitle = ""
+                startedAt = System.currentTimeMillis()
                 try {
                     val app = context.applicationContext
                     val intent = Intent(app, GenerationService::class.java)

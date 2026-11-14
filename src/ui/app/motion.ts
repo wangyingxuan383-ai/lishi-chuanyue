@@ -82,3 +82,44 @@ export function nameForTransition(el: Element | null | undefined, name: string):
   (el as HTMLElement).style.viewTransitionName = name;
   (el as HTMLElement).dataset.vtNamed = "1";
 }
+
+/** Gold dust bursting from a point (R29-T007): an opened book, a milestone. 华丽 only. */
+export function burstDust(x: number, y: number, count = 18): void {
+  if (motionLevel() !== "rich" || typeof document === "undefined") return;
+  const layer = document.createElement("div");
+  layer.className = "dust-burst";
+  layer.style.left = `${x}px`; layer.style.top = `${y}px`;
+  for (let i = 0; i < count; i++) {
+    const dot = document.createElement("i");
+    const angle = (360 / count) * i + Math.random() * 18;
+    dot.style.setProperty("--a", `${angle}deg`);
+    dot.style.setProperty("--d", `${50 + Math.random() * 90}px`);
+    dot.style.setProperty("--s", `${0.6 + Math.random() * 0.9}`);
+    dot.style.animationDelay = `${Math.random() * 120}ms`;
+    layer.appendChild(dot);
+  }
+  document.body.appendChild(layer);
+  window.setTimeout(() => layer.remove(), 1400);
+}
+
+/**
+ * Opening a book from the home screen (R29-T007): the chosen design plays its
+ * own flourish on `host`, then `go` navigates (where the page transition takes
+ * over). Without 华丽 it navigates at once.
+ */
+export function openWithFlourish(host: HTMLElement | null, from: HTMLElement | null, go: () => void, ms = 460): void {
+  if (!host || motionLevel() !== "rich") { go(); return; }
+  const rect = (from ?? host).getBoundingClientRect();
+  // How far the book travels to the middle of the screen, for the design's keyframes.
+  host.style.setProperty("--dx", `${Math.round(window.innerWidth / 2 - (rect.left + rect.width / 2))}px`);
+  host.style.setProperty("--dy", `${Math.round(window.innerHeight * 0.42 - (rect.top + rect.height / 2))}px`);
+  host.classList.add("opening");
+  const group = host.closest(".home-shelf");
+  group?.classList.add("opening");
+  burstDust(rect.left + rect.width / 2, rect.top + rect.height / 2, 22);
+  window.setTimeout(() => {
+    go();
+    // The home screen stays mounted underneath: put it back for the way home.
+    window.setTimeout(() => { host.classList.remove("opening"); group?.classList.remove("opening"); }, 900);
+  }, ms);
+}

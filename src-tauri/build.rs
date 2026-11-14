@@ -21,6 +21,11 @@ fn main() {
                     "open_url",
                     "set_system_bars",
                     "haptic",
+                    "background_status",
+                    "request_battery_exemption",
+                    "open_autostart_settings",
+                    "set_notify_prefs",
+                    "take_launch_target",
                 ]),
             )
             .plugin(

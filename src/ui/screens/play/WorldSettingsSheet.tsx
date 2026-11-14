@@ -5,6 +5,8 @@ import type { Intensity, Pilot, World, WorldState } from "../../../engine/types"
 import { useApp } from "../../app/context";
 import { differsFromDefaults, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../../app/playDefaults";
 import { ModesSettings } from "../../components/Modes";
+import { depthOf } from "../../../engine/depth";
+import { DepthCards } from "./DepthSheet";
 import { Sheet } from "../../components/Sheet";
 import { SourceSetup, SourceSummary, ReferenceSheet } from "../../components/Sources";
 import { Switch } from "../../components/Switch";
@@ -52,6 +54,9 @@ export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, 
           {FORTUNE_MODES.map(([v, l]) => <button key={v} aria-pressed={fortuneMode(s.fortune) === v} onClick={() => onChange({ fortune: v })}>{l}</button>)}
         </div>
         <p className="muted m-0">{FORTUNE_MODE_NOTE[fortuneMode(s.fortune)]}</p>
+
+        <h3 className="settings-sub">生成档位 {mark("depth")}</h3>
+        <DepthCards value={depthOf(s)} onChange={(depth) => onChange({ depth })} />
 
         <h3 className="settings-sub">写法</h3>
         <span className="muted">每段篇幅 {mark("length")}</span>
@@ -108,8 +113,8 @@ export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, 
         {intensity("darkness", "黑暗与压抑")}
         <p className="muted">“浓烈”仍受所用 AI 服务的规则限制。</p>
         {defaults && differs.length > 0 && <div className="row wrap">
-          <button onClick={() => { onChange({ difficulty: defaults.difficulty, length: defaults.length, choiceCount: defaults.choiceCount, perspective: defaults.perspective, style: defaults.style, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery, fortune: defaults.fortune, tabooHints: defaults.tabooHints, intensity: defaults.intensity }); toast("已恢复为默认"); }}>全部恢复为默认</button>
-          <button className="ghost" onClick={() => { const next = { ...defaults, difficulty: s.difficulty, length: s.length, choiceCount: s.choiceCount, perspective: s.perspective, style: s.style, autoUpkeep: s.autoUpkeep, chapterEvery: s.chapterEvery, fortune: fortuneMode(s.fortune), tabooHints: s.tabooHints ?? true, intensity: s.intensity }; void savePlayDefaults(game.repo, next).then(() => { setDefaults(next); toast("以后新开一局都用这些设置"); }); }}>设为以后的默认</button>
+          <button onClick={() => { onChange({ depth: defaults.depth, difficulty: defaults.difficulty, length: defaults.length, choiceCount: defaults.choiceCount, perspective: defaults.perspective, style: defaults.style, autoUpkeep: defaults.autoUpkeep, chapterEvery: defaults.chapterEvery, fortune: defaults.fortune, tabooHints: defaults.tabooHints, intensity: defaults.intensity }); toast("已恢复为默认"); }}>全部恢复为默认</button>
+          <button className="ghost" onClick={() => { const next = { ...defaults, depth: depthOf(s), difficulty: s.difficulty, length: s.length, choiceCount: s.choiceCount, perspective: s.perspective, style: s.style, autoUpkeep: s.autoUpkeep, chapterEvery: s.chapterEvery, fortune: fortuneMode(s.fortune), tabooHints: s.tabooHints ?? true, intensity: s.intensity }; void savePlayDefaults(game.repo, next).then(() => { setDefaults(next); toast("以后新开一局都用这些设置"); }); }}>设为以后的默认</button>
         </div>}
         <button className="ghost t-left" onClick={onRules}>{s.mode === "free" ? "时间与货币 ›" : "纪年与货币 ›"}</button>
       </div>

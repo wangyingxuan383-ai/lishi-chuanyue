@@ -120,6 +120,7 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 - 仓库放在网络挂载的目录（如 sshfs）上时，把编译产物放到本地盘：`CARGO_TARGET_DIR=~/lishi-target`。开发台和检查脚本都会按这个变量找 `story-dev-host`。
 - 内存小的机器：`CARGO_BUILD_JOBS=2`、`CARGO_PROFILE_DEV_DEBUG=0` 能明显降低编译时的内存占用；前端测试可用 `pnpm exec vitest run --maxWorkers=1`，避免超时。
 - 开发台每次启动都会先 `cargo build -p story-dev-host`，超过 3 分钟就放弃，页面停在“正在打开…”。改过 Rust 代码或版本号之后，先手动构建一次，或用 `LISHI_DEV_HOST_BUILD_TIMEOUT_MS` 放宽时限。
+- 改了样式后跑一次 `node_modules/.bin/vite build`：开发服务器对某些 CSS 写法很宽容，生产构建会直接失败（`src/ui/styles/styles.test.ts` 检查最常见的一种）。
 - 界面检查用 Chromium：`LISHI_BROWSER=/usr/bin/chromium`。冷启动慢时用 `LISHI_UI_TIMEOUT_MS=45000` 放宽等待时间。
 - 浏览器开发台里的助手需要固定版本的 Node 与 SDK（`LISHI_PI_NODE`），没准备时助手页会提示运行环境未准备；其他功能不受影响。
 
@@ -143,7 +144,9 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 | 命令 | 检查什么 |
 | --- | --- |
 | `node scripts/ui/dev-isolated.mjs --fresh` 后 `node scripts/ui/play-check.mjs` | 前者在 1421 端口启动只用 `.cache/ui-isolated` 的开发台（不碰你的存档和 Key，只许访问本机）；后者配合 `node scripts/fake-llm.mjs` 检查首次启动、三种开局、游玩页菜单、长按、助手页、主题与大字号、流式生成、动效退场、草稿、正文里的选项、变化行和生成中离开；报告和截图在 `output/playwright/play-check/` |
-| 同一个隔离开发台上再跑 `node scripts/ui/style-shots.mjs` | 两种外观风格（宣纸书卷、墨韵）各自浅色与深色下的首页、设置、开局、游玩、菜单、变化清单、打字、发送和写完时的截图，含几张动画进行中的画面；在 `output/playwright/style-shots/` |
+| 同一个隔离开发台上再跑 `node scripts/ui/style-shots.mjs` | 两种外观风格（宣纸书卷、墨韵）各自浅色与深色下的首页、设置、开局、游玩、菜单、变化清单、打字、发送和写完时的截图，含几张动画进行中的画面，首页有场景和书架两种；在 `output/playwright/style-shots/` |
+| 同一个隔离开发台上跑 `node scripts/ui/feature-shots.mjs [scroll\|ink] [paper\|night]` | 给第一个故事挂一本小样书，截生成档位、原著札记（新建、整理完成）、每段用量、本局用量、让 AI 改时间与货币、两种首页和开书中途的画面；在 `output/playwright/feature-shots/` |
+| 同一个隔离开发台上跑 `node scripts/ui/motion-film.mjs [scroll\|ink] [paper\|night]` | 动画放慢四倍、每 80 毫秒截一帧，拼成胶片图：从场景首页和书架首页开书、从故事返回；在 `output/playwright/motion-film/` |
 | `node scripts/ui/readme-shots.mjs` | 生成 README 里的截图（`docs/images/readme/`）；端口用 `--port`、`--fake-port` 改 |
 | `node scripts/ui/r13-writing.mjs` | 写作工具：展开输入、常用行动、润色行动、AI 改写段落与恢复原文 |
 | `node scripts/ui/app-update.mjs` | 更新面板的各种状态（360 宽、三套主题），截图在 `output/playwright/app-update/` |
