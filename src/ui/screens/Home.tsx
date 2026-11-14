@@ -86,23 +86,57 @@ function dynastyMark(clock: string): string | undefined {
   return REIGNS.find(([re]) => re.test(clock))?.[1];
 }
 
-function WorldItem({ card, onOpen, onMenu, featured }: { card: WorldCard; onOpen: () => void; onMenu: () => void; featured?: boolean }) {
+function WorldItem({ card, onOpen, onMenu, featured, writing, index = 0 }: { card: WorldCard; onOpen: () => void; onMenu: () => void; featured?: boolean; writing?: boolean; index?: number }) {
   const press = useLongPress(onMenu, onOpen);
   return (
-    <div className={`card world-card${featured ? " featured" : ""}`}>
-      <button className="world-open" {...press} aria-label={`继续“${card.world.title}”`}>
+    <div className={`card world-card${featured ? " featured" : " shelf-item"}${writing ? " writing" : ""}`} style={{ ["--i" as string]: index }}>
+      <button className="world-open" data-world-id={card.world.id} {...press} aria-label={`继续“${card.world.title}”`}>
         <BookCover seed={card.world.id} title={card.world.title} seal={card.seal} />
         <span className="world-info">
           <h3>{card.world.title}</h3>
           <p>{card.protagonist} · {card.clock}</p>
-          {card.lastLine && <p className="last-line">{card.lastLine}</p>}
-          <p className="meta">{card.turns ? `${card.turns} 回合` : "刚开局"} · {relative(card.world.playedAt)}</p>
-          {featured && <span className="primary continue-btn">继续</span>}
+          {featured && card.lastLine && <p className="last-line">{card.lastLine}</p>}
+          <p className="meta">
+            {writing ? <span className="writing-badge"><i aria-hidden="true" />正在写…</span> : <>{card.turns ? `${card.turns} 回合` : "刚开局"} · {relative(card.world.playedAt)}</>}
+          </p>
+          {featured && <span className="primary continue-btn"><Icon name="play" size={16} />继续</span>}
         </span>
       </button>
       <button className="icon-btn world-menu" aria-label={`“${card.world.title}”的更多操作`} onClick={onMenu}><Icon name="more" /></button>
     </div>
   );
+}
+
+/** Paper-coloured placeholders with a passing light while the shelf loads. */
+function ShelfSkeleton() {
+  return (
+    <div className="stack" aria-hidden="true">
+      <div className="skeleton skeleton-hero"><span className="skeleton-cover" /><span className="skeleton-lines"><i /><i /><i /></span></div>
+      <div className="skeleton skeleton-btn" />
+      <div className="shelf"><div className="skeleton skeleton-book" /><div className="skeleton skeleton-book" /></div>
+    </div>
+  );
+}
+
+/** Stories still being written (D160: leaving the page does not stop them). */
+function useWritingWorlds(game: ReturnType<typeof useApp>["game"]) {
+  const [writing, setWriting] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let live = true, timer = 0;
+    const check = async () => {
+      try {
+        const rows = await game.platform.sql.query("SELECT DISTINCT world_id FROM execution_runs WHERE status IN ('running','committing')");
+        if (!live) return;
+        const next = new Set(rows.map((r) => String((r as { world_id: string }).world_id)));
+        setWriting((old) => (old.size === next.size && [...next].every((id) => old.has(id)) ? old : next));
+        timer = window.setTimeout(check, next.size ? 1500 : 6000);
+      } catch { if (live) timer = window.setTimeout(check, 6000); }
+    };
+    void check();
+    const off = game.subscribe(() => { window.clearTimeout(timer); void check(); });
+    return () => { live = false; window.clearTimeout(timer); off(); };
+  }, [game]);
+  return writing;
 }
 
 export default function Home() {
@@ -185,17 +219,19 @@ export default function Home() {
     start();
   };
   const shownCards = cards?.filter(card => localFind(query, card.world.title, card.protagonist, card.lastLine));
+  const writing = useWritingWorlds(game);
 
   return (
     <div className="screen">
-      <div className="topbar">
-        <div className="title"><h1>穿越小说模拟</h1></div>
+      <div className="topbar home-topbar">
+        <div className="title brand"><span className="brand-mark" aria-hidden="true">穿越</span><h1>穿越小说模拟</h1></div>
         <button className="icon-btn update-mark" aria-label={unread ? "设置，有新版本" : "设置"} onClick={() => push({ name: "settings" })}><Icon name="settings" />{unread && <i className="update-dot" aria-hidden="true" />}</button>
       </div>
       <div className="screen-body stack">
         {exportStatus && <div className="notice" role="status">{exportStatus}</div>}
         <BudgetReminder />
         <WhatsNewNotice />
+        {!cards && <ShelfSkeleton />}
         {cards && cards.length === 0 && (
           <div className="hero">
             <Seal />
@@ -203,19 +239,24 @@ export default function Home() {
             <p className="muted">醒来时，你已在另一个时代。</p>
           </div>
         )}
-        {cards && cards.length > 0 && <input type="search" aria-label="查找故事" placeholder="按书名、主角或最近剧情查找故事" value={query} onChange={event => setQuery(event.target.value)} />}
+        {cards && cards.length > 3 && <input type="search" aria-label="查找故事" placeholder="按书名、主角或最近剧情查找故事" value={query} onChange={event => setQuery(event.target.value)} />}
         {cards && cards.length > 0 && shownCards && !shownCards.length && <p className="muted" role="status">没有找到相关故事，清空查找即可查看全部。</p>}
         {shownCards && shownCards.length > 0 && (
-          <WorldItem featured card={shownCards[0]} onOpen={() => push({ name: "play", worldId: shownCards[0].world.id })} onMenu={() => setMenuFor(shownCards[0])} />
+          <WorldItem featured card={shownCards[0]} writing={writing.has(shownCards[0].world.id)} onOpen={() => push({ name: "play", worldId: shownCards[0].world.id })} onMenu={() => setMenuFor(shownCards[0])} />
         )}
-        <button className={cards && cards.length > 0 ? "big-btn" : "primary big-btn"} onClick={start}>{cards && cards.length > 0 ? "开始新的故事" : "开始穿越"}</button>
+        {cards && <button className={`big-btn new-story${cards.length > 0 ? "" : " primary"}`} onClick={start}>
+          <span className="new-story-mark" aria-hidden="true"><Icon name="plus" size={22} /></span>
+          <span className="new-story-text"><b>{cards.length > 0 ? "开始新的故事" : "开始穿越"}</b><small>随便穿、我的开局，或从灵感出发</small></span>
+        </button>}
         {!profile && <p className="muted t-center">先连接一个 AI 服务才能开始。</p>}
         {shownCards && shownCards.length > 1 && (
           <div className="list">
-            <p className="section-title">其他故事</p>
-            {shownCards.slice(1).map((c) => (
-              <WorldItem key={c.world.id} card={c} onOpen={() => push({ name: "play", worldId: c.world.id })} onMenu={() => setMenuFor(c)} />
-            ))}
+            <p className="section-title">书架</p>
+            <div className="shelf">
+              {shownCards.slice(1).map((c, i) => (
+                <WorldItem key={c.world.id} card={c} index={i} writing={writing.has(c.world.id)} onOpen={() => push({ name: "play", worldId: c.world.id })} onMenu={() => setMenuFor(c)} />
+              ))}
+            </div>
           </div>
         )}
         {deleted.length > 0 && <details className="recent-deleted">

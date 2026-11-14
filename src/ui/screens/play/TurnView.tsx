@@ -4,11 +4,11 @@ import type { StoryNode } from "../../../engine/types";
 import { useApp } from "../../app/context";
 import { StoryText } from "../../components/StoryText";
 import { useLongPress } from "../../components/useLongPress";
-import { ChipRow } from "./ChipRow";
+import { TurnChanges } from "./TurnChanges";
 import { ReportCard } from "./ReportCard";
 
 // Memoized: while a new passage streams in, earlier turns do not re-render (R26-T008).
-export const TurnView = memo(function TurnView({ node, onMenu, pressed, watch, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; pressed?: boolean; watch?: boolean; children?: React.ReactNode }) {
+export const TurnView = memo(function TurnView({ node, onMenu, onPanel, pressed, fresh, watch, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; onPanel?: () => void; pressed?: boolean; fresh?: boolean; watch?: boolean; children?: React.ReactNode }) {
   const press = useLongPress(() => onMenu(node));
   const { devMode } = useApp();
   // Developer mode: era words the local check found (R07-T002).
@@ -17,7 +17,7 @@ export const TurnView = memo(function TurnView({ node, onMenu, pressed, watch, c
   // A summary already in the player's words (“你修改了剧本”) is shown as it is.
   if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" || node.actionText?.startsWith("你") ? node.actionText : `你修改了：${node.actionText}`}</div>;
   return (
-    <div className={`turn${pressed ? " pressed" : ""}`} data-node-id={node.id} {...press}>
+    <div className={`turn${pressed ? " pressed" : ""}${fresh ? " fresh" : ""}`} data-node-id={node.id} {...press}>
       {node.kind !== "opening" && node.actionMode === "write" && node.actionText && (
         <div className="turn-written"><StoryText text={node.actionText} /></div>
       )}
@@ -29,7 +29,7 @@ export const TurnView = memo(function TurnView({ node, onMenu, pressed, watch, c
       <StoryText text={node.narrative} />
       {node.rewritten && <span className="rewritten-mark">已改写</span>}
       {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
-      <ChipRow chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
+      <TurnChanges onPanel={onPanel} fresh={fresh} chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
       {referenceReview && <details className="muted"><summary>原著核对{referenceReview.unresolved?.length ? ` · ${referenceReview.unresolved.length}项待查` : ""}</summary>{referenceReview.findings?.map((f, i) => <p key={i}>{f.claim} · {f.status === "supported" ? "有原文依据" : f.status === "branch" ? "保留玩家分支" : "资料不足"}</p>)}{referenceReview.unresolved?.map((t, i) => <p key={`u${i}`}>{t}</p>)}</details>}
       {children}
     </div>

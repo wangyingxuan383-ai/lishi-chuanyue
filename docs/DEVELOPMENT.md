@@ -142,7 +142,8 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 
 | 命令 | 检查什么 |
 | --- | --- |
-| `node scripts/ui/dev-isolated.mjs --fresh` 后 `node scripts/ui/play-check.mjs` | 前者在 1421 端口启动只用 `.cache/ui-isolated` 的开发台（不碰你的存档和 Key，只许访问本机）；后者配合 `node scripts/fake-llm.mjs` 检查首次启动、三种开局、游玩页菜单、长按、助手页、主题与大字号、流式生成；报告和截图在 `output/playwright/play-check/` |
+| `node scripts/ui/dev-isolated.mjs --fresh` 后 `node scripts/ui/play-check.mjs` | 前者在 1421 端口启动只用 `.cache/ui-isolated` 的开发台（不碰你的存档和 Key，只许访问本机）；后者配合 `node scripts/fake-llm.mjs` 检查首次启动、三种开局、游玩页菜单、长按、助手页、主题与大字号、流式生成、动效退场、草稿、正文里的选项、变化行和生成中离开；报告和截图在 `output/playwright/play-check/` |
+| 同一个隔离开发台上再跑 `node scripts/ui/style-shots.mjs` | 两种外观风格（宣纸书卷、墨韵）各自浅色与深色下的首页、设置、开局、游玩、菜单、变化清单、打字、发送和写完时的截图，含几张动画进行中的画面；在 `output/playwright/style-shots/` |
 | `node scripts/ui/readme-shots.mjs` | 生成 README 里的截图（`docs/images/readme/`）；端口用 `--port`、`--fake-port` 改 |
 | `node scripts/ui/r13-writing.mjs` | 写作工具：展开输入、常用行动、润色行动、AI 改写段落与恢复原文 |
 | `node scripts/ui/app-update.mjs` | 更新面板的各种状态（360 宽、三套主题），截图在 `output/playwright/app-update/` |
@@ -276,7 +277,7 @@ pnpm tauri build                       # 安装包和单个程序
 
 改了 `assets/app-icon.svg`（安卓用，印章四周留白，落在启动器遮罩保留的圆里）或 `assets/app-icon-desktop.svg`（电脑用，印章撑满）之后：
 
-1. `node scripts/ui/icon.mjs` 用思源宋体（SIL OFL，从 Google Fonts 加载，要联网）把它们渲染成 1024×1024 的 PNG。
+1. `node scripts/ui/icon.mjs` 用思源宋体（SIL OFL，从 Google Fonts 加载，要联网）把它们渲染成 1024×1024 的 PNG；浏览器同界面检查脚本，用 `LISHI_BROWSER` 指定 Chromium。
 2. `pnpm tauri icon assets/app-icon.png --ios-color "#efe5cf"` 生成安卓图标。这个颜色参数同时决定安卓自适应图标的纸色背景，写进 `res/values/ic_launcher_background.xml`；不要在别的文件里再定义同名颜色，否则安卓打包会报资源重复。
 3. `pnpm tauri icon assets/app-icon-desktop.png --output .cache/icons-desktop` 生成电脑图标，把其中除 `android/`、`ios/` 以外的文件复制到 `src-tauri/icons/`。
 

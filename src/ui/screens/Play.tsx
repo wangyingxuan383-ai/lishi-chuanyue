@@ -3,8 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { eraContext } from "../../engine/era";
 import { nowOf, timeRows } from "../../engine/calendar/clock";
-import type { AutoplayEvent, AutoplayHandle, ContextPreview, TurnEvent, TurnHandle } from "../../engine/game";
-import { explainFailure } from "../../engine/llm/providers";
+import type { ContextPreview } from "../../engine/game";
 import { challengeInputOf, challengeView } from "../../engine/modes";
 import type { TurnRecord } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
@@ -25,7 +24,7 @@ import { PassageCardSheet } from "../components/ShareCard";
 import { useShortcuts } from "../components/useShortcuts";
 import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { Icon } from "../components/Icon";
-import { buzz } from "../app/motion";
+import { buzz, motionLevel } from "../app/motion";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
 import { adoptRewrite, adoptCanonCorrection, assertWritingAnchor, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview } from "../../engine/writing/assist";
 import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
@@ -36,17 +35,22 @@ import { ScriptSheet } from "../components/ScriptSheet";
 import { ChallengeSheet } from "../components/ChallengeSheet";
 import { ReferenceSheet } from "../components/Sources";
 import { AskSheet } from "./play/AskSheet";
-import { InputModeSheet, PlayDock } from "./play/PlayInput";
-import { EPILOGUE, HINTS, MODES, MODE_SAVED, PAGE, WATCH_MODES } from "./play/constants";
+import { InputModeSheet } from "./play/PlayInput";
+import { Composer } from "./play/Composer";
+import { HeadTools, NextChoices, NoticeCard, StampBurst, WritingTurn, milestoneOf } from "./play/StoryParts";
+import { EPILOGUE, HINTS, MODE_SAVED, PAGE } from "./play/constants";
 import { HintInput } from "./play/HintInput";
 import { MoreMenu, PassageMenu, PassageMoreMenu } from "./play/PlayMenus";
-import { RegenButton } from "./play/RegenButton";
 import { RememberSheet } from "./play/RememberSheet";
 import { SkipSheet } from "./play/SkipSheet";
 import { StorySheet } from "./play/StorySheet";
 import { TurnView } from "./play/TurnView";
 import type { Gen, WritingSettings } from "./play/types";
 import { WorldSettingsSheet } from "./play/WorldSettingsSheet";
+import { useGeneration } from "./play/useGeneration";
+import { usePlayDraft } from "./play/usePlayDraft";
+import { useAssistantBusy } from "./play/useAssistantBusy";
+import { useNotificationGate } from "./play/useNotificationGate";
 
 export default function Play({ worldId, active = true }: { worldId: string; active?: boolean }) {
   const { game, push, replace, toast, devMode, pop, profile, reading } = useApp();
@@ -63,68 +67,15 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const limit = useRef(PAGE);
   const [state, setState] = useState<WorldState | null>(null);
   const [variants, setVariants] = useState<tree.Variants | null>(null);
-  const [gen, setGen] = useState<Gen | null>(null);
-  /** 连播 under way (旁观): which step of how many; between two steps nothing is generating, but the player still waits. */
-  const [auto, setAuto] = useState<{ step: number; total: number } | null>(null);
-  const autoHandle = useRef<AutoplayHandle | null>(null);
-  const resumedAutoplay = useRef(false);
-  const [agentBusy, setAgentBusy] = useState(false);
   const [agentFloor, setAgentFloor] = useState<number | undefined>();
-  const agentActive = useRef(false);
-  const busy = !!gen || !!auto || agentBusy;
-  busyRef.current = busy;
   /** The state before the latest passage: an end card shows only on the passage where the script or challenge ended. */
   const [before, setBefore] = useState<WorldState | null>(null);
   /** The end card set aside with 继续玩下去 / 继续自由发展, by the passage it belongs to. */
   const [endSeen, setEndSeen] = useState<string | null>(null);
-  /** One message under the story at a time (AUDIT 5.1): what happened, and what to do now. */
-  const [notice, setNotice] = useState<{ text: string; actions: { label: string; run: () => void }[] } | null>(null);
-  const failures = useRef(0);
-  /** Does the last request again, for “再试一次”. */
-  const retry = useRef<(() => void) | null>(null);
-  /** No new words for a while: say it is still being written (AUDIT 5.5). */
-  const [slow, setSlow] = useState(false);
-  const lastWords = useRef(0);
-  const [modeIndex, setModeIndex] = useState(0);
-  const [input, setInput] = useState("");
   /** 旁观: the input offers 幕后 / 写 only. */
   const watch = world?.settings.pilot === "ai";
-  const modeList = watch ? WATCH_MODES : MODES;
-  const currentMode = modeList[modeIndex] ?? modeList[0];
-  // Switching who plays the protagonist starts again from the first way of writing.
-  useEffect(() => { if (draftLoaded.current) setModeIndex(0); }, [watch]);
-  // The words in the box, the 幕后要求 and the way of writing are kept per story (R28):
-  // leaving the story or closing the app does not lose them; sending clears them.
-  const draftLoaded = useRef(false);
-  const draftTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const [writing, setWriting] = useState<WritingDraft | null>(null);
-  const [desk, setDesk] = useState(false);
-  const writingScope = useRef({ worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active: true });
-  writingScope.current = { worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active };
-  useEffect(() => () => { writingScope.current.active = false; }, []);
-  useEffect(() => { setWriting(null); setDesk(false); }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
-  const [noteOpen, setNoteOpen] = useState(false);
-  const [note, setNote] = useState("");
-  useEffect(() => {
-    if (!world || draftLoaded.current) return;
-    void game.repo.getSetting<{ text?: string; note?: string; mode?: string } | null>(`draft:${worldId}`, null).then((saved) => {
-      draftLoaded.current = true;
-      if (!saved) return;
-      if (saved.text) setInput((current) => current || saved.text!);
-      if (saved.note) { setNote(saved.note); setNoteOpen(true); }
-      const index = modeList.findIndex((m) => m.mode === saved.mode);
-      if (index > 0) setModeIndex(index);
-    }).catch(() => { draftLoaded.current = true; });
-  }, [world, worldId]);
-  useEffect(() => {
-    if (!draftLoaded.current) return;
-    clearTimeout(draftTimer.current);
-    draftTimer.current = setTimeout(() => {
-      const text = input.trim() ? input : "", kept = noteOpen && note.trim() ? note : "";
-      void game.repo.setSetting(`draft:${worldId}`, text || kept || currentMode.mode !== modeList[0].mode ? { text, note: kept, mode: currentMode.mode } : null).catch(() => {});
-    }, 500);
-    return () => clearTimeout(draftTimer.current);
-  }, [input, note, noteOpen, currentMode.mode, worldId]);
+  const draft = usePlayDraft(game, worldId, !!world, watch);
+  const { input, setInput, note, setNote, noteOpen, setNoteOpen, modeIndex, setModeIndex, modeList, currentMode } = draft;
   const [menuNode, setMenuNode] = useState<StoryNode | null>(null);
   const [menuMore, setMenuMore] = useState<StoryNode | null>(null);
   const [editing, setEditing] = useState<{ node: StoryNode; field: "narrative" | "action"; text: string } | null>(null);
@@ -135,6 +86,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const [sheet, setSheet] = useState<"more" | "reading" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
+  const openPanel = useCallback(() => setPanel(true), []);
   const wide = useWide();
   const mouse = useMouse();
   /** Room for the long placeholders in the one-line input box. */
@@ -144,10 +96,6 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   useEffect(() => { if (!input && inputBox.current) inputBox.current.style.height = ""; }, [input]);
   const [atBottom, setAtBottom] = useState(true);
   const [typing, setTyping] = useState(false);
-  const [notificationStart, setNotificationStart] = useState<(() => void) | null>(null);
-  const handle = useRef<TurnHandle | null>(null);
-  const screenActive = useRef(true);
-  const recoveryNoticeVersion = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
   const shownPage = useRef(active);
   shownPage.current = active;
@@ -175,7 +123,6 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const turn = [...nodes].reverse().find((n) => n.kind !== "edit");
   // 前情提要: back after more than six hours, a card at the bottom of the story (direction G).
   const [recap, closeRecap] = useRecap(worldId, world?.playedAt ?? null, cursor?.head.id ?? null, state);
-  useEffect(() => { if (gen) closeRecap(); }, [!!gen]);
   // A late recap follows the same reading preference as new story text.
   useEffect(() => {
     if (!recap || !reading.autoScroll || !follow.current) return;
@@ -184,7 +131,6 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   }, [recap, reading.autoScroll]);
   // 印谱: "得一枚印：…" the first time a seal is earned (PLAN_V4 direction G).
   useSealToast(world, state, nodes.filter((n) => n.kind === "turn" || n.kind === "fastforward").length);
-
   const refresh = useCallback(async (keepLimit = limit.current) => {
     const version = ++refreshVersion.current;
     const w = await game.repo.getWorld(worldId);
@@ -226,17 +172,62 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     setBefore(previous);
     setVariants(currentVariants);
   }, [game, worldId, pop]);
-
-  // No new words for 8 seconds while writing: say so, rather than a silent cursor (AUDIT 5.5).
-  // Before the first words, the waiting line counts the seconds (R28).
-  const [waited, setWaited] = useState(0);
-  useEffect(() => {
-    if (!gen) { setSlow(false); setWaited(0); return; }
-    const started = Date.now();
-    setWaited(0);
-    const id = setInterval(() => { setSlow(Date.now() - lastWords.current > 8000); setWaited(Math.floor((Date.now() - started) / 1000)); }, 1000);
-    return () => clearInterval(id);
-  }, [!!gen]);
+  // Choices and writing tools fold away during a request. Reserve their space
+  // in the story until new words fill it, so a taller viewport cannot clamp a
+  // reader at the bottom upward. No scroll position is restored at completion.
+  const streamFloor = () => {
+    const el = scroller.current;
+    const dock = el?.closest(".play")?.querySelector<HTMLElement>(".dock");
+    const input = dock?.querySelector<HTMLElement>(".inputbar");
+    if (!el || !dock || !input) return undefined;
+    const dockStyle = getComputedStyle(dock), storyStyle = getComputedStyle(el);
+    const folding = Math.max(0, dock.offsetHeight - input.offsetHeight - parseFloat(dockStyle.paddingTop) - parseFloat(dockStyle.paddingBottom) - parseFloat(dockStyle.borderTopWidth));
+    return Math.max(0, el.scrollTop + el.clientHeight + folding - parseFloat(storyStyle.paddingTop) - parseFloat(storyStyle.paddingBottom));
+  };
+  // Install the saved passage in the same render that removes its stream (the generation
+  // hook clears the stream). Do not shrink the scroll range while refresh reads SQLite.
+  const showSaved = (node: StoryNode) => {
+    refreshVersion.current++;
+    const current = visibleNodes.current;
+    const existing = current.findIndex((n) => n.id === node.id);
+    const parent = current.findIndex((n) => n.id === node.parentId);
+    const saved = existing >= 0 ? current.map((n) => n.id === node.id ? node : n)
+      : [...(parent >= 0 ? current.slice(0, parent + 1) : current), node];
+    visibleNodes.current = saved;
+    setNodes(saved);
+  };
+  const notifications = useNotificationGate(game, toast);
+  const agentBusy = useAssistantBusy(game, worldId, (running) => setAgentFloor(running ? streamFloor() : undefined));
+  const generation = useGeneration({
+    game, worldId, autoScroll: reading.autoScroll, follow, refresh, showSaved, streamFloor,
+    restoreDraft: draft.restore, onDone: (node) => { void countTurn(); celebrate(node); }, isBusy: () => busyRef.current,
+    toast, push, profileId: profile?.id,
+  });
+  const { gen, auto, notice, setNotice, slow, waited } = generation;
+  // A finished passage settles with a gold sweep; a milestone is stamped down (华丽, D160).
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [stamp, setStamp] = useState<{ label: string; sub: string; key: number } | null>(null);
+  const celebrate = (node: StoryNode) => {
+    const level = motionLevel();
+    if (level === "off") return;
+    setFresh(node.id);
+    setTimeout(() => setFresh((f) => (f === node.id ? null : f)), 1800);
+    if (level !== "rich") return;
+    const milestone = milestoneOf(((node.meta.chips as { text: string }[] | undefined) ?? []).map((c) => c.text));
+    if (!milestone) return;
+    const key = Date.now();
+    setTimeout(() => { setStamp({ ...milestone, key }); buzz(game.platform); }, 500);
+    setTimeout(() => setStamp((s) => (s?.key === key ? null : s)), 2600);
+  };
+  const busy = !!gen || !!auto || agentBusy;
+  busyRef.current = busy;
+  useEffect(() => { if (gen) closeRecap(); }, [!!gen]);
+  const [writing, setWriting] = useState<WritingDraft | null>(null);
+  const [desk, setDesk] = useState(false);
+  const writingScope = useRef({ worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active: true });
+  writingScope.current = { worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active };
+  useEffect(() => () => { writingScope.current.active = false; }, []);
+  useEffect(() => { setWriting(null); setDesk(false); }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
   // After the third turn, once ever: everything a passage can do is behind a long press (AUDIT 4.2).
   const [pressTip, setPressTip] = useState(false);
   const countTurn = async () => {
@@ -248,31 +239,6 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const [modePicker, setModePicker] = useState(false);
   // The AI filed new cards in the background: show its line and the new 设定集.
   useEffect(() => game.subscribe((id) => { if (id === worldId && shownPage.current) void refresh(); }), [game, worldId, refresh]);
-  // A story has one writer at a time, even while its assistant is on another page.
-  useEffect(() => {
-    let live = true;
-    const check = async () => {
-      try {
-        // The Pi assistant's tasks (pi_tasks); the old agent_task runs no longer exist (R26-T002).
-        const rows = await game.platform.sql.query("SELECT id FROM pi_tasks WHERE world_id=? AND status IN ('running','committing') LIMIT 1", [worldId]);
-        if (live) {
-          const running = !!rows.length;
-          if (running !== agentActive.current) {
-            setAgentFloor(running ? streamFloor() : undefined);
-            agentActive.current = running;
-          }
-          setAgentBusy(running);
-        }
-      } catch { /* An older host still reports conflicts when a run starts. */ }
-    };
-    void check();
-    // Fast while the assistant works, slow otherwise; a committed change also triggers a check.
-    let timer = 0;
-    const loop = () => { timer = window.setTimeout(async () => { await check(); if (live) loop(); }, agentActive.current ? 1000 : 4000); };
-    loop();
-    const off = game.subscribe((id) => { if (id === worldId) void check(); });
-    return () => { live = false; window.clearTimeout(timer); off(); };
-  }, [game, worldId]);
   useEffect(() => {
     if (!active) { captureReading(); follow.current = false; return; }
     const anchor = assistantAnchor.current;
@@ -302,18 +268,6 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const toBottom = (smooth = false) => {
     const el = scroller.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
-  };
-  // Choices and writing tools fold away during a request. Reserve their space
-  // in the story until new words fill it, so a taller viewport cannot clamp a
-  // reader at the bottom upward. No scroll position is restored at completion.
-  const streamFloor = () => {
-    const el = scroller.current;
-    const dock = el?.closest(".play")?.querySelector<HTMLElement>(".dock");
-    const input = dock?.querySelector<HTMLElement>(".inputbar");
-    if (!el || !dock || !input) return undefined;
-    const dockStyle = getComputedStyle(dock), storyStyle = getComputedStyle(el);
-    const folding = Math.max(0, dock.offsetHeight - input.offsetHeight - parseFloat(dockStyle.paddingTop) - parseFloat(dockStyle.paddingBottom) - parseFloat(dockStyle.borderTopWidth));
-    return Math.max(0, el.scrollTop + el.clientHeight + folding - parseFloat(storyStyle.paddingTop) - parseFloat(storyStyle.paddingBottom));
   };
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -347,243 +301,49 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     } else if (reading.autoScroll && follow.current) toBottom();
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   }, [active, returnAnchor, nodes, gen?.text, gen?.phase, notice, recap, reading.autoScroll]);
-
-  // Page came back from the background: replay what the stream cached meanwhile.
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      void handle.current?.catchUp();
-      void autoHandle.current?.catchUp();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, []);
-
-  useBack(() => {
-    if (busy) {
-      toast(auto ? "正在连播，先停止或等播完" : "正在写，先停止或等写完");
-      return true;
-    }
-    return false;
-  }, active && (!!gen || !!auto));
-
-  // Install the saved passage in the same render that removes its stream. In particular,
-  // do not temporarily shrink the scroll range while refresh is reading from SQLite.
-  const showSaved = (node: StoryNode) => {
-    refreshVersion.current++;
-    const current = visibleNodes.current;
-    const existing = current.findIndex((n) => n.id === node.id);
-    const parent = current.findIndex((n) => n.id === node.parentId);
-    const saved = existing >= 0 ? current.map((n) => n.id === node.id ? node : n)
-      : [...(parent >= 0 ? current.slice(0, parent + 1) : current), node];
-    visibleNodes.current = saved;
-    setNodes(saved);
-    setGen(null);
-  };
-  const onEvent = (restore: { mode: ActionMode; text: string; note: string } | null) => (e: TurnEvent) => {
-    if (!screenActive.current) return;
-    if (e.type === "step") { resumedAutoplay.current = true; setAuto({ step: e.index, total: e.total }); setGen({ phase: "starting", text: "", action: null, variant: false, minHeight: streamFloor() }); }
-    else if (e.type === "finished") { resumedAutoplay.current = false; setAuto(null); setGen(null); handle.current = null; void refresh(); }
-    else if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
-    else if (e.type === "text") { lastWords.current = Date.now(); setSlow(false); setGen((g) => g && { ...g, phase: "writing", text: e.full }); }
-    else if (e.type === "organizing") setGen((g) => g && { ...g, phase: "organizing" });
-    else if (e.type === "done") {
-      showSaved(e.node);
-      if (!resumedAutoplay.current) handle.current = null;
-      failures.current = 0;
-      buzz(game.platform);
-      void refresh();
-      void countTurn();
-    } else if (e.type === "failed") {
-      resumedAutoplay.current = false;
-      setAuto(null);
-      handle.current = null;
-      if (e.partialSaved) {
-        if (e.node || e.cursor) showSaved(e.node ?? e.cursor!.head);
-        else void refresh().then(() => setGen(null));
-        // The interrupted passage shows its own 续写 / 重说; here only why it stopped.
-        void refresh();
-        if (e.reason !== "cancelled") setNotice({ text: `${e.detail ?? explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
-      } else {
-        setGen(null);
-        // A paused run still holds the action; giving it back would invite sending it twice.
-        if (restore && e.reason !== "limit") {
-          setInput(restore.text);
-          setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === restore.mode)));
-          if (restore.note) { setNote(restore.note); setNoteOpen(true); }
-        }
-        if (e.reason === "cancelled") { if (e.runId) void inspectSavedExecution(e.detail, e.runId); return; }
-        // Paused at its allowance: offer to continue that run (not a new one), via the saved run.
-        if (e.reason === "limit") {
-          setNotice({ text: explainFailure("limit"), actions: e.runId ? [{ label: "接着写完", run: () => resumeExecution(e.runId!, true) }] : [] });
-          if (e.runId) void inspectSavedExecution(e.detail, e.runId);
-          return;
-        }
-        failures.current++;
-        buzz(game.platform);
-        const actions: { label: string; run: () => void }[] = [];
-        if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup", profileId: profile?.id }) });
-        else {
-          if (retry.current) { const again = retry.current; actions.push({ label: e.reason === "refused" ? "原样再试" : "再试一次", run: again }); }
-          if (failures.current >= 2 || e.reason === "quota" || e.reason === "refused") actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
-        }
-        setNotice({ text: e.detail ?? explainFailure(e.reason, e.status), actions });
-        if (e.runId) void inspectSavedExecution(e.detail, e.runId);
-      }
-    }
-  };
-
-  const resumeExecution = (id: string, resume = false) => {
-    if (!screenActive.current || busyRef.current || handle.current) return;
-    recoveryNoticeVersion.current++;
-    lastWords.current = Date.now();
-    setSlow(false);
-    setNotice(null);
-    setGen({ phase: "starting", text: "", action: null, variant: false, minHeight: streamFloor() });
-    retry.current = () => resumeExecution(id, true);
-    handle.current = game.followExecution(id, onEvent(null), resume);
-  };
-  const showSavedExecution = (run: { id: string; status: string; error: string | null; kind?: string; steps?: number; total?: number; hasText?: boolean }, fallback?: string) => {
-    const detail = run.error?.trim() || fallback?.trim() || (run.status === "paused" ? "这段写得比较久，已先停下，进度已保存" : "");
-    const saved = run.kind === "autoplay" ? `连播已完成 ${run.steps ?? 0}/${run.total ?? 0} 段。` : "上次生成的进度已保存。";
-    const text = detail ? `${detail}${/[。！？]$/.test(detail) ? "" : "。"}${detail.includes("进度已保存") ? "" : ` ${saved}`}` : saved;
-    // Opening the page never starts a request by itself. A paused run (its allowance
-    // used) continues only when the player asks, with the same allowance again (D159).
-    const label = run.kind === "autoplay" ? run.hasText ? "续写并继续连播" : "重试剩余连播" : run.status === "paused" ? "接着写完" : "继续上次生成";
-    setNotice({ text, actions: [{ label, run: () => resumeExecution(run.id, true) }] });
-  };
-  const inspectSavedExecution = async (fallback?: string, expectedId?: string) => {
-    const version = ++recoveryNoticeVersion.current;
-    try {
-      const run = await game.currentExecution(worldId);
-      if (!run || (expectedId && run.id !== expectedId) || !screenActive.current || handle.current || version !== recoveryNoticeVersion.current) return;
-      if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run, fallback);
-    } catch { /* The existing failure notice remains available. */ }
-  };
-  useEffect(() => {
-    let disposed = false;
-    screenActive.current = true;
-    void (async () => {
-      await refresh();
-      const run = await game.currentExecution(worldId);
-      if (disposed || !run || handle.current || busyRef.current) return;
-      if (["running", "committing", "interrupted"].includes(run.status)) resumeExecution(run.id, run.status === "interrupted");
-      else if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run);
-    })().catch(() => {
-      if (!disposed) setNotice({ text: "暂时没能读取上次生成的进度，请稍后重新打开故事。", actions: [] });
-    });
-    return () => {
-      disposed = true;
-      screenActive.current = false;
-      recoveryNoticeVersion.current++;
-      handle.current?.detach?.();
-      autoHandle.current?.detach?.();
-      handle.current = null;
-      autoHandle.current = null;
-    };
-  }, [game, worldId, refresh]);
-
-  // Asked once before the first passage on Android. Closing the sheet is not a no (it asks again next time);
-  // a no is remembered, and Settings shows the state with a way to the system switch (ANDROID_COMPAT F1).
-  const beforeGenerating = async (start: () => void) => {
-    if (game.platform.name !== "android" || await game.repo.getSetting("notifAsked", false)) { start(); return; }
-    const status = await game.platform.system.notificationStatus().catch(() => ({ granted: false, enabled: false }));
-    if (status.enabled) { await game.repo.setSetting("notifAsked", true); start(); return; }
-    setNotificationStart(() => start);
-  };
-  const answerNotifications = async (answer: "allow" | "no" | "later") => {
-    const start = notificationStart;
-    setNotificationStart(null);
-    if (answer !== "later") await game.repo.setSetting("notifAsked", true);
-    if (answer === "allow") {
-      const granted = await game.platform.system.requestNotifications().catch(() => false);
-      if (!granted) toast("没有打开通知。以后可以在 设置 → 通知 里打开", { label: "去打开", run: () => void game.platform.system.openSystemSettings("notifications") });
-    }
-    start?.();
-  };
-
+  // Leaving while a passage is written is fine: it keeps writing and the shelf shows it (D160).
   const send = (override?: { mode: ActionMode; text: string }, overrideNote?: string | null) => {
     if (busy || !cursor) return;
     if (!game.llm) { push({ name: "setup" }); return; }
-    void beforeGenerating(() => {
+    void notifications.gate(() => {
       const mode = override?.mode ?? (input.trim() ? currentMode.mode : "continue");
       const text = override?.text ?? (mode === "continue" ? "" : input.trim());
       // An open 幕后要求 goes with a typed action and with a tapped choice alike.
-      const directorNote = overrideNote !== undefined ? overrideNote : !watch && noteOpen && note.trim() ? note.trim() : null;
-      lastWords.current = Date.now();
-      setSlow(false);
-      retry.current = () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); };
-      setNotice(null);
-      follow.current = reading.autoScroll;
-      setGen({ phase: "starting", text: "", action: { mode, text }, variant: false, minHeight: streamFloor() });
-      setInput("");
-      setNote("");
-      setNoteOpen(false);
-      // 做/说 stay for the next turn; 写 and 幕后 are one-off ways of writing.
-      if (mode === "write" || (mode === "direct" && !watch)) setModeIndex(0);
+      const directorNote = overrideNote !== undefined ? overrideNote : draft.directorNote();
+      // A tapped choice leaves what the player was typing in the box (R28-T009).
+      if (!override) setInput("");
+      draft.clearAfterSend(mode);
       buzz(game.platform);
-      // A failure gives the words back to the box (and 再试一次 sends them again), choices included.
-      handle.current = game.play(worldId, { mode, text, directorNote }, onEvent(mode === "continue" || mode === "skip" ? null : { mode, text, note: directorNote ?? "" }));
-    });
-  };
-
-  /**
-   * 连播 (旁观): ordinary “继续” passages one after another. Each step streams
-   * like a normal turn; between steps the dock still says 连播 n/m with 停止.
-   */
-  const startAutoplay = (turns: number) => {
-    if (busy || !cursor) return;
-    if (!game.llm) { push({ name: "setup" }); return; }
-    void beforeGenerating(() => {
-      let played = 0;
-      retry.current = () => startAutoplay(Math.max(1, turns - played));
-      setNotice(null);
-      follow.current = reading.autoScroll;
-      setAuto({ step: 0, total: turns });
-      const forward = onEvent(null);
-      autoHandle.current = game.autoplay(worldId, { turns }, (e: AutoplayEvent) => {
-        if (e.type === "step") {
-          lastWords.current = Date.now();
-          setSlow(false);
-          setAuto({ step: e.index, total: e.total });
-          setGen({ phase: "starting", text: "", action: null, variant: false, minHeight: streamFloor() });
-        } else if (e.type === "finished") {
-          autoHandle.current = null;
-          setAuto(null);
-          setGen(null);
-          void refresh();
-          if (e.reason === "count") toast(`连播了 ${e.steps} 段`);
-          else if (e.reason === "busy") toast("正在写，稍后再连播");
-          else if (e.reason === "player") toast("主角由你来演时不能连播");
-        } else {
-          if (e.type === "done") played++;
-          forward(e);
-        }
+      generation.start({
+        action: { mode, text },
+        // A failure gives the words back to the box; 再试一次 sends them again without doubling them.
+        retry: () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); },
+        restore: mode === "continue" || mode === "skip" ? null : { mode, text, note: directorNote ?? "" },
+        run: (on) => game.play(worldId, { mode, text, directorNote }, on),
       });
     });
   };
 
+  const startAutoplay = (turns: number) => {
+    if (busy || !cursor) return;
+    if (!game.llm) { push({ name: "setup" }); return; }
+    void notifications.gate(() => generation.startAutoplay(turns));
+  };
+
   const regenerate = (hint: string | null) => {
     if (busy || !turn?.parentId) return;
-    void beforeGenerating(() => {
-      setNotice(null);
-      follow.current = reading.autoScroll;
-      lastWords.current = Date.now();
-      setSlow(false);
-      retry.current = () => regenerate(hint);
-      setGen({ phase: "starting", text: "", action: turn.actionMode && turn.actionMode !== "continue" ? { mode: turn.actionMode, text: turn.actionText ?? "" } : null, variant: true });
-      handle.current = game.regenerate(worldId, hint, onEvent(null));
-    });
+    void notifications.gate(() => generation.start({
+      action: turn.actionMode && turn.actionMode !== "continue" ? { mode: turn.actionMode, text: turn.actionText ?? "" } : null,
+      variant: true, retry: () => regenerate(hint), run: (on) => game.regenerate(worldId, hint, on),
+    }));
   };
 
   const resume = () => {
     if (busy || !cursor) return;
-    void beforeGenerating(() => {
-      setNotice(null);
-      follow.current = reading.autoScroll;
-      setGen({ phase: "starting", text: turn?.narrative ?? cursor.head.narrative, action: null, variant: true, minHeight: streamFloor() });
-      handle.current = game.resumeInterrupted(worldId, onEvent(null));
-    });
+    void notifications.gate(() => generation.start({
+      action: null, text: turn?.narrative ?? cursor.head.narrative, variant: true,
+      retry: resume, run: (on) => game.resumeInterrupted(worldId, on),
+    }));
   };
 
   const switchVariant = async (delta: number) => {
@@ -747,7 +507,11 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     "Ctrl+/": { inInputs: true, run: keys },
   }, mouse && active);
 
-  if (!world || !cursor || !state) return <div className="screen-body"><p className="muted">正在读取…</p></div>;
+  if (!world || !cursor || !state) return (
+    <div className="screen-body skeleton-story" aria-label="正在读取" role="status">
+      {[92, 100, 96, 70, 0, 100, 88, 94, 60].map((w, i) => w ? <i key={i} className="skeleton" style={{ width: `${w}%` }} /> : <br key={i} />)}
+    </div>
+  );
 
   const head = cursor.head;
   const placeName = state.places.find((p) => p.id === state.placeId)?.name;
@@ -755,10 +519,11 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const now = nowOf(era.clock, state.time.elapsedMinutes);
   const shown = gen?.variant ? nodes.slice(0, nodes.findIndex((n) => n.id === turn?.id)) : nodes;
   const mode = currentMode;
-  const dead = state.protagonist.stats.health <= 0 && world.settings.difficulty !== "宽松";
+  const dead = isDead;
   const sendLabel = agentBusy ? "等待" : busy ? "停止" : input.trim() ? "发送" : "继续";
-  const showChoices = !busy && !dead && !(typing && (!mouse || input.trim())) && !!turn?.choices.length && turn.status !== "interrupted";
-  const stopOrSend = () => { if (auto && autoHandle.current) autoHandle.current.stop(); else if (gen || auto) handle.current?.stop(); else send(); };
+  // The choices live in the story now, so typing no longer hides them (D160).
+  const showChoices = !busy && !dead && !!turn?.choices.length && turn.status !== "interrupted";
+  const stopOrSend = () => { if (gen || auto) generation.stop(); else send(); };
   // The end cards of a script played out or a challenge decided on the latest passage (not after death).
   const ends = turn && !dead && endSeen !== turn.id ? endsAt(state, before) : { challenge: false, script: false };
   const ending = challengeView(state);
@@ -799,7 +564,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
     <PlayQualityEffects revision={`${head.id}:${gen?.phase ?? "idle"}:${writing?.kind ?? ""}:${sheet ?? ""}`} />
     <div className="play" data-daypart={daypart(now.hour)}>
       <div className="topbar">
-        <button className="icon-btn" aria-label="返回" title="返回（Esc）" onClick={() => (gen || auto ? toast("正在写，先停止或等写完") : pop())}><Icon name="back" /></button>
+        <button className="icon-btn" aria-label="返回" title="返回（Esc）" onClick={() => pop()}><Icon name="back" /></button>
         <button className="title" aria-label="此时此地" title="此时此地" onClick={() => setSheet("time")}>
           <h1>{place}</h1>
           <div className="subtitle">{now.text}</div>
@@ -817,25 +582,14 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
             {shown.map((node) => {
               const isHead = node.id === turn?.id && !busy;
               return (
-                <TurnView key={node.id} node={node} onMenu={setMenuNode} pressed={menuNode?.id === node.id} watch={watch}>{isHead ? <>
+                <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
                   {isHead && node.status === "interrupted" && (
-                    <div className="notice">这段没有写完。{notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}<div className="row"><button onClick={resume}>续写</button><button onClick={() => regenerate(null)}>重说</button></div></div>
+                    <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }] }} onAction={(run) => run()} />
                   )}
                   {isHead && node.status === "no_record" && <p className="muted">这段没能整理出记录，状态可能没有更新。</p>}
                   {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
-                    <div className="turn-tools">
-                      {variants && variants.count > 1 && (
-                        <>
-                          <button className="ghost" aria-label="上一版" title="上一版" disabled={variants.index === 0} onClick={() => switchVariant(-1)}><Icon name="back" size={20} /></button>
-                          <span>{variants.index + 1}/{variants.count}</span>
-                          <button className="ghost" aria-label="下一版" title="下一版" disabled={variants.index === variants.count - 1} onClick={() => switchVariant(1)}><Icon name="forward" size={20} /></button>
-                        </>
-                      )}
-                      <RegenButton title={mouse ? "重说（Ctrl+R），右键选重说的要求" : undefined} onTap={() => regenerate(null)} onLong={() => setSheet("hints")} />
-                      <button className="ghost" title="重说时提个要求" onClick={() => setSheet("hints")}>换个写法</button>
-                      {node.parentId && <button className="ghost" title={mouse ? "撤销这一段（Ctrl+Z）" : "撤销这一段"} onClick={() => void undo()}>撤销</button>}
-                      <button className="ghost" aria-label="这一段还能做什么" title={mouse ? "这一段还能做什么（也可以右键点这一段）" : undefined} onClick={() => setMenuNode(node)}><Icon name="more" size={20} /></button>
-                    </div>
+                    <HeadTools node={node} variants={variants} mouse={mouse} onSwitch={(d) => void switchVariant(d)}
+                      onRegen={() => regenerate(null)} onHints={() => setSheet("hints")} onUndo={() => void undo()} onMenu={() => setMenuNode(node)} />
                   )}
                   {isHead && pressTip && (
                     <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
@@ -843,21 +597,11 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
                 </> : null}</TurnView>
               );
             })}
-            {gen && (
-              <div className="turn">
-                {gen.action?.mode === "write" && gen.action.text && <div className="turn-written"><StoryText text={gen.action.text} /></div>}
-                {gen.action && gen.action.mode !== "continue" && gen.action.mode !== "write" && gen.action.text && <div className={`turn-action ${gen.action.mode}`}>{gen.action.text}</div>}
-                {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : <p className="status-line"><span className="cursor-blink">{statusText || waitingLine(place, now.hour)}</span>{waited >= 2 && <span className="waited">{waited} 秒</span>}</p>}
-                {gen.text && statusText && <p className="status-line">{statusText}</p>}
-                {slow && gen.text && <p className="status-line">还在写，稍等…（不想等可以点“停止”）</p>}
-                {slow && !gen.text && waited >= 8 && <p className="status-line">还没收到回复，稍等…（不想等可以点“停止”）</p>}
-              </div>
-            )}
+            {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
+              onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); }} />}
+            {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow} />}
             {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
-              <div className="notice">
-                {notice.text}
-                {notice.actions.length > 0 && <div className="row">{notice.actions.map((a) => <button key={a.label} onClick={() => { setNotice(null); a.run(); }}>{a.label}</button>)}</div>}
-              </div>
+              <NoticeCard notice={notice} onAction={(run) => { setNotice(null); run(); }} />
             )}
             {dead && <EndingCard state={state} world={world} now={now.text} turns={nodes.filter((n) => n.kind === "turn").length}
               onLife={() => setSheet("life")}
@@ -875,14 +619,15 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
             {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
           </div>
         </div>
+        {stamp && <StampBurst key={stamp.key} label={stamp.label} sub={stamp.sub} />}
         {!atBottom && <button className={`to-bottom${gen?.text ? " fresh" : ""}`} aria-label={gen?.text ? "下面有新写的内容，回到底部" : "回到底部 ↓"} onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
       </div>
 
-      <PlayDock dead={dead} state={state} watch={watch} auto={auto} showChoices={showChoices} input={input} typing={typing}
-        mouse={mouse} busy={busy} turn={turn} head={head} noteOpen={noteOpen} mode={mode} note={note} inputBox={inputBox}
-        gen={gen} roomy={roomy} modeIndex={modeIndex} agentBusy={agentBusy} sendLabel={sendLabel} setDesk={setDesk}
-        setSheet={setSheet} send={send} setInput={setInput} setModeIndex={setModeIndex} setNote={setNote} setNoteOpen={setNoteOpen}
-        openWriting={openWriting} setModePicker={setModePicker} setTyping={setTyping} stopOrSend={stopOrSend} />
+      <Composer dead={dead} state={state} watch={watch} auto={auto} input={input} typing={typing} mouse={mouse} busy={busy}
+        agentBusy={agentBusy} turn={turn} head={head} noteOpen={noteOpen} note={note} mode={mode} modeIndex={modeIndex}
+        gen={gen} roomy={roomy} inputBox={inputBox} setInput={setInput} setModeIndex={setModeIndex} setNote={setNote}
+        setNoteOpen={setNoteOpen} setTyping={setTyping} onModes={() => setModePicker(true)} onDesk={() => setDesk(true)}
+        onPolish={() => openWriting("polish", turn ?? head)} onAutoplay={() => setSheet("autoplay")} onSend={() => send()} onStopOrSend={stopOrSend} />
 
       {menuNode && <PassageMenu menuNode={menuNode} head={head} busy={busy} setMenuNode={setMenuNode}
         openWriting={openWriting} setRemember={setRemember} goBack={goBack} toast={toast} setMenuMore={setMenuMore} />}
@@ -984,10 +729,7 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
         onSave={(challenge: Challenge | null, summary) => saveMode({ challengeSet: challenge }, summary)} />}
       {sheet === "autoplay" && <AutoplaySheet temporary={!watch} onClose={() => setSheet(null)} onStart={(n) => { setSheet(null); startAutoplay(n); }} />}
       {panel && !wide && <Panel {...panelProps} />}
-      {notificationStart && <Sheet title="写好了提醒你？" onClose={() => void answerNotifications("later")}>
-        <p className="muted mt-0">切到别的应用时，故事会在后台接着写。打开通知，写好了会提醒你回来看。</p>
-        <div className="row"><button className="primary grow" onClick={() => void answerNotifications("allow")}>打开通知</button><button onClick={() => void answerNotifications("no")}>不用了</button></div>
-      </Sheet>}
+      {notifications.sheet}
     </div>
     {wide && <div className="play-side"><Panel {...panelProps} docked /></div>}
     </div>

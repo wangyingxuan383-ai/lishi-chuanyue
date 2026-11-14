@@ -1,0 +1,99 @@
+/* Sheets, dialogs, panel, toast. */
+/* ---------- overlays ---------- */
+/* A sheet's layer on <body> (Sheet.tsx): above the screens and the character panel, below dialogs and toasts. */
+.sheet-layer { position: fixed; inset: 0; z-index: 21; }
+.backdrop { position: fixed; inset: 0; z-index: 20; background: var(--backdrop); animation: fade var(--dur-fast) ease-out both; }
+/* Closing overlays (Sheet.tsx, Dialog.tsx): sink and fade, ignore taps meanwhile. */
+.sheet-layer.closing { pointer-events: none; }
+.sheet-layer.closing .backdrop, .backdrop.closing { animation: fade-out var(--dur-fast) var(--ease-in) both; }
+.sheet-layer.closing .sheet { animation: sink var(--dur-fast) var(--ease-in) both; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
+  max-height: 85vh; overflow-y: auto;
+  padding: 10px 16px calc(16px + env(safe-area-inset-bottom));
+  background-color: var(--surface); background-image: var(--grain);
+  border-radius: 10px 10px 0 0; border-top: 3px double var(--line);
+  box-shadow: 0 -6px 24px var(--shadow);
+  animation: rise var(--dur) var(--ease-out) both;
+}
+.sheet-handle { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 10px; }
+.sheet h2 { font-size: 17px; margin: 4px 0 12px; padding-right: 40px; font-family: var(--serif); letter-spacing: 0.06em; }
+.sheet-menu { display: grid; gap: 2px; }
+.sheet-menu button { text-align: left; border: none; background: transparent; font-size: 16px; padding: 12px 8px; }
+.sheet-menu button.danger { color: var(--loss); }
+.dialog-backdrop { z-index: 30; }
+.dialog {
+  position: fixed; z-index: 31; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(88vw, 400px); padding: 20px 20px 16px;
+  background-color: var(--surface); background-image: var(--grain);
+  border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 6px;
+  box-shadow: 0 10px 32px var(--shadow); animation: dialog-in var(--dur) var(--ease-out) both;
+}
+.dialog.closing { pointer-events: none; animation: dialog-out var(--dur-fast) var(--ease-in) both; }
+@keyframes dialog-in { from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); } }
+@keyframes dialog-out { to { opacity: 0; transform: translate(-50%, -50%) scale(0.98); } }
+.dialog h2 { margin: 0 0 8px; font-size: 18px; font-family: var(--serif); letter-spacing: 0.04em; }
+.dialog p { margin: 0 0 16px; color: var(--muted); font-size: 15px; line-height: 1.7; }
+.dialog input { margin: 4px 0 16px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.dialog-actions button { min-width: 88px; }
+.sheet-close { position: absolute; top: 6px; right: 6px; width: var(--tap); height: var(--tap); padding: 0; display: grid; place-items: center; border: none; background: transparent; color: var(--muted); }
+.sheet-close:hover { color: var(--fg); }
+/* A sheet without a title: keep its first row clear of the close button. */
+.sheet-close + :not(h2) { margin-top: 30px; }
+/* Rewriting a passage looks like the passage (AUDIT_V4 6.6): story font and size, growing with the text. */
+.sheet[aria-label="改写这段文字"] textarea, .sheet[aria-label="改我的行动"] textarea {
+  font-family: var(--serif); font-size: var(--story-size); line-height: 1.8; letter-spacing: 0.02em;
+  field-sizing: content; min-height: 5lh; max-height: 62vh;
+}
+.sheet[aria-label="改我的行动"] textarea { min-height: 3lh; }
+@keyframes rise { from { transform: translateY(28px); opacity: 0; } }
+@keyframes sink { to { transform: translateY(32px); opacity: 0; } }
+@keyframes fade-out { to { opacity: 0; } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes fade-up { from { opacity: 0; transform: translateY(4px); } }
+
+.panel {
+  position: fixed; inset: 0; z-index: 21; display: flex; flex-direction: column;
+  background-color: var(--bg); background-image: var(--glow), var(--grain);
+  animation: slide var(--dur) var(--ease-out) both;
+}
+@keyframes slide { from { transform: translateX(28px); opacity: 0; } }
+.panel.leaving { pointer-events: none; animation: slide-out var(--dur-fast) var(--ease-in) both; }
+@keyframes slide-out { to { transform: translateX(28px); opacity: 0; } }
+.tabs { display: flex; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs button { border: none; background: transparent; min-height: var(--tap); padding: 6px 11px; border-radius: 0; white-space: nowrap; font-family: var(--serif); transition: color 0.15s, box-shadow 0.15s; }
+.tabs button[aria-selected="true"] { color: var(--accent); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.panel-body { flex: 1; overflow-y: auto; padding: 14px 16px 32px; max-width: 640px; width: 100%; margin: 0 auto; }
+.stat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.stat { padding: 12px; border-radius: 3px; background: var(--surface); border: 1px solid var(--line); }
+.stat .label { font-size: 12px; color: var(--muted); }
+.stat .value { font-size: 17px; margin-top: 2px; font-family: var(--serif); }
+.bar { height: 3px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease-out; }
+.item-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.item-row b { font-family: var(--serif); }
+.item-row small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.tag { font-size: 12px; padding: 1px 7px; border-radius: 3px; border: 1px solid var(--accent); color: var(--accent); background: transparent; white-space: nowrap; align-self: flex-start; font-family: var(--serif); }
+.tag.own { margin-left: 6px; border-color: var(--warn); color: var(--warn); vertical-align: middle; }
+
+.toast {
+  position: fixed; left: 0; right: 0; top: calc(60px + env(safe-area-inset-top)); z-index: 40;
+  width: fit-content; max-width: min(90vw, 560px); margin: 0 auto; display: flex; align-items: center; gap: 12px;
+  padding: 9px 16px; border-radius: 6px; background: var(--toast-bg); color: var(--toast-fg); font-size: 14px; text-align: center;
+  box-shadow: 0 4px 16px var(--shadow); animation: toast 0.18s ease-out both;
+}
+@keyframes toast { from { opacity: 0; transform: translateY(-6px); } }
+.toast.leaving { animation: toast-out var(--dur-fast) var(--ease-in) both; }
+@keyframes toast-out { to { opacity: 0; transform: translateY(-4px); } }
+.toast-action { position: relative; min-height: 32px; padding: 2px 10px; border: 1px solid currentColor; border-radius: 3px; background: transparent; color: inherit; font-size: 14px; white-space: nowrap; }
+.segmented { display: flex; gap: 6px; flex-wrap: wrap; }
+.segmented button { min-height: var(--tap); padding: 6px 14px; }
+.segmented button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: color-mix(in srgb, var(--fg) 6%, transparent); padding: 10px; border-radius: 3px; }
+/* The grab zone above the handle: pull down to close (Sheet.tsx). */
+.sheet-grab { margin: -10px -16px 0; padding: 10px 16px 0; touch-action: none; cursor: grab; }
+.sheet h2 { touch-action: none; }
+.sheet-menu button.with-icon { display: flex; align-items: center; justify-content: flex-start; gap: 12px; }
+.sheet-menu button.with-icon .icon { flex-shrink: 0; color: var(--accent); opacity: 0.9; }
+.sheet-menu button.danger.with-icon .icon { color: var(--loss); }

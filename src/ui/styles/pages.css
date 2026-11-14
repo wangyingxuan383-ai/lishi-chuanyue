@@ -1,0 +1,167 @@
+/* New game, facts, codex, table of contents, cards and the character panel. */
+/* ---------- new game ---------- */
+.sticky-bar { position: sticky; bottom: 0; z-index: 2; padding: 10px 0 calc(10px + env(safe-area-inset-bottom)); background: var(--bg); border-top: 3px double var(--line); box-shadow: 0 -12px 12px -6px color-mix(in srgb, var(--bg) 90%, transparent); }
+.template-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.template-card { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 3px; }
+.template-card b { font-size: 15px; font-weight: 600; font-family: var(--serif); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.template-card small { font-size: 12px; color: var(--muted); }
+.template-card .hook { font-size: 13px; color: var(--fg); font-family: var(--serif); line-height: 1.5; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.random-card { display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; padding: 16px; border: 1px solid var(--accent); border-left-width: 5px; background: var(--surface); min-height: 76px; }
+.random-card b { display: block; font-family: var(--serif); font-size: 19px; letter-spacing: 0.1em; color: var(--accent); }
+.random-card small { color: var(--muted); font-size: 14px; }
+.fold { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.fold-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; text-align: left; border: none; background: transparent; padding: 10px 14px; min-height: 56px; }
+.fold-head span:first-child { display: grid; gap: 2px; min-width: 0; }
+.fold-head b { font-family: var(--serif); font-weight: 600; font-size: 15px; }
+.fold-head small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fold-head > span:last-child { color: var(--accent); font-size: 14px; flex-shrink: 0; }
+.fold-body { padding: 0 14px 14px; animation: fade-up var(--dur) var(--ease-out); }
+.fold-chevron { display: inline-block; margin-left: 4px; font-style: normal; transition: transform var(--dur-fast) var(--ease-out); }
+.fold.open .fold-chevron { transform: rotate(90deg); }
+/* Small-looking controls still get a 44px touch area (DESIGN_SPEC §4). */
+.toast-action::after, button.link::after, .tip button::after { content: ""; position: absolute; inset: -6px -2px; }
+/* Press feedback (DESIGN_SPEC §6): rows and cards answer a touch the way 建议选项 do. */
+.sheet-menu button:active:not(:disabled), .mode-option:active:not(:disabled), .world-open:active, .fold-head:active { background: var(--accent-soft); }
+.icon-btn:active:not(:disabled) { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.sheet-menu button, .mode-option, .fold-head, .icon-btn { transition: background-color var(--dur-fast) ease-out; }
+.wanted { border-color: var(--warn) !important; }
+button.primary.soft { background: color-mix(in srgb, var(--accent) 70%, var(--line)); border-color: transparent; }
+.template-card.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.turn-written { border-left: 3px solid var(--accent-soft); padding-left: 10px; margin-bottom: 6px; }
+
+/* ---------- facts (label / value list) ---------- */
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 10px 16px; margin: 0 0 12px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+
+/* ---------- 设定集 ---------- */
+.codex-era { padding: 12px 14px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); }
+.codex-text { margin: 0; white-space: pre-wrap; line-height: 1.7; font-size: 14px; }
+.person-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.person-side small { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.timeline { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.timeline small { display: block; color: var(--muted); font-size: 12px; }
+.context-layer { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.context-layer summary { cursor: pointer; line-height: 1.6; }
+.context-layer summary .muted { font-size: 13px; }
+.context-layer pre.raw { max-height: 40vh; overflow: auto; }
+button.codex-item { width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; min-height: auto; padding: 10px 0; }
+button.danger-text { color: var(--loss); }
+
+
+/* ---------- 完整感 (direction G): 目录, search, 前情提要 ---------- */
+.toc .section-title { margin: 6px 0 2px; color: var(--accent); }
+.toc button.codex-item { min-height: var(--tap); }
+.toc .item-row b { font-weight: 600; letter-spacing: 0.04em; }
+.toc-pin { font-family: var(--serif); line-height: 1.6; }
+.toc .item-row small.toc-snippet { line-height: 1.6; color: var(--fg); font-family: var(--serif); font-size: 14px; }
+.toc-snippet mark { background: var(--accent-soft); color: var(--accent); padding: 0 1px; border-radius: 2px; }
+.turn.toc-flash { animation: toc-flash 1.6s ease-out; }
+@keyframes toc-flash { 0%, 30% { background: var(--accent-soft); } 100% { background: transparent; } }
+.recap-card {
+  margin: 14px 0 6px; padding: 8px 14px 12px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 3px;
+  background: var(--surface); font-family: var(--serif); font-size: 15px; line-height: 1.75; animation: fade-up 0.24s ease-out both;
+}
+.recap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recap-head b { letter-spacing: 0.12em; color: var(--accent); }
+.recap-head button { min-height: var(--tap); padding: 0 8px; font-size: 14px; color: var(--muted); font-family: var(--sans); }
+.recap-card p { margin: 4px 0 0; }
+.recap-label { display: inline-block; margin-right: 8px; font-size: 13px; color: var(--muted); font-family: var(--sans); }
+/* ---------- 完整感 (PLAN_V4 direction G): 书摘卡, 这一世小传, 行状, 印谱 ---------- */
+.ending-seal span { display: block; }
+.ending-life { min-height: var(--tap); padding: 0 18px; font-family: var(--serif); letter-spacing: 0.08em; border-color: var(--accent); color: var(--accent); background: transparent; }
+.share-preview { display: grid; place-items: center; min-height: 240px; max-height: 52vh; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.share-preview img { display: block; max-width: 100%; max-height: calc(52vh - 20px); height: auto; box-shadow: 0 2px 10px var(--shadow); }
+.share-preview.scroll { place-items: center start; }
+.share-preview.scroll img { max-width: none; height: calc(52vh - 20px); max-height: none; }
+.life { display: grid; gap: 12px; }
+.life-head { display: flex; gap: 14px; align-items: center; }
+.life-head h3 { margin: 0; font-family: var(--serif); font-size: 21px; letter-spacing: 0.12em; }
+.life-head .muted { margin: 2px 0 0; font-size: 13px; }
+.life-seal { width: 52px; height: 52px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 4px; background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-weight: 700; font-size: 19px; line-height: 1.05; box-shadow: inset 0 0 0 3px var(--accent), inset 0 0 0 4px color-mix(in srgb, var(--on-accent) 55%, transparent); transform: rotate(-4deg); }
+.life-bio { padding: 12px 14px; border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 3px; background: var(--raised); font-family: var(--serif); font-size: 15px; line-height: 1.9; }
+.life-bio p { margin: 0 0 6px; }
+.life-bio p:last-child { margin: 0; }
+.life-bio b { display: inline-block; margin-right: 8px; padding: 0 4px; font-size: 12px; font-weight: 400; color: var(--accent); border: 1px solid var(--accent); border-radius: 2px; line-height: 1.6; vertical-align: 2px; }
+.life .section-title { margin: 6px 0 0; }
+.life-stats .value { font-size: 15px; }
+.seal-book { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 8px; }
+.seal-stamp { display: grid; justify-items: center; gap: 4px; text-align: center; }
+.seal-stamp .stamp { width: 48px; height: 48px; display: grid; grid-template-columns: 1fr 1fr; grid-auto-flow: column; grid-template-rows: 1fr 1fr; direction: rtl; place-items: center; padding: 4px; border-radius: 3px; border: 1px dashed var(--line); color: var(--muted); font-family: var(--serif); font-size: 15px; line-height: 1; opacity: 0.7; }
+.seal-stamp.got .stamp { border: none; background: var(--accent); color: var(--on-accent); font-weight: 700; opacity: 1; box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent); }
+.seal-stamp:nth-child(odd).got .stamp { transform: rotate(-3deg); }
+.seal-stamp:nth-child(even).got .stamp { transform: rotate(2deg); }
+.seal-stamp small { font-size: 12px; line-height: 1.4; color: var(--muted); }
+.seal-stamp.got small { color: var(--fg); font-family: var(--serif); }
+/* ---------- 角色面板与编辑（AUDIT_V4 8.1、8.3、8.4；AUDIT_V4_FUNCTION F6–F8、G1、D5、D8） ---------- */
+/* 人物小传 at the top of 我 */
+.bio-card { padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 3px; background: var(--surface); display: grid; gap: 6px; }
+.bio-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.bio-name { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 600; letter-spacing: 0.04em; }
+.bio-head .muted { font-size: 14px; }
+.bio-edit { margin-left: auto; align-self: center; }
+.bio-identity { margin: 0; font-family: var(--serif); font-size: 15px; line-height: 1.75; }
+.bio-line { margin: 0; font-size: 14px; line-height: 1.6; color: var(--fg); }
+.bio-line > span { display: inline-block; min-width: 4.5em; margin-right: 6px; color: var(--muted); font-size: 13px; }
+/* 主角面板: the player's own notes, on a leaf of paper under the 小传. */
+.hero-panel { display: grid; gap: 4px; padding: 12px 16px 14px; border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 3px; background: var(--raised); }
+.hero-panel .section-title { margin: 0 0 4px; font-size: 15px; color: var(--accent); }
+.hero-panel .bio-line { font-family: var(--serif); font-size: 15px; line-height: 1.75; }
+/* An input with a hint inside the same line: 钱 "120 文", 名字 "3/12". */
+.field-line { position: relative; display: flex; align-items: center; }
+.field-line > input { flex: 1; min-width: 0; padding-right: 96px; }
+.field-suffix { position: absolute; right: 10px; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--muted); pointer-events: none; }
+.field-suffix.over { color: var(--warn); font-weight: 600; }
+.bio-fields .field-line > input { padding-right: 52px; }
+.level-buttons button { flex: 1 1 auto; padding: 6px 10px; font-family: var(--serif); }
+/* 行囊 */
+.item-count { align-self: center; white-space: nowrap; font-family: var(--serif); color: var(--muted); }
+/* Attitudes by closeness */
+.tag.att-hostile { border-color: var(--loss); color: var(--loss); }
+.tag.att-cold { border-color: var(--line); color: var(--muted); }
+.tag.att-plain { border-color: var(--line); color: var(--fg); }
+.tag.att-friendly { border-color: var(--gain); color: var(--gain); }
+.tag.att-close { border-color: #a8791e; color: #8a5f0c; background: rgba(212, 160, 76, 0.12); }
+:root[data-theme="night"] .tag.att-close { border-color: var(--accent); color: var(--accent); }
+/* 世界线 cards: route or bookmark, and the game time */
+.line-mark { display: inline-block; margin-right: 6px; padding: 0 4px; font-size: 12px; border: 1px solid var(--accent); color: var(--accent); border-radius: 2px; vertical-align: 2px; font-weight: 400; }
+.line-mark.bookmark { border-color: var(--warn); color: var(--warn); }
+.line-row .card p.line-when { color: var(--fg); font-size: 13px; }
+/* 我的开局 with its own ⋯ */
+.my-template { position: relative; display: grid; }
+.my-template .template-card { padding-right: 36px; }
+.my-template-menu { position: absolute; top: 0; right: 0; min-height: var(--tap); min-width: 36px; border: none; background: transparent; color: var(--muted); }
+
+/* A quiet update reminder, using the existing cinnabar/theme colour. */
+.update-dot { display: inline-block; width: 7px; height: 7px; margin-left: 8px; border-radius: 50%; background: var(--loss); vertical-align: 2px; }
+.update-mark { position: relative; }
+.update-mark > .update-dot { position: absolute; top: 7px; right: 7px; margin: 0; }
+
+/* 落笔中 (R28 第二批): a brush draws a ring, the seal is stamped inside it. */
+.opening-wait { position: relative; padding-top: 28px; }
+.opening-ring { width: 180px; height: 180px; }
+.opening-ring circle { fill: none; stroke-linecap: round; transform-origin: 100px 100px; transform: rotate(-90deg); }
+.ring-trace { stroke: color-mix(in srgb, var(--line) 80%, transparent); stroke-width: 2; }
+.ring-brush { stroke: var(--accent); stroke-width: 7; stroke-dasharray: 490; stroke-dashoffset: 490; animation: ring-draw 2.6s cubic-bezier(0.6, 0, 0.3, 1) infinite; }
+@keyframes ring-draw { 0% { stroke-dashoffset: 490; opacity: 1; } 70% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 0; opacity: 0; } }
+.opening-seal {
+  position: absolute; top: 28px; left: 50%; display: grid; place-items: center; width: 180px; height: 180px; margin-left: -90px;
+  font-family: var(--serif); font-weight: 700; font-size: 26px; letter-spacing: 0.15em; color: var(--accent);
+  animation: seal-breathe 2.6s ease-in-out infinite;
+}
+@keyframes seal-breathe { 0%, 100% { opacity: 0.35; transform: scale(0.94); } 50% { opacity: 1; transform: scale(1); } }
+:root[data-motion="rich"] .opening-seal { animation: seal-stamp 2.6s cubic-bezier(0.2, 0.9, 0.3, 1) infinite; }
+@keyframes seal-stamp { 0%, 55% { opacity: 0; transform: scale(1.8) rotate(-14deg); filter: blur(3px); } 68% { opacity: 1; transform: scale(0.96) rotate(-4deg); filter: blur(0); } 90% { opacity: 1; transform: scale(1) rotate(-4deg); } 100% { opacity: 0; } }
+
+/* The new story's first screen (R28 第二批): story type as tabs, three starter cards. */
+.mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; padding: 3px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--raised); }
+.mode-tabs button { border: none; background: transparent; border-radius: calc(var(--radius) - 1px); font-family: var(--serif); }
+.mode-tabs button[aria-pressed="true"] { background: var(--surface); color: var(--accent); box-shadow: var(--elev-1); }
+.starter-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.starter-row.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.starter { display: grid; justify-items: start; gap: 4px; padding: 12px 10px; text-align: left; min-height: 96px; }
+.starter b { font-family: var(--serif); font-size: 16px; font-weight: 600; }
+.starter small { font-size: 12px; color: var(--muted); line-height: 1.4; white-space: normal; }
+.starter-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); }
+button.starter { white-space: normal; }
+.assist-btn { width: 100%; }

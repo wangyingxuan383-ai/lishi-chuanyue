@@ -1,0 +1,114 @@
+
+/* Visual design R09 (docs/design/DESIGN_SPEC.md, D125): 宣纸书卷 by day —
+   paper colours and grain, Song serif for the story and titles, cinnabar
+   seals — and the 夜读 palette at night. One-handed use on a phone first. */
+:root {
+  /* 纸张 (default) */
+  --bg: #efe5cf;
+  --surface: #f6eedc;
+  --raised: #fbf6ea;
+  --fg: #2a2019;
+  --muted: #6f5d47;
+  --line: #d9c8a7;
+  --accent: #a83221;
+  --on-accent: #ffffff;
+  --accent-soft: #ecd6c3;
+  --gain: #3e6b47;
+  --loss: #a83221;
+  --warn: #7d560c;
+  --chip: #6b4e33;
+  --shadow: rgba(90, 60, 30, 0.1);
+  /* Overlays: backdrop dims the page; the toast is ink on paper (reversed at night). */
+  --backdrop: rgba(20, 14, 8, 0.38);
+  --toast-bg: rgba(42, 32, 25, 0.92); --toast-fg: #f6eedc;
+  --dock: var(--surface); --dock-line: var(--line); --dock-field: var(--raised);
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .32 0 0 0 0 .18 0 0 0 .075 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  --glow: radial-gradient(140% 70% at 50% 0%, rgba(255, 250, 238, 0.55), transparent 70%);
+  --divider: "◇";
+  --story-size: 18px;
+  --story-leading: 2;
+  --story-paragraph: 0.7em;
+  --story-measure: 36em;
+  --radius: 4px;
+  --tap: 44px;
+  /* Spacing, radii and layers (DESIGN_SPEC §4). */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --radius-card: 3px; --radius-dialog: 6px; --radius-sheet: 10px;
+  --z-bar: 5; --z-backdrop: 20; --z-sheet: 21; --z-dialog: 31; --z-toast: 40;
+  /* Motion (DESIGN_SPEC §6): short, light, never in the way. */
+  --dur-fast: 150ms; --dur: 200ms; --dur-slow: 260ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1); --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --serif: "Noto Serif SC Variable", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
+  --sans: system-ui, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--sans);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 白天: the same book on plain white paper, for strong light. */
+:root[data-theme="day"] {
+  --bg: #faf7f0; --surface: #ffffff; --raised: #ffffff; --fg: #26201a; --muted: #6b5f50; --line: #e6dccb;
+  --accent-soft: #f3e1d6; --chip: #6b4e33; --shadow: rgba(60, 40, 20, 0.08); --grain: none; --glow: none;
+  --dock: #f4efe4; --dock-line: #ddd0b8; --dock-field: #fffdf8;
+}
+
+/* 夜间: ink-dark paper, candle-warm text, gold instead of cinnabar. */
+:root[data-theme="night"] {
+  color-scheme: dark;
+  --bg: #131518; --surface: #1b1e22; --raised: #1f2226; --fg: #e9dcc5; --muted: #9a9183; --line: #2b2f35;
+  --accent: #d4a04c; --on-accent: #1c1508; --accent-soft: #33291b;
+  --gain: #9fcf95; --loss: #e7896b; --warn: #e6b450; --chip: #d8c6a4; --shadow: rgba(0, 0, 0, 0.35);
+  --backdrop: rgba(0, 0, 0, 0.55); --toast-bg: rgba(233, 220, 197, 0.95); --toast-fg: #15171b;
+  --grain: none; --glow: radial-gradient(130% 55% at 50% -10%, rgba(212, 160, 76, 0.13), transparent 62%);
+  --divider: "✦";
+}
+
+/* Shared by both styles, so components can ask for depth and roundness by role.
+   宣纸书卷 keeps its flat, crisp look; 墨韵 overrides these below. */
+:root {
+  --radius-lg: 6px; --radius-pill: 6px;
+  --elev-1: 0 1px 2px var(--shadow);
+  --elev-2: 0 4px 16px var(--shadow);
+  --elev-3: 0 10px 32px var(--shadow);
+  --font-title: var(--serif);
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* A spring with one soft overshoot (CSS linear(), D160 animations). */
+  --spring-soft: linear(0, 0.006, 0.025 2.8%, 0.101 6.1%, 0.539 18.9%, 0.721 25.3%, 0.849 31.5%, 0.937 38.1%, 0.968 41.8%, 0.991 45.7%, 1.006 50.1%, 1.015 55%, 1.017 63.9%, 1.001 85.9%, 1);
+}
+
+/* 墨韵·新中式 (D160): a modern app's structure — big rounded cards, soft layered
+   shadows, generous white space — with ink black and one cinnabar seal for
+   identity. Titles in Song serif, interface text in the system sans. */
+:root[data-style="ink"] {
+  --bg: #f7f5f0; --surface: #ffffff; --raised: #f2efe9; --fg: #1f1d1a; --muted: #6e6a63; --line: #e7e2d9;
+  --accent: #b5281c; --on-accent: #ffffff; --accent-soft: #f6e4df;
+  --gain: #2f7a4f; --loss: #b5281c; --warn: #8a5a00; --chip: #4a4640;
+  --shadow: rgba(31, 29, 26, 0.08);
+  --backdrop: rgba(18, 16, 14, 0.42);
+  --toast-bg: rgba(31, 29, 26, 0.94); --toast-fg: #f7f5f0;
+  --dock: rgba(255, 255, 255, 0.82); --dock-line: transparent; --dock-field: #f2efe9;
+  --grain: none;
+  --glow: radial-gradient(120% 60% at 85% -10%, rgba(181, 40, 28, 0.06), transparent 60%), radial-gradient(90% 50% at 0% 0%, rgba(31, 29, 26, 0.04), transparent 60%);
+  --divider: "·";
+  --radius: 12px; --radius-card: 16px; --radius-dialog: 20px; --radius-sheet: 24px; --radius-lg: 20px; --radius-pill: 999px;
+  --elev-1: 0 1px 2px rgba(31, 29, 26, 0.06), 0 1px 1px rgba(31, 29, 26, 0.04);
+  --elev-2: 0 2px 4px rgba(31, 29, 26, 0.04), 0 8px 24px rgba(31, 29, 26, 0.08);
+  --elev-3: 0 4px 8px rgba(31, 29, 26, 0.06), 0 18px 48px rgba(31, 29, 26, 0.16);
+  --s-gutter: 20px;
+}
+:root[data-style="ink"][data-theme="day"] { --bg: #fbfaf7; --raised: #f4f2ed; }
+:root[data-style="ink"][data-theme="night"] {
+  color-scheme: dark;
+  --bg: #121212; --surface: #1c1c1d; --raised: #252527; --fg: #ede6da; --muted: #9b958b; --line: #2e2e30;
+  --accent: #e0503c; --on-accent: #ffffff; --accent-soft: #3a211d;
+  --gain: #8fd0a3; --loss: #f08068; --warn: #e8b85c; --chip: #cfc6b8;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --backdrop: rgba(0, 0, 0, 0.6);
+  --toast-bg: rgba(237, 230, 218, 0.95); --toast-fg: #141414;
+  --dock: rgba(28, 28, 29, 0.84); --dock-field: #252527;
+  --glow: radial-gradient(120% 60% at 85% -10%, rgba(224, 80, 60, 0.10), transparent 60%), radial-gradient(90% 60% at 0% 0%, rgba(120, 110, 100, 0.10), transparent 60%);
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --elev-2: 0 2px 6px rgba(0, 0, 0, 0.35), 0 10px 28px rgba(0, 0, 0, 0.45);
+  --elev-3: 0 6px 12px rgba(0, 0, 0, 0.4), 0 22px 56px rgba(0, 0, 0, 0.6);
+}

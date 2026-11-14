@@ -27,8 +27,10 @@ export interface Reading {
   indent: boolean;
   /** Widest the story column gets on a big screen, in characters. */
   measure: number;
-  /** Animations: follow the system's "reduce motion", or always off. */
-  motion: "system" | "off";
+  /** Look of the whole app (D160): 宣纸书卷 (default) or 墨韵·新中式. */
+  style: "scroll" | "ink";
+  /** Animations (D160): rich (default), simple, or off. The system's "reduce motion" always means off. */
+  motion: "rich" | "simple" | "off";
   /** A short vibration on long press. */
   haptics: boolean;
   /** Keep the screen on while reading and writing. */
@@ -36,12 +38,20 @@ export interface Reading {
   /** Follow newly generated story text to the bottom. */
   autoScroll: boolean;
 }
-export const DEFAULT_READING: Reading = { size: 18, theme: "paper", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "system", haptics: true, keepAwake: false, autoScroll: false };
+export const DEFAULT_READING: Reading = { size: 18, theme: "paper", style: "scroll", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "rich", haptics: true, keepAwake: false, autoScroll: false };
+/** Saved reading settings from older versions: "system" animations became "rich". */
+export function normalizeReading(saved: Partial<Reading> & { motion?: string; style?: string }): Reading {
+  const r = { ...DEFAULT_READING, ...saved } as Reading;
+  if (!["rich", "simple", "off"].includes(r.motion)) r.motion = "rich";
+  if (r.style !== "ink") r.style = "scroll";
+  return r;
+}
 /** The theme a setting resolves to now. */
 export const resolvedTheme = (theme: Reading["theme"]): "paper" | "day" | "night" =>
   theme === "auto" ? (matchMedia?.("(prefers-color-scheme: dark)").matches ? "night" : "paper") : theme;
 /** The theme is remembered outside the database too, so the first frame already has it. */
 export const THEME_KEY = "lishi.theme";
+export const STYLE_KEY = "lishi.style";
 
 export interface AppValue {
   platform: Platform;

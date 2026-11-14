@@ -189,7 +189,11 @@ export default function NewGame() {
   };
   const blank = () => ({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: { ...fresh().settings, mode: draft.settings.mode, clockStyle: free ? "elapsed" as const : "era" as const }, ...(free ? { origin: "", arrival: "不穿越" as const } : {}) });
 
-  useBack(() => phase !== "form", phase !== "form");
+  // While the opening is written, back leaves the page; the opening keeps writing and shows up on the shelf (D160).
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const leaveWhileWriting = () => { toast("开场在后台继续写，写好后会出现在书架上"); pop(); };
+  useBack(() => { leaveWhileWriting(); return true; }, phase !== "form");
   useEffect(() => () => { assistTicket.current++; draftTicket.current++; }, []);
 
   const useTemplate = (t: OpeningTemplate) => {
@@ -326,6 +330,8 @@ export default function NewGame() {
       else if (e.type === "failed") { setPhase("form"); setError(explainFailure(e.reason, e.status)); }
     };
     const worldId = await game.createWorld(input, onEvent);
+    // Left while it was written: stay where the player went.
+    if (!alive.current) return;
     if (worldId) {
       clearTimeout(saveTimer.current);
       await game.repo.setSetting("newgameDraft", null);
@@ -401,10 +407,22 @@ export default function NewGame() {
   if (phase !== "form") {
     return (
       <div className="screen">
-        <div className="topbar"><div className="title"><h1>{draft.title || "新的故事"}</h1></div></div>
+        <div className="topbar">
+          <button className="icon-btn" aria-label="返回" title="返回（开场在后台继续写）" onClick={leaveWhileWriting}><Icon name="back" /></button>
+          <div className="title"><h1>{draft.title || "新的故事"}</h1></div>
+        </div>
         <div className="screen-body">
           {!text ? (
-            <div className="hero"><p className="hero-title">{phase === "organizing" ? "整理中…" : "落笔中…"}</p><p className="muted">{tip}</p></div>
+            <div className="hero opening-wait">
+              {/* A brush draws a ring, then the seal is stamped inside it. */}
+              <svg className="opening-ring" viewBox="0 0 200 200" aria-hidden="true">
+                <circle className="ring-trace" cx="100" cy="100" r="78" />
+                <circle className="ring-brush" cx="100" cy="100" r="78" />
+              </svg>
+              <span className="opening-seal" aria-hidden="true">{phase === "organizing" ? "整理" : "落笔"}</span>
+              <p className="hero-title">{phase === "organizing" ? "整理中…" : "落笔中…"}</p>
+              <p className="muted">{tip}</p>
+            </div>
           ) : <StoryText text={text} streaming={phase === "writing"} />}
           {text && phase === "organizing" && <p className="status-line">整理人物与设定…</p>}
         </div>
@@ -517,19 +535,20 @@ export default function NewGame() {
       </div>
       <div className="screen-body stack setup-form">
         {error && <div className="notice">{error}</div>}
-        <div className="segmented" role="group" aria-label="故事模式">
+        <div className="segmented mode-tabs" role="group" aria-label="故事模式">
           <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
           <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
           <button aria-pressed={!!draft.fanfic} onClick={() => switchMode("fanfic")}>同人</button>
         </div>
-        <div className="row wrap">
-          <button disabled={assisting} onClick={() => void randomStart()}>随便穿</button>
-          <button onClick={() => setSheet("mine")}>我的开局</button>
-          {!draft.fanfic && <button className="ghost" onClick={() => setSheet("ideas")}>开局灵感</button>}
+        {/* Three ways to start, as cards (R28 第二批); the names stay the buttons' accessible names. */}
+        <div className={`starter-row${draft.fanfic ? " two" : ""}`}>
+          <button className="starter" aria-label="随便穿" disabled={assisting} onClick={() => void randomStart()}><span className="starter-icon"><Icon name="dice" size={22} /></span><b>随便穿</b><small>交给 AI 定一个开局</small></button>
+          <button className="starter" aria-label="我的开局" onClick={() => setSheet("mine")}><span className="starter-icon"><Icon name="bookmark" size={22} /></span><b>我的开局</b><small>用存好的设定</small></button>
+          {!draft.fanfic && <button className="starter" aria-label="开局灵感" onClick={() => setSheet("ideas")}><span className="starter-icon"><Icon name="sparkle" size={22} /></span><b>开局灵感</b><small>从题材出发改一改</small></button>}
         </div>
         <section className="stack gap-2">
           <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} aria-label="一句话想法" placeholder={draft.fanfic ? "想在原著中怎样开始？也可以先选书，让 AI 帮你构思。" : "写一句想法，或直接填写下面的设定"} />
-          <button disabled={assisting} onClick={() => void assist()}>{assisting ? "构思中…" : "AI 补全空着的设定"}</button>
+          <button className="assist-btn" aria-label={assisting ? "构思中…" : "AI 补全空着的设定"} disabled={assisting} onClick={() => void assist()}><Icon name="sparkle" size={18} />{assisting ? "构思中…" : "AI 补全空着的设定"}</button>
         </section>
         <details><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
 

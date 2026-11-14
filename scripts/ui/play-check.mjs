@@ -31,6 +31,7 @@ const titles = [
   "20px 系统字号与菜单按钮溢出",
   "流式生成时既有回合的 DOM 稳定性",
   "动效退场、草稿与输入方式、字号快捷与撤销",
+  "对话版面：正文里的选项、变化行、生成中离开",
 ];
 const results = [];
 const pageErrors = [];
@@ -550,6 +551,47 @@ async function main() {
       await shot("draft-restored");
       await play().locator(".inputbar textarea").fill("");
       await page.waitForTimeout(700);
+    });
+    await step(14, async () => {
+      await ensurePlay();
+      // The choices are in the story, after the latest passage, not in the dock.
+      const inStory = await story().locator(".next-choices .choice").count();
+      const inDock = await play().locator(".dock .choice").count();
+      verify("建议选项在正文末尾、不在底部输入栏", inStory > 0 && inDock === 0, `正文 ${inStory} 条，底部 ${inDock} 条`);
+      // Tapping a choice leaves what was typed in the box.
+      await play().locator(".inputbar textarea").fill("这句先留着");
+      const before = await story().locator(".turn[data-node-id]").count();
+      await story().locator(".next-choices .choice").first().click();
+      await waitComplete(before + 1);
+      const kept = await play().locator(".inputbar textarea").inputValue();
+      verify("点选项后输入框里已写的字还在", kept === "这句先留着", kept || "（空）");
+      await play().locator(".inputbar textarea").fill("");
+      // The changes line opens the grouped list.
+      const line = story().locator(".turn[data-node-id]").last().locator(".turn-changes");
+      if (await line.count()) {
+        await line.click();
+        await sheet().getByRole("heading", { name: "这一回合的变化", exact: true }).waitFor();
+        verify("变化行点开是分组的变化清单", await sheet().locator(".changes-group").count() > 0);
+        await shot("turn-changes");
+        await closeSheets();
+      } else verify("变化行点开是分组的变化清单", false, "最新一段没有变化行");
+      // Leaving while it writes: back works at once, and the passage is there on return.
+      const count = await story().locator(".turn[data-node-id]").count();
+      await play().locator(".inputbar textarea").fill("我在客栈里来回踱步");
+      await play().locator(".dock .send-btn").click();
+      await play().locator(".writing-turn").waitFor({ timeout: 15_000 });
+      await shot("writing-turn");
+      const backAt = Date.now();
+      await play().locator(".topbar").getByRole("button", { name: "返回", exact: true }).click();
+      const back = await page.locator(".world-open:visible").first().waitFor({ timeout: 10_000 }).then(() => true, () => false);
+      const stillWriting = await page.evaluate(() => !!document.querySelector(".preserved-play .writing-turn"));
+      verify("生成中可以直接返回书架", back, `${back ? "书架已出现" : "没有回到书架"}，用时 ${Date.now() - backAt}ms${stillWriting ? "，后台仍在写" : ""}`);
+      await page.waitForTimeout(4000);
+      await page.locator(".world-open:visible").first().click();
+      await play().waitFor();
+      await waitComplete(count + 1);
+      verify("回来时这一段已经写好", await story().locator(".turn[data-node-id]").count() >= count + 1);
+      await shot("after-leave");
     });
   } catch (error) {
     fatal = shortError(error);

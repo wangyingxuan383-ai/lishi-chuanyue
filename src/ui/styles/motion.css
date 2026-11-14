@@ -1,0 +1,130 @@
+/* 华丽 animations (D160): everything here only runs at :root[data-motion="rich"].
+   简洁 keeps the light fades of the other files; 关 (or the system's reduce-motion)
+   switches all animation off (base.css). Only transform, opacity and filter move. */
+
+/* ---------- page changes (View Transitions; App.tsx) ---------- */
+::view-transition-group(*) { animation-duration: 420ms; animation-timing-function: var(--ease-out); }
+:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 380ms var(--ease-in) both; }
+:root[data-vt="push"]::view-transition-new(root) { animation: vt-ink-open 520ms var(--ease-out) both; }
+:root[data-vt="pop"]::view-transition-old(root) { animation: vt-slide-away 360ms var(--ease-in) both; }
+:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 420ms var(--ease-out) both; }
+/* Opening a book: its cover grows into the story (shared element “story-card”). */
+::view-transition-group(story-card) { animation-duration: 520ms; animation-timing-function: var(--spring-soft); z-index: 2; }
+::view-transition-old(story-card), ::view-transition-new(story-card) { height: 100%; object-fit: cover; }
+@keyframes vt-recede { to { opacity: 0.4; transform: scale(0.94); filter: blur(2px); } }
+@keyframes vt-ink-open { from { clip-path: circle(0% at 50% 85%); filter: saturate(0.4); } to { clip-path: circle(150% at 50% 85%); } }
+@keyframes vt-slide-away { to { opacity: 0; transform: translateX(28%) rotate(1.5deg); } }
+@keyframes vt-come-back { from { opacity: 0; transform: scale(0.96); } }
+/* With View Transitions running, the CSS screen entry would play twice. */
+:root[data-vt] .screen, :root[data-vt] .agent-conversation, :root[data-vt] .play-layout { animation: none !important; }
+
+/* ---------- lists come in one after another, with a soft spring ---------- */
+:root[data-motion="rich"] .sheet-menu > *, :root[data-motion="rich"] .settings-entry, :root[data-motion="rich"] .shelf > *,
+:root[data-motion="rich"] .mode-option, :root[data-motion="rich"] .theme-cards > * {
+  animation: pop-in 460ms var(--spring-soft) both;
+}
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(2) { animation-delay: 30ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(3) { animation-delay: 60ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(4) { animation-delay: 90ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(5) { animation-delay: 120ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(6) { animation-delay: 150ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(n+7) { animation-delay: 180ms; }
+@keyframes pop-in { from { opacity: 0; transform: translateY(14px) scale(0.97); } }
+:root[data-motion="rich"] .world-card.featured { animation: hero-in 620ms var(--spring-soft) both; }
+:root[data-motion="rich"] .new-story { animation: pop-in 520ms var(--spring-soft) 80ms both; }
+@keyframes hero-in { from { opacity: 0; transform: translateY(24px) scale(0.95); filter: blur(4px); } }
+
+/* ---------- sheets rise with a spring and follow the finger ---------- */
+:root[data-motion="rich"] .sheet { animation: sheet-rise 520ms var(--spring-soft) both; }
+@keyframes sheet-rise { from { transform: translateY(70%); opacity: 0.2; } }
+:root[data-motion="rich"] .dialog { animation: dialog-pop 420ms var(--spring-soft) both; }
+@keyframes dialog-pop { from { opacity: 0; transform: translate(-50%, -46%) scale(0.86); } }
+.sheet.dragging { animation: none !important; transition: none !important; }
+.sheet.settle { transition: transform 420ms var(--spring-soft) !important; }
+.sheet.flung { transition: transform 200ms var(--ease-in), opacity 200ms var(--ease-in) !important; }
+
+/* ---------- the passage: ink spreads into words ---------- */
+:root[data-motion="rich"] .story-text.streaming .sent { animation: ink-bleed 700ms var(--ease-out) both; }
+@keyframes ink-bleed { from { opacity: 0; filter: blur(5px); transform: translateY(3px); } 55% { opacity: 0.85; filter: blur(0.6px); } }
+/* The action flies up from the input bar into the story. */
+:root[data-motion="rich"] .turn-action.flying, :root[data-motion="rich"] .writing-turn .turn-written {
+  animation: fly-in 640ms var(--spring-soft) both;
+}
+@keyframes fly-in { from { opacity: 0; transform: translateY(60vh) scale(0.9); } 60% { opacity: 1; } }
+/* A finished passage settles with a pale-gold sweep. */
+:root[data-motion="rich"] .turn.fresh { position: relative; }
+:root[data-motion="rich"] .turn.fresh::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: var(--radius);
+  background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, #e6c27a 32%, transparent) 50%, transparent 70%);
+  background-size: 250% 100%; animation: gold-sweep 1.3s var(--ease-out) both;
+}
+@keyframes gold-sweep { from { background-position: 120% 0; } to { background-position: -60% 0; opacity: 0; } }
+:root[data-motion="rich"] .next-choices { animation: choices-in 600ms var(--spring-soft) 200ms both; }
+:root[data-motion="rich"] .choice { animation: pop-in 480ms var(--spring-soft) both; }
+:root[data-motion="rich"] .choice:nth-child(1) { animation-delay: 300ms; }
+:root[data-motion="rich"] .choice:nth-child(2) { animation-delay: 380ms; }
+:root[data-motion="rich"] .choice:nth-child(3) { animation-delay: 460ms; }
+:root[data-motion="rich"] .choice:nth-child(4) { animation-delay: 540ms; }
+@keyframes choices-in { from { opacity: 0; transform: translateY(18px); } }
+/* Numbers that change flash green or red. */
+.count-up { display: inline-block; font-variant-numeric: tabular-nums; }
+:root[data-motion="rich"] .change.gain .count-up { animation: flash-gain 1.2s ease-out both; }
+:root[data-motion="rich"] .change.loss .count-up { animation: flash-loss 1.2s ease-out both; }
+@keyframes flash-gain { 0%, 40% { text-shadow: 0 0 10px color-mix(in srgb, var(--gain) 70%, transparent); transform: scale(1.25); } }
+@keyframes flash-loss { 0%, 40% { text-shadow: 0 0 10px color-mix(in srgb, var(--loss) 70%, transparent); transform: scale(1.25); } }
+
+/* ---------- a seal stamped down for a milestone (StampBurst) ---------- */
+.stamp-layer { position: absolute; inset: 0; z-index: 8; pointer-events: none; display: grid; place-items: center; overflow: hidden; }
+.stamp {
+  position: relative; display: grid; place-items: center; width: 132px; height: 132px; border-radius: 12px;
+  background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-weight: 700; font-size: 34px; letter-spacing: 0.08em;
+  writing-mode: vertical-rl; box-shadow: inset 0 0 0 6px var(--accent), inset 0 0 0 8px color-mix(in srgb, var(--on-accent) 70%, transparent), 0 16px 40px var(--shadow);
+  animation: stamp-down 1.9s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+:root[data-style="ink"] .stamp { border-radius: 50%; }
+.stamp small { font-size: 13px; font-weight: 500; letter-spacing: 0.2em; margin-top: 6px; opacity: 0.9; }
+@keyframes stamp-down {
+  0% { opacity: 0; transform: scale(2.6) rotate(-28deg); filter: blur(6px); }
+  22% { opacity: 1; transform: scale(0.92) rotate(-8deg); filter: blur(0); }
+  30% { transform: scale(1.04) rotate(-9deg); }
+  38%, 78% { opacity: 1; transform: scale(1) rotate(-9deg); }
+  100% { opacity: 0; transform: scale(1) rotate(-9deg) translateY(-30px); }
+}
+.stamp-splash { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); opacity: 0; animation: splash 1.1s cubic-bezier(0.1, 0.8, 0.3, 1) 0.36s both; }
+@keyframes splash { 0% { opacity: 0.9; transform: rotate(var(--a)) translateX(30px) scale(1); } 100% { opacity: 0; transform: rotate(var(--a)) translateX(var(--d)) scale(0.3); } }
+
+/* ---------- touch: an ink ripple on buttons; the send button sends out a ring ---------- */
+.ripple { position: absolute; border-radius: 50%; pointer-events: none; background: currentColor; opacity: 0.22; transform: scale(0); animation: ripple 620ms var(--ease-out) forwards; }
+@keyframes ripple { to { transform: scale(2.6); opacity: 0; } }
+:root[data-motion="rich"] .send-btn.fired { animation: send-pulse 700ms var(--ease-out); }
+@keyframes send-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 18px transparent; } }
+:root[data-motion="rich"] .tool-btn:active:not(:disabled) .icon { animation: tool-spin 500ms var(--spring-soft); }
+@keyframes tool-spin { from { transform: rotate(-40deg) scale(0.8); } }
+
+/* ---------- the play screen breathes: slow drifting light, by time of day ---------- */
+:root[data-motion="rich"] .play::after {
+  content: ""; position: absolute; inset: -20%; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(38% 30% at 20% 25%, color-mix(in srgb, #e9b864 16%, transparent), transparent 70%),
+    radial-gradient(34% 28% at 80% 70%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%);
+  animation: drift 26s ease-in-out infinite alternate;
+}
+:root[data-motion="rich"][data-style="ink"] .play::after {
+  background:
+    radial-gradient(40% 32% at 18% 22%, color-mix(in srgb, var(--fg) 7%, transparent), transparent 70%),
+    radial-gradient(36% 30% at 82% 75%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%);
+}
+@keyframes drift { 0% { transform: translate3d(-3%, -2%, 0) scale(1); } 100% { transform: translate3d(4%, 3%, 0) scale(1.08); } }
+
+/* ---------- waiting for the first words: the brush leaves a trail ---------- */
+:root[data-motion="rich"] .ink-brush { width: 44px; height: 44px; }
+:root[data-motion="rich"] .ink-brush::after {
+  content: ""; position: absolute; inset: -6px; border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 60%, color-mix(in srgb, var(--accent) 35%, transparent) 85%, transparent);
+  animation: brush-turn 1.4s linear infinite; mask: radial-gradient(circle, transparent 58%, #000 60%);
+}
+
+/* ---------- empty home: the seal stamps itself on arrival ---------- */
+:root[data-motion="rich"] .hero .seal { animation: stamp-arrive 900ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes stamp-arrive { 0% { opacity: 0; transform: scale(2.2) rotate(-20deg); filter: blur(4px); } 60% { opacity: 1; transform: scale(0.94) rotate(-3deg); filter: blur(0); } }
+:root[data-motion="rich"] .play { overflow: hidden; }

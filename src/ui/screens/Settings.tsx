@@ -15,7 +15,7 @@ import { exportWorldFile } from "../../engine/archive";
 import { PURPOSES } from "../components/Usage";
 import { Seal } from "../components/Seal";
 import { BackupRestore } from "../components/BackupRestore";
-import { Icon } from "../components/Icon";
+import { Icon, type IconName } from "../components/Icon";
 import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget";
 import { WhatsNewSheet } from "../components/WhatsNew";
 import { UpdateButton, UpdateDevSource } from "../components/UpdateSheet";
@@ -71,25 +71,25 @@ export default function Settings() {
 
   const theme = THEMES.find(([v]) => v === reading.theme)?.[1] ?? "纸张";
   const android = game.platform.name === "android";
-  const entries: { group: string; items: { page: Page; label: string; state: string; hidden?: boolean }[] }[] = [
+  const entries: { group: string; items: { page: Page; label: string; state: string; icon: IconName; hidden?: boolean }[] }[] = [
     { group: "AI", items: [
-      { page: "services", label: "AI 服务", state: profile ? `${profile.name} · ${profile.mainModel}` : "还没有连接" },
-      { page: "writing", label: "写作与叙事", state: `${defaults.style} · ${defaults.length}篇幅 · 第${defaults.perspective === "你" ? "二" : defaults.perspective === "我" ? "一" : "三"}人称` },
-      { page: "memory", label: "记忆与整理", state: `${({ 8000: "省一些", 12000: "标准", 16000: "记得更多" } as Record<number, string>)[profile?.contextTokens ?? 12000] ?? `${profile?.contextTokens?.toLocaleString()} tokens`} · ${defaults.chapterEvery ? `每 ${defaults.chapterEvery} 回合一章` : "不写章节"}` },
+      { page: "services", label: "AI 服务", icon: "chat", state: profile ? `${profile.name} · ${profile.mainModel}` : "还没有连接" },
+      { page: "writing", label: "写作与叙事", icon: "feather", state: `${defaults.style} · ${defaults.length}篇幅 · 第${defaults.perspective === "你" ? "二" : defaults.perspective === "我" ? "一" : "三"}人称` },
+      { page: "memory", label: "记忆与整理", icon: "memo", state: `${({ 8000: "省一些", 12000: "标准", 16000: "记得更多" } as Record<number, string>)[profile?.contextTokens ?? 12000] ?? `${profile?.contextTokens?.toLocaleString()} tokens`} · ${defaults.chapterEvery ? `每 ${defaults.chapterEvery} 回合一章` : "不写章节"}` },
     ] },
     { group: "游戏", items: [
-      { page: "play", label: "游玩默认", state: `难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
-      { page: "reading", label: "阅读与外观", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
-      { page: "sources" as Page, label: "参考书籍", state: "导入、查看与管理，各个故事都能选用" },
-      { page: "guide" as Page, label: "游玩指南", state: "怎么玩、各个功能在哪、常见问题" },
-      { page: "notify", label: "通知与提醒", state: !android ? "电脑上不需要" : notify?.enabled ? "已打开" : "没打开", hidden: !android && !devMode },
+      { page: "play", label: "游玩默认", icon: "dice", state: `难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
+      { page: "reading", label: "阅读与外观", icon: "palette", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
+      { page: "sources" as Page, label: "参考书籍", icon: "book", state: "导入、查看与管理，各个故事都能选用" },
+      { page: "guide" as Page, label: "游玩指南", icon: "info", state: "怎么玩、各个功能在哪、常见问题" },
+      { page: "notify", label: "通知与提醒", icon: "bell", state: !android ? "电脑上不需要" : notify?.enabled ? "已打开" : "没打开", hidden: !android && !devMode },
     ] },
     { group: "应用", items: [
-      { page: "data", label: "存档与数据", state: "备份与导出" },
-      { page: "budget", label: "用量与花费", state: spend },
-      { page: "network", label: "网络与代理", state: network.proxy === "custom" ? "自定义代理" : network.proxy === "system" ? "跟随系统代理" : "直接连接" },
-      { page: "about", label: "关于与更新", state: `版本 ${__APP_VERSION__}` },
-      { page: "dev", label: "开发者", state: devMode ? "已打开" : "关", hidden: !devMode },
+      { page: "data", label: "存档与数据", icon: "database", state: "备份与导出" },
+      { page: "budget", label: "用量与花费", icon: "coin", state: spend },
+      { page: "network", label: "网络与代理", icon: "globe", state: network.proxy === "custom" ? "自定义代理" : network.proxy === "system" ? "跟随系统代理" : "直接连接" },
+      { page: "about", label: "关于与更新", icon: "seal", state: `版本 ${__APP_VERSION__}` },
+      { page: "dev", label: "开发者", icon: "key", state: devMode ? "已打开" : "关", hidden: !devMode },
     ] },
   ];
   const foundEntries = entries.map(group => ({ ...group, items: group.items.filter(item => !item.hidden && localFind(query, group.group, item.label, FIND_WORDS[item.page])) })).filter(group => group.items.length);
@@ -103,18 +103,31 @@ export default function Settings() {
       <div className="screen-body stack settings">
         {page === "home" && <input type="search" aria-label="查找设置" placeholder="查找设置，如字号、自动滚动、备份" value={query} onChange={event => setQuery(event.target.value)} />}
         {page === "home" && !!query.trim() && !foundEntries.length && <p className="muted" role="status">没有找到相关设置，试试功能名称。</p>}
-        {page === "home" && foundEntries.map((g) => (
-          <section key={g.group} className="settings-group">
-            <h2>{g.group}</h2>
-            <div className="settings-list">
-              {g.items.map((i) => (
-                <button key={i.page} className="settings-entry" aria-label={i.page === "about" && unread ? `${i.label}，有新版本` : undefined} onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : i.page === ("sources" as Page) ? setSources(true) : setPage(i.page))}>
-                  <span><b>{i.label}{i.page === "about" && unread && <i className="update-dot" aria-hidden="true" />}</b><small>{i.state}</small></span><span aria-hidden="true">›</span>
-                </button>
-              ))}
-            </div>
-          </section>
-        ))}
+        {/* The service the stories are written with, first and large (R28 第二批). */}
+        {page === "home" && !query.trim() && (
+          <button className={`service-hero${profile ? " ok" : ""}`} onClick={() => setPage("services")} aria-label={`AI 服务：${profile ? `${profile.name}，${profile.mainModel}` : "还没有连接"}`}>
+            <span className="service-hero-icon"><Icon name="chat" size={26} /></span>
+            <span className="service-hero-text"><small>AI 服务</small><b>{profile ? profile.name : "还没有连接"}</b><span>{profile ? profile.mainModel : "连接一个服务才能开始写故事"}</span></span>
+            <span className="service-hero-state"><i aria-hidden="true" />{profile ? "已连接" : "去连接"}</span>
+          </button>
+        )}
+        {page === "home" && foundEntries.map((g) => {
+          const items = query.trim() ? g.items : g.items.filter((i) => i.page !== "services");
+          if (!items.length) return null;
+          return (
+            <section key={g.group} className="settings-group">
+              <h2>{g.group}</h2>
+              <div className="settings-list">
+                {items.map((i) => (
+                  <button key={i.page} className="settings-entry" aria-label={i.page === "about" && unread ? `${i.label}，有新版本` : undefined} onClick={() => (i.page === ("guide" as Page) ? push({ name: "guide" }) : i.page === ("sources" as Page) ? setSources(true) : setPage(i.page))}>
+                    <span className="entry-icon" aria-hidden="true"><Icon name={i.icon} size={20} /></span>
+                    <span><b>{i.label}{i.page === "about" && unread && <i className="update-dot" aria-hidden="true" />}</b><small>{i.state}</small></span><span aria-hidden="true">›</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          );
+        })}
         {page === "services" && <ServicesPage profiles={profiles} onChanged={() => void listProfiles(game.repo).then(setProfiles)} />}
         {page === "writing" && <WritingPage defaults={defaults} onChange={(d) => { setDefaults(d); void savePlayDefaults(game.repo, d); }} />}
         {page === "memory" && <MemoryPage defaults={defaults} onChange={(d) => { setDefaults(d); void savePlayDefaults(game.repo, d); }} />}
@@ -268,13 +281,36 @@ function PlayPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: (d
   );
 }
 
+/** The two looks of the whole app (D160): 宣纸书卷 stays the default. */
+export const STYLES: [Reading["style"], string, string][] = [
+  ["scroll", "宣纸书卷", "纸色、宋体、朱砂印，像读一本线装书（默认）"],
+  ["ink", "墨韵", "新中式：大圆角卡片、柔和阴影、墨黑与一枚朱印"],
+];
+export function StylePicker() {
+  const { reading, setReading } = useApp();
+  return (
+    <div className="setting">
+      <div className="setting-head"><b>外观风格</b><small>整套界面的样子，随时可以换回来</small></div>
+      <div className="style-cards">
+        {STYLES.map(([v, label, note]) => (
+          <button key={v} className={`style-card style-${v}`} aria-pressed={reading.style === v} onClick={() => setReading({ ...reading, style: v })}>
+            <span className="style-preview" aria-hidden="true"><i className="sp-bar" /><i className="sp-line" /><i className="sp-line" /><i className="sp-line short" /><i className="sp-card" /><i className="sp-input" /></span>
+            <b>{label}</b><small>{note}</small>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ReadingPage() {
   const { reading, setReading } = useApp();
   const set = (patch: Partial<Reading>) => setReading({ ...reading, ...patch });
   return (
     <>
+      <StylePicker />
       <div className="setting">
-        <div className="setting-head"><b>主题</b><small>跟随系统：手机是浅色时用纸张，深色时用夜间</small></div>
+        <div className="setting-head"><b>明暗</b><small>跟随系统：手机是浅色时用纸张，深色时用夜间</small></div>
         <div className="theme-cards">
           {THEMES.map(([v, l]) => (
             <button key={v} aria-pressed={reading.theme === v} className={`theme-card theme-${v}`} onClick={() => set({ theme: v })}><span className="swatch" aria-hidden="true" />{l}</button>
@@ -289,7 +325,7 @@ function ReadingPage() {
       <div className="story-text reading-preview" aria-label="效果预览"><p>西市的鼓声一声接一声，你裹紧单衣，跟着人流走进坊门。</p><p>“郎君，买胡饼么？”炉边的老汉抬起头。</p></div>
       <h3 className="settings-sub">更多</h3>
       <Choice label="生成时自动滚动" note="打开后，跟着新写出的内容往下读" value={reading.autoScroll} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ autoScroll: v })} />
-      <Choice label="动画" note="弹层、标签出现时的轻微动画" value={reading.motion} options={[["system", "跟随系统"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />
+      <Choice label="动画" note="华丽：页面、回合和印章都有动效；简洁：只留轻微的淡入淡出。系统设置了减少动态效果时一律关闭" value={reading.motion} options={[["rich", "华丽"], ["simple", "简洁"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />
       <Choice label="触感" note="长按、发送和写完一段时轻轻振一下" value={reading.haptics} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ haptics: v })} />
       <Choice label="阅读时不锁屏" note="只在读故事时生效" value={reading.keepAwake} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ keepAwake: v })} />
     </>

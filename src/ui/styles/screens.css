@@ -1,0 +1,128 @@
+/* Screen frame: top bar, screen body, home shelf and cards. */
+/* ---------- screens ---------- */
+.screen { min-height: 100%; display: flex; flex-direction: column; }
+/* Entering a screen (App.tsx sets data-nav): forward slides in a little from the right, back only fades.
+   No fill mode, so no transform stays behind once it has played. */
+:root[data-nav="push"] .screen, :root[data-nav="push"] .agent-conversation, :root[data-nav="push"] .preserved-play:not([data-inactive]) > .play-layout { animation: screen-in var(--dur-slow) var(--ease-out); }
+:root[data-nav="pop"] .screen, :root[data-nav="pop"] .agent-conversation, :root[data-nav="pop"] .preserved-play:not([data-inactive]) > .play-layout { animation: fade var(--dur) var(--ease-out); }
+@keyframes screen-in { from { opacity: 0; transform: translateX(14px); } }
+.screen-body { flex: 1; padding: 16px; max-width: 640px; width: 100%; margin: 0 auto; }
+.topbar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 4px;
+  min-height: 52px; padding: 4px 6px;
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 3px double var(--line);
+}
+.topbar h1 { font-size: 17px; margin: 0; font-weight: 600; font-family: var(--serif); letter-spacing: 0.06em; }
+.topbar .title { flex: 1; min-width: 0; padding: 0 4px; }
+.topbar .title > :first-child { font-family: var(--serif); }
+.topbar button.title { border: none; border-radius: 0; background: transparent; text-align: left; }
+.topbar .subtitle { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--sans); }
+.icon-btn { min-width: var(--tap); padding: 0 10px; border: none; background: transparent; font-size: 18px; display: inline-flex; align-items: center; justify-content: center; }
+/* Line icons (Icon.tsx): centred in their button, in one row with a label after them. */
+.icon { display: block; flex-shrink: 0; }
+button:has(> .icon) { display: inline-flex; align-items: center; justify-content: center; gap: 4px; white-space: nowrap; }
+.mode-option b .icon { display: inline-block; vertical-align: -0.15em; margin-right: 2px; color: var(--accent); }
+/* The 角色 button: a small seal with the protagonist's first character (AUDIT_V4 4.11). */
+.name-seal {
+  display: grid; place-items: center; width: 28px; height: 28px; border-radius: 3px;
+  background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 16px; font-weight: 700; line-height: 1;
+  box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent);
+}
+
+.hero { padding: 44px 8px 20px; text-align: center; display: grid; justify-items: center; gap: 10px; }
+.hero h1 { font-size: 28px; margin: 6px 0 0; letter-spacing: 0.35em; padding-left: 0.35em; font-family: var(--serif); }
+.hero p { margin: 0; }
+.big-btn { width: 100%; min-height: 56px; font-size: 18px; }
+
+.card {
+  display: block; width: 100%; text-align: left;
+  padding: 14px 16px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 3px;
+  background: var(--surface); box-shadow: 0 1px 0 var(--shadow);
+}
+.card h3 { margin: 0 0 4px; font-size: 17px; font-family: var(--serif); letter-spacing: 0.04em; }
+.card p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.6; }
+.card.selected { border-color: var(--accent); background: var(--accent-soft); }
+.list { display: grid; gap: 10px; }
+.section-title { margin: 10px 0 0; font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.06em; color: var(--fg); }
+/* 书架: each story is a book — its cover on the left, the title and where it stands beside it.
+   Only the story to continue keeps the cinnabar edge, so the list below stays calm. */
+.world-card { position: relative; padding: 0; }
+.world-card:not(.featured) { border-left: 1px solid var(--line); }
+.world-open { display: flex; align-items: flex-start; gap: 14px; width: 100%; text-align: left; border: none; background: transparent; padding: 14px; min-height: auto; }
+.world-info { display: block; flex: 1; min-width: 0; }
+.world-open h3 { margin: 2px 0 2px; padding-right: 34px; font-size: 17px; font-family: var(--serif); letter-spacing: 0.04em; }
+.world-open p { margin: 0; font-size: 14px; color: var(--muted); line-height: 1.6; }
+/* The last line read, as it stands in the book: a hairline before it instead of quote marks of our own. */
+.world-open .last-line { margin-top: 8px; padding-left: 9px; border-left: 2px solid var(--line); font-family: var(--serif); color: var(--fg); line-height: 1.7; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.world-open .meta { margin-top: 6px; font-size: 12px; }
+.world-menu { position: absolute; top: 4px; right: 2px; }
+.world-card.featured { border-left-width: 5px; }
+.world-card.featured .world-open { padding: 16px 14px 16px 14px; gap: 16px; }
+.world-card.featured .world-open h3 { font-size: 20px; }
+.world-card.featured .book-art { width: 64px; height: 90px; }
+.continue-btn { display: inline-flex; align-items: center; justify-content: center; margin-top: 12px; min-height: var(--tap); padding: 0 28px; border-radius: var(--radius); background: var(--accent); color: var(--on-accent); font-family: var(--serif); letter-spacing: 0.2em; }
+/* 这一版新增 on the home screen: one quiet line with a small 新 seal, not an alert. */
+.whats-new { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); animation: fade-up 0.24s ease-out both; }
+.whats-new-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 8px 4px 8px 12px; border: none; background: transparent; text-align: left; }
+.whats-new-open > .icon { color: var(--accent); }
+.whats-new-mark {
+  flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 3px;
+  background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 15px; font-weight: 700; line-height: 1;
+  box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent);
+}
+.whats-new-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.whats-new-text b { font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.04em; }
+.whats-new-text small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.whats-new-close { color: var(--muted); }
+.whats-new-body > p.muted { margin: -6px 0 0; }
+.whats-new-list { margin: 0; display: grid; gap: 14px; }
+.whats-new-list dt { font-family: var(--serif); font-size: 16px; font-weight: 600; letter-spacing: 0.04em; }
+.whats-new-list dt::before { content: var(--divider); margin-right: 8px; color: var(--accent); font-size: 11px; vertical-align: 2px; }
+.whats-new-list dd { margin: 2px 0 0; padding-left: 19px; color: var(--muted); font-size: 14px; line-height: 1.7; }
+
+/* ---------- home, R28 第二批 (D160): a big “继续” card, a new-story entry, a two-column shelf ---------- */
+.home-topbar .brand { display: flex; align-items: center; gap: 10px; }
+.brand-mark {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 4px; flex-shrink: 0;
+  background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-size: 10px; font-weight: 700; line-height: 1; letter-spacing: 0;
+  writing-mode: vertical-rl; box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px color-mix(in srgb, var(--on-accent) 55%, transparent);
+}
+.world-card.featured { overflow: hidden; }
+.world-card.featured .world-open { padding: 18px 16px; gap: 18px; align-items: center; }
+.world-card.featured .book-art { width: 84px; height: 118px; box-shadow: 0 6px 18px var(--shadow); }
+.world-card.featured .world-open h3 { font-size: 21px; }
+.continue-btn { gap: 6px; }
+.new-story { display: flex; align-items: center; gap: 14px; text-align: left; padding: 12px 16px; min-height: 68px; }
+.new-story-mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0; border: 1px solid currentColor; color: var(--accent); }
+.new-story.primary .new-story-mark { color: var(--on-accent); }
+.new-story-text { display: grid; gap: 2px; }
+.new-story-text b { font-family: var(--serif); font-size: 18px; letter-spacing: 0.08em; font-weight: 600; }
+.new-story-text small { font-size: 13px; opacity: 0.75; font-family: var(--sans); letter-spacing: 0; }
+.shelf { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.shelf-item .world-open { flex-direction: column; align-items: flex-start; gap: 10px; padding: 14px 12px; }
+.shelf-item .book-art { width: 56px; height: 80px; }
+.shelf-item .world-open h3 { font-size: 16px; padding-right: 20px; }
+.shelf-item .world-open p { font-size: 13px; }
+.shelf-item .world-menu { top: 2px; right: 0; }
+@media (min-width: 720px) { .shelf { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.writing-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-weight: 600; }
+.writing-badge i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: breathe 1.4s ease-in-out infinite; }
+.world-card.writing .book-art { animation: writing-glow 2.4s ease-in-out infinite; }
+@keyframes writing-glow { 50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent), 0 6px 18px var(--shadow); } }
+
+/* Loading: paper-coloured placeholders with a passing light. */
+.skeleton { position: relative; overflow: hidden; border-radius: var(--radius-lg); background: color-mix(in srgb, var(--line) 45%, var(--surface)); }
+.skeleton::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--surface) 70%, transparent), transparent); animation: shimmer 1.4s ease-in-out infinite; }
+@keyframes shimmer { to { transform: translateX(100%); } }
+.skeleton-hero { display: flex; gap: 16px; padding: 18px 16px; height: 154px; }
+.skeleton-cover { width: 84px; border-radius: 4px; background: color-mix(in srgb, var(--line) 80%, transparent); }
+.skeleton-lines { flex: 1; display: grid; align-content: center; gap: 12px; }
+.skeleton-lines i { height: 12px; border-radius: 6px; background: color-mix(in srgb, var(--line) 80%, transparent); }
+.skeleton-lines i:nth-child(1) { width: 60%; height: 18px; } .skeleton-lines i:nth-child(3) { width: 40%; }
+.skeleton-btn { height: 68px; }
+.skeleton-book { height: 170px; }
+.skeleton-story { display: grid; gap: 14px; padding: 28px 20px; }
+.skeleton-story i { display: block; height: 14px; border-radius: 7px; }

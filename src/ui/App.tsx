@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { markNavigation } from "./app/motion";
+import { flushSync } from "react-dom";
+import { installRipples, markNavigation, nameForTransition, withViewTransition } from "./app/motion";
 import { getPlatform, type Platform } from "../platform";
 import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
-import { AppProvider, DEFAULT_READING, THEME_KEY, resolvedTheme, useToast, type AppValue, type Reading, type Route } from "./app/context";
+import { AppProvider, DEFAULT_READING, STYLE_KEY, THEME_KEY, normalizeReading, resolvedTheme, useToast, type AppValue, type Reading, type Route } from "./app/context";
 import { Dialog, type DialogRequest } from "./components/Dialog";
 import { Seal } from "./components/Seal";
 import { archiveProblems, importWorld } from "../engine/archive";
@@ -29,19 +30,23 @@ export function llmFor(profile: Profile | null): LlmConfig | null {
   };
 }
 
-/** Each theme's --bg (styles), for the phone's status and navigation bars. */
-const BAR_COLORS = { paper: "#efe5cf", day: "#faf7f0", night: "#131518" } as const;
+/** Each style and theme's --bg (tokens.css), for the phone's status and navigation bars. */
+const BAR_COLORS = {
+  scroll: { paper: "#efe5cf", day: "#faf7f0", night: "#131518" },
+  ink: { paper: "#f7f5f0", day: "#fbfaf7", night: "#121212" },
+} as const;
 
 function applyReading(r: Reading) {
   const root = document.documentElement;
   const theme = resolvedTheme(r.theme);
   root.dataset.theme = theme;
-  void getPlatform().then((p) => p.system.setSystemBars(BAR_COLORS[theme], theme === "night")).catch(() => {});
+  root.dataset.style = r.style;
+  void getPlatform().then((p) => p.system.setSystemBars(BAR_COLORS[r.style][theme], theme === "night")).catch(() => {});
   root.dataset.font = r.serif ? "serif" : "sans";
   root.dataset.motion = r.motion;
   root.dataset.indent = r.indent ? "on" : "off";
   root.dataset.haptics = r.haptics ? "on" : "off";
-  try { localStorage.setItem(THEME_KEY, r.theme); } catch { /* storage may be unavailable */ }
+  try { localStorage.setItem(THEME_KEY, r.theme); localStorage.setItem(STYLE_KEY, r.style); } catch { /* storage may be unavailable */ }
   root.style.setProperty("--story-size", `${r.size}px`);
   // Sans text reads better a little tighter (AUDIT_V4 10.3).
   root.style.setProperty("--story-leading", String(r.serif ? r.leading : Math.max(1.6, r.leading - 0.2)));
@@ -136,7 +141,7 @@ export default function App() {
       const activeId = await game.repo.getSetting<string | null>("activeProfile", null);
       const active = profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null;
       game.llm = llmFor(active);
-      const r = { ...DEFAULT_READING, ...(await game.repo.getSetting<Partial<Reading>>("reading", {})) };
+      const r = normalizeReading(await game.repo.getSetting<Partial<Reading>>("reading", {}));
       // The network choice applies to every request from the start.
       const network = await game.repo.getSetting<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>("network", { proxy: "none" });
       void platform.llm.setNetwork(network).catch(() => {});
@@ -154,9 +159,17 @@ export default function App() {
 
   // A message belongs to the screen it was shown on (AUDIT_V4 1.10): moving on clears it.
   // The direction picks the screen entry animation (base.css, :root[data-nav]).
-  const push = useCallback((r: Route) => { clearToast(); markNavigation("push"); setStack((s) => [...s, r]); }, [clearToast]);
-  const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); setStack((s) => [...s.slice(0, -1), r]); }, [clearToast]);
-  const pop = useCallback(() => { clearToast(); markNavigation("pop"); setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)); }, [clearToast]);
+  // At 华丽 a page change runs as a View Transition; opening a book grows its cover into the story (D160).
+  const push = useCallback((r: Route) => {
+    clearToast(); markNavigation("push");
+    if (r.name === "play") nameForTransition(document.querySelector(`[data-world-id="${r.worldId}"] .book-art`), "story-card");
+    withViewTransition("push", () => flushSync(() => setStack((s) => [...s, r])), () => {
+      if (r.name === "play") nameForTransition(document.querySelector(".preserved-play:not([data-inactive]) > *"), "story-card");
+    });
+  }, [clearToast]);
+  const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); withViewTransition("push", () => flushSync(() => setStack((s) => [...s.slice(0, -1), r]))); }, [clearToast]);
+  const pop = useCallback(() => { clearToast(); markNavigation("pop"); withViewTransition("pop", () => flushSync(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)))); }, [clearToast]);
+  useEffect(() => installRipples(), []);
   // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
   // a new request answers the one it replaces as cancelled.
   const dialogId = useRef(0);

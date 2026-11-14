@@ -1,10 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- Desktop variant of app-icon.svg: the seal fills the canvas, so it stays
-       legible at taskbar sizes. Rendered by scripts/ui/icon.mjs. -->
-  <rect x="48" y="48" width="928" height="928" rx="120" fill="#a83221"/>
-  <rect x="104" y="104" width="816" height="816" rx="70" fill="none" stroke="#fbf4e6" stroke-width="22" stroke-opacity="0.85"/>
-  <g fill="#fbf4e6" font-family="'Noto Serif SC', 'Noto Serif CJK SC', 'Source Han Serif SC', 'Songti SC', serif" font-weight="700" font-size="340" text-anchor="middle">
-    <text x="512" y="478">穿</text>
-    <text x="512" y="846">越</text>
+  <!-- 穿越小说模拟 app icon (R28, D160): 墨韵·新中式. Ink ground, a round cinnabar seal
+       with 穿越 in Noto Serif SC 700 (SIL OFL, rendered by scripts/ui/icon.mjs), and a
+       pale-gold brush ring with one open end — a passage through time. Desktop: the mark fills the rounded square. -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="36%" r="72%"><stop offset="0" stop-color="#2b2721"/><stop offset="0.65" stop-color="#171512"/><stop offset="1" stop-color="#0f0e0c"/></radialGradient>
+    <linearGradient id="gold" x1="0.9" y1="0.1" x2="0.1" y2="0.9"><stop offset="0" stop-color="#f6dfa6"/><stop offset="0.45" stop-color="#d9b46a"/><stop offset="1" stop-color="#9c7536" stop-opacity="0.25"/></linearGradient>
+    <radialGradient id="seal" cx="38%" cy="32%" r="78%"><stop offset="0" stop-color="#d84a33"/><stop offset="0.7" stop-color="#b22a1d"/><stop offset="1" stop-color="#951f16"/></radialGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%"><stop offset="0.55" stop-color="#d9b46a" stop-opacity="0.18"/><stop offset="1" stop-color="#d9b46a" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="200" fill="url(#bg)"/>
+  <g transform="translate(512 512) scale(1.32) translate(-512 -522)">
+  <circle cx="512" cy="522" r="330" fill="url(#halo)"/>
+  <path d="M 784 384 A 300 300 0 1 1 650 252" fill="none" stroke="url(#gold)" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="724" cy="300" r="13" fill="#f6dfa6"/>
+  <circle cx="512" cy="522" r="206" fill="url(#seal)"/>
+  <circle cx="512" cy="522" r="184" fill="none" stroke="#fbf1de" stroke-width="9" stroke-opacity="0.92"/>
+  <g fill="#fbf1de" font-family="'Noto Serif SC', 'Noto Serif CJK SC', serif" font-weight="700" font-size="152" text-anchor="middle">
+    <text x="512" y="502">穿</text><text x="512" y="658">越</text>
+  </g>
   </g>
 </svg>

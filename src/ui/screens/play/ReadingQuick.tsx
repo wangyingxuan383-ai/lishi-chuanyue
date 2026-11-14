@@ -2,7 +2,7 @@
 // The same values as 设置 → 阅读与外观; the change shows at once behind the sheet.
 import { useApp, type Reading } from "../../app/context";
 import { Sheet } from "../../components/Sheet";
-import { Choice, SIZES, THEMES } from "../Settings";
+import { Choice, SIZES, STYLES, THEMES } from "../Settings";
 
 export function ReadingQuickSheet({ onClose }: { onClose: () => void }) {
   const { reading, setReading } = useApp();
@@ -26,13 +26,14 @@ export function ReadingQuickSheet({ onClose }: { onClose: () => void }) {
         </div>
       </div>
       <div className="setting">
-        <div className="setting-head"><b>主题</b></div>
+        <div className="setting-head"><b>明暗</b></div>
         <div className="theme-cards">
           {THEMES.map(([v, l]) => (
             <button key={v} aria-pressed={reading.theme === v} className={`theme-card theme-${v}`} onClick={() => set({ theme: v })}><span className="swatch" aria-hidden="true" />{l}</button>
           ))}
         </div>
       </div>
+      <Choice label="外观风格" value={reading.style} options={STYLES.map(([v, l]) => [v, l] as [typeof v, string])} onChange={(v) => set({ style: v })} />
       <Choice label="行距" value={reading.leading} options={[[1.7, "紧"], [2, "适中"], [2.3, "松"]]} onChange={(v) => set({ leading: v })} />
     </Sheet>
   );

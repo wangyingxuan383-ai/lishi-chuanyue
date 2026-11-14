@@ -1,0 +1,22 @@
+/* Labelled fields, pickers, links. */
+/* ---------- forms: labelled fields, pickers, links ---------- */
+.field-label { font-size: 14px; color: var(--muted); }
+.field { display: grid; gap: 6px; }
+.field-hint { font-size: 13px; color: var(--muted); }
+.field-hint.warn { color: var(--warn); }
+.picker { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; text-align: left; padding: 10px 14px; background: var(--raised); }
+.picker span:first-child { display: grid; gap: 2px; min-width: 0; }
+.picker b { font-family: var(--serif); font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker small { color: var(--muted); font-size: 13px; }
+.picker > span:last-child { color: var(--accent); font-size: 18px; }
+.links { margin: 0; font-size: 14px; color: var(--muted); }
+button.link { position: relative; min-height: 32px; padding: 0 2px; border: none; background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.input-tools { display: flex; gap: 4px; align-items: stretch; }
+.input-tools input { flex: 1; min-width: 0; }
+/* Our own 看 button shows the key; Edge's built-in eye would be a second one. */
+input::-ms-reveal, input::-ms-clear { display: none; }
+.input-tools .icon-btn { font-size: 14px; font-family: var(--serif); color: var(--accent); border: 1px solid var(--line); background: var(--surface); }
+.notice.ok { border-left-color: var(--gain); }
+.model-list { max-height: 50vh; overflow-y: auto; }
+.model-list b, .picker b.model { font-family: var(--sans); font-weight: 500; font-size: 15px; word-break: break-all; }
+.model-list small { color: var(--gain); }

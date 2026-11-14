@@ -4,8 +4,9 @@
 //   node scripts/ui/icon.mjs
 import fs from "node:fs";
 import { chromium } from "playwright-core";
+import { launchBrowser } from "./browser.mjs";
 
-const browser = await chromium.launch({ channel: "msedge" });
+const browser = await launchBrowser(chromium);
 const page = await browser.newPage({ viewport: { width: 1024, height: 1024 }, deviceScaleFactor: 1 });
 // app-icon: padded, for Android (the launcher masks the edges); app-icon-desktop: the seal fills the canvas.
 for (const name of ["app-icon", "app-icon-desktop"]) {
