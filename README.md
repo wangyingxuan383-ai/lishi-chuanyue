@@ -79,7 +79,7 @@
 
 本项目暂未授予开源许可：你可以查看代码、下载安装包自己使用；复制、修改或再发布，需要先取得作者的同意。
 
-应用内置的思源宋体（Noto Serif SC）按 SIL Open Font License 1.1 随附，不受上面这条限制。
+应用内置的思源宋体（Noto Serif SC）按 SIL Open Font License 1.1 随附，不受上面这条限制。完整文本见[字体许可](public/licenses/NotoSerifSC-OFL.txt)。
 
 ## 反馈
 

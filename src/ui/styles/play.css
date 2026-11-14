@@ -19,7 +19,8 @@
 .play-layout.wide > .play { min-width: 0; min-height: 0; }
 .play-side { border-left: 1px solid var(--line); min-height: 0; display: flex; }
 .panel.docked { position: static; inset: auto; z-index: auto; flex: 1; animation: none; min-width: 0; }
-.play-layout.wide @media (min-width: 1000px) {
+.play-layout.wide .dock { padding-inline: max(10px, calc((100% - 640px) / 2)); }
+@media (min-width: 1000px) {
   /* Sheets still rise from the bottom, at a readable width. */
   .sheet { max-width: 600px; margin: 0 auto; }
 }
