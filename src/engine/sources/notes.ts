@@ -55,7 +55,13 @@ export async function getNote(repo: Repo, id: string): Promise<CanonNote | null>
   const [row] = await repo.platform.sql.query("SELECT * FROM canon_notes WHERE id=?", [id]);
   return row ? rowNote(row) : null;
 }
-export async function saveNote(repo: Repo, note: CanonNote): Promise<void> {
+export async function saveNote(repo: Repo, note: CanonNote, existingOnly = false): Promise<void> {
+  // A cancelled worker may return after deletion. It must never recreate the row.
+  if (existingOnly) {
+    await repo.platform.sql.batch([{ sql: "UPDATE canon_notes SET title=?,scope_json=?,content=?,refs_json=?,model=?,status=?,active=?,progress_json=?,updated_at=? WHERE id=?",
+      params: [note.title, JSON.stringify(note.scope), note.content, JSON.stringify(note.refs), note.model, note.status, note.active ? 1 : 0, JSON.stringify(note.progress), note.updatedAt, note.id] }]);
+    return;
+  }
   await repo.platform.sql.batch([{
     sql: `INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,scope_json=excluded.scope_json,content=excluded.content,
@@ -190,20 +196,26 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   const materials = await noteMaterials(repo, note);
   if (!materials.length) throw new Error(note.kind === "plot" || note.kind === "timeline" ? "这段章节里没有正文" : "原著里没有找到相关内容，换个名字或别名试试");
   const batches = noteBatches(materials);
-  const refs = [...new Set(materials.map((m) => m.section))].slice(0, 400);
+  const refs = [...new Set(materials.map((m) => m.section))];
   let current: CanonNote = { ...note, model: runner.model, refs, status: "running", progress: { parts: note.progress.parts ?? [], total: batches.length + mergeRequests(batches.length) }, updatedAt: new Date().toISOString() };
-  const save = async (patch: Partial<CanonNote>) => { current = { ...current, ...patch, updatedAt: new Date().toISOString() }; await saveNote(repo, current); onProgress({ ...current }); };
+  const save = async (patch: Partial<CanonNote>) => { current = { ...current, ...patch, updatedAt: new Date().toISOString() }; await saveNote(repo, current, true); onProgress({ ...current }); };
+  const call: NoteRunner["call"] = async (messages, signal) => {
+    signal.throwIfAborted();
+    const text = await runner.call(messages, signal);
+    signal.throwIfAborted();
+    return text;
+  };
   await save({});
   try {
     if (batches.length === 1) {
-      const content = await runner.call(noteBatchMessages(bookTitle, note, batches[0], true), signal);
+      const content = await call(noteBatchMessages(bookTitle, note, batches[0], true), signal);
       await save({ content: content.trim(), status: "done", progress: { parts: [], total: 1 } });
       return current;
     }
     const parts = [...current.progress.parts];
     for (let i = parts.length; i < batches.length; i++) {
       if (signal.aborted) { await save({ status: "paused", progress: { ...current.progress, parts } }); return current; }
-      parts.push((await runner.call(noteBatchMessages(bookTitle, note, batches[i], false), signal)).trim());
+      parts.push((await call(noteBatchMessages(bookTitle, note, batches[i], false), signal)).trim());
       await save({ progress: { ...current.progress, parts } });
     }
     let level = parts;
@@ -212,7 +224,7 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
       const groups = noteBatches(level.map((text) => ({ section: 0, title: "", text, digest: false })));
       const final = groups.length === 1;
       const next: string[] = [];
-      for (const group of groups) next.push((await runner.call(noteMergeMessages(bookTitle, note, group.map((g) => g.text), final), signal)).trim());
+      for (const group of groups) next.push((await call(noteMergeMessages(bookTitle, note, group.map((g) => g.text), final), signal)).trim());
       level = next;
     }
     await save({ content: level[0] ?? "", status: "done", progress: { parts: [], total: current.progress.total } });
@@ -222,10 +234,19 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   return current;
 }
 
+/** Mixed summaries cannot be safely truncated into an earlier chapter range. */
+export function noteWithinScope(note: Pick<CanonNote, "kind" | "scope" | "refs">, through: number | null): boolean {
+  if (through === null) return true;
+  if (note.refs.some((section) => !Number.isInteger(section) || section < 0 || section > through)) return false;
+  if (note.kind === "plot" || note.kind === "timeline") return Number.isInteger(note.scope.to) && note.scope.to! <= through;
+  // Older notes truncated references at 400; their complete scope is unknown.
+  return note.refs.length > 0 && note.refs.length < 400;
+}
+
 /** Notes for one passage: the main plot around the reading position, then people and settings named in play. */
 export async function notesForTurn(repo: Repo, binding: SourceBinding | null | undefined, worldId: string, recent: string): Promise<{ title: string; kind: NoteKind; content: string }[]> {
   if (!binding) return [];
-  const notes = (await listNotes(repo, binding.bookId, worldId)).filter((n) => n.active && n.status === "done" && n.content.trim());
+  const notes = (await listNotes(repo, binding.bookId, worldId)).filter((n) => n.active && n.status === "done" && n.content.trim() && noteWithinScope(n, binding.through));
   const at = binding.position;
   const ranked: [number, CanonNote][] = [];
   const ranges = notes.filter((n) => n.kind === "plot" || n.kind === "timeline");

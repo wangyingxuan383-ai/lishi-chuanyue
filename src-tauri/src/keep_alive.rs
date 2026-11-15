@@ -88,6 +88,10 @@ pub fn shared() -> Arc<KeepAlive> {
 }
 
 static ON_TIMEOUT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+static ON_STOP: OnceLock<Box<dyn Fn(&str, &str) + Send + Sync>> = OnceLock::new();
+pub fn set_stop_handler(handler: impl Fn(&str, &str) + Send + Sync + 'static) {
+    let _ = ON_STOP.set(Box::new(handler));
+}
 pub fn set_timeout_handler(handler: impl Fn() + Send + Sync + 'static) {
     let _ = ON_TIMEOUT.set(Box::new(handler));
 }
@@ -101,6 +105,16 @@ pub extern "system" fn Java_io_timejump_chuanyue_GenerationService_nativeTimeout
     if let Some(handler) = ON_TIMEOUT.get() {
         handler();
     }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_timejump_chuanyue_GenerationService_nativeStop(
+    mut env: jni21::JNIEnv<'_>, _class: jni21::objects::JClass<'_>,
+    run: jni21::objects::JString<'_>, execution: jni21::objects::JString<'_>,
+) {
+    let (Ok(run),Ok(execution))=(env.get_string(&run),env.get_string(&execution)) else {return;};
+    if let Some(handler)=ON_STOP.get(){handler(&run.to_string_lossy(),&execution.to_string_lossy());}
 }
 
 /// R29-T006: what the generation notification shows, and a notice when a run
@@ -216,14 +230,16 @@ mod android {
         };
         let result = (|| -> Result<(), jni21::errors::Error> {
             match signal {
-                RunSignal::Phase { title, phase, chars, .. } => {
+                RunSignal::Phase { run_id, execution_id, title, phase, chars, .. } => {
                     let phase = env.new_string(phase)?;
                     let title = env.new_string(title)?;
+                    let run = env.new_string(run_id)?;
+                    let execution = env.new_string(execution_id)?;
                     env.call_static_method(
                         &bridge.class,
                         "update",
-                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;I)V",
-                        &[bridge.context.as_obj().into(), (&phase).into(), (&title).into(), (chars.min(i32::MAX as usize) as i32).into()],
+                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V",
+                        &[bridge.context.as_obj().into(), (&run).into(), (&execution).into(), (&phase).into(), (&title).into(), (chars.min(i32::MAX as usize) as i32).into()],
                     )?;
                 }
                 RunSignal::Ended { world_id, title, status, reason, .. } => {

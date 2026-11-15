@@ -22,7 +22,7 @@ pub type CompletionSink = Arc<dyn Fn(String) + Send + Sync>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunSignal {
     /// `phase`: thinking, writing, organizing or checking; `chars`: words written so far.
-    Phase { run_id: String, world_id: String, title: String, phase: &'static str, chars: usize },
+    Phase { run_id: String, execution_id: String, world_id: String, title: String, phase: &'static str, chars: usize },
     /// `status`: paused, failed or cancelled; `reason` is player-facing.
     Ended { run_id: String, world_id: String, title: String, status: &'static str, reason: String },
 }
@@ -38,10 +38,20 @@ pub fn signal_phase(purpose: &str) -> &'static str {
 pub struct Engine {
     pub store: Store,
     pub(crate) model: Arc<dyn Model>,
-    active: Mutex<HashMap<String, CancellationToken>>,
+    active: Mutex<HashMap<String, ActiveRun>>,
     lease: LeaseFactory,
     pub(crate) committed: CompletionSink,
     observer: Mutex<Option<RunObserver>>,
+}
+struct ActiveRun { execution_id: String, cancel: CancellationToken }
+fn notification_execution_id(ticket:&execution_lease::LeaseTicket)->String {
+    format!("{}:{}:{}:{}",ticket.world_id,ticket.owner_id,ticket.owner_instance,ticket.fence)
+}
+fn notification_target(plan:&RunPlan)->(String,String) {
+    match execution_lease::ticket(plan) {
+        Ok(Some(ticket))=>(ticket.owner_id.clone(),notification_execution_id(&ticket)),
+        _=>(plan.id.clone(),String::new()),
+    }
 }
 pub(crate) struct Context {
     pub(crate) plan: RunPlan,
@@ -110,7 +120,8 @@ impl Engine {
     }
     fn signal_phase(&self, plan: &RunPlan, phase: &'static str, chars: usize) {
         if let Some(observer) = self.observer() {
-            observer(RunSignal::Phase { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: self.signal_title(plan), phase, chars });
+            let (run_id,execution_id)=notification_target(plan);
+            observer(RunSignal::Phase { run_id, execution_id, world_id: plan.world_id.clone(), title: self.signal_title(plan), phase, chars });
         }
     }
     /// Only called once by a fresh native process, before accepting requests.
@@ -135,15 +146,22 @@ impl Engine {
         self.store.snapshot(id, after)
     }
     pub fn stop(&self, id: &str) -> Result<()> {
-        if let Some(token) = self.active.lock().map_err(|_| Error::Cancelled)?.get(id) {
-            token.cancel();
+        if let Some(run) = self.active.lock().map_err(|_| Error::Cancelled)?.get(id) {
+            run.cancel.cancel();
+        }
+        Ok(())
+    }
+    /// Drawer actions are tied to one launch, including when a run is resumed.
+    pub fn stop_execution(&self, id: &str, execution_id: &str) -> Result<()> {
+        if let Some(run)=self.active.lock().map_err(|_|Error::Cancelled)?.get(id) {
+            if !execution_id.is_empty() && run.execution_id==execution_id {run.cancel.cancel();}
         }
         Ok(())
     }
     pub fn stop_all(&self) {
         if let Ok(active) = self.active.lock() {
-            for token in active.values() {
-                token.cancel();
+            for run in active.values() {
+                run.cancel.cancel();
             }
         }
     }
@@ -201,13 +219,14 @@ impl Engine {
         // The stored plan does not carry the pause point; keep the one resume() set (D159).
         if resume_base.is_object() { plan.meta["resumeBudgetBase"] = resume_base; }
         let execution_ticket = execution_lease::ticket(&plan)?.ok_or(Error::Stale)?;
+        let execution_id=notification_execution_id(&execution_ticket);
         let token = CancellationToken::new();
         let id = plan.id.clone();
         let mut active = self.active.lock().map_err(|_| Error::Cancelled)?;
         if active.contains_key(&id) {
             return Err(Error::Invalid("运行已经在执行".into()));
         }
-        active.insert(id.clone(), token.clone());
+        active.insert(id.clone(), ActiveRun {execution_id,cancel:token.clone()});
         drop(active);
         let engine = self.clone();
         let active_before = budget.active_ms;
@@ -472,14 +491,15 @@ impl Engine {
                 || purpose.starts_with("tool:compose_draft")
                 || purpose.starts_with("tool:check_draft");
             let progress = self.observer().filter(|_| show_text).map(|observer| {
-                let (run_id, world_id, title) = (plan.id.clone(), plan.world_id.clone(), self.signal_title(&plan));
+                let (run_id, execution_id)=notification_target(&plan);
+                let (world_id,title)=(plan.world_id.clone(),self.signal_title(&plan));
                 let last = Mutex::new((Instant::now(), 0usize));
                 move |chars: usize| {
                     let Ok(mut last) = last.lock() else { return };
                     // About once a second, or every 120 words: enough for a notification.
                     if (last.1 == 0 && chars > 0) || chars >= last.1 + 120 || (chars > last.1 && last.0.elapsed().as_millis() >= 1000) {
                         *last = (Instant::now(), chars);
-                        observer(RunSignal::Phase { run_id: run_id.clone(), world_id: world_id.clone(), title: title.clone(), phase: "writing", chars });
+                        observer(RunSignal::Phase { run_id: run_id.clone(), execution_id: execution_id.clone(), world_id: world_id.clone(), title: title.clone(), phase: "writing", chars });
                     }
                 }
             });
@@ -663,7 +683,7 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"));
+        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"));
         let support = if tier == Tier::Fast {
             false
         } else if modern {
@@ -898,9 +918,9 @@ impl Engine {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
-        } else if has_book && plan.meta["referenceReviewVersion"]=="reference-review-lite-1" && !plan.meta["playerNarrative"].is_string() {
-            let (revised,report)=self.review_reference_lite(&shared,&plan,&narrative).await?;
-            narrative=revised;
+        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2")) && !plan.meta["playerNarrative"].is_string() {
+            let (revised,revised_record,report)=self.review_reference_lite(&shared,&plan,&narrative,&record).await?;
+            narrative=revised; record=revised_record;
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report;
         }
         let mut options = plan.options.clone();
@@ -1018,22 +1038,25 @@ impl Engine {
         Ok(())
     }
 
-    /// reference-review-lite-1 (D161): one helper-model request without tools.
+    /// reference-review-lite-2: one helper-model request, text and record together.
     /// It lists sentences that contradict the supplied original; each fix is
     /// applied locally only where its quote occurs exactly once. Anything that
     /// goes wrong keeps the passage as written: the check never stops a turn.
-    async fn review_reference_lite(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, narrative:&str)->Result<(String,Value)>{
+    async fn review_reference_lite(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, narrative:&str, record:&Value)->Result<(String,Value,Value)>{
         self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
-        let messages=lite_review_messages(plan,narrative,cap);
+        let mut messages=lite_review_messages(plan,narrative,cap);
+        if let Some(message)=messages.last_mut() {
+            message["content"]=format!("{}\n【本回合记录】\n{}",message["content"].as_str().unwrap_or(""),record).into();
+        }
         let result=match self.complete(shared,"reference-review-lite",messages,vec![],true).await {
             Ok(result)=>result,
             Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
-            Err(error)=>return Ok((narrative.to_owned(),json!({"version":"reference-review-lite-1","status":"skipped","reason":error.to_string()}))),
+            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-2","status":"skipped","reason":error.to_string()}))),
         };
         let issues=rules::record::lenient_json(&result.text).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
-        let (revised,applied,skipped)=apply_lite_fixes(narrative,&issues);
-        Ok((revised,json!({"version":"reference-review-lite-1","status":if issues.is_array(){"reviewed"}else{"skipped"},"issues":applied,"skipped":skipped})))
+        let (revised,revised_record,applied,skipped)=apply_lite_review(narrative,record,&issues);
+        Ok((revised,revised_record,json!({"version":"reference-review-lite-2","status":if issues.is_array(){"reviewed"}else{"skipped"},"issues":applied,"skipped":skipped})))
     }
     async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
@@ -1895,7 +1918,7 @@ fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Vec<Value>{
     let source=&plan.state["source"];
     let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
     vec![
-        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。不改文风，不增删情节，不引入正文里没有的人物。只返回JSON：{\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄，尽量短\",\"problem\":\"与原著哪里不符（写明依据的节）\",\"fix\":\"改正后的这句\"}]}，最多5条；没有问题返回{\"issues\":[]}。"}),
+        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。不改文风，不增删情节，不引入正文里没有的人物。只返回JSON：{\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄，尽量短\",\"problem\":\"与原著哪里不符（写明依据的节）\",\"fix\":\"改正后的这句\"}]}，每个问题还必须有recordPatch对象：只含受这句更正影响的回合记录字段，不受影响留空对象；数组字段提供更正后的完整列表，保留无关项目；对象字段只提供有变化的属性；不能改整局设定。按列出顺序修正记录，后项基于前项结果。正文和记录必须一致，无法同步就不要提出这条更正。最多5条；没有问题返回{\"issues\":[]}。"}),
         json!({"role":"user","content":format!("【当前位置】原著第{}节前后\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（只含当前位置及之前不远的片段）{}\n【待校对正文】\n{narrative}",position+1,source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到当前位置之前的原文）".to_owned()}else{evidence})}),
     ]
 }
@@ -1915,6 +1938,28 @@ fn apply_lite_fixes(narrative:&str, issues:&Value)->(String,Vec<Value>,usize){
         if fits {text=text.replacen(quote,fix,1);applied.push(json!({"quote":quote,"problem":issue["problem"],"fix":fix}));} else {skipped+=1;}
     }
     (text,applied,skipped)
+}
+
+/// A sentence correction and its record patch form one unit. Never apply one
+/// side of an invalid result; untouched fields and unrelated settlements stay.
+fn apply_lite_review(narrative:&str, record:&Value, issues:&Value)->(String,Value,Vec<Value>,usize){
+    let mut text=narrative.to_owned();let mut current=record.clone();let mut applied=vec![];let mut skipped=0;
+    for issue in issues.as_array().into_iter().flatten().take(5) {
+        let Some(patch)=issue["recordPatch"].as_object() else {skipped+=1;continue;};
+        if patch.iter().any(|(k,v)|v.is_null()||!["time","money","place","stats","items","people","status","goals","date","hour","died","currency","log","deviation","report","risk","beat","challenge","continuity","choices"].contains(&k.as_str())) {skipped+=1;continue;}
+        let (revised,mut fixes,_)=apply_lite_fixes(&text,&json!([issue]));
+        if fixes.is_empty(){skipped+=1;continue;}
+        let mut next=current.clone();
+        for (key,value) in patch {
+            if let (Some(old),Some(new))=(next[key].as_object_mut(),value.as_object()){old.extend(new.clone());}
+            else {next[key]=value.clone();}
+        }
+        let mut warnings=vec![];
+        let Some(normalized)=rules::record::normalize_record(&next,&mut warnings) else {skipped+=1;continue;};
+        if !warnings.is_empty()||patch.keys().any(|k|normalized.get(k).is_none()){skipped+=1;continue;}
+        text=revised;current=normalized;applied.append(&mut fixes);
+    }
+    (text,current,applied,skipped)
 }
 
 /// Generation tiers (D161): how much the writer may look up before writing.
@@ -1995,5 +2040,19 @@ mod lite_review_tests {
         let (text, applied, skipped) = apply_lite_fixes("一张纸三文，又一张纸。一句", &issues);
         assert_eq!(text, "一张纸两文，又一张纸。一句");
         assert_eq!((applied.len(), skipped), (1, 2));
+    }
+    #[test]
+    fn lite_corrections_update_records_atomically_without_losing_other_changes() {
+        let record=json!({"money":-2,"time":5,"items":[{"name":"纸","delta":1}],"people":[{"name":"李四"},{"name":"店主"}]});
+        let issues=json!([
+            {"quote":"李四","fix":"张三","recordPatch":{"people":[{"name":"张三"},{"name":"店主"}]}},
+            {"quote":"两文","fix":"三文","recordPatch":{"money":-3}},
+            {"quote":"收好","fix":"扔掉"},
+            {"quote":"纸","fix":"布","recordPatch":{"source":{}}}
+        ]);
+        let (text,record,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&issues);
+        assert_eq!(text,"张三付了三文，收好纸。");assert_eq!((applied.len(),skipped),(2,2));
+        assert_eq!(record["people"],json!([{"name":"张三"},{"name":"店主"}]));
+        assert_eq!(record["money"],-3);assert_eq!(record["time"],5);assert_eq!(record["items"][0]["name"],"纸");
     }
 }

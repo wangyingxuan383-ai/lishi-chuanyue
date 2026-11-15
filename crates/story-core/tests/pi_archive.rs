@@ -271,3 +271,20 @@ fn formal_export_preserves_external_proof_and_revision_without_device_capabiliti
     assert_eq!(evidence["references"][0]["location"]["contentHash"],"sha256:page");
     assert!(!archive.to_string().contains(PRIVATE));assert!(archive.get("agent_capability_grants").is_none());
 }
+
+#[test]
+fn formal_export_includes_shared_and_own_canon_notes_as_paused_data() {
+    let mut db=Connection::open_in_memory().unwrap();fixture(&mut db);
+    db.execute("INSERT INTO source_books VALUES('book','书','txt','t',?)",[json!({"id":"book","sections":[]}).to_string()]).unwrap();
+    db.execute("UPDATE states SET state_json=?",[json!({"source":{"bookId":"book"}}).to_string()]).unwrap();
+    db.execute_batch("INSERT INTO worlds(id,title,era_id,settings_json,created_at,updated_at,played_at) VALUES('other','别局','','{}','t','t','t');
+      INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,status,progress_json,created_at,updated_at) VALUES
+      ('shared','book',NULL,'person','人物','{\"subject\":\"掌柜\"}','共享内容','[0]','done','{\"parts\":[],\"total\":1}','t','t'),
+      ('own','book','world','question','本局问题','{}','已保存部分','[0]','running','{\"parts\":[\"摘要\"],\"total\":2}','t','t'),
+      ('other-note','book','other','question','别局问题','{}','不导出','[]','done','{\"parts\":[],\"total\":1}','t','t');").unwrap();
+    let store=story_core::Store(std::sync::Arc::new(std::sync::Mutex::new(db)));
+    let archive=story_core::world_archive::export(&store,"world").unwrap();
+    let notes=archive["books"][0]["notes"].as_array().unwrap();assert_eq!(notes.len(),2);
+    let shared=notes.iter().find(|n|n["id"]=="shared").unwrap();assert_eq!(shared["active"],true);assert_eq!(shared["refs"],json!([0]));
+    let own=notes.iter().find(|n|n["id"]=="own").unwrap();assert_eq!(own["status"],"paused");assert_eq!(own["progress"]["parts"],json!(["摘要"]));
+}

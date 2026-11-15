@@ -941,7 +941,7 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
         Step::Reply(calls(vec![("h", "read_history", json!({"query":"纸"}))])),
         // A service that ignores tool_choice "none" and calls again still ends the loop.
         Step::Reply(Completion { tool_calls: calls(vec![("again", "search_original", json!({"query":"纸"}))]).tool_calls, ..written() }),
-        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文"},{"quote":"不存在的句子","problem":"x","fix":"y"}]}"#)),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文","recordPatch":{"money":-3}},{"quote":"不存在的句子","problem":"x","fix":"y","recordPatch":{"money":-99}}]}"#)),
     ]);
     let mut plan = bound(&fixture, "standard", "standard");
     plan.meta["referenceReviewVersion"] = "reference-review-lite-1".into();
@@ -963,8 +963,13 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
     drop(requests);
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
     assert_eq!(narrative, "你付了三文，收好一张纸。");
-    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-1");
+    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-2");
     assert_eq!(snapshot.draft["referenceReview"]["skipped"], 1);
+    let saved: String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[&node],|r|r.get(0)).unwrap();
+    let record: Value=serde_json::from_str(&saved).unwrap();
+    assert_eq!(record["money"],-3);assert_eq!(record["time"],5);assert_eq!(record["items"][0]["name"],"纸");
+    let state: String=fixture.store.lock().unwrap().query_row("SELECT state_json FROM states WHERE node_id=?",[&node],|r|r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&state).unwrap()["protagonist"]["stats"]["money"].as_f64(),Some(7.0));
 }
 
 #[tokio::test]
@@ -1020,6 +1025,21 @@ async fn standard_tier_reads_the_books_canon_notes_but_not_another_storys() {
 }
 
 #[tokio::test]
+async fn canon_notes_tool_respects_the_same_chapter_limit_as_the_writer() {
+    let fixture=Fixture::new(vec![Step::Reply(calls(vec![("n","read_canon_notes",json!({"query":"掌柜"}))])),Step::Reply(written())]);
+    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','长篇','txt','test','{}');
+      INSERT INTO canon_notes(id,book_id,kind,title,scope_json,content,refs_json,status,created_at,updated_at) VALUES
+      ('safe','book','person','掌柜','{}','掌柜在第一章开店。','[0]','done','t','t'),
+      ('later','book','plot','掌柜后传','{\"from\":0,\"to\":3}','掌柜后来继位。','[0,3]','done','t','t'),
+      ('unknown','book','person','掌柜旧札记','{}','掌柜另一个未来身份。','[]','done','t','t');").unwrap();
+    let mut plan=bound(&fixture,"limited-notes","standard");plan.state["source"]["through"]=0.into();
+    fixture.engine.start(plan).unwrap();assert_eq!(fixture.settled("limited-notes").await.status,"committed");
+    let requests=fixture.model.requests.lock().unwrap();
+    let result=requests[1]["messages"].as_array().unwrap().iter().find(|m|m["tool_call_id"]=="n").unwrap()["content"].as_str().unwrap();
+    assert!(result.contains("第一章开店")&&!result.contains("继位")&&!result.contains("未来身份"),"{result}");
+}
+
+#[tokio::test]
 async fn an_observer_hears_progress_and_a_stop_without_a_passage() {
     use story_core::runtime::RunSignal;
     let seen = Arc::new(Mutex::new(Vec::<RunSignal>::new()));
@@ -1039,6 +1059,48 @@ async fn an_observer_hears_progress_and_a_stop_without_a_passage() {
     assert!(seen.iter().any(|s| matches!(s, RunSignal::Phase { phase: "writing", chars, .. } if *chars > 0)));
     assert!(seen.iter().any(|s| matches!(s, RunSignal::Ended { run_id, status: "failed", .. } if run_id == "observed-fail")));
     assert!(!seen.iter().any(|s| matches!(s, RunSignal::Ended { run_id, .. } if run_id == "observed")));
+}
+
+#[tokio::test]
+async fn notification_stop_targets_one_launch_and_ignores_a_stale_action_after_resume() {
+    use story_core::runtime::RunSignal;
+    async fn stopped_while_other_runs(fixture:&Fixture,id:&str) {
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                if fixture.engine.snapshot(id,0).unwrap().status=="cancelled" && fixture.leases.load(Ordering::SeqCst)==1 {break;}
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("targeted stop did not finish while the other story stayed active");
+    }
+    let (a_started,b_started,resumed_started)=(Arc::new(Notify::new()),Arc::new(Notify::new()),Arc::new(Notify::new()));
+    let b_release=Arc::new(Notify::new());
+    let fixture=Fixture::new(vec![
+        Step::Wait{started:a_started.clone(),release:Arc::new(Notify::new()),reply:written()},
+        Step::Wait{started:b_started.clone(),release:b_release.clone(),reply:written()},
+        Step::Wait{started:resumed_started.clone(),release:Arc::new(Notify::new()),reply:written()},
+    ]);
+    {
+        let db=fixture.store.lock().unwrap();
+        db.execute("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('other','另一故事','','other-line','{}','t','t','t')",[]).unwrap();
+        db.execute("INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('other-n','other',0,'opening','另一开场','t')",[]).unwrap();
+        db.execute("INSERT INTO states(node_id,state_json) VALUES('other-n',?)",[state().to_string()]).unwrap();
+        db.execute("INSERT INTO lines(id,world_id,name,node_id,kind,created_at) VALUES('other-line','other','主线','other-n','line','t')",[]).unwrap();
+    }
+    let seen=Arc::new(Mutex::new(Vec::new()));let sink=seen.clone();
+    fixture.engine.observe(Arc::new(move |s|sink.lock().unwrap().push(s)));
+    fixture.engine.start(fixture.plan("stop-a")).unwrap();a_started.notified().await;
+    let mut other=fixture.plan("stop-b");other.world_id="other".into();other.line_id="other-line".into();other.head_id="other-n".into();other.base_id=Some("other-n".into());
+    fixture.engine.start(other).unwrap();b_started.notified().await;
+    let batch=||seen.lock().unwrap().iter().rev().find_map(|s|match s {RunSignal::Phase{run_id,execution_id,..} if run_id=="stop-a"=>Some(execution_id.clone()),_=>None}).unwrap();
+    let old=batch();fixture.engine.stop_execution("stop-a",&old).unwrap();
+    stopped_while_other_runs(&fixture,"stop-a").await;
+    assert_eq!(fixture.engine.snapshot("stop-b",0).unwrap().status,"running");
+    fixture.engine.resume("stop-a").unwrap();resumed_started.notified().await;
+    let new=batch();assert_ne!(old,new);
+    fixture.engine.stop_execution("stop-a",&old).unwrap();
+    assert_eq!(fixture.engine.snapshot("stop-a",0).unwrap().status,"running");
+    fixture.engine.stop_execution("stop-a",&new).unwrap();stopped_while_other_runs(&fixture,"stop-a").await;
+    b_release.notify_one();assert_eq!(fixture.settled("stop-b").await.status,"committed");
 }
 
 #[tokio::test]

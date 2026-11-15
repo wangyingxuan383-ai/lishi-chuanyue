@@ -165,6 +165,10 @@ impl Fixture {
 #[tokio::test]
 async fn native_sequence_finishes_without_reader_and_uses_new_state() {
     let f = Fixture::new(false);
+    let phases=Arc::new(Mutex::new(Vec::new()));let sink=phases.clone();
+    f.engine.observe(Arc::new(move |signal| {
+        if let story_core::runtime::RunSignal::Phase{run_id,execution_id,..}=signal {sink.lock().unwrap().push((run_id,execution_id));}
+    }));
     f.engine.start(f.plan(2)).unwrap();
     let saved = f.settled().await;
     assert_eq!(saved.status, "committed", "{:?}", saved.error);
@@ -173,6 +177,8 @@ async fn native_sequence_finishes_without_reader_and_uses_new_state() {
     assert_eq!(saved.budget.model_requests, 2);
     assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
     assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 3);
+    let targets=phases.lock().unwrap();assert!(targets.len()>=2);
+    assert!(targets.iter().all(|(run,batch)|run=="auto"&&!batch.is_empty()&&batch==&targets[0].1));drop(targets);
     let requests = f.model.requests.lock().unwrap();
     let second = requests[1].to_string();
     assert!(second.contains("第1段"));

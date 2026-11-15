@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -135,7 +136,10 @@ class GenerationService : Service() {
         val stop = PendingIntent.getBroadcast(
             this,
             REQUEST_STOP,
-            Intent(this, GenerationActionReceiver::class.java).setAction(GenerationActionReceiver.ACTION_STOP),
+            Intent(this, GenerationActionReceiver::class.java).setAction(GenerationActionReceiver.ACTION_STOP)
+                .setData(Uri.Builder().scheme("chuanyue").authority("generation-stop").appendPath(executionId).build())
+                .putExtra(GenerationActionReceiver.EXTRA_RUN_ID, runId)
+                .putExtra(GenerationActionReceiver.EXTRA_EXECUTION_ID, executionId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val title = if (detailed && storyTitle.isNotBlank()) "《$storyTitle》" else "穿越小说模拟"
@@ -154,16 +158,19 @@ class GenerationService : Service() {
             .setSmallIcon(R.drawable.ic_stat_seal)
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setContentIntent(openApp)
             .setWhen(if (startedAt > 0) startedAt else System.currentTimeMillis())
             .setShowWhen(true)
             .setUsesChronometer(true)
-            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setSound(null)
+        if (runId.isNotBlank() && executionId.isNotBlank()) {
+            builder.addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
+        }
         if (detailed && phase != "writing") builder.setProgress(0, 0, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
@@ -191,6 +198,8 @@ class GenerationService : Service() {
         /** What the progress notification shows (R29-T006), set from the Rust engine. */
         private var phase = "thinking"
         private var storyTitle = ""
+        private var runId = ""
+        private var executionId = ""
         private var chars = 0
         private var startedAt = 0L
         /** Notification ids of "写好了" and "没写完", cleared when the player comes back. */
@@ -200,6 +209,7 @@ class GenerationService : Service() {
         /** The Rust whole-run lease covers model gaps and settlement. */
         private const val STOP_DELAY_MS = 0L
         @JvmStatic private external fun nativeTimeout()
+        @JvmStatic private external fun nativeStop(runId: String, executionId: String)
         private val lock = Any()
         private val main = Handler(Looper.getMainLooper())
         private var requested = false
@@ -229,8 +239,10 @@ class GenerationService : Service() {
 
         /** The engine's phase and words so far; refreshes the live notification. */
         @JvmStatic
-        fun update(context: Context, newPhase: String, title: String, written: Int) {
+        fun update(context: Context, run: String, execution: String, newPhase: String, title: String, written: Int) {
             synchronized(lock) {
+                runId = run
+                executionId = execution
                 phase = newPhase
                 if (title.isNotBlank()) storyTitle = title
                 chars = written
@@ -277,10 +289,12 @@ class GenerationService : Service() {
             }
         }
 
-        /** Stop from the notification: the same as a timeout, progress is kept. */
+        /** Stop only the launch represented by this immutable notification. */
         @JvmStatic
-        fun stopFromNotification() {
-            synchronized(lock) { stopNativeRuns() }
+        fun stopFromNotification(run: String, execution: String) {
+            if (run.isBlank() || execution.isBlank()) return
+            try { nativeStop(run, execution) }
+            catch (error: LinkageError) { Log.w(TAG, "Generation targeted cancellation unavailable: ${error.javaClass.simpleName}") }
         }
 
         /** One notification per story and kind, so two stories never replace each other. */
@@ -381,6 +395,8 @@ class GenerationService : Service() {
                 phase = "thinking"
                 chars = 0
                 storyTitle = ""
+                runId = ""
+                executionId = ""
                 startedAt = System.currentTimeMillis()
                 try {
                     val app = context.applicationContext

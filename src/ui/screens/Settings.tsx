@@ -317,6 +317,7 @@ function ReadingPage() {
   return (
     <>
       <StylePicker />
+      <Choice label="首页样式" note="场景突出正在读的故事，书架按书脊排列；随时可以切换" value={reading.home} options={[["scene", "场景"], ["shelf", "书架"]]} onChange={(v) => set({ home: v })} />
       <div className="setting">
         <div className="setting-head"><b>明暗</b><small>跟随系统：手机是浅色时用纸张，深色时用夜间</small></div>
         <div className="theme-cards">

@@ -84,6 +84,10 @@ pub fn run() {
                     engine.stop_all();
                 }
             });
+            let weak = Arc::downgrade(&engine);
+            keep_alive::set_stop_handler(move |run,execution| {
+                if let Some(engine)=weak.upgrade(){let _=engine.stop_execution(run,execution);}
+            });
             app.manage(engine);
             pi_agent::initialize(app.handle(), services.0.shared())?;
             app.manage(services.0);

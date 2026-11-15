@@ -805,14 +805,17 @@ export class Game {
   private noteRuns = new Map<string, AbortController>();
   /** 原著札记 (R29-T003, D162): write or resume one note on the helper model; a pause keeps finished parts. */
   async runCanonNote(id: string, onProgress: (note: CanonNote) => void): Promise<CanonNote> {
-    const note = await getNote(this.repo, id); if (!note) throw new Error("札记不存在");
-    const [book] = await this.platform.sql.query("SELECT title FROM source_books WHERE id=?", [note.bookId]);
-    if (!book) throw new Error("书籍不存在");
-    this.requireLlm();
     if (this.noteRuns.has(id)) throw new Error("这份札记正在整理");
-    const model = this.auxModelName(), controller = new AbortController();
+    const controller = new AbortController();
     this.noteRuns.set(id, controller);
     try {
+      const note = await getNote(this.repo, id); if (!note) throw new Error("札记不存在");
+      controller.signal.throwIfAborted();
+      const [book] = await this.platform.sql.query("SELECT title FROM source_books WHERE id=?", [note.bookId]);
+      controller.signal.throwIfAborted();
+      if (!book) throw new Error("书籍不存在");
+      this.requireLlm();
+      const model = this.auxModelName();
       return await runNote(this.repo, note, String(book.title), {
         model,
         call: async (messages, signal) => {

@@ -11,6 +11,7 @@ import { checkChallenge, checkScript } from "./modes";
 import { bookStatements, chunksOf } from "./sources/library";
 import { validBinding, type SourceBook, type AnalysisJob } from "./sources/types";
 import { sourceAnalysisResult, structuredSourceAnalysis } from "./sources/facts";
+import { listNotes, type CanonNote } from "./sources/notes";
 
 export const ARCHIVE_FORMAT = "lishi-world";
 // v7 preserves formal provenance and readable Pi history. Imported
@@ -41,7 +42,22 @@ export interface AgentArchive {
   links?: { sessionId: string; parentSessionId: string; parentMessageId: string }[];
   subtasks?: AgentArchivedSubtask[];
 }
-export interface BookBundle { book: SourceBook; jobs: AnalysisJob[]; analysis: { jobId: string; ordinal: number; section: number; text: string }[] }
+export interface BookBundle { book: SourceBook; jobs: AnalysisJob[]; analysis: { jobId: string; ordinal: number; section: number; text: string }[]; notes?: CanonNote[] }
+
+function validArchivedNote(note: any, book: SourceBook, worldId: Json): note is CanonNote {
+  const section=(n: unknown)=>Number.isInteger(n)&&Number(n)>=0&&Number(n)<book.sections.length;
+  if (!note || typeof note.id!=="string" || note.bookId!==book.id || !(note.worldId===null || note.worldId===worldId)
+    || !["plot","person","setting","timeline","question"].includes(note.kind) || !["paused","running","done","failed"].includes(note.status)
+    || typeof note.title!=="string" || typeof note.content!=="string" || typeof note.model!=="string" || typeof note.active!=="boolean"
+    || typeof note.createdAt!=="string" || typeof note.updatedAt!=="string" || !Array.isArray(note.refs) || !note.refs.every(section)) return false;
+  const scope=note.scope, progress=note.progress;
+  return !!scope && typeof scope==="object" && !Array.isArray(scope)
+    && ["from","to"].every(k=>scope[k]===undefined || section(scope[k])) && !(scope.from!==undefined && scope.to!==undefined && scope.from>scope.to)
+    && ["subject","question"].every(k=>scope[k]===undefined || typeof scope[k]==="string")
+    && (scope.aliases===undefined || Array.isArray(scope.aliases)&&scope.aliases.every((s:unknown)=>typeof s==="string"))
+    && !!progress && Array.isArray(progress.parts) && progress.parts.every((s:unknown)=>typeof s==="string")
+    && Number.isSafeInteger(progress.total) && progress.total>=0 && (progress.error===undefined || typeof progress.error==="string");
+}
 
 export interface PiReadableArchive {
   engine: "pi"; version: 1; readOnly: true;
@@ -136,7 +152,8 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
     const [row] = await repo.platform.sql.query("SELECT json FROM source_books WHERE id=?", [id]);
     if (!row) throw new Error("参考书籍缺失，无法导出完整世界");
     books.push({ book: JSON.parse(String(row.json)), jobs: (await repo.platform.sql.query("SELECT json FROM source_jobs WHERE book_id=?", [id])).map((r) => JSON.parse(String(r.json))),
-      analysis: (await repo.platform.sql.query("SELECT job_id AS jobId,ordinal,section,text FROM source_analysis WHERE book_id=?", [id])) as any });
+      analysis: (await repo.platform.sql.query("SELECT job_id AS jobId,ordinal,section,text FROM source_analysis WHERE book_id=?", [id])) as any,
+      notes: (await listNotes(repo,id,worldId)).map((n)=>({...n,status:n.status==="running"?"paused":n.status})) });
   }
   return {
     format:ARCHIVE_FORMAT, version:ARCHIVE_VERSION, exportedAt:new Date().toISOString(), world,nodes,states,
@@ -187,6 +204,16 @@ export function archiveProblems(raw: unknown): string[] {
         const b = bundle?.book;
         if (!b || typeof b.id !== "string" || ids.has(b.id) || typeof b.title !== "string" || !["txt", "epub", "pdf", "docx"].includes(b.format) || !Array.isArray(b.sections) || !b.sections.length || b.sections.some((s) => !s || typeof s.title !== "string" || typeof s.text !== "string" || (s.page !== undefined && (!Number.isInteger(s.page) || s.page < 1)))) { problems.push("参考书籍损坏"); continue; }
         ids.add(b.id);
+        if (bundle.notes !== undefined) {
+          if (!Array.isArray(bundle.notes)) problems.push("原著札记清单损坏");
+          else {
+            const noteIds=new Set<string>();
+            for (const note of bundle.notes) {
+              if (!validArchivedNote(note,b,a.world.id) || noteIds.has(note.id)) problems.push("原著札记损坏或不属于这个故事");
+              noteIds.add(note?.id);
+            }
+          }
+        }
         if (b.sections.reduce((n, s) => n + s.text.length, 0) > 64 * 1024 * 1024 || typeof b.createdAt !== "string") problems.push("参考书籍过大或信息不完整");
         if (!Array.isArray(bundle.jobs) || !Array.isArray(bundle.analysis)) { problems.push("书籍整理记录损坏"); continue; }
         if (bundle.jobs.some((j) => !j || typeof j.id !== "string")) { problems.push("书籍整理任务损坏"); continue; }
@@ -424,6 +451,11 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
   for (const l of archive.lines) statements.push(insert("lines", LINE_FIELDS, l));
   for (const p of archive.pins) statements.push(insert("pins", PIN_FIELDS, p));
   for (const c of archive.chapters) statements.push(insert("chapters", CHAPTER_FIELDS, c));
+  for (const bundle of archive.books ?? []) for (const note of bundle.notes ?? []) {
+    // Content/progress are data only: importing never starts a note worker.
+    statements.push({sql:"INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      params:[newId(),bookIds.get(bundle.book.id)!,note.worldId===null?null:worldId,note.kind,note.title,JSON.stringify(note.scope),note.content,JSON.stringify(note.refs),note.model,note.status==="running"?"paused":note.status,note.active?1:0,JSON.stringify(note.progress),note.createdAt,note.updatedAt]});
+  }
   statements.push({ sql: "UPDATE worlds SET current_line_id = ? WHERE id = ?", params: [archive.world.current_line_id as Json, worldId] });
   const mapBooksDeep=(value:any):any=>Array.isArray(value)?value.map(mapBooksDeep):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,k==="bookId"&&typeof v==="string"?bookIds.get(v)??v:mapBooksDeep(v)])):value;
   if(archive.version>=7 && archive.pi) {

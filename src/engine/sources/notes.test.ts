@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../../platform/memory";
 import { Game } from "../game";
 import { saveBook } from "./library";
-import { estimateNote, getNote, listNotes, newNote, noteBatches, noteMaterials, notesForTurn, runNote, saveNote } from "./notes";
+import { deleteNote, estimateNote, getNote, listNotes, newNote, noteBatches, noteMaterials, notesForTurn, runNote, saveNote } from "./notes";
+import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { newBinding, type SourceBook } from "./types";
 import { sampleState } from "../testing/fixtures";
 
@@ -52,11 +53,11 @@ describe("原著札记 (D162)", () => {
     } };
     const paused = await runNote(repo, note, book.title, runner, pause.signal, () => {});
     expect(paused.status).toBe("paused");
-    expect(paused.progress.parts).toEqual(["第1段摘要", "第2段摘要"]);
+    expect(paused.progress.parts).toEqual(["第1段摘要"]);
     const done = await runNote(repo, (await getNote(repo, note.id))!, book.title, runner, new AbortController().signal, () => {});
     expect(done.status).toBe("done");
     expect(done.content).toBe("合并后的主线（第1章）");
-    expect(calls.filter((c) => !c.includes("合并")).length).toBe(paused.progress.total - 1);
+    expect(calls.filter((c) => !c.includes("合并")).length).toBe(paused.progress.total);
   });
 
   it("gives a passage the plot around the reading position and the people in play", async () => {
@@ -73,5 +74,62 @@ describe("原著札记 (D162)", () => {
     const notes = await notesForTurn(repo, binding, here, "三哥推门进来，小舞跟在后面。");
     expect(notes.map((n) => n.title)).toEqual(["后段主线", "人物：唐三"]);
     expect((await listNotes(repo, book.id, here)).some((n) => n.title === "别处")).toBe(false);
+  });
+
+  it("excludes mixed later chapters and notes with unknown scope from a limited story", async () => {
+    const { repo, book } = await setup();
+    const done = (n: ReturnType<typeof newNote>, refs: number[]) => ({ ...n, refs, status: "done" as const, content: n.title });
+    await saveNote(repo, done(newNote(book.id,"plot",{from:0,to:11},"后文主线"),[0,11]));
+    await saveNote(repo, done(newNote(book.id,"person",{subject:"唐三"},"后文身份"),[0,11]));
+    await saveNote(repo, done(newNote(book.id,"person",{subject:"唐三"},"旧札记范围不明"),[]));
+    await saveNote(repo, done(newNote(book.id,"person",{subject:"唐三"},"已知身份"),[0]));
+    await saveNote(repo, done(newNote(book.id,"plot",{from:0,to:0},"当前主线"),[0]));
+    const binding={...newBinding(book.id,true),through:0};
+    expect((await notesForTurn(repo,binding,"","唐三")).map(n=>n.title)).toEqual(["当前主线","已知身份"]);
+    expect((await notesForTurn(repo,{...binding,through:null},"","唐三")).length).toBe(5);
+  });
+
+  it.each(["reject","resolve"])("does not recreate a deleted note when cancellation later %ss", async (outcome) => {
+    const {repo,book}=await setup();
+    const note=newNote(book.id,"plot",{from:0,to:0},"删除中的札记");await saveNote(repo,note);
+    let started!:()=>void, finish!:(value:string)=>void, fail!:(error:Error)=>void;
+    const ready=new Promise<void>(resolve=>{started=resolve;});
+    const controller=new AbortController();
+    const pending=runNote(repo,note,book.title,{model:"mock",call:()=>new Promise<string>((resolve,reject)=>{finish=resolve;fail=reject;started();})},controller.signal,()=>{});
+    await ready;controller.abort();await deleteNote(repo,note.id);
+    expect(await getNote(repo,note.id)).toBeNull();
+    if(outcome==="reject")fail(new Error("cancelled"));else finish("迟到结果");
+    expect((await pending).status).toBe("paused");expect(await getNote(repo,note.id)).toBeNull();
+  });
+
+  it("can cancel before the note worker finishes its initial reads",async()=>{
+    const {game,repo,book}=await setup();const note=newNote(book.id,"plot",{from:0,to:0},"马上删除");await saveNote(repo,note);
+    const running=game.runCanonNote(note.id,()=>{});
+    game.pauseCanonNote(note.id);
+    const stopped=expect(running).rejects.toMatchObject({name:"AbortError"});
+    await deleteNote(repo,note.id);await stopped;
+    expect(await getNote(repo,note.id)).toBeNull();expect(game.canonNoteRunning(note.id)).toBe(false);
+  });
+
+  it("roundtrips shared and own notes without another story or automatic execution",async()=>{
+    const {repo,book}=await setup();
+    const create=async()=>(await repo.createWorld({title:"归档",eraId:"free",settings:{premise:""},opening:{parentId:null,kind:"opening",narrative:"开场",state:{...sampleState(),source:newBinding(book.id,true)},meta:{}}})).world.id;
+    const here=await create(),other=await create();
+    for(const [title,worldId,status] of [["共享",null,"done"],["本局",here,"running"],["别局",other,"done"]] as const){
+      await saveNote(repo,{...newNote(book.id,"question",{question:title},title,worldId),content:title,status,refs:[0],progress:{parts:["已保存摘要"],total:2}});
+    }
+    const archive=await exportWorld(repo,here);expect(archiveProblems(archive)).toEqual([]);
+    expect(archive.books![0].notes!.map(n=>[n.title,n.status])).toEqual([["共享","done"],["本局","paused"]]);
+    const imported=await importWorld(repo,archive,"new"),copy=await exportWorld(repo,imported);
+    expect(archiveProblems(copy)).toEqual([]);
+    expect(copy.books![0].book.id).not.toBe(book.id);
+    const notes=copy.books![0].notes!;
+    expect(notes.map(n=>n.content)).toEqual(["共享","本局"]);
+    expect(notes[1].worldId).toBe(imported);expect(notes[1].progress.parts).toEqual(["已保存摘要"]);
+    expect(notes[0].id).not.toBe(archive.books![0].notes![0].id);
+    const damaged=structuredClone(archive);damaged.books![0].notes![0].worldId=other;
+    expect(archiveProblems(damaged)).toContain("原著札记损坏或不属于这个故事");
+    const legacy=structuredClone(archive);delete legacy.books![0].notes;
+    expect(archiveProblems(legacy)).toEqual([]);await expect(importWorld(repo,legacy,"new")).resolves.toBeTypeOf("string");
   });
 });

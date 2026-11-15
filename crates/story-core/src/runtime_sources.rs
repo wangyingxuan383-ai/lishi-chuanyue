@@ -317,16 +317,18 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
     let Some(book) = plan.state["source"]["bookId"].as_str() else {
         return Ok(json!({"notes":[],"reason":"未绑定参考书籍"}));
     };
-    let mut statement = db.prepare("SELECT id,kind,title,scope_json,content FROM canon_notes WHERE book_id=? AND active=1 AND status='done' AND content<>'' AND (world_id IS NULL OR world_id=?) ORDER BY updated_at DESC")?;
+    let mut statement = db.prepare("SELECT id,kind,title,scope_json,content,refs_json FROM canon_notes WHERE book_id=? AND active=1 AND status='done' AND content<>'' AND (world_id IS NULL OR world_id=?) ORDER BY updated_at DESC")?;
     let rows = statement
-        .query_map(params![book, plan.world_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))?
+        .query_map(params![book, plan.world_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let query = query.trim();
     let words: Vec<&str> = query.split(|c: char| c.is_whitespace() || "，、,；;。".contains(c)).filter(|w| !w.is_empty()).collect();
+    let through = plan.state["source"]["through"].as_u64();
+    let rows: Vec<_> = rows.into_iter().filter(|(_,kind,_,scope,_,refs)| note_within_scope(kind,scope,refs,through)).collect();
     let total = rows.len();
     let mut remaining = budget(plan);
     let mut notes = vec![];
-    for (id, kind, title, scope, content) in rows {
+    for (id, kind, title, scope, content, _) in rows {
         let haystack = format!("{title}\n{scope}\n{content}");
         if !words.is_empty() && !words.iter().any(|w| haystack.contains(w)) {
             continue;
@@ -345,6 +347,19 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         notes.push(value);
     }
     Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记是玩家让 AI 整理的原著梗概，可能有误，不等于已读原文；需要原句或与原文冲突时以原文为准。"}))
+}
+
+fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>) -> bool {
+    let Some(through) = through else { return true; };
+    let refs: Value = serde_json::from_str(refs).unwrap_or(Value::Null);
+    let Some(refs) = refs.as_array() else { return false; };
+    if refs.iter().any(|s| s.as_u64().is_none_or(|s| s > through)) { return false; }
+    if matches!(kind, "plot" | "timeline") {
+        let scope: Value = serde_json::from_str(scope).unwrap_or(Value::Null);
+        scope["to"].as_u64().is_some_and(|to| to <= through)
+    } else {
+        !refs.is_empty() && refs.len() < 400
+    }
 }
 
 fn budget(plan: &RunPlan) -> usize {

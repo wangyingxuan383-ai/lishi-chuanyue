@@ -14,7 +14,7 @@ export const DEPTH_NOTE: Record<Depth, string> = {
   standard: "缺什么才查一次再写；同人故事写完后用辅助模型快速对一遍原著。",
   deep: "可以多次翻原著原文，写完逐段核对。最贴原著，也最慢、最费。",
 };
-export const REFERENCE_REVIEW_LITE = "reference-review-lite-1";
+export const REFERENCE_REVIEW_LITE = "reference-review-lite-2";
 export const REFERENCE_REVIEW_FULL = "reference-review-2";
 
 /** A world saved before tiers plays at 标准. */

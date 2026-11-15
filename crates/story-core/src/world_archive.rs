@@ -37,7 +37,13 @@ pub fn export(store:&Store,world:&str)->Result<Value> {
             let Some(book)=rows.first() else{return Err(Error::Invalid("参考书籍缺失，无法导出完整故事".into()));};
             let jobs=ws::rows(&tx,"SELECT json FROM source_jobs WHERE book_id=? ORDER BY id",&[&id])?.iter().map(|r|ws::parse(ws::text(r,"json"))).collect::<Vec<_>>();
             let analysis=ws::rows(&tx,"SELECT job_id AS jobId,ordinal,section,text FROM source_analysis WHERE book_id=? ORDER BY job_id,ordinal",&[&id])?;
-            books.push(json!({"book":ws::parse(ws::text(book,"json")),"jobs":jobs,"analysis":analysis}));
+            let mut notes=ws::rows(&tx,"SELECT id,book_id AS bookId,world_id AS worldId,kind,title,scope_json AS scope,content,refs_json AS refs,model,status,active,progress_json AS progress,created_at AS createdAt,updated_at AS updatedAt FROM canon_notes WHERE book_id=? AND (world_id IS NULL OR world_id=?) ORDER BY created_at,id",&[&id,&world])?;
+            for note in &mut notes {
+                for key in ["scope","refs","progress"] {note[key]=ws::parse(ws::text(note,key));}
+                note["active"]=(note["active"].as_i64()==Some(1)).into();
+                if note["status"]=="running" {note["status"]="paused".into();}
+            }
+            books.push(json!({"book":ws::parse(ws::text(book,"json")),"jobs":jobs,"analysis":analysis,"notes":notes}));
         }
         let archive=json!({"format":"lishi-world","version":7,"exportedAt":ws::now(),"world":row,"nodes":nodes,"states":states,"lines":lines,
           "pins":ws::rows(&tx,"SELECT * FROM pins WHERE world_id=? ORDER BY id",&[&world])?,"chapters":ws::rows(&tx,"SELECT * FROM chapters WHERE world_id=? ORDER BY id",&[&world])?,

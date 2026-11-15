@@ -1,8 +1,8 @@
 /* 首页·书架 (HomeShelf.tsx, D163): CSS 3D books on a wooden shelf. A book is
    a box: the spine faces you; the cover is a plane hinged on the spine's right
    edge, turned 90° into the shelf; turning the whole box -90° shows the cover. */
-.home-shelf { display: grid; gap: 14px; }
-.shelf-case { position: relative; padding: 10px 8px 4px; border-radius: calc(var(--radius-card) + 6px);
+.home-shelf { display: grid; gap: 14px; min-width: 0; }
+.shelf-case { position: relative; min-width: 0; padding: 10px 8px 4px; border-radius: calc(var(--radius-card) + 6px);
   --wood: #7a5232; --wood-light: #9a6c45; --wood-dark: #4f3220;
   background:
     repeating-linear-gradient(92deg, transparent 0 22px, rgba(0, 0, 0, 0.05) 22px 23px, transparent 23px 51px, rgba(255, 255, 255, 0.04) 51px 52px),
@@ -11,7 +11,7 @@
 :root[data-theme="night"] .shelf-case { --wood: #4a3322; --wood-light: #5d4230; --wood-dark: #24170f; }
 :root[data-style="ink"] .shelf-case { --wood: #2b2a28; --wood-light: #3a3835; --wood-dark: #151413;
   box-shadow: inset 0 0 0 1px rgba(214, 178, 106, 0.35), inset 0 10px 30px rgba(0, 0, 0, 0.6), 0 14px 32px var(--shadow); }
-.shelf-row { position: relative; }
+.shelf-row { position: relative; min-width: 0; }
 .shelf-books { display: flex; align-items: flex-end; gap: 4px; min-height: 186px; padding: 18px 10px 0 26px; perspective: 900px; perspective-origin: 50% 30%; overflow-x: auto; scrollbar-width: none; }
 .shelf-books::-webkit-scrollbar { display: none; }
 .shelf-plank { position: relative; height: 16px; margin: 0 -2px 10px; border-radius: 2px;
