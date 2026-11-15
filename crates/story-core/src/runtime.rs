@@ -1054,9 +1054,13 @@ impl Engine {
             Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
             Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-2","status":"skipped","reason":error.to_string()}))),
         };
-        let issues=rules::record::lenient_json(&result.text).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
+        // Do not repair truncated JSON into an executable record patch.
+        let text=result.text.trim();
+        let body=text.strip_prefix("```json").or_else(||text.strip_prefix("```")).and_then(|s|s.strip_suffix("```")).unwrap_or(text).trim();
+        let issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
         let (revised,revised_record,applied,skipped)=apply_lite_review(narrative,record,&issues);
-        Ok((revised,revised_record,json!({"version":"reference-review-lite-2","status":if issues.is_array(){"reviewed"}else{"skipped"},"issues":applied,"skipped":skipped})))
+        let unresolved=if !issues.is_array(){vec!["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]}else if skipped>0 {vec!["部分更正未能同时校准正文和回合记录，已保留本段原稿；可使用“按原著纠错”进一步核对。"]}else{vec![]};
+        Ok((revised,revised_record,json!({"version":"reference-review-lite-2","status":if !issues.is_array(){"skipped"}else if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
     }
     async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
@@ -1959,6 +1963,10 @@ fn apply_lite_review(narrative:&str, record:&Value, issues:&Value)->(String,Valu
         if !warnings.is_empty()||patch.keys().any(|k|normalized.get(k).is_none()){skipped+=1;continue;}
         text=revised;current=normalized;applied.append(&mut fixes);
     }
+    // Later full-array patches may depend on earlier proposed fixes. If even
+    // one fix is rejected, keep both original sides rather than leaking that
+    // rejected change through a subsequent patch.
+    if skipped>0 {return (narrative.to_owned(),record.clone(),vec![],issues.as_array().map_or(0,|a|a.len().min(5)));}
     (text,current,applied,skipped)
 }
 
@@ -2050,9 +2058,11 @@ mod lite_review_tests {
             {"quote":"收好","fix":"扔掉"},
             {"quote":"纸","fix":"布","recordPatch":{"source":{}}}
         ]);
-        let (text,record,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&issues);
-        assert_eq!(text,"张三付了三文，收好纸。");assert_eq!((applied.len(),skipped),(2,2));
-        assert_eq!(record["people"],json!([{"name":"张三"},{"name":"店主"}]));
-        assert_eq!(record["money"],-3);assert_eq!(record["time"],5);assert_eq!(record["items"][0]["name"],"纸");
+        let (text,corrected,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&json!(issues.as_array().unwrap()[..2]));
+        assert_eq!(text,"张三付了三文，收好纸。");assert_eq!((applied.len(),skipped),(2,0));
+        assert_eq!(corrected["people"],json!([{"name":"张三"},{"name":"店主"}]));
+        assert_eq!(corrected["money"],-3);assert_eq!(corrected["time"],5);assert_eq!(corrected["items"][0]["name"],"纸");
+        let (text,unchanged,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&issues);
+        assert_eq!(text,"李四付了两文，收好纸。");assert_eq!(unchanged,record);assert!(applied.is_empty());assert_eq!(skipped,4);
     }
 }

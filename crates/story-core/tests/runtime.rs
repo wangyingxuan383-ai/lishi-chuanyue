@@ -941,7 +941,7 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
         Step::Reply(calls(vec![("h", "read_history", json!({"query":"纸"}))])),
         // A service that ignores tool_choice "none" and calls again still ends the loop.
         Step::Reply(Completion { tool_calls: calls(vec![("again", "search_original", json!({"query":"纸"}))]).tool_calls, ..written() }),
-        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文","recordPatch":{"money":-3}},{"quote":"不存在的句子","problem":"x","fix":"y","recordPatch":{"money":-99}}]}"#)),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文","recordPatch":{"money":-3}}]}"#)),
     ]);
     let mut plan = bound(&fixture, "standard", "standard");
     plan.meta["referenceReviewVersion"] = "reference-review-lite-1".into();
@@ -964,7 +964,7 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
     assert_eq!(narrative, "你付了三文，收好一张纸。");
     assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-2");
-    assert_eq!(snapshot.draft["referenceReview"]["skipped"], 1);
+    assert_eq!(snapshot.draft["referenceReview"]["skipped"], 0);
     let saved: String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[&node],|r|r.get(0)).unwrap();
     let record: Value=serde_json::from_str(&saved).unwrap();
     assert_eq!(record["money"],-3);assert_eq!(record["time"],5);assert_eq!(record["items"][0]["name"],"纸");
@@ -974,7 +974,8 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
 
 #[tokio::test]
 async fn a_failed_lite_check_keeps_the_passage_and_commits() {
-    let fixture = Fixture::new(vec![Step::Reply(written()), Step::Reply(prose("我看不出问题。"))]);
+  for malformed in ["我看不出问题。",r#"{"issues":[{"quote":"两文","fix":"三文","recordPatch":{"money":-3,"items":[]}}"#] {
+    let fixture = Fixture::new(vec![Step::Reply(written()), Step::Reply(prose(malformed))]);
     let mut plan = bound(&fixture, "lite-skip", "standard");
     plan.meta["referenceReviewVersion"] = "reference-review-lite-1".into();
     fixture.engine.start(plan).unwrap();
@@ -982,6 +983,21 @@ async fn a_failed_lite_check_keeps_the_passage_and_commits() {
     assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
     assert_eq!(snapshot.draft["referenceReview"]["status"], "skipped");
     assert_eq!(fixture.scalar("SELECT COUNT(*) FROM nodes WHERE narrative LIKE '%两文%'"), 1);
+  }
+}
+
+#[tokio::test]
+async fn a_rejected_lite_correction_cannot_leak_into_a_later_record_patch() {
+    let fixture=Fixture::new(vec![Step::Reply(written()),Step::Reply(prose(r#"{"issues":[{"quote":"不存在的纸","fix":"布","recordPatch":{"items":[{"name":"布","delta":1}]}},{"quote":"两文","fix":"三文","recordPatch":{"money":-3,"items":[{"name":"布","delta":1}]}}]}"#))]);
+    let mut plan=bound(&fixture,"dependent-lite","standard");plan.meta["referenceReviewVersion"]="reference-review-lite-2".into();
+    fixture.engine.start(plan).unwrap();let saved=fixture.settled("dependent-lite").await;
+    assert_eq!(saved.status,"committed","{:?}",saved.error);
+    let id=saved.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    let record:String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[id],|r|r.get(0)).unwrap();
+    let record:Value=serde_json::from_str(&record).unwrap();
+    assert_eq!(record["items"][0]["name"],"纸","a rejected sentence must not change the item through a later patch: {record}");
+    assert_eq!(record["money"],-2);
+    assert!(!saved.draft["referenceReview"]["unresolved"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
