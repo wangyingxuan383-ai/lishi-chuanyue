@@ -1,7 +1,7 @@
 // Game session facade: native opening, turns, variants and recovery, plus
 // local edits, context previews and auxiliary writing jobs.
 import { depthBudget, depthOf, referenceReview } from "./depth";
-import { getNote, newNote, notesForTurn, runNote, saveNote, type CanonNote } from "./sources/notes";
+import { getNote, newNote, noteReplyProblem, notesForTurn, runNote, saveNote, type CanonNote } from "./sources/notes";
 import { parseReviseEntry, parseReviseRules, reviseEntryMessages, reviseRulesMessages, type ReviseContext, type ReviseEntry, type ReviseEntryResult, type ReviseRules } from "./prompt/revise";
 import { validateContinuity, readContinuity } from "./continuity";
 import { formatDate } from "./calendar/date";
@@ -222,6 +222,7 @@ const DEFAULT_CONTEXT_TOKENS = 12_000;
 const CODEX_TIMEOUT = DEFAULT_TIMEOUTS;
 /** A note reads up to 16 000 characters and writes up to 3 000. */
 const NOTE_TIMEOUT = DEFAULT_TIMEOUTS;
+const NOTE_OUTPUT_TOKENS = 8192;
 // Free-mode wording is applied at the call site, keeping the shared chapter helper unchanged.
 const FREE_CHAPTER_PROMPT_VERSION = "chapter-2-free";
 
@@ -366,7 +367,7 @@ export class Game {
   /** One streamed call with a single retry before any data arrives. */
   private async call(
     messages: ChatMessage[],
-    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; usage: UsageScope },
+    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope },
   ): Promise<ChatResult> {
     const llm = this.requireLlm();
     const model = opts.aux ? llm.auxModel || llm.model : llm.model;
@@ -376,7 +377,9 @@ export class Game {
       let received: ChatResult | null = null;
       const handle = streamChat(this.platform, {
         slot: llm.slot, url: llm.url, model, messages,
-        maxTokens: llm.maxTokens ?? 2048, includeUsage: llm.includeUsage, timeouts: opts.timeouts,
+        maxTokens: opts.outputTokens === undefined ? llm.maxTokens ?? 2048
+          : Math.min(opts.outputTokens, llm.maxOutputTokens ?? llm.maxTokens ?? opts.outputTokens),
+        includeUsage: llm.includeUsage, timeouts: opts.timeouts,
         extra: llm.extra as never,
       }, {
         onText: (_delta, full) => { if (!opts.signal?.aborted) partial = full; },
@@ -929,10 +932,11 @@ export class Game {
       return await runNote(this.repo, note, String(book.title), {
         model,
         call: async (messages, signal) => {
-          const result = await this.call(messages, { aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT });
-          const usable = !!result.text.trim() && !refusedFinish(result.finishReason) && !isNotice(result.text);
-          await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result, signal.aborted ? "cancelled" : usable ? "ok" : "refused", model)]);
-          if (!usable) throw new Error("模型没有返回可用的札记，已完成的部分保留，可以接着整理");
+          const result = await this.call(messages, { aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
+          const problem = noteReplyProblem(result);
+          await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result,
+            signal.aborted ? "cancelled" : problem?.kind === "refused" ? "refused" : problem ? "failed" : "ok", model)]);
+          if (problem) throw problem;
           return result.text;
         },
       }, controller.signal, onProgress);

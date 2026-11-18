@@ -3,7 +3,7 @@
 // and then reads, edits, switches off or deletes. Each passage carries the ones
 // that matter at the reading position, instead of re-reading the original.
 import { useEffect, useRef, useState } from "react";
-import { NOTE_KINDS, NOTE_KIND_LABEL, deleteNote, estimateNote, listNotes, newNote, saveNote, suggestTitle, type CanonNote, type NoteEstimate, type NoteKind, type NoteScope } from "../../engine/sources/notes";
+import { NOTE_KINDS, NOTE_KIND_LABEL, deleteNote, estimateNote, listNotes, newNote, noteStepsDone, saveNote, suggestTitle, type CanonNote, type NoteEstimate, type NoteKind, type NoteScope } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { Switch } from "./Switch";
@@ -12,7 +12,7 @@ type View = { name: "list" } | { name: "new" } | { name: "note"; id: string };
 
 /** A note left "running" by a closed app is simply paused. */
 const statusText = (n: CanonNote, running: boolean) =>
-  running ? `整理中 ${n.progress.parts.length}/${Math.max(1, n.progress.total)}`
+  running ? `整理中 ${noteStepsDone(n.progress)}/${Math.max(1, n.progress.total)}`
     : n.status === "done" ? (n.active ? "写作时会用" : "已停用")
     : n.status === "failed" ? "没整理完" : "已暂停";
 
@@ -29,7 +29,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, onClose }: { bo
   }, [bookId, worldId]);
   const run = (note: CanonNote) => {
     void game.runCanonNote(note.id, (next) => { setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null); setTick((t) => t + 1); })
-      .then((done) => { if (done.status === "done") toast(`“${done.title}”整理好了`); else if (done.status === "failed") toast(done.progress.error ?? "没整理完，已完成的部分保留"); reload(); })
+      .then((done) => { if (done.status === "done") toast(`“${done.title}”整理好了`); reload(); })
       .catch((e) => { toast(e instanceof Error ? e.message : "没能开始整理"); reload(); });
   };
   const current = view.name === "note" ? notes?.find((n) => n.id === view.id) : undefined;
@@ -134,14 +134,15 @@ function NoteDetail({ note, running, onBack, onResume, onPause, onSave, onDelete
   const [text, setText] = useState(note.content);
   useEffect(() => { setText(note.content); }, [note.content]);
   const total = Math.max(1, note.progress.total);
+  const done = noteStepsDone(note.progress);
   return (
     <div className="stack">
       <p className="muted m-0"><span className="tag">{NOTE_KIND_LABEL[note.kind]}</span> AI 整理，可能有误，可以直接改。{note.worldId ? "只用于这个故事。" : "用这本书的故事都会用到。"}</p>
       {note.status !== "done" && <div className="stack gap-2">
-        <div className="bar" aria-hidden="true"><i style={{ width: `${Math.round((note.progress.parts.length / total) * 100)}%` }} /></div>
-        <p className="muted m-0">{running ? `正在整理：${note.progress.parts.length}/${total}` : note.status === "failed" ? note.progress.error ?? "没整理完" : `已暂停：${note.progress.parts.length}/${total}`}</p>
+        <div className="bar" aria-hidden="true"><i style={{ width: `${Math.round((done / total) * 100)}%` }} /></div>
+        <p className="muted m-0">{running ? `正在整理：${done}/${total}` : note.status === "failed" ? note.progress.error ?? "没整理完" : `已暂停：${done}/${total}`}</p>
         {!running && note.status === "failed" && note.progress.detail && <details><summary className="muted">查看原因</summary><p className="field-hint m-0">{note.progress.detail}</p></details>}
-        <div className="row">{running ? <button onClick={onPause}>暂停</button> : <button className="primary" onClick={onResume}>{note.progress.parts.length ? "接着整理" : "开始整理"}</button>}</div>
+        <div className="row">{running ? <button onClick={onPause}>暂停</button> : <button className="primary" onClick={onResume}>{done || note.status === "failed" ? "接着整理" : "开始整理"}</button>}</div>
       </div>}
       {note.status === "done" && <>
         <Switch label="写作时使用" note={note.active ? "写到相关章节、人物或设定时带上" : "暂时不用，札记保留"} checked={note.active} onChange={(v) => void onSave({ active: v })} />

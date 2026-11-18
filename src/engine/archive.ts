@@ -56,7 +56,11 @@ function validArchivedNote(note: any, book: SourceBook, worldId: Json): note is 
     && ["subject","question"].every(k=>scope[k]===undefined || typeof scope[k]==="string")
     && (scope.aliases===undefined || Array.isArray(scope.aliases)&&scope.aliases.every((s:unknown)=>typeof s==="string"))
     && !!progress && Array.isArray(progress.parts) && progress.parts.every((s:unknown)=>typeof s==="string")
-    && Number.isSafeInteger(progress.total) && progress.total>=0 && (progress.error===undefined || typeof progress.error==="string");
+    && Number.isSafeInteger(progress.total) && progress.total>=0 && (progress.error===undefined || typeof progress.error==="string")
+    && (progress.batchSizes === undefined || Array.isArray(progress.batchSizes)
+      && progress.batchSizes.every((size: number) => Number.isSafeInteger(size) && size > 0))
+    && (progress.merges === undefined || Array.isArray(progress.merges)
+      && progress.merges.every((level: unknown) => Array.isArray(level) && level.every((part: unknown) => typeof part === "string")));
 }
 
 export interface PiReadableArchive {

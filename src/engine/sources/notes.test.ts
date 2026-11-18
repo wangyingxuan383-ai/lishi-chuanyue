@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../../platform/memory";
 import { Game } from "../game";
 import { saveBook } from "./library";
-import { deleteNote, estimateNote, getNote, listNotes, newNote, noteBatches, noteMaterials, notesForTurn, runNote, saveNote } from "./notes";
+import { deleteNote, estimateNote, getNote, listNotes, newNote, noteBatches, noteMaterials, noteStepsDone, notesForTurn, runNote, saveNote } from "./notes";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { newBinding, type SourceBook } from "./types";
 import { sampleState } from "../testing/fixtures";
@@ -57,7 +57,83 @@ describe("原著札记 (D162)", () => {
     const done = await runNote(repo, (await getNote(repo, note.id))!, book.title, runner, new AbortController().signal, () => {});
     expect(done.status).toBe("done");
     expect(done.content).toBe("合并后的主线（第1章）");
-    expect(calls.filter((c) => !c.includes("合并")).length).toBe(paused.progress.total);
+    expect(calls.filter((c) => !c.includes("合并")).length).toBe(paused.progress.batchSizes!.length + 1);
+  });
+
+  it("rescues a long range at the failed batch without redoing its previous chapters", async () => {
+    const { game, repo } = await setup();
+    const book: SourceBook = {
+      ...longBook(),
+      sections: Array.from({ length: 300 }, (_, i) => ({ title: `标记${i + 1}`, text: "风起，船离开码头。".repeat(170) })),
+    };
+    await saveBook(repo, book);
+    const note = newNote(book.id, "plot", { from: 100, to: 299 }, "第101～300章");
+    const materials = await noteMaterials(repo, note);
+    const first = noteBatches(materials)[0];
+    // A checkpoint written by 0.16.0, before the work plan was persisted.
+    await saveNote(repo, { ...note, status: "failed", progress: { parts: ["既有摘要"], total: 23, error: "模型没有返回可用的札记" } });
+    const writes: string[] = [];
+    const chapter = /\[第(\d+)章/g;
+    game.platform.llm.stream = async (request, onEvent) => {
+      const body = request.body as { max_tokens: number; messages: { content: string }[] };
+      expect(body.max_tokens).toBe(8192);
+      const messages = body.messages;
+      const original = messages[1].content.startsWith("【原著材料】");
+      if (original) writes.push(messages[1].content);
+      const failed = original && writes.length === 1;
+      onEvent({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: failed ? "没写完" : "整理的事实（第101章）" }, finish_reason: failed ? "length" : "stop" }] }) });
+      onEvent({ type: "done" });
+      return "test-stream";
+    };
+    const done = await game.runCanonNote(note.id, () => {});
+    expect(done.status).toBe("done");
+    const sent = writes.map((text) => [...text.matchAll(chapter)].map((m) => Number(m[1])));
+    expect(sent[1].length).toBeLessThan(sent[0].length);
+    const actuallyWritten = sent.slice(1).flat();
+    expect(actuallyWritten).toEqual(materials.slice(first.length).map((m) => m.section + 1));
+  });
+
+  it("recovers a completed merge after a later merge failed, without reading the source again", async () => {
+    const { repo, book } = await setup();
+    const note = newNote(book.id, "plot", { from: 0, to: 11 }, "长札记");
+    await saveNote(repo, note);
+    let mergeCalls = 0;
+    const failed = await runNote(repo, note, book.title, { model: "aux", call: async (messages) => {
+      if (!messages[0].content.includes("合并")) return "局部摘要";
+      if (++mergeCalls === 2) throw new Error("模型连接已经断开");
+      return "第一组合并结果";
+    } }, new AbortController().signal, () => {});
+    expect(failed.status).toBe("failed");
+    expect(failed.progress.merges).toEqual([["第一组合并结果"]]);
+    expect(noteStepsDone(failed.progress)).toBe(failed.progress.parts.length + 1);
+    expect(failed.progress.detail).toContain("第 2 组");
+    const calls: string[] = [];
+    const done = await runNote(repo, (await getNote(repo, note.id))!, book.title, { model: "aux", call: async (messages) => {
+      expect(messages[0].content).toContain("合并");
+      calls.push(messages[1].content);
+      return calls.length === 1 ? "第二组合并结果" : "完整札记";
+    } }, new AbortController().signal, () => {});
+    expect(done.content).toBe("完整札记");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain("第一组合并结果");
+  });
+
+  it("explains a service refusal without retrying it or rejecting legitimate English prose", async () => {
+    const { game, repo, book } = await setup();
+    const note = newNote(book.id, "plot", { from: 0, to: 0 }, "短札记");
+    await saveNote(repo, note);
+    let calls = 0;
+    game.platform.llm.stream = async (_request, onEvent) => {
+      const refused = ++calls === 1;
+      onEvent({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: refused ? "" : "The traveler leaves the small town at sunrise." }, finish_reason: refused ? "content_filter" : "stop" }] }) });
+      onEvent({ type: "done" });
+      return "test-stream";
+    };
+    const failed = await game.runCanonNote(note.id, () => {});
+    expect(failed.progress.error).toContain("AI 服务拒绝");
+    expect(calls).toBe(1);
+    expect((await game.runCanonNote(note.id, () => {})).status).toBe("done");
+    expect(calls).toBe(2);
   });
 
   it("gives a passage the plot around the reading position and the people in play", async () => {
