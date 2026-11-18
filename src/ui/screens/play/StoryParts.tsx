@@ -1,6 +1,8 @@
 // Pieces of the story stream (R28 第二批, D160): the choices under the latest
 // passage, its tool row, the passage being written and the notice card.
+import { useState } from "react";
 import type { StoryNode } from "../../../engine/types";
+import { FailureSheet } from "../../components/FailureSheet";
 import type { Variants } from "../../../engine/tree";
 import { Icon, type IconName } from "../../components/Icon";
 import { StoryText } from "../../components/StoryText";
@@ -72,16 +74,26 @@ export function WritingTurn({ gen, statusText, waitLine, waited, slow }: { gen: 
 }
 
 /** What happened and what to do now; the first action is the main one. */
+const PAUSED = new Set(["cancelled", "limit", "interrupted", "system_stop", "busy"]);
+
 export function NoticeCard({ notice, onAction }: { notice: Notice; onAction: (run: () => void) => void }) {
-  const tone = /拒绝|失败|不对|没有权限|连不上|出了问题/.test(notice.text) ? "bad" : /停下|保存|中断|没有写完/.test(notice.text) ? "pause" : "info";
+  const [why, setWhy] = useState(false);
+  const tone = notice.reason ? (PAUSED.has(notice.reason) ? "pause" : "bad")
+    : /拒绝|失败|不对|没有权限|连不上|出了问题/.test(notice.text) ? "bad" : /停下|保存|中断|没有写完/.test(notice.text) ? "pause" : "info";
   const icon: IconName = tone === "bad" ? "alert" : tone === "pause" ? "hourglass" : "info";
+  // A failure keeps its cause behind 查看原因 (R30): the card itself stays one sentence.
+  const explained = !!(notice.reason && notice.reason !== "cancelled" && (notice.failure || notice.detail));
   return (
     <div className={`notice notice-${tone}`} role="status">
       <span className="notice-icon"><Icon name={icon} size={20} /></span>
       <div className="notice-body">
         <p>{notice.text}</p>
-        {notice.actions.length > 0 && <div className="notice-actions">{notice.actions.map((a, i) => <button key={a.label} className={i === 0 ? "primary" : ""} onClick={() => onAction(a.run)}>{a.label}</button>)}</div>}
+        {(notice.actions.length > 0 || explained) && <div className="notice-actions">
+          {notice.actions.map((a, i) => <button key={a.label} className={i === 0 ? "primary" : ""} onClick={() => onAction(a.run)}>{a.label}</button>)}
+          {explained && <button className="ghost" onClick={() => setWhy(true)}>查看原因</button>}
+        </div>}
       </div>
+      {why && <FailureSheet text={notice.text} failure={notice.failure} failures={notice.failures} detail={notice.detail} onClose={() => setWhy(false)} />}
     </div>
   );
 }

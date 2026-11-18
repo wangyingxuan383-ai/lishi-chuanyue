@@ -76,6 +76,7 @@ export function Composer(p: ComposerProps) {
             <span className="composer-tools">
               {!watch && <button className="icon-btn" aria-label="润色行动" title="润色行动" disabled={busy || !typed} onMouseDown={(e) => e.preventDefault()} onClick={p.onPolish}><Icon name="sparkle" size={20} /></button>}
               <button className="icon-btn" aria-label="展开输入" title="展开输入" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={p.onDesk}><Icon name="expand" size={20} /></button>
+              {typed && <button className="icon-btn" aria-label="清空输入" title="清空输入" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => { p.setInput(""); if (inputBox.current) { inputBox.current.style.height = "auto"; inputBox.current.focus(); } }}><Icon name="close" size={20} /></button>}
             </span>
           )}
         </div>

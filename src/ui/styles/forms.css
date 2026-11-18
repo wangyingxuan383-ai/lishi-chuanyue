@@ -44,3 +44,6 @@ button.small { min-height: 32px; padding: 2px 10px; font-size: 13px; align-self:
 .ai-revise { border: 1px dashed var(--line); border-radius: var(--radius-lg, 8px); padding: 6px 10px; }
 .ai-revise > summary { cursor: pointer; color: var(--accent); font-family: var(--serif); padding: 4px 0; }
 .ai-revise[open] > summary { margin-bottom: 6px; }
+
+/* 清空重填 above the setup fields (R30): small, out of the way, right-aligned. */
+.form-tools { justify-content: flex-end; margin: -4px 0 -8px; }

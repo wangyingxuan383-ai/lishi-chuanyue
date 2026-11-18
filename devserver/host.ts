@@ -13,7 +13,7 @@ const MAX_RESPONSE = 128 * 1024 * 1024;
 const METHODS = new Set(["status", "importLegacy", "sqlQuery", "sqlBatch", "sqlBackup", "sqlListBackups", "sqlRestore", "start", "snapshot", "list", "stop", "resume", "settle", "context", "agent", "pi_agent"]);
 
 export class HostError extends Error {
-  constructor(readonly code: string, message: string, readonly status = 500) { super(message); }
+  constructor(readonly code: string, message: string, readonly status = 500, readonly failure?: unknown) { super(message); }
 }
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
@@ -75,11 +75,11 @@ export class HostBridge {
           const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
           if (!line.trim()) continue;
           try {
-            const response = JSON.parse(line) as { id: number; result?: unknown; error?: { code?: string; message?: string } };
+            const response = JSON.parse(line) as { id: number; result?: unknown; error?: { code?: string; message?: string; failure?: unknown } };
             const item = this.pending.get(response.id);
             if (!item) continue;
             this.pending.delete(response.id); clearTimeout(item.timer);
-            if (response.error) item.reject(new HostError(response.error.code ?? "dev_host", response.error.message ?? "开发宿主操作失败"));
+            if (response.error) item.reject(new HostError(response.error.code ?? "dev_host", response.error.message ?? "开发宿主操作失败", 500, response.error.failure));
             else item.resolve(response.result);
           } catch {
             this.fail(new HostError("dev_host_protocol", "开发宿主返回格式无效")); child.kill(); return;
@@ -184,6 +184,6 @@ export async function hostRequest(host: HostBridge, method: string, req: Incomin
     const result = await host.call(method, params);
     reply(res, 200, result);
   } catch (error) {
-    reply(res, error instanceof HostError ? error.status : 500, { code: error instanceof HostError ? error.code : "dev_host", message: error instanceof HostError ? error.message : "开发宿主操作失败" });
+    reply(res, error instanceof HostError ? error.status : 500, { code: error instanceof HostError ? error.code : "dev_host", message: error instanceof HostError ? error.message : "开发宿主操作失败", ...(error instanceof HostError && error.failure ? { failure: error.failure } : {}) });
   }
 }

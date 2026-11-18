@@ -140,6 +140,7 @@ export function compactChatMessages(messages: ChatMessage[]): ChatMessage[] | nu
 export function retryDecision(error: unknown, attempt: number, messages: ChatMessage[]): { retry: boolean; messages: ChatMessage[] } {
   if (attempt !== 1 || !(error instanceof ChatError) || error.partial) return { retry: false, messages };
   const compact = isContextWindowError(error) ? compactChatMessages(messages) : null;
+  // The same rule as native passages (D167): no words yet, and the failure may pass.
   const transient = error.kind === "network" || error.kind === "timeout_first"
     || (error.kind === "http" && (error.status === 429 || (error.status ?? 0) >= 500));
   return { retry: compact !== null || transient, messages: compact ?? messages };
@@ -159,7 +160,13 @@ export interface ChatRequest {
   toolChoice?: ChatToolChoice;
 }
 
-export const DEFAULT_TIMEOUTS = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 180_000 };
+/**
+ * One set of limits for every model request, native passages and helper tasks
+ * alike (R30, D167): a model that thinks before writing may take minutes for
+ * its first word; after that only silence ends a request, and the backstop
+ * keeps one that never ends from running for ever.
+ */
+export const DEFAULT_TIMEOUTS = { firstByteMs: 180_000, idleMs: 120_000, totalMs: 900_000 };
 
 export interface ChatHandle {
   streamId: Promise<string>;

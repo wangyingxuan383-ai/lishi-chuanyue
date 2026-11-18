@@ -15,6 +15,9 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod maintain;
+mod review;
+
 pub type LeaseFactory = Arc<dyn Fn(u64) -> Box<dyn Send> + Send + Sync>;
 pub type CompletionSink = Arc<dyn Fn(String) + Send + Sync>;
 /// What a host shows while a story is being written (R29-T006): the phone's
@@ -43,7 +46,7 @@ pub struct Engine {
     pub(crate) committed: CompletionSink,
     observer: Mutex<Option<RunObserver>>,
 }
-struct ActiveRun { execution_id: String, cancel: CancellationToken }
+struct ActiveRun { execution_id: String, cancel: CancellationToken, system: Arc<std::sync::OnceLock<String>> }
 fn notification_execution_id(ticket:&execution_lease::LeaseTicket)->String {
     format!("{}:{}:{}:{}",ticket.world_id,ticket.owner_id,ticket.owner_instance,ticket.fence)
 }
@@ -60,8 +63,21 @@ pub(crate) struct Context {
     pub(crate) started: Instant,
     pub(crate) active_before: u64,
     pub(crate) cancel: CancellationToken,
+    /// Where in the passage this launch is, for the failure record (D166).
+    pub(crate) stage: crate::failure::Stage,
+    /// Model requests counted before this launch, so a failure can say how
+    /// many this attempt sent (zero means it replayed or was refused locally).
+    pub(crate) requests_before: u32,
 }
 impl Context {
+    pub(crate) fn new(plan: RunPlan, budget: RunBudget, draft: Value, cancel: CancellationToken) -> Context {
+        let active_before = budget.active_ms;
+        let requests_before = budget.model_requests;
+        Context { plan, budget, draft, started: Instant::now(), active_before, cancel, stage: crate::failure::Stage::Prepare, requests_before }
+    }
+    pub(crate) fn failure(&self, error: &Error) -> Value {
+        crate::failure::record(error, self.stage, self.budget.model_requests.saturating_sub(self.requests_before))
+    }
     pub(crate) fn budget(&mut self) -> RunBudget {
         self.budget.active_ms = self.active_before + self.started.elapsed().as_millis() as u64;
         self.budget.clone()
@@ -131,19 +147,37 @@ impl Engine {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Starting a UI process must not interrupt work owned by :agent, or
         // any other live process. Only expired/unowned stories are recovered.
-        tx.execute("UPDATE execution_runs SET status='interrupted',error='进程曾中断，已保留完成步骤，可恢复' WHERE status IN ('running','committing') AND NOT EXISTS(SELECT 1 FROM world_execution_leases l WHERE l.world_id=execution_runs.world_id AND l.owner_id<>'' AND l.expires_at_ms>?)",[execution_lease::now_ms()])?;
+        tx.execute("UPDATE execution_runs SET status='interrupted',error='进程曾中断，已保留完成步骤，可恢复' WHERE status IN ('running','committing') AND NOT EXISTS(SELECT 1 FROM world_execution_leases l WHERE l.world_id=COALESCE(json_extract(plan_json,'$.meta.executionLease.worldId'),execution_runs.world_id) AND l.owner_id<>'' AND l.expires_at_ms>? AND (json_extract(plan_json,'$.meta.executionLease') IS NULL OR (l.owner_id=json_extract(plan_json,'$.meta.executionLease.ownerId') AND l.owner_instance=json_extract(plan_json,'$.meta.executionLease.ownerInstance') AND l.fence=json_extract(plan_json,'$.meta.executionLease.fence'))))",[execution_lease::now_ms()])?;
         tx.commit()?;
         Ok(())
     }
     pub fn start(self: &Arc<Self>, plan: RunPlan) -> Result<String> {
         self.store.initialize()?;
+        // Once per process, before the first run: old records are trimmed (D171).
+        static PRUNED: std::sync::Once = std::sync::Once::new();
+        PRUNED.call_once(|| { let _ = self.store.prune(Utc::now()); });
         self.store.register(&plan)?;
         let id = plan.id.clone();
         self.launch(plan, RunBudget::default(), json!({}))?;
         Ok(id)
     }
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {
-        self.store.snapshot(id, after)
+        let mut snapshot = self.store.snapshot(id, after)?;
+        // Polling a live run needs its status and new events, not its working
+        // draft, which can be large; the finished snapshot carries it (R30).
+        if matches!(snapshot.status.as_str(), "running" | "committing") && self.active.lock().map_err(|_| Error::Cancelled)?.contains_key(id) {
+            snapshot.draft = json!({});
+        }
+        // A run nobody is writing any more (its process closed, its lease
+        // lapsed) is stopped here, so the page stops waiting and the story is
+        // free again; it can be continued (R30).
+        if matches!(snapshot.status.as_str(), "running" | "committing")
+            && !self.active.lock().map_err(|_| Error::Cancelled)?.contains_key(id)
+            && self.store.interrupt_orphan(id, None)?
+        {
+            return self.store.snapshot(id, after);
+        }
+        Ok(snapshot)
     }
     pub fn stop(&self, id: &str) -> Result<()> {
         if let Some(run) = self.active.lock().map_err(|_| Error::Cancelled)?.get(id) {
@@ -161,6 +195,17 @@ impl Engine {
     pub fn stop_all(&self) {
         if let Ok(active) = self.active.lock() {
             for run in active.values() {
+                run.cancel.cancel();
+            }
+        }
+    }
+    /// The phone stopped background work (a foreground-service timeout or
+    /// destruction): recorded as the system's stop, which can be continued,
+    /// never as the player's 停止 (R30, D167).
+    pub fn system_stop_all(&self, reason: &str) {
+        if let Ok(active) = self.active.lock() {
+            for run in active.values() {
+                let _ = run.system.set(reason.to_owned());
                 run.cancel.cancel();
             }
         }
@@ -197,8 +242,9 @@ impl Engine {
         }
         let mut plan = self.store.plan(id)?;
         // A run paused at its allowance continues with the same allowance again;
-        // the totals already used stay recorded (D159).
-        if snapshot.status == "paused" {
+        // the totals already used stay recorded (D159). A retry after a failure
+        // is a fresh attempt and gets the same allowance (R30).
+        if matches!(snapshot.status.as_str(), "paused" | "failed") {
             plan.meta["resumeBudgetBase"] = serde_json::to_value(&snapshot.budget)?;
         }
         // Store::resume acquires ownership before changing a running flag.
@@ -226,7 +272,8 @@ impl Engine {
         if active.contains_key(&id) {
             return Err(Error::Invalid("运行已经在执行".into()));
         }
-        active.insert(id.clone(), ActiveRun {execution_id,cancel:token.clone()});
+        let system = Arc::new(std::sync::OnceLock::new());
+        active.insert(id.clone(), ActiveRun {execution_id,cancel:token.clone(),system:system.clone()});
         drop(active);
         let engine = self.clone();
         let active_before = budget.active_ms;
@@ -237,14 +284,7 @@ impl Engine {
         } else {
             crate::types::RUN_TIME_LIMIT_MS
         };
-        let context = Arc::new(Mutex::new(Context {
-            plan,
-            budget,
-            draft,
-            started: Instant::now(),
-            active_before,
-            cancel: token.clone(),
-        }));
+        let context = Arc::new(Mutex::new(Context::new(plan, budget, draft, token.clone())));
         // The lease exists until settlement, including tools, extraction and commit.
         let lease = (self.lease)(total_ms.saturating_sub(counted_before));
         tokio::spawn(async move {
@@ -276,6 +316,10 @@ impl Engine {
                         Err(_)=>{token.cancel();Err(Error::Limit(if total_ms == crate::types::RUN_TIME_LIMIT_MS {crate::types::RUN_TIME_LIMIT_TEXT} else {"已达到本次时长上限"}))}
                     }
             };
+            let outcome = match outcome {
+                Err(Error::Cancelled) if system.get().is_some() => Err(Error::SystemStop(system.get().cloned().unwrap_or_default())),
+                other => other,
+            };
             // An expired process may finish after another process resumed the
             // same run. It must not overwrite that owner's progress/status.
             let still_owner = engine
@@ -285,26 +329,36 @@ impl Engine {
                     execution_lease::guard(&db, &execution_ticket, execution_lease::now_ms())
                 })
                 .is_ok();
+            // The lease was lost (the phone slept past it, or another window took
+            // the story): stop as interrupted unless someone else resumed it.
+            if !still_owner && engine.store.interrupt_orphan(&id, Some(&execution_ticket)).unwrap_or(false) {
+                if let (Some(observer), Ok(plan)) = (engine.observer(), context.lock().map(|c| c.plan.clone())) {
+                    observer(RunSignal::Ended { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: engine.signal_title(&plan), status: "interrupted", reason: crate::failure::player_line(crate::failure::FailKind::Interrupted).into() });
+                }
+            }
             if let (true, Err(error)) = (still_owner, outcome) {
                 let status = match &error {
                     Error::Cancelled => "cancelled",
                     Error::Limit(_) => "paused",
                     Error::Stale => "stale",
+                    // Not the player's stop: it can be continued like any interruption.
+                    Error::SystemStop(_) => "interrupted",
                     _ => "failed",
                 };
                 let _ = engine.reconcile_children(&context, status);
                 let _ = engine.checkpoint(&context);
-                let plan = context.lock().ok().map(|c| c.plan.clone());
-                if plan.is_some_and(|plan| {
+                let ended = context.lock().ok().map(|c| (c.plan.clone(), c.failure(&error)));
+                if let Some((plan, failure)) = ended.filter(|(plan, failure)| {
                     engine
                         .store
-                        .finish_owned(&plan, status, Some(&error))
+                        .finish_owned(plan, status, Some(&error), Some(failure))
                         .is_ok()
                 }) {
                     let _ = engine.flush_usage(&id, status);
-                    let _ = engine.store.event(&id, json!({"type":"failed","reason":if matches!(error, Error::Cancelled) {"cancelled"} else {"config"},"detail":error.to_string(),"partialSaved":false}));
-                    if let (Some(observer), Some(plan)) = (engine.observer(), context.lock().ok().map(|c| c.plan.clone())) {
-                        observer(RunSignal::Ended { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: engine.signal_title(&plan), status, reason: error.to_string() });
+                    let _ = engine.store.event(&id, json!({"type":"failed","reason":crate::failure_kind(&error),"detail":error.to_string(),"failure":failure}));
+                    // Tidying that did not finish is asked for again by the next passage.
+                    if let Some(observer) = engine.observer().filter(|_| plan.kind != "maintain") {
+                        observer(RunSignal::Ended { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: engine.signal_title(&plan), status, reason: crate::failure::player_line(crate::failure::kind_of(&error)).into() });
                     }
                 }
             }
@@ -325,7 +379,7 @@ impl Engine {
         let mut db = self.store.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         execution_lease::guard_plan(&tx, &c.plan)?;
-        let counters:(i64,i64,i64)=tx.query_row("SELECT COALESCE(MAX(json_extract(budget_json,'$.modelRequests')),0),COALESCE(MAX(json_extract(budget_json,'$.toolCalls')),0),COALESCE(MAX(json_extract(budget_json,'$.corrections')),0) FROM execution_runs WHERE json_extract(plan_json,'$.meta.parentRun')=?",[&c.plan.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let counters:(i64,i64,i64)=tx.query_row("SELECT COALESCE(MAX(json_extract(budget_json,'$.modelRequests')),0),COALESCE(MAX(json_extract(budget_json,'$.toolCalls')),0),COALESCE(MAX(json_extract(budget_json,'$.corrections')),0) FROM execution_runs WHERE parent_run=?",[&c.plan.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         c.budget.model_requests = c.budget.model_requests.max(counters.0 as u32);
         c.budget.tool_calls = c.budget.tool_calls.max(counters.1 as u32);
         c.budget.corrections = c.budget.corrections.max(counters.2 as u32);
@@ -339,12 +393,12 @@ impl Engine {
             c.draft["steps"] = stored["steps"].clone();
             c.draft["lastNodeId"] = stored["lastNodeId"].clone();
         }
-        let mut stmt=tx.prepare("SELECT id FROM execution_runs WHERE json_extract(plan_json,'$.meta.parentRun')=? AND status<>'committed'")?;
+        let mut stmt=tx.prepare("SELECT id FROM execution_runs WHERE parent_run=? AND status<>'committed'")?;
         let children = stmt
             .query_map([&c.plan.id], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
-        tx.execute("UPDATE execution_runs SET status='interrupted' WHERE json_extract(plan_json,'$.meta.parentRun')=? AND status='running'",[&c.plan.id])?;
+        tx.execute("UPDATE execution_runs SET status='interrupted' WHERE parent_run=? AND status='running'",[&c.plan.id])?;
         tx.commit()?;
         drop(db);
         drop(c);
@@ -393,7 +447,11 @@ impl Engine {
         final_only: bool,
     ) -> Result<Completion> {
         self.check(shared)?;
-        let plan = shared.lock().map_err(|_| Error::Cancelled)?.plan.clone();
+        let plan = {
+            let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+            c.stage = crate::failure::Stage::of_purpose(purpose);
+            c.plan.clone()
+        };
         // Cache identity includes the actual task inputs, model and source scope.
         // A resumed, reassembled stage must never consume another request's result.
         let fingerprint=format!("{:x}",Sha256::digest(json!({"purpose":purpose,"model":plan.model,"messages":messages,"tools":tools,"state":plan.state,"base":plan.base_id,"source":plan.reference,"finalOnly":final_only.then_some(true)}).to_string()));
@@ -446,7 +504,7 @@ impl Engine {
             c.draft["contextReports"][purpose]=report.clone();c.draft["phase"]=purpose.into();
         }
         self.checkpoint(shared)?;self.store.run_event(&plan,json!({"type":"request-context","report":report}))?;
-        let mut messages=bounded.map_err(|e|Error::Invalid(format!("{}：{}",crate::stage_context::label(purpose),e)))?;
+        let mut messages=bounded.map_err(|e|Error::fail(crate::failure::FailKind::Context,format!("{}：{}",crate::stage_context::label(purpose),e)))?;
         if final_only {
             messages.push(json!({"role":"system","content":"【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本次的完整结果，不要再调用工具；资料不足之处按已知写，不编造原著细节。"}));
         }
@@ -503,18 +561,33 @@ impl Engine {
                     }
                 }
             });
+            // At most about four writes a second while words stream in (R30):
+            // each one stores the whole text so far, and the page polls anyway.
+            let written = Mutex::new(None::<Instant>);
+            // The words held back by the limit, written once the reply ends.
+            let held = Arc::new(Mutex::new(None::<Value>));
+            let held_in = held.clone();
             let sink: TextSink = Arc::new(move |text| {
                 if !show_text {
                     return;
                 }
                 let visible = narrative_part(&text);
                 if let Some(progress) = &progress { progress(visible.chars().count()); }
-                if !visible.is_empty() {
-                    let event = json!({"type":"text","delta":"","full":format!("{original}{visible}")});
-                    let _ = store.event(&id, event.clone());
-                    if let Some(parent) = &parent_run {
-                        let _ = store.event(parent, event);
-                    }
+                let due = written.lock().map(|mut last| {
+                    let due = last.is_none_or(|at| at.elapsed().as_millis() >= 250);
+                    if due { *last = Some(Instant::now()); }
+                    due
+                }).unwrap_or(true);
+                if visible.is_empty() { return; }
+                let event = json!({"type":"text","delta":"","full":format!("{original}{visible}")});
+                if !due {
+                    if let Ok(mut held) = held_in.lock() { *held = Some(event); }
+                    return;
+                }
+                if let Ok(mut held) = held_in.lock() { *held = None; }
+                let _ = store.event(&id, event.clone());
+                if let Some(parent) = &parent_run {
+                    let _ = store.event(parent, event);
                 }
             });
             let future = self
@@ -527,6 +600,9 @@ impl Engine {
                     Err(_) => { token.cancel(); Err(Error::Limit(crate::types::RUN_TIME_LIMIT_TEXT)) }
                 }
             };
+            if let Some(event) = held.lock().ok().and_then(|mut held| held.take()) {
+                self.store.run_event(&plan, event)?;
+            }
             self.checkpoint(shared)?;
             match result {
                 Ok(result) => {
@@ -564,8 +640,8 @@ impl Engine {
                     }
                     return match error {
                         Error::Cancelled | Error::Limit(_) | Error::Stale | Error::ContextWindow
-                        | Error::Provider { .. } | Error::Refused(_) => Err(error),
-                        other => Err(Error::Invalid(format!("{}：{}", crate::stage_context::label(purpose), other))),
+                        | Error::Provider { .. } | Error::Refused(_) | Error::SystemStop(_) | Error::Busy { .. } => Err(error),
+                        other => Err(Error::fail(crate::failure::kind_of(&other), format!("{}：{}", crate::stage_context::label(purpose), other))),
                     };
                 }
             }
@@ -639,6 +715,7 @@ impl Engine {
         let plan = shared.lock().map_err(|_| Error::Cancelled)?.plan.clone();
         match plan.kind.as_str() {
             "autoplay" => return Box::pin(self.execute_autoplay(shared)).await,
+            "maintain" => return self.maintain(shared).await,
             "turn" | "variant" | "continue" | "opening" | "correction" | "ask" => {},
             _ => return Err(Error::Invalid("不支持的运行类型".into())),
         }
@@ -694,7 +771,7 @@ impl Engine {
             false
         };
         if plan.kind == "correction" && !support {
-            return Err(Error::Invalid("这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用".into()));
+            return Err(Error::fail(crate::failure::FailKind::Unsupported,"这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用"));
         }
         let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t["function"]["name"].as_str().unwrap_or(""))).filter(|t|tier!=Tier::Standard||STANDARD_TOOLS.contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
         // Lookup rounds before the model must write; questions and checks keep
@@ -854,11 +931,11 @@ impl Engine {
                 narrative_part(&raw)
             )
         };
-        let parsed = rules::parse_record(&raw).map_err(Error::Invalid)?;
+        let parsed = rules::parse_record(&raw).map_err(|e| Error::fail(crate::failure::FailKind::Format, e))?;
         if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
         let mut record = parsed["record"].clone();
         if narrative.trim().is_empty() {
-            return Err(Error::Invalid("模型没有写出正文，草稿已保留".into()));
+            return Err(Error::fail(crate::failure::FailKind::Empty, "模型没有写出正文，草稿已保留"));
         }
         if refused(&result, narrative.as_str(), !record.is_null()) {
             return Err(Error::Refused(
@@ -886,9 +963,7 @@ impl Engine {
             // Fast and standard tiers write from the context and notes (D162);
             // only the deep tier insists on having read the original.
             if tier == Tier::Deep && !read && !supplied && !insufficient {
-                return Err(Error::Invalid(
-                    "没有可核实的原文依据，资料不足，未提交本次正文".into(),
-                ));
+                return Err(Error::fail(crate::failure::FailKind::Review, "没有可核实的原文依据，资料不足，未提交本次正文"));
             }
         }
         if record.is_null()
@@ -901,7 +976,7 @@ impl Engine {
                 .complete(&shared, "extract", extraction, vec![], true)
                 .await?;
             let parsed = rules::parse_record(&format!("<record>{}", extracted.text))
-                .map_err(Error::Invalid)?;
+                .map_err(|e| Error::fail(crate::failure::FailKind::Format, e))?;
             if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
             if record.is_null() {
                 record = parsed["record"].clone();
@@ -910,9 +985,7 @@ impl Engine {
             }
         }
         if record.is_null() {
-            return Err(Error::Invalid(
-                "正文已保存为草稿，整理结果不完整，可恢复重试".into(),
-            ));
+            return Err(Error::fail(crate::failure::FailKind::Format, "正文已保存为草稿，整理结果不完整，可恢复重试"));
         }
         if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2")) && !plan.meta["playerNarrative"].is_string() {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
@@ -941,7 +1014,7 @@ impl Engine {
                         }
                         let mut opts = options.clone();
                         opts["advanceTime"] = false.into();
-                        seed = rules::apply_record(&seed, &patch, &opts).map_err(Error::Invalid)?
+                        seed = rules::apply_record(&seed, &patch, &opts).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?
                             ["state"]
                             .clone();
                     }
@@ -965,8 +1038,9 @@ impl Engine {
                 }
             }
         }
+        shared.lock().map_err(|_| Error::Cancelled)?.stage = crate::failure::Stage::Settle;
         let mut applied =
-            rules::apply_record(&state, &settlement_record, &options).map_err(Error::Invalid)?;
+            rules::apply_record(&state, &settlement_record, &options).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?;
         if plan.kind == "opening"
             && codex_timeline.is_array()
             && state["time"]["date"]["ceYear"].is_number()
@@ -978,54 +1052,15 @@ impl Engine {
                 &json!({"timeline":codex_timeline}),
                 &opts,
             )
-            .map_err(Error::Invalid)?["state"]
+            .map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?["state"]
                 .clone();
         }
-        {
-            if let Some(messages) = plan.meta["upkeepMessages"].as_array() {
-                let messages = crate::stage_context::organization(&plan, messages, &narrative);
-                if let Some(response) = self.optional_complete(&shared, "upkeep", messages).await? {
-                    if let Some(patch) =
-                        crate::organize::upkeep_patch(&response.text, &applied["state"])
-                    {
-                        shared.lock().map_err(|_| Error::Cancelled)?.draft["upkeepPatch"] = patch;
-                    }
-                    shared.lock().map_err(|_| Error::Cancelled)?.draft["upkeepAttempted"] =
-                        true.into();
-                }
-            }
-            if let Some(messages) = plan.meta["chapterMessages"].as_array() {
-                let (mut messages, groups) = crate::stage_context::chapter(messages, &narrative, plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize);
-                if state["era"]["mode"] == "free" {
-                    for message in &mut messages {
-                        if message["role"] == "system" {
-                            message["content"] = message["content"]
-                                .as_str()
-                                .unwrap_or("")
-                                .replace("历史互动小说", "互动小说")
-                                .into();
-                        }
-                    }
-                }
-                let mut summaries=vec![];let mut complete=true;
-                if groups.len()>1 {
-                    for (index, group) in groups.iter().enumerate(){
-                        let mut request=messages.clone();let content=request.last_mut().ok_or_else(||Error::Invalid("章节上下文缺失".into()))?;
-                        content["content"]=format!("{}\n【本章剧情·第{}/{}组】\n{}\n仅总结本组实际发生的事，后续将合并整章。",content["content"].as_str().unwrap_or(""),index+1,groups.len(),group).into();
-                        if let Some(response)=self.optional_complete(&shared,&format!("chapter:part:{index}"),request).await? {
-                            if let Some(chapter)=crate::organize::parse_chapter(&response.text){summaries.push(chapter);}else{complete=false;break;}
-                        }else{complete=false;break;}
-                    }
-                }
-                let content=messages.last_mut().ok_or_else(||Error::Invalid("章节上下文缺失".into()))?;
-                content["content"]=format!("{}\n【本章剧情】\n{}",content["content"].as_str().unwrap_or(""),if groups.len()>1{format!("以下为按原文顺序核实的分组摘要，请合并整章，不能新增事实：\n{}",json!(summaries))}else{groups.first().cloned().unwrap_or_default()}).into();
-                if let Some(response) = if complete {self.optional_complete(&shared, "chapter", messages).await?} else {None}
-                {
-                    if let Some(chapter) = crate::organize::parse_chapter(&response.text) {
-                        shared.lock().map_err(|_| Error::Cancelled)?.draft["chapter"] = chapter;
-                    }
-                }
-            }
+        // 设定集整理 and 章节摘要 wait until the passage is saved and shown, and
+        // then never hold the story (D168). A sequence's passages still run
+        // them in order, before the next passage.
+        let deferred = plan.meta["parentRun"].is_null() && matches!(plan.kind.as_str(), "turn" | "variant" | "continue");
+        if !deferred {
+            self.maintain_requests(&shared, &plan, &narrative, &applied["state"]).await?;
         }
         self.checkpoint(&shared)?;
         let result = self.commit(&shared, &narrative, record, &applied, &result)?;
@@ -1035,106 +1070,12 @@ impl Engine {
             plan.world_id,
             result["nodeId"].as_str().unwrap_or("")
         ));
+        if deferred {
+            // The passage is saved either way; tidying that cannot start is
+            // asked for again by the next passage.
+            let _ = self.start_maintenance(&plan, &narrative, &result);
+        }
         Ok(())
-    }
-
-    /// reference-review-lite-2: one helper-model request, text and record together.
-    /// It lists sentences that contradict the supplied original; each fix is
-    /// applied locally only where its quote occurs exactly once. Anything that
-    /// goes wrong keeps the passage as written: the check never stops a turn.
-    async fn review_reference_lite(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, narrative:&str, record:&Value)->Result<(String,Value,Value)>{
-        self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
-        let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
-        let mut messages=lite_review_messages(plan,narrative,cap);
-        if let Some(message)=messages.last_mut() {
-            message["content"]=format!("{}\n【本回合记录】\n{}",message["content"].as_str().unwrap_or(""),record).into();
-        }
-        let result=match self.complete(shared,"reference-review-lite",messages,vec![],true).await {
-            Ok(result)=>result,
-            Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
-            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-2","status":"skipped","reason":error.to_string()}))),
-        };
-        // Do not repair truncated JSON into an executable record patch.
-        let text=result.text.trim();
-        let body=text.strip_prefix("```json").or_else(||text.strip_prefix("```")).and_then(|s|s.strip_suffix("```")).unwrap_or(text).trim();
-        let issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
-        let (revised,revised_record,applied,skipped)=apply_lite_review(narrative,record,&issues);
-        let unresolved=if !issues.is_array(){vec!["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]}else if skipped>0 {vec!["部分更正未能同时校准正文和回合记录，已保留本段原稿；可使用“按原著纠错”进一步核对。"]}else{vec![]};
-        Ok((revised,revised_record,json!({"version":"reference-review-lite-2","status":if !issues.is_array(){"skipped"}else if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
-    }
-    async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
-        let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
-        let parts=crate::stage_context::parts(narrative,(cap/6).clamp(256,2400));
-        let mut body=String::new();let mut current=record.clone();let mut findings=vec![];let mut unresolved=vec![];
-        for (index,part) in parts.iter().enumerate(){
-            self.check(shared)?;
-            let reviewed=self.review_reference_part(shared,plan,mcp,tools,part,&current,index).await?;
-            body.push_str(reviewed["narrative"].as_str().unwrap_or(part));current=reviewed["record"].clone();
-            findings.extend(reviewed["report"]["findings"].as_array().cloned().unwrap_or_default());
-            unresolved.extend(reviewed["report"]["unresolved"].as_array().cloned().unwrap_or_default());
-        }
-        Ok(json!({"narrative":body,"record":current,"report":{"version":"reference-review-2","parts":parts.len(),"findings":findings,"unresolved":unresolved,"status":if unresolved.is_empty(){"reviewed"}else{"partial"}}}))
-    }
-    async fn review_reference_part(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value,part:usize)->Result<Value>{
-        self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
-        let compact=crate::stage_context::state(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/10).min(1500)).to_string();
-        let mut reference=plan.reference.clone().unwrap_or(Value::Null);
-        let mut left=(plan.meta["budgetChars"].as_u64().unwrap_or(12000)/4) as usize;
-        let mut evidence=vec![];
-        for p in reference["passages"].as_array().into_iter().flatten().filter(|p|p["kind"]=="original") {let cost=p.to_string().encode_utf16().count();if cost<=left{left-=cost;evidence.push(p.clone());}}
-        reference["passages"]=evidence.into();
-        let mut messages=vec![json!({"role":"system","content":r#"核对尚未保存草稿中新引入的关键身份、关系、称谓、能力、物品、时间和事件。保留玩家明确分支，AI自行写错不算玩家改写。先用已提供原文，需要时批量定位具体主张，再read_original读原文与邻文，不扫描整本书。只纠正有依据的细节，不替玩家作决定，不补回已经改变的命运。缺少原文依据的具体值保留不确定性；确实影响当前关键情节且必须玩家决定时填写needsPlayer。最后只返回JSON：{"replacement":"完整核对后的本段正文","recordPatch":{仅受改稿影响的记录字段},"findings":[{"claim":"具体主张","status":"supported/branch/uncertain","playerFactId":"branch时对应的玩家事实ID","playerQuote":"当前是玩家写入正文时也可引用其准确原句；来源不明的旧事实标uncertain","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}],"unresolved":["资料不足"],"needsPlayer":"必要问题，可省略"}。没有新关键事实时findings可为空；核对说明不进入正文。"#}),json!({"role":"user","content":format!("【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【已提供原文】{}\n【待核对正文】{}\n【原回合记录】{}",plan.action,plan.state["source"],compact,crate::stage_context::facts(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/12).min(1400)),reference,narrative,record)})];
-        for round in 0..2 {
-            let final_round=round==1;
-            messages.push(json!({"role":"system","content":if final_round {"这是本段核对的收尾请求，不再调用工具。根据实际已读材料输出完整JSON，保留玩家分支；不能核实的项目标uncertain并写入unresolved，不能把候选或推测当原著。确实必须玩家决定的关键矛盾填needsPlayer。不延长检索，不把无法核实说成已核实。".to_owned()} else {format!("本段核对第{}轮，最多再有{}轮查证，然后必须返回JSON结论。只检查草稿新引入的具体细节；复用当前已有原句，候选够用后read_original，不再次用相同人物名泛搜；互不依赖的问题同批查证。",round+1,1-round)}}));
-            let review_tools=if final_round{vec![]}else{tools.iter().filter(|t|["read_original","prepare_reference_check","read_canon_facts","read_history","read_characters"].contains(&t["function"]["name"].as_str().unwrap_or(""))).cloned().collect()};
-            let result=self.complete(shared,&format!("reference-review:{part}:{round}"),messages.clone(),review_tools,false).await?;
-            if !result.tool_calls.is_empty(){
-                messages.push(chat::assistant_message(&result));
-                for call in &result.tool_calls {
-                    let name=call["function"]["name"].as_str().unwrap_or("");
-                    if !is_read_tool(name){return Err(Error::Invalid("原著核对只允许读取与预演".into()));}
-                    let args:Value=serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}"))?;
-                    let key=format!("reference-tool:{part}:{round}:{}",call["id"].as_str().unwrap_or(""));
-                    let cached=self.store.lock()?.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done'",params![plan.id,key],|r|r.get::<_,String>(0)).optional()?;
-                    let value=if let Some(cached)=cached {serde_json::from_str(&cached)?} else {
-                        shared.lock().map_err(|_|Error::Cancelled)?.charge_tool()?; self.checkpoint(shared)?;
-                        let output=mcp.call(name,&args).await?;
-                        self.store.lock()?.execute("INSERT OR REPLACE INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES(?,?,?,'done',?,?)",params![plan.id,key,name,args.to_string(),output.to_string()])?;output
-                    };
-                    messages.push(json!({"role":"tool","tool_call_id":call["id"],"content":value.to_string()}));
-                }
-                continue;
-            }
-            let mut report=match rules::record::lenient_json(&result.text){Some(report)=>report,None=>{
-                if refused(&result,&result.text,false){return Err(Error::Refused("AI服务拒绝了这次原著核对，正文草稿已保留，原路线未改动。请检查服务提示或换用可用模型后继续。".into()));}
-                if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":"请按要求返回完整JSON核对结果；资料不足标uncertain，不再展开查证。"}));continue;}
-                return Err(Error::Invalid("原著核对未返回完整结果，正文草稿已保留，可继续重试".into()));
-            }};
-            let provided=shared.lock().map_err(|_|Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
-            if let Err(error)=crate::writing_context::validate_findings(&report,&provided,&plan.state,&plan.action){
-                if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":format!("核对格式或依据未通过：{}。保留有效结果，补查或标明uncertain；不要把不明来源旧状态当玩家分支。",error)}));continue;}
-                // Unverified evidence does not become a protected branch or a
-                // verified correction. Keep the untouched draft and surface each
-                // missing basis; a local correction can perform deeper checking.
-                if !report["findings"].is_array(){return Err(error);}
-                let mut unresolved=report["unresolved"].as_array().cloned().unwrap_or_default();
-                for finding in report["findings"].as_array_mut().unwrap(){
-                    if crate::writing_context::validate_findings(&json!({"findings":[finding.clone()]}),&provided,&plan.state,&plan.action).is_err(){
-                        unresolved.push(format!("{}：尚未取得有效原文或玩家分支依据",finding["claim"].as_str().unwrap_or("关键细节")).into());
-                        finding["status"]="uncertain".into();finding["citations"]=json!([]);
-                    }
-                }
-                report["unresolved"]=unresolved.into();report["replacement"]=narrative.into();report["recordPatch"]=json!({});
-            }
-            shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report.clone(); self.checkpoint(shared)?;
-            if let Some(question)=report["needsPlayer"].as_str().filter(|s|!s.trim().is_empty()){return Err(Error::Invalid(format!("这段关键情节还需确认：{question}")));}
-            let mut local=plan.clone();local.meta["anchor"]=json!({"original":narrative});local.meta["correctionRange"]=json!({"start":0,"end":narrative.encode_utf16().count()});local.meta["originalRecord"]=record.clone();
-            let revised=crate::writing_context::local_correction(&local,&report)?;
-            let mut issues=vec![];let record=rules::record::normalize_record(&revised["record"],&mut issues).ok_or_else(||Error::Invalid("核对后的回合记录无效，草稿已保留".into()))?;
-            return Ok(json!({"narrative":revised["narrative"],"record":record,"report":{"version":"reference-review-1","findings":report["findings"],"unresolved":report["unresolved"],"status":if report["unresolved"].as_array().is_some_and(|a|!a.is_empty()){"partial"}else{"reviewed"}}}));
-        }
-        Err(Error::Invalid("关键细节仍需补查，草稿已保留；请缩小待查问题或补充必要线索".into()))
     }
 
     fn cached_tool_support(&self,plan:&RunPlan)->Result<Option<bool>>{
@@ -1176,7 +1117,7 @@ impl Engine {
                         .and_then(|s| serde_json::from_str::<Value>(s).ok())
                         .is_some_and(|v| v["value"] == "ready")
             }),
-            Err(Error::Invalid(message))
+            Err(Error::Invalid(message) | Error::Fail { kind: crate::failure::FailKind::Other, message })
                 if [
                     "400",
                     "404",
@@ -1283,6 +1224,7 @@ impl Engine {
         completion: &Completion,
     ) -> Result<Value> {
         self.check(shared)?;
+        shared.lock().map_err(|_| Error::Cancelled)?.stage = crate::failure::Stage::Commit;
         let c = shared.lock().map_err(|_| Error::Cancelled)?;
         let plan = &c.plan;
         let mut db = self.store.lock()?;
@@ -1313,7 +1255,10 @@ impl Engine {
             uuid::Uuid::new_v4().simple().to_string()
         };
         let mut meta = plan.meta.clone();
-        for key in ["settingsGuard", "sourceGuard", "targetId", "executionLease"] {
+        // A saved passage keeps what describes it, not the prompts that built
+        // it: those were copied into every node and only grew the save (R30).
+        for key in ["settingsGuard", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "chapterMessages", "codexMessages",
+            "autoplayTurnSystem", "autoplayExtractSystem", "autoplayUpkeepSystem", "autoplayChapterSystem", "resumeBudgetBase", "stepBudgetBase"] {
             if let Some(object) = meta.as_object_mut() {
                 object.remove(key);
             }
@@ -1415,7 +1360,7 @@ impl Engine {
             let patch: Value = serde_json::from_str(&record_text)?;
             let mut opts = plan.options.clone();
             opts["advanceTime"] = false.into();
-            let edited = rules::apply_record(&state, &patch, &opts).map_err(Error::Invalid)?;
+            let edited = rules::apply_record(&state, &patch, &opts).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?;
             state = edited["state"].clone();
             tx.execute(
                 "UPDATE states SET state_json=? WHERE node_id=?",
@@ -1427,7 +1372,7 @@ impl Engine {
             let mut options = plan.options.clone();
             options["advanceTime"] = false.into();
             let next =
-                rules::apply_record(&state, &edit["record"], &options).map_err(Error::Invalid)?;
+                rules::apply_record(&state, &edit["record"], &options).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?;
             if next["state"] == state {
                 continue;
             }
@@ -1458,7 +1403,7 @@ impl Engine {
             let patch = &c.draft["upkeepPatch"];
             let mut opts = plan.options.clone();
             opts["advanceTime"] = false.into();
-            let next = rules::apply_record(&state, patch, &opts).map_err(Error::Invalid)?;
+            let next = rules::apply_record(&state, patch, &opts).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?;
             if next["state"] != state {
                 state = next["state"].clone();
                 let next_id = uuid::Uuid::new_v4().simple().to_string();
@@ -1766,8 +1711,9 @@ fn transient_retry_delay(error: &Error) -> Option<std::time::Duration> {
         // The service broke off mid-stream with an error event (D164): the
         // passage was not finished, so one fresh attempt replaces the partial text.
         Error::Provider { kind, .. } if kind == "stream" => Some(std::time::Duration::from_secs(1)),
+        // No words yet and the failure may pass: the same rule as helper tasks (D167).
         Error::Provider { kind, status, partial: false, .. }
-            if kind == "network"
+            if kind == "network" || kind == "timeout_first"
                 || (kind == "http" && status.is_some_and(|s| s == 429 || s >= 500)) =>
         {
             Some(std::time::Duration::from_secs(if *status == Some(429) && kind == "http" { 2 } else { 1 }))
@@ -1897,79 +1843,10 @@ pub(crate) fn write_usage(
             .unwrap_or_default();
         let prompt = output["usage"]["prompt_tokens"].as_i64();
         let completion = output["usage"]["completion_tokens"].as_i64();
-        tx.execute("INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET node_id=COALESCE(excluded.node_id,usage.node_id),outcome=CASE WHEN excluded.outcome='ok' THEN 'ok' ELSE usage.outcome END",params![format!("{run}:{key}"),world,node,input["purpose"].as_str().unwrap_or("turn"),input["model"].as_str().unwrap_or(""),prompt,completion,prompt.is_none()||completion.is_none(),output["firstTokenMs"].as_i64(),output["totalMs"].as_i64(),if status=="done" {outcome} else {"failed"},Utc::now().to_rfc3339()])?;
+        tx.execute("INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET node_id=COALESCE(excluded.node_id,usage.node_id),outcome=CASE WHEN excluded.outcome='ok' THEN 'ok' ELSE usage.outcome END",params![format!("{run}:{key}"),world,node,input["purpose"].as_str().unwrap_or("turn"),input["model"].as_str().unwrap_or(""),prompt,completion,prompt.is_none()||completion.is_none(),output["firstTokenMs"].as_i64(),output["totalMs"].as_i64(),if status=="done"||status=="stale" {outcome} else {"failed"},Utc::now().to_rfc3339()])?;
     }
     Ok(())
 }
-/// The lite check's request: the passage, what the player asked, and the
-/// original already supplied to the writer (about a fifth of the budget).
-fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Vec<Value>{
-    let mut left=cap/5;
-    let mut evidence=String::new();
-    // The search spans the whole book, but later chapters describe what has not
-    // happened yet: a passage from far past the reading position once "corrected"
-    // two servants at 双叉岭 into 八戒 and 沙僧. Keep the check to what is known by now.
-    let position=plan.state["source"]["position"].as_u64().unwrap_or(0);
-    let known=|p:&&Value|p["section"].as_u64().is_none_or(|s|s<=position+LITE_REVIEW_AHEAD);
-    for p in plan.reference.as_ref().and_then(|r|r["passages"].as_array()).into_iter().flatten().filter(|p|p["kind"]=="original").filter(known) {
-        let text=p["text"].as_str().unwrap_or("");
-        let line=format!("\n[第{}节·{}·片段{}]\n{}\n",p["section"].as_u64().unwrap_or(0)+1,p["title"].as_str().unwrap_or(""),p["chunk"].as_u64().unwrap_or(0)+1,text);
-        let cost=line.encode_utf16().count();
-        if cost>left {break;}
-        left-=cost;evidence.push_str(&line);
-    }
-    let notes=plan.reference.as_ref().and_then(|r|r["notes"].as_str()).unwrap_or("");
-    let source=&plan.state["source"];
-    let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
-    vec![
-        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。不改文风，不增删情节，不引入正文里没有的人物。只返回JSON：{\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄，尽量短\",\"problem\":\"与原著哪里不符（写明依据的节）\",\"fix\":\"改正后的这句\"}]}，每个问题还必须有recordPatch对象：只含受这句更正影响的回合记录字段，不受影响留空对象；数组字段提供更正后的完整列表，保留无关项目；对象字段只提供有变化的属性；不能改整局设定。按列出顺序修正记录，后项基于前项结果。正文和记录必须一致，无法同步就不要提出这条更正。最多5条；没有问题返回{\"issues\":[]}。"}),
-        json!({"role":"user","content":format!("【当前位置】原著第{}节前后\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（只含当前位置及之前不远的片段）{}\n【待校对正文】\n{narrative}",position+1,source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到当前位置之前的原文）".to_owned()}else{evidence})}),
-    ]
-}
-
-/// How many sections past the player's reading position the lite check may cite:
-/// the story moves on from where it started, but not by a book's worth.
-const LITE_REVIEW_AHEAD: u64 = 3;
-
-/// Local, conservative application: a fix is used only when its quote occurs
-/// exactly once and the replacement stays about the same size.
-fn apply_lite_fixes(narrative:&str, issues:&Value)->(String,Vec<Value>,usize){
-    let mut text=narrative.to_owned();let mut applied=vec![];let mut skipped=0;
-    for issue in issues.as_array().into_iter().flatten().take(5) {
-        let quote=issue["quote"].as_str().unwrap_or("").trim();
-        let fix=issue["fix"].as_str().unwrap_or("").trim();
-        let fits=!quote.is_empty()&&!fix.is_empty()&&quote!=fix&&text.matches(quote).count()==1&&fix.chars().count()<=quote.chars().count()*2+40;
-        if fits {text=text.replacen(quote,fix,1);applied.push(json!({"quote":quote,"problem":issue["problem"],"fix":fix}));} else {skipped+=1;}
-    }
-    (text,applied,skipped)
-}
-
-/// A sentence correction and its record patch form one unit. Never apply one
-/// side of an invalid result; untouched fields and unrelated settlements stay.
-fn apply_lite_review(narrative:&str, record:&Value, issues:&Value)->(String,Value,Vec<Value>,usize){
-    let mut text=narrative.to_owned();let mut current=record.clone();let mut applied=vec![];let mut skipped=0;
-    for issue in issues.as_array().into_iter().flatten().take(5) {
-        let Some(patch)=issue["recordPatch"].as_object() else {skipped+=1;continue;};
-        if patch.iter().any(|(k,v)|v.is_null()||!["time","money","place","stats","items","people","status","goals","date","hour","died","currency","log","deviation","report","risk","beat","challenge","continuity","choices"].contains(&k.as_str())) {skipped+=1;continue;}
-        let (revised,mut fixes,_)=apply_lite_fixes(&text,&json!([issue]));
-        if fixes.is_empty(){skipped+=1;continue;}
-        let mut next=current.clone();
-        for (key,value) in patch {
-            if let (Some(old),Some(new))=(next[key].as_object_mut(),value.as_object()){old.extend(new.clone());}
-            else {next[key]=value.clone();}
-        }
-        let mut warnings=vec![];
-        let Some(normalized)=rules::record::normalize_record(&next,&mut warnings) else {skipped+=1;continue;};
-        if !warnings.is_empty()||patch.keys().any(|k|normalized.get(k).is_none()){skipped+=1;continue;}
-        text=revised;current=normalized;applied.append(&mut fixes);
-    }
-    // Later full-array patches may depend on earlier proposed fixes. If even
-    // one fix is rejected, keep both original sides rather than leaking that
-    // rejected change through a subsequent patch.
-    if skipped>0 {return (narrative.to_owned(),record.clone(),vec![],issues.as_array().map_or(0,|a|a.len().min(5)));}
-    (text,current,applied,skipped)
-}
-
 /// Generation tiers (D161): how much the writer may look up before writing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tier { Fast, Standard, Deep }
@@ -2026,43 +1903,3 @@ mod correction_notes_tests {
     }
 }
 
-#[cfg(test)]
-mod lite_review_tests {
-    use super::*;
-    #[test]
-    fn the_lite_check_sees_where_the_story_is_and_not_far_later_chapters() {
-        let mut plan: RunPlan = serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"turn","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[],"state":{"source":{"bookId":"b","fanfic":true,"plot":"canon","position":12,"instructions":"沿原著"}},"settings":{},"options":{},"action":{"text":"上前行礼"},"meta":{}})).unwrap();
-        plan.reference = Some(json!({"passages":[
-            {"kind":"original","section":12,"chunk":40,"title":"双叉岭","text":"两个从者挑着担子"},
-            {"kind":"original","section":26,"chunk":99,"title":"白虎岭","text":"八戒沙僧护着师父"}
-        ]}));
-        let messages = lite_review_messages(&plan, "两个从人上前。", 12000);
-        let user = messages[1]["content"].as_str().unwrap();
-        assert!(user.contains("【当前位置】原著第13节") && user.contains("[第13节·双叉岭") && user.contains("两个从者"), "{user}");
-        assert!(!user.contains("八戒沙僧"), "{user}");
-        assert!(messages[0]["content"].as_str().unwrap().contains("还没有发生"));
-    }
-    #[test]
-    fn fixes_apply_only_where_the_quote_is_unique_and_the_size_is_close() {
-        let issues = json!([{"quote":"三文","problem":"x","fix":"两文"},{"quote":"纸","problem":"y","fix":"布"},{"quote":"一句","problem":"z","fix":"很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长"}]);
-        let (text, applied, skipped) = apply_lite_fixes("一张纸三文，又一张纸。一句", &issues);
-        assert_eq!(text, "一张纸两文，又一张纸。一句");
-        assert_eq!((applied.len(), skipped), (1, 2));
-    }
-    #[test]
-    fn lite_corrections_update_records_atomically_without_losing_other_changes() {
-        let record=json!({"money":-2,"time":5,"items":[{"name":"纸","delta":1}],"people":[{"name":"李四"},{"name":"店主"}]});
-        let issues=json!([
-            {"quote":"李四","fix":"张三","recordPatch":{"people":[{"name":"张三"},{"name":"店主"}]}},
-            {"quote":"两文","fix":"三文","recordPatch":{"money":-3}},
-            {"quote":"收好","fix":"扔掉"},
-            {"quote":"纸","fix":"布","recordPatch":{"source":{}}}
-        ]);
-        let (text,corrected,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&json!(issues.as_array().unwrap()[..2]));
-        assert_eq!(text,"张三付了三文，收好纸。");assert_eq!((applied.len(),skipped),(2,0));
-        assert_eq!(corrected["people"],json!([{"name":"张三"},{"name":"店主"}]));
-        assert_eq!(corrected["money"],-3);assert_eq!(corrected["time"],5);assert_eq!(corrected["items"][0]["name"],"纸");
-        let (text,unchanged,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&issues);
-        assert_eq!(text,"李四付了两文，收好纸。");assert_eq!(unchanged,record);assert!(applied.is_empty());assert_eq!(skipped,4);
-    }
-}

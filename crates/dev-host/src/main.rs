@@ -40,7 +40,7 @@ fn core_error(error: story_core::Error) -> Value {
         story_core::Error::Limit(_) => "execution_limit",
         _ => "execution_failed",
     };
-    json!({"code":code,"message":error.to_string()})
+    json!({"code":code,"message":error.to_string(),"failure":story_core::failure::refused_at_start(&error)})
 }
 fn sql_error(error: story_core::error::PlatformError) -> Value {
     json!({"code":error.code,"message":error.message})

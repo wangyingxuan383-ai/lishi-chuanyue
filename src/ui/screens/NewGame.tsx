@@ -13,6 +13,8 @@ import { ERAS } from "../../content/eras";
 import type { TurnEvent } from "../../engine/game";
 import { FORTUNE_MODES } from "../../engine/fortune";
 import { explainFailure } from "../../engine/llm/providers";
+import type { Failure } from "../../platform";
+import { FailureSheet } from "../components/FailureSheet";
 import type { Intensity, Perspective, WorldSettings } from "../../engine/types";
 import { newId } from "../../engine/db/repo";
 import { useApp, useBack } from "../app/context";
@@ -110,6 +112,9 @@ export default function NewGame() {
   const identityBox = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** The opening's failure record, behind 查看原因 (R30). */
+  const [failure, setFailure] = useState<{ failure?: Failure; failures?: Failure[]; detail?: string } | null>(null);
+  const [why, setWhy] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const tip = useMemo(() => pickRandom(TIPS), []);
   /** 设置 → 游玩默认: what a fresh draft (and 清空重填) starts from. */
@@ -187,6 +192,16 @@ export default function NewGame() {
     setGroup("全部");
     setAllTemplates(false);
   };
+  /** 清空重填: the words go, how the story is played and written stays; 撤销 brings them back. */
+  const clearForm = () => {
+    const before = draft;
+    const beforeIdea = idea;
+    setDraft({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
+    setIdea("");
+    setError(null); setFailure(null);
+    toast("已清空", { label: "撤销", run: () => { setDraft(before); setIdea(beforeIdea); } });
+  };
+  const filled = !!(idea.trim() || draft.premise.trim() || draft.name.trim() || draft.identity.trim() || draft.hint.trim() || draft.openingText.trim());
   const blank = () => ({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: { ...fresh().settings, mode: draft.settings.mode, clockStyle: free ? "elapsed" as const : "era" as const }, ...(free ? { origin: "", arrival: "不穿越" as const } : {}) });
 
   // While the opening is written, back leaves the page; the opening keeps writing and shows up on the shelf (D160).
@@ -198,7 +213,7 @@ export default function NewGame() {
 
   const useTemplate = (t: OpeningTemplate) => {
     setDraft((d) => fromTemplate(t, d));
-    setError(null);
+    setError(null); setFailure(null);
     setSheet(null);
     window.scrollTo?.(0, 0);
   };
@@ -270,7 +285,7 @@ export default function NewGame() {
   const useChallenge = (c: ChallengeCard) => {
     const before = draftRef.current;
     setDraft((d) => fromChallenge(c, d));
-    setError(null);
+    setError(null); setFailure(null);
     toast(`已填入“${c.title}”`, { label: "撤销", run: () => setDraft(before) });
   };
   /** AI 帮我拟大纲 / 出题: fills only what is still empty when the answer comes, never the player's words. */
@@ -318,7 +333,7 @@ export default function NewGame() {
   const start = async (d: Draft, defs: PlayDefaults | null = defaults) => {
     if (!game.llm) { toast("先连接 AI 服务"); return; }
     if (d.source && !await getBook(game.repo, d.source.bookId)) { setError("这台设备上没有选中的参考书籍，请重新选择或导入。"); return; }
-    setError(null);
+    setError(null); setFailure(null);
     setText(d.openingMode === "player" ? d.openingText : "");
     setPhase(d.openingMode === "player" ? "organizing" : "loading");
     const input = toNewWorld(d, defs ? { difficulty: defs.difficulty, autoUpkeep: defs.autoUpkeep, chapterEvery: defs.chapterEvery, fortune: defs.fortune, tabooHints: defs.tabooHints, depth: defs.depth } : undefined);
@@ -327,7 +342,7 @@ export default function NewGame() {
       if (e.type === "thinking") setPhase("thinking");
       else if (e.type === "text") { setPhase("writing"); setText(e.full); }
       else if (e.type === "organizing") setPhase("organizing");
-      else if (e.type === "failed") { setPhase("form"); setError(explainFailure(e.reason, e.status)); }
+      else if (e.type === "failed") { setPhase("form"); setError(explainFailure(e.reason, e.status)); setFailure(e.reason === "cancelled" ? null : { failure: e.failure, failures: e.failures, detail: e.detail }); }
     };
     const worldId = await game.createWorld(input, onEvent);
     // Left while it was written: stay where the player went.
@@ -398,7 +413,7 @@ export default function NewGame() {
     const next = text ? parseShare(text) : null;
     if (!next) { toast("没有找到开局设定，请粘贴完整的分享文字"); return false; }
     setDraft(next);
-    setError(null);
+    setError(null); setFailure(null);
     toast(`已导入「${next.title || "开局设定"}」`);
     return true;
   };
@@ -455,14 +470,7 @@ export default function NewGame() {
             { label: "保存为文件", onSelect: () => void exportFile() },
             { label: "导入开局设定", onSelect: () => { setPasted(""); setSheet("import"); } },
             { label: "从文件导入", onSelect: async () => { importFrom(await game.platform.files.importText().catch(() => null)); } },
-            { label: "清空重填", danger: true, onSelect: () => {
-              const before = draft;
-              const beforeIdea = idea;
-              // The words go; how the story is played and written stays.
-              setDraft({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
-              setIdea("");
-              toast("已清空", { label: "撤销", run: () => { setDraft(before); setIdea(beforeIdea); } });
-            } },
+            { label: "清空重填", danger: true, onSelect: clearForm },
           ]}
         />
       )}
@@ -534,7 +542,8 @@ export default function NewGame() {
         <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}><Icon name="more" /></button>
       </div>
       <div className="screen-body stack setup-form">
-        {error && <div className="notice">{error}</div>}
+        {error && <div className="notice"><div className="notice-body"><p>{error}</p>{failure && (failure.failure || failure.detail) && <div className="notice-actions"><button className="ghost" onClick={() => setWhy(true)}>查看原因</button></div>}</div></div>}
+        {why && error && failure && <FailureSheet text={error} failure={failure.failure} failures={failure.failures} detail={failure.detail} onClose={() => setWhy(false)} />}
         <div className="segmented mode-tabs" role="group" aria-label="故事模式">
           <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
           <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
@@ -552,6 +561,7 @@ export default function NewGame() {
         </section>
         <details><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
 
+        {filled && <div className="row form-tools"><button className="link" onClick={clearForm}>清空重填</button></div>}
         <label className="field">故事设定
           <textarea aria-label="故事设定" rows={4} value={draft.premise} onChange={(e) => set("premise", e.target.value)} placeholder={free ? "世界、作品或题材，故事从哪里开始，你想保留或改变什么。都可以自己写。" : "时代、地点、时局，你想讲的故事。比如：北宋宣和年间，汴京……"} />
         </label>

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
-import { Game, nativeFailReason } from "./game";
+import { Game, nativeFailReason, thrownFailure } from "./game";
+import { PlatformError } from "../platform";
+import { ChatError } from "./llm/chat";
 import { fakeLlm } from "./testing/fakeLlm";
 import { newBinding } from "./sources/types";
 import { saveBook } from "./sources/library";
@@ -41,7 +43,7 @@ describe("opening and recovery contracts", () => {
   });
 
   it("distinguishes local budgets, service refusals and technical waits", () => {
-    expect(nativeFailReason("failed", "原著核对：请求装配超过14545字符预算")).toBe("config");
+    expect(nativeFailReason("failed", "原著核对：请求装配超过14545字符预算")).toBe("context");
     expect(nativeFailReason("failed", "原著核对：AI服务拒绝本次内容")).toBe("refused");
     expect(nativeFailReason("failed", "写作：connection timeout")).toBe("timeout");
     expect(nativeFailReason("cancelled", "")).toBe("cancelled");
@@ -50,10 +52,12 @@ describe("opening and recovery contracts", () => {
     expect(nativeFailReason("paused", "x", "limit")).toBe("limit");
   });
 
+  // Before 0.16.0 stale, context and busy all became "config", whose only action was 去设置 (R30).
   it.each([
-    ["auth", "auth"], ["quota", "quota"], ["network", "network"], ["timeout", "timeout"],
-    ["http", "http"], ["refused", "refused"], ["cancelled", "cancelled"], ["no_record", "no_record"],
-    ["context", "config"], ["limit", "limit"], ["stale", "config"], ["config", "config"], ["future-kind", "config"],
+    ["auth", "auth"], ["quota", "quota"], ["network", "network"], ["timeout", "timeout"], ["stream", "stream"],
+    ["http", "http"], ["refused", "refused"], ["cancelled", "cancelled"], ["no_record", "format"], ["format", "format"],
+    ["context", "context"], ["limit", "limit"], ["stale", "stale"], ["busy", "busy"], ["system_stop", "system_stop"],
+    ["setup", "setup"], ["config", "other"], ["future-kind", "other"],
   ])("uses structured %s without guessing from contradictory text", (kind, expected) => {
     expect(nativeFailReason("failed", "拒绝 timeout HTTP 401 429 network 记录不完整", kind)).toBe(expected);
     expect(nativeFailReason("failed", null, kind)).toBe(expected);
@@ -63,8 +67,23 @@ describe("opening and recovery contracts", () => {
     const game = await Game.open(await createMemoryPlatform(), model);
     const snapshot = { id: "failed-run", worldId: "w", status: "failed", budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 10 },
       draft: {}, result: null, error: "原著核对：上下文窗口不足，服务拒绝输入", errorKind: "context", events: [] };
-    expect(game["nativeFailure"](snapshot, "备用提示")).toEqual({ type: "failed", reason: "config", runId: "failed-run", detail: snapshot.error, partialSaved: false });
+    expect(game["nativeFailure"](snapshot, "备用提示")).toEqual({ type: "failed", reason: "context", runId: "failed-run", detail: snapshot.error, partialSaved: false });
     expect(game["nativeFailure"]({ ...snapshot, errorKind: null, error: "连接中断" }, "备用提示").reason).toBe("network");
     expect(game["nativeFailure"]({ ...snapshot, error: null }, "备用提示").detail).toBe("备用提示");
+    // The typed record wins over the stored kind and the words, and travels with the event.
+    const failure = { kind: "format", stage: "record", sent: "no", requests: 0, at: "2026-11-17T00:00:00Z" };
+    const typed = game["nativeFailure"]({ ...snapshot, failure, failures: [failure] }, "备用提示");
+    expect(typed.reason).toBe("format");
+    expect(typed.failure).toEqual(failure);
+    expect(typed.failures).toEqual([failure]);
+  });
+
+  it("turns a refusal before the run starts into the same typed failure", () => {
+    const busy = new PlatformError("execution", "上一段还在生成或收尾", { kind: "busy", stage: "prepare", sent: "no", requests: 0, holder: "turn", at: "x" });
+    expect(thrownFailure(busy, false, "备用")).toMatchObject({ reason: "busy", detail: "上一段还在生成或收尾", failure: { holder: "turn" } });
+    expect(thrownFailure(busy, true, "备用").reason).toBe("cancelled");
+    // An unknown local error offers a retry, no longer a trip to settings.
+    expect(thrownFailure(new Error("意外"), false, "备用")).toMatchObject({ reason: "other", detail: "意外" });
+    expect(thrownFailure(new ChatError("no_secret"), false, "备用").reason).toBe("setup");
   });
 });

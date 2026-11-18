@@ -12,6 +12,8 @@ pub mod context;
 pub(crate) mod continuity;
 pub(crate) mod ordinary_resources;
 pub mod error;
+pub mod failure;
+pub(crate) mod recall;
 pub mod mcp;
 pub mod organize;
 pub mod migration;

@@ -277,6 +277,13 @@ pub fn build(input: &Value) -> Result<Value> {
         },
         "玩家要点完整保留",
     );
+    // Before 0.16.0 the native context left this layer out (D169).
+    add(
+        "world",
+        "天下大事与历史偏离",
+        if settings["mode"] == "free" { String::new() } else { crate::recall::world_block(state) },
+        "只带近来已到时间的大事和已经改变的历史，不预告未来；不裁剪",
+    );
     add(
         "directive",
         "叙事方针",
@@ -400,7 +407,12 @@ pub fn build(input: &Value) -> Result<Value> {
     let mut room = cap.saturating_sub(fixed + overhead + size(&notes) + size(&evidence));
     let continuity=crate::continuity::recall(&input["continuity"],&recent,1200.min(room/4));
     room=room.saturating_sub(size(&continuity));
-    if !continuity.is_empty(){layers.push(json!({"key":"recall","label":"知情与未完事项","content":continuity,"chars":size(&continuity),"note":"只取本路线相关记录，原句可只读回查"}));}
+    // 相关旧事 (D169): sentences from turns gone from the window about who and
+    // what is in play, or matching what the player wrote. Room is set aside
+    // now and filled once the window is known.
+    let story_turns = history.iter().filter(|n| n["kind"] != "edit").count();
+    let older_room = if story_turns > 3 { crate::recall::RECALL_BUDGET.saturating_sub(size(&continuity)).min(room / 4) } else { 0 };
+    room = room.saturating_sub(older_room);
     let mut cards = String::new();
     for c in list(&state["cards"])
         .iter()
@@ -494,6 +506,22 @@ pub fn build(input: &Value) -> Result<Value> {
         kept.insert(n["id"].clone().to_string());
     }
     pairs.reverse();
+    {
+        let offset = input["historyOffset"].as_u64().unwrap_or(0) as usize;
+        let older: Vec<crate::recall::Older> = history
+            .iter()
+            .filter(|n| n["kind"] != "edit")
+            .enumerate()
+            .filter(|(_, n)| !kept.contains(&n["id"].clone().to_string()))
+            .map(|(i, n)| crate::recall::Older { narrative: text(&n["narrative"]), turn: offset + i })
+            .collect();
+        let query = if matches!(text(&input["mode"]), "continue" | "skip") { String::new() } else { format!("{}\n{}", text(&input["text"]), text(&input["directorNote"])) };
+        let old = if older_room > 0 { crate::recall::recall_block(state, &recent, &older, older_room, &query) } else { String::new() };
+        let recall = format!("{continuity}{old}");
+        if !recall.is_empty() {
+            layers.push(json!({"key":"recall","label":"知情与相关旧事","content":recall,"chars":size(&recall),"note":"本路线的知情与未完事项，以及原文窗口以外提到眼下人和物、或与本次行动相关的句子"}));
+        }
+    }
     let mut messages = vec![];
     let system = ["rules", "premise", "era", "canonNotes", "recap", "spec"]
         .iter()
@@ -513,7 +541,13 @@ pub fn build(input: &Value) -> Result<Value> {
         messages.push(json!({"role":"user","content":action}));
         messages.push(json!({"role":"assistant","content":body}));
     }
-    let user_layers = || layers.iter().filter(|l| !["rules", "premise", "era", "canonNotes", "recap", "spec"].contains(&text(&l["key"])));
+    // The same order as the facade's request: what is true now, what is
+    // relevant, the original, then the player's action last (D169).
+    const ORDER: [&str; 11] = ["state", "essentials", "world", "cards", "recall", "referenceRules", "reference", "directive", "modes", "notes", "action"];
+    let rank = |l: &&Value| ORDER.iter().position(|k| *k == text(&l["key"])).unwrap_or(ORDER.len());
+    let mut ordered: Vec<&Value> = layers.iter().filter(|l| !["rules", "premise", "era", "canonNotes", "recap", "spec", "tools"].contains(&text(&l["key"]))).collect();
+    ordered.sort_by_key(rank);
+    let user_layers = || ordered.iter().copied();
     let user = user_layers().map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
     let compact_user = user_layers().filter(|l| !["cards", "recall"].contains(&text(&l["key"])))
         .map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
@@ -531,6 +565,31 @@ mod tests {
     use super::*;
     fn input() -> Value {
         json!({"budgetChars":14545,"template":{"rules":"按原来的旁观规则写作","era":"世界规则前后一致","spec":"正文后输出<record>","action":"继续","notes":""},"mode":"continue","settings":{"pilot":"ai","premise":"保留玩家主动改变的情节","rules":"","essentials":"","directive":""},"era":{"clock":{"mode":"free","clockStyle":"elapsed","timeStyle":"24h","hour":8},"currency":{"units":[{"name":"文","value":1}]}},"state":{"time":{"elapsedMinutes":4055*1440},"protagonist":{"name":"旅人","gender":"男","age":20,"identity":"行者","stats":{"money":120,"health":80,"energy":70},"items":[],"statuses":[]},"people":[],"places":[],"cards":[],"goals":[],"source":{"bookId":"b","instructions":"保留玩家改写","through":null,"position":0}},"reference":{"bookId":"b","passages":[{"section":10,"chunk":20,"title":"重逢","kind":"original","text":"青色玉佩只有一枚。".repeat(180),"start":0}]},"history":[{"id":"n","kind":"turn","actionText":"继续","narrative":"上一段开头。".repeat(1000)+"最后她交回青色玉佩。"}]})
+    }
+    #[test]
+    fn world_events_and_old_sentences_reach_the_writer_and_the_action_comes_last() {
+        let mut i = input();
+        i["settings"]["mode"] = "history".into();
+        i["state"]["time"]["elapsedMinutes"] = 200000.into();
+        i["state"]["timeline"] = json!([{"date":"天宝八载六月","title":"哥舒翰攻克石堡城","kind":"固定","atMinute":190000}]);
+        i["state"]["people"] = json!([{"id":"w","name":"王掌柜","aliases":[],"role":"掌柜","attitude":"冷淡","alive":true}]);
+        i["reference"] = Value::Null;
+        i["history"] = json!([
+            {"id":"o","kind":"opening","actionText":"","narrative":"你在邸店醒来。王掌柜说房钱九十文，三日内付清。"},
+            {"id":"a","kind":"turn","actionText":"出门","narrative":format!("{}王掌柜看着你出门。", "甲".repeat(4000))},
+            {"id":"b","kind":"turn","actionText":"做工","narrative":"乙".repeat(4000)},
+            {"id":"c","kind":"turn","actionText":"回来","narrative":format!("{}王掌柜又站在廊下。", "丙".repeat(4000))}
+        ]);
+        i["historyOffset"] = 0.into();
+        i["template"]["action"] = "\n\n【玩家行动】去西市。".into();
+        let a = build(&i).unwrap();
+        let user = a["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(user.contains("哥舒翰攻克石堡城"), "{user}");
+        assert!(user.contains("- 开场（王掌柜）：王掌柜说房钱九十文，三日内付清。"), "{user}");
+        assert!(user.trim_end().ends_with("【玩家行动】去西市。"), "{user}");
+        // Free worlds have no history of record.
+        i["settings"]["mode"] = "free".into();
+        assert!(!build(&i).unwrap()["messages"].to_string().contains("天下大事"));
     }
     #[test]
     fn long_state_is_projected_not_dumped_and_evidence_precedes_old_prose() {

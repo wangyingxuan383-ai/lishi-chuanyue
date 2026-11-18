@@ -62,7 +62,10 @@ class GenerationService : Service() {
                 // SecurityException and invalid/missing foreground-service type.
                 warn("promotion", error)
                 try {
-                    stopNativeRuns()
+                    // While the player is looking at the app the passage can go on
+                    // without the drawer notification (R30); only in the background
+                    // would Android stop it unprotected.
+                    if (inBackground()) stopNativeRuns()
                 } finally {
                     stopGeneration()
                 }
@@ -218,6 +221,7 @@ class GenerationService : Service() {
         private var pendingStop: Runnable? = null
         private val committed = LinkedHashSet<String>()
 
+        /** Stops native runs because Android stopped background work (recorded as the system's stop, R30). */
         private fun stopNativeRuns() {
             try {
                 nativeTimeout()
@@ -411,7 +415,7 @@ class GenerationService : Service() {
                 } catch (error: Exception) {
                     requested = false
                     warn("start", error)
-                    stopNativeRuns()
+                    if (inBackground()) stopNativeRuns()
                 }
             }
         }

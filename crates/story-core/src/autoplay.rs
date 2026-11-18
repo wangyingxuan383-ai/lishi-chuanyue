@@ -90,7 +90,7 @@ impl Engine {
                     return Err(Error::Stale);
                 }
                 if saved.status == "running" {
-                    self.store.finish(&child_id, "interrupted", None)?;
+                    self.store.finish(&child_id, "interrupted", None, None)?;
                 }
                 self.store.resume(&child_id)?;
                 (self.store.plan(&child_id)?, saved.draft, saved.budget)
@@ -112,15 +112,7 @@ impl Engine {
             self.checkpoint(&shared)?;
             self.store
                 .event(&plan.id, json!({"type":"step","index":index,"total":total}))?;
-            let active_before = budget.active_ms;
-            let child = Arc::new(Mutex::new(Context {
-                plan: child_plan.clone(),
-                budget,
-                draft: child_draft,
-                started: Instant::now(),
-                active_before,
-                cancel,
-            }));
+            let child = Arc::new(Mutex::new(Context::new(child_plan.clone(), budget, child_draft, cancel)));
             // Boxing is intentional: execute dispatches autoplay back here.
             let outcome = Box::pin(self.execute(child.clone())).await;
             self.checkpoint(&child)?;
@@ -131,10 +123,12 @@ impl Engine {
                     Error::Cancelled => "cancelled",
                     Error::Limit(_) => "paused",
                     Error::Stale => "stale",
+                    Error::SystemStop(_) => "interrupted",
                     _ => "failed",
                 };
+                let failure = child.lock().map_err(|_| Error::Cancelled)?.failure(&error);
                 self.store
-                    .finish(&child_id, status, Some(&error))?;
+                    .finish(&child_id, status, Some(&error), Some(&failure))?;
                 self.flush_usage(&child_id, status)?;
                 // A terminal event can fail after the child committed. Keep
                 // the parent's atomic route/step update before checkpointing.
@@ -142,6 +136,7 @@ impl Engine {
                 let persisted_plan = self.store.plan(&plan.id)?;
                 {
                     let mut parent = shared.lock().map_err(|_| Error::Cancelled)?;
+                    parent.stage = child.lock().map_err(|_| Error::Cancelled)?.stage;
                     parent.plan = persisted_plan;
                     parent.draft = saved.draft;
                 }
@@ -375,7 +370,10 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     template["action"]="".into();
     template["notes"]=history.last().and_then(|n|n["meta"]["notes"].as_array()).map(|a|a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")).unwrap_or_default().into();
     let era=json!({"currency":plan.options["currency"],"clock":plan.options["clock"]});
-    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters});
+    // 相关旧事 numbers passages from the opening; history holds the last 200.
+    let total: i64 = store.lock()?.query_row("WITH RECURSIVE path AS (SELECT id,parent_id,kind FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.kind FROM nodes n JOIN path p ON n.id=p.parent_id) SELECT COUNT(*) FROM path WHERE kind<>'edit'", [&plan.head_id], |r| r.get(0))?;
+    let offset = (total as usize).saturating_sub(history.iter().filter(|n| n["kind"] != "edit").count());
+    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters});
     let mut input=input;
     input["continuity"]=crate::continuity::project(&*store.lock()?,&plan.world_id,plan.base_id.as_deref().unwrap_or(&plan.head_id)).unwrap_or_else(|_|json!({"unavailable":true}));
     let context=crate::writing_context::build(&input)?;

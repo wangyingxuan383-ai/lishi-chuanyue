@@ -164,6 +164,16 @@ export function pickRandom<T>(items: T[]): T {
   return items[Math.floor(Math.random() * items.length)];
 }
 
+/** A protagonist's name fits the 12-character name field (Panel and NewGame NAME_MAX). */
+export const TEMPLATE_NAME_MAX = 12;
+
+/**
+ * A random name from the template. Two-part Latin names such as "Marcus
+ * Cornelius" can run past the name field's limit; then the given name alone is
+ * used, so 随便穿 never lands on a setup that cannot start.
+ */
 export function templateName(t: OpeningTemplate, gender: "男" | "女"): string {
-  return (pickRandom(t.surnames) + pickRandom(t.given[gender])).trim();
+  const given = pickRandom(t.given[gender]);
+  const full = (pickRandom(t.surnames) + given).trim();
+  return [...full].length <= TEMPLATE_NAME_MAX ? full : given.trim();
 }

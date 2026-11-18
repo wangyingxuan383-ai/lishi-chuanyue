@@ -151,9 +151,10 @@ export default function App() {
       setReadingState(r);
       setDevModeState(await game.repo.getSetting("devMode", false));
       setProfileState(active);
-      const recovered = active ? await game.recoverPending().catch(() => null) : null;
+      // Reattaches runs still being written; it never opens a story by itself.
+      if (active) await game.recoverPending().catch(() => {});
       const welcomed = await game.repo.getSetting("welcomed", false);
-      setStack(recovered ? [{ name: "home" }, { name: "play", worldId: recovered }] : !active && !welcomed ? [{ name: "home" }, { name: "setup", first: true }] : [{ name: "home" }]);
+      setStack(!active && !welcomed ? [{ name: "home" }, { name: "setup", first: true }] : [{ name: "home" }]);
       setBoot({ platform, game });
     })().catch((e) => setError(String(e?.message ?? e)));
   }, []);

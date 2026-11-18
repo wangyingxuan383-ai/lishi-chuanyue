@@ -7,6 +7,7 @@
 import type { Repo } from "../db/repo";
 import { newId } from "../db/repo";
 import type { ChatMessage } from "../llm/chat";
+import { explainFailure } from "../llm/providers";
 import { sourceAnalysisText } from "./facts";
 import { terms } from "./library";
 import type { SourceBinding } from "./types";
@@ -23,7 +24,8 @@ export const NOTE_KINDS: [NoteKind, string, string][] = [
 export const NOTE_KIND_LABEL = Object.fromEntries(NOTE_KINDS.map(([k, l]) => [k, l])) as Record<NoteKind, string>;
 
 export interface NoteScope { from?: number; to?: number; subject?: string; aliases?: string[]; question?: string }
-export interface NoteProgress { parts: string[]; total: number; error?: string }
+/** `error`: one sentence for the player; `detail`: what actually went wrong, for 查看原因 (R30). */
+export interface NoteProgress { parts: string[]; total: number; error?: string; detail?: string }
 export interface CanonNote {
   id: string; bookId: string; worldId: string | null; kind: NoteKind; title: string; scope: NoteScope;
   content: string; refs: number[]; model: string; status: "paused" | "running" | "done" | "failed";
@@ -188,6 +190,16 @@ export interface NoteRunner {
   model: string;
 }
 
+/** A failed note in the player's words (R30): one sentence, the cause kept apart. */
+export function noteFailure(error: unknown): { error: string; detail?: string } {
+  const kind = error && typeof error === "object" && "kind" in error ? String((error as { kind: unknown }).kind) : null;
+  const status = error && typeof error === "object" && "status" in error ? Number((error as { status: unknown }).status) || undefined : undefined;
+  const detail = error instanceof Error ? error.message.replace(/\S*:\/\/\S+/g, "[链接]").slice(0, 300) : undefined;
+  const kept = "已完成的部分保留了，可以接着整理。";
+  if (kind) return { error: `${explainFailure(kind, status)}${kept}`, ...(detail ? { detail } : {}) };
+  return { error: detail && detail.length <= 60 ? detail : `没能整理完。${kept}`, ...(detail && detail.length > 60 ? { detail } : {}) };
+}
+
 /**
  * Write (or resume) a note: each batch is digested once and saved, so a pause
  * or a failure keeps the finished parts; then the parts are merged.
@@ -199,9 +211,16 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   const refs = [...new Set(materials.map((m) => m.section))];
   let current: CanonNote = { ...note, model: runner.model, refs, status: "running", progress: { parts: note.progress.parts ?? [], total: batches.length + mergeRequests(batches.length) }, updatedAt: new Date().toISOString() };
   const save = async (patch: Partial<CanonNote>) => { current = { ...current, ...patch, updatedAt: new Date().toISOString() }; await saveNote(repo, current, true); onProgress({ ...current }); };
+  // 暂停 always frees the note, even when a request never answers (a phone
+  // that slept mid-request): before 0.16.0 that left it "整理中" and 接着整理 refused.
+  const stopped = new Promise<never>((_, reject) => {
+    const abort = () => reject(new DOMException("已暂停", "AbortError"));
+    if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+  });
+  stopped.catch(() => {});
   const call: NoteRunner["call"] = async (messages, signal) => {
     signal.throwIfAborted();
-    const text = await runner.call(messages, signal);
+    const text = await Promise.race([runner.call(messages, signal), stopped]);
     signal.throwIfAborted();
     return text;
   };
@@ -229,7 +248,7 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     }
     await save({ content: level[0] ?? "", status: "done", progress: { parts: [], total: current.progress.total } });
   } catch (error) {
-    await save(signal.aborted ? { status: "paused" } : { status: "failed", progress: { ...current.progress, error: error instanceof Error ? error.message : "没能整理" } });
+    await save(signal.aborted ? { status: "paused" } : { status: "failed", progress: { ...current.progress, ...noteFailure(error) } });
   }
   return current;
 }

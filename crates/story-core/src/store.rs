@@ -31,6 +31,29 @@ impl Store {
         lease::ensure_schema(&*self.lock()?)?;
         Ok(())
     }
+    /// Keeps the run records small (R30, D171): a saved passage's run keeps
+    /// only its summary after 14 days (usage stays in its own table); a run
+    /// that stopped is kept 30 days for 复制诊断; a deleted story's runs go.
+    /// Runs still in progress are never touched.
+    pub fn prune(&self, now: chrono::DateTime<Utc>) -> Result<usize> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved = (now - chrono::Duration::days(14)).to_rfc3339();
+        let stopped = (now - chrono::Duration::days(30)).to_rfc3339();
+        let gone = "(SELECT id FROM execution_runs WHERE (status IN ('failed','cancelled','stale','interrupted','paused') AND updated_at<?1) OR (world_id NOT IN (SELECT id FROM worlds) AND (COALESCE(json_type(plan_json,'$.newWorld'),'null') <> 'object' OR status IN ('committed','previewed'))))";
+        let mut changed = 0;
+        for table in ["execution_events", "execution_steps", "execution_failures"] {
+            changed += tx.execute(&format!("DELETE FROM {table} WHERE run_id IN {gone}"), params![stopped])?;
+        }
+        changed += tx.execute(&format!("DELETE FROM execution_runs WHERE id IN {gone}"), params![stopped])?;
+        let old = "(SELECT id FROM execution_runs WHERE status IN ('committed','previewed') AND updated_at<?1)";
+        for table in ["execution_events", "execution_steps"] {
+            changed += tx.execute(&format!("DELETE FROM {table} WHERE run_id IN {old}"), params![saved])?;
+        }
+        changed += tx.execute("UPDATE execution_runs SET draft_json='{}' WHERE status IN ('committed','previewed') AND updated_at<?1 AND draft_json<>'{}'", params![saved])?;
+        tx.commit()?;
+        Ok(changed)
+    }
     pub fn register(&self, plan: &RunPlan) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -55,14 +78,11 @@ impl Store {
         // A stale running flag is not a lock. Preserve dead-owner progress but
         // do not let it prevent another process from acquiring the story.
         let now = lease::now_ms();
-        if !lease::current(tx, &plan.world_id)?
-            .is_some_and(|l| !l.ticket.owner_id.is_empty() && l.expires_at_ms > now)
-        {
-            tx.execute("UPDATE execution_runs SET status='interrupted',error='原执行进程的租约已失效，进度已保留' WHERE world_id=? AND status IN ('running','committing')",[&plan.world_id])?;
-        }
+        Self::interrupt_dead_tx(tx, &plan.world_id)?;
         let ticket = Self::acquire_plan_tx(tx, plan, now)?;
-        if tx.query_row("SELECT 1 FROM execution_runs WHERE world_id=? AND status IN ('running','committing') AND id<>?", params![plan.world_id, plan.meta["parentRun"].as_str().unwrap_or("")], |_| Ok(())).optional()?.is_some() {
-            return Err(Error::Invalid("这个故事还在生成".into()));
+        // A look-up never waits for a passage, and a passage never waits for a look-up (D170).
+        if !lease::own_lease(plan) && tx.query_row("SELECT 1 FROM execution_runs WHERE world_id=? AND status IN ('running','committing') AND id<>? AND COALESCE(json_extract(plan_json,'$.kind'),'') NOT IN ('ask','maintain')", params![plan.world_id, plan.meta["parentRun"].as_str().unwrap_or("")], |_| Ok(())).optional()?.is_some() {
+            return Err(Error::Busy { holder: "turn".into(), until_ms: 0 });
         }
         let mut stored = plan.clone();
         stored.meta["executionLease"] = serde_json::to_value(ticket)?;
@@ -70,9 +90,55 @@ impl Store {
             Self::guard(&tx, &stored)?;
         }
         let time = Utc::now().to_rfc3339();
-        tx.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at) VALUES(?,?,?,?,'running',?,?,?, ?,?)",
-            params![plan.id, plan.world_id, plan.line_id, plan.head_id, serde_json::to_string(&stored)?, serde_json::to_string(&RunBudget::default())?, "{}", time, time])?;
+        tx.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at,parent_run) VALUES(?,?,?,?,'running',?,?,?, ?,?,?)",
+            params![plan.id, plan.world_id, plan.line_id, plan.head_id, serde_json::to_string(&stored)?, serde_json::to_string(&RunBudget::default())?, "{}", time, time, plan.meta["parentRun"].as_str()])?;
         Ok(())
+    }
+    /// Runs left "running" by an owner that is gone (closed app, lost
+    /// lease) are stopped as interrupted, with a record, so they neither
+    /// block the story nor look like the player's stop (R30).
+    pub(crate) fn interrupt_dead_tx(tx: &Transaction<'_>, world: &str) -> Result<()> {
+        let rows: Vec<(String, String, String)> = {
+            let mut stmt = tx.prepare("SELECT id,plan_json,COALESCE(json_extract(draft_json,'$.phase'),'') FROM execution_runs WHERE world_id=? AND status IN ('running','committing')")?;
+            let rows = stmt.query_map([world], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let now = lease::now_ms();
+        for (id, plan, phase) in rows {
+            let plan: RunPlan = serde_json::from_str(&plan)?;
+            if lease::alive(tx, &plan, now)? {
+                continue;
+            }
+            Self::interrupt_tx(tx, &id, &phase)?;
+        }
+        Ok(())
+    }
+    fn interrupt_tx(tx: &Transaction<'_>, id: &str, phase: &str) -> Result<()> {
+        let error = Error::fail(crate::failure::FailKind::Interrupted, "上一段在写完前被中断，进度已保留");
+        let failure = crate::failure::record(&error, crate::failure::Stage::of_purpose(phase), 0);
+        Self::finish_tx(tx, id, "interrupted", Some(&error), Some(&failure))?;
+        tx.execute("INSERT INTO execution_events(run_id,seq,event_json) VALUES(?,(SELECT COALESCE(MAX(seq),0)+1 FROM execution_events WHERE run_id=?),?)", params![id, id, json!({"type":"failed","reason":"interrupted","detail":error.to_string(),"failure":failure}).to_string()])?;
+        Ok(())
+    }
+    /// A run whose owner is gone (a closed app, a lost lease) and that nobody
+    /// took over stops as interrupted, so it neither blocks the story nor keeps
+    /// the page waiting (R30). Returns whether it was stopped now.
+    pub fn interrupt_orphan(&self, id: &str, ours: Option<&lease::LeaseTicket>) -> Result<bool> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String)> = tx.query_row("SELECT plan_json,COALESCE(json_extract(draft_json,'$.phase'),'') FROM execution_runs WHERE id=? AND status IN ('running','committing')", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let Some((plan, phase)) = row else { return Ok(false) };
+        let plan: RunPlan = serde_json::from_str(&plan)?;
+        // Taken over by another launch since: that owner decides.
+        if ours.is_some_and(|ours| lease::ticket(&plan).ok().flatten().as_ref() != Some(ours)) {
+            return Ok(false);
+        }
+        if lease::alive(&tx, &plan, lease::now_ms())? && ours.is_none() {
+            return Ok(false);
+        }
+        Self::interrupt_tx(&tx, id, &phase)?;
+        tx.commit()?;
+        Ok(true)
     }
     fn acquire_plan_tx(
         tx: &Transaction<'_>,
@@ -91,7 +157,7 @@ impl Store {
         } else {
             lease::acquire_tx(
                 tx,
-                &plan.world_id,
+                &lease::key(plan),
                 &plan.id,
                 lease::process_instance(),
                 now,
@@ -131,6 +197,11 @@ impl Store {
         crate::maintenance::guard(tx)?;
         if lease::ticket(plan)?.is_some() {
             lease::guard_plan(tx, plan)?;
+        }
+        // An answer stays useful after the story moves on (D170); tidying
+        // checks the story itself before applying anything (D168).
+        if lease::own_lease(plan) {
+            return Ok(());
         }
         let row: Option<(String,String,String)> = tx.query_row("SELECT w.current_line_id,l.node_id,w.settings_json FROM worlds w JOIN lines l ON l.id=w.current_line_id WHERE w.id=? AND w.archived=0 AND l.deleted_at IS NULL", [&plan.world_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let Some((line, head, settings)) = row else {
@@ -183,12 +254,23 @@ impl Store {
         plan: &RunPlan,
         status: &str,
         error: Option<&Error>,
+        failure: Option<&Value>,
     ) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         lease::guard_plan(&tx, plan)?;
-        tx.execute("UPDATE execution_runs SET status=?,error=?,error_kind=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')",params![status,error.map(ToString::to_string),error.map(crate::failure_kind),Utc::now().to_rfc3339(),plan.id])?;
+        Self::finish_tx(&tx, &plan.id, status, error, failure)?;
         tx.commit()?;
+        Ok(())
+    }
+    /// Stops a run and keeps why: the typed record goes with the run and is
+    /// appended to its history, which a later retry does not erase (D166).
+    fn finish_tx(tx: &Transaction<'_>, id: &str, status: &str, error: Option<&Error>, failure: Option<&Value>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let changed = tx.execute("UPDATE execution_runs SET status=?,error=?,error_kind=?,failure_json=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')",params![status,error.map(ToString::to_string),error.map(crate::failure_kind),failure.map(Value::to_string),now,id])?;
+        if let (1, Some(failure)) = (changed, failure) {
+            tx.execute("INSERT INTO execution_failures(run_id,seq,failure_json,at) VALUES(?,(SELECT COALESCE(MAX(seq),0)+1 FROM execution_failures WHERE run_id=?),?,?)", params![id, id, failure.to_string(), now])?;
+        }
         Ok(())
     }
     pub fn event(&self, id: &str, event: Value) -> Result<RunEvent> {
@@ -218,7 +300,14 @@ impl Store {
     }
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {
         let db = self.lock()?;
-        let row = db.query_row("SELECT world_id,status,budget_json,draft_json,result_json,error,error_kind FROM execution_runs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,Option<String>>(5)?, r.get::<_,Option<String>>(6)?)))?;
+        let row = db.query_row("SELECT world_id,status,budget_json,draft_json,result_json,error,error_kind,failure_json FROM execution_runs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,Option<String>>(5)?, r.get::<_,Option<String>>(6)?, r.get::<_,Option<String>>(7)?)))?;
+        let mut failures = vec![];
+        if !matches!(row.1.as_str(), "running" | "committing" | "committed" | "previewed") {
+            let mut stmt = db.prepare("SELECT failure_json FROM execution_failures WHERE run_id=? ORDER BY seq")?;
+            for text in stmt.query_map([id], |r| r.get::<_, String>(0))? {
+                failures.push(serde_json::from_str(&text?)?);
+            }
+        }
         let mut stmt = db.prepare(
             "SELECT seq,event_json FROM execution_events WHERE run_id=? AND seq>? ORDER BY seq",
         )?;
@@ -242,6 +331,8 @@ impl Store {
             result: row.4.map(|s| serde_json::from_str(&s)).transpose()?,
             error: row.5,
             error_kind: row.6,
+            failure: row.7.map(|s| serde_json::from_str(&s)).transpose()?,
+            failures,
             events,
         })
     }
@@ -255,21 +346,26 @@ impl Store {
     }
     pub fn list(&self) -> Result<Value> {
         let db = self.lock()?;
-        let mut s = db.prepare("SELECT id,world_id,status FROM execution_runs WHERE status NOT IN ('committed','previewed') AND json_extract(plan_json,'$.meta.parentRun') IS NULL ORDER BY created_at")?;
+        let mut s = db.prepare("SELECT id,world_id,status FROM execution_runs WHERE status NOT IN ('committed','previewed') AND parent_run IS NULL ORDER BY created_at")?;
         let rows = s.query_map([], |r| Ok(json!({"id":r.get::<_,String>(0)?,"worldId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?})))?;
         Ok(Value::Array(rows.collect::<std::result::Result<_, _>>()?))
     }
-    pub fn finish(&self, id: &str, status: &str, error: Option<&Error>) -> Result<()> {
-        self.lock()?.execute("UPDATE execution_runs SET status=?,error=?,error_kind=?,updated_at=? WHERE id=? AND status NOT IN ('committed','previewed')", params![status, error.map(ToString::to_string), error.map(crate::failure_kind), Utc::now().to_rfc3339(), id])?;
+    pub fn finish(&self, id: &str, status: &str, error: Option<&Error>, failure: Option<&Value>) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::finish_tx(&tx, id, status, error, failure)?;
+        tx.commit()?;
         Ok(())
     }
+    /// Saved model answers of `stage` and later stages are no longer reused,
+    /// so the next attempt requests them again (D166). They stay for usage.
     pub fn resume(&self, id: &str) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (status, text): (String, String) = tx.query_row(
-            "SELECT status,plan_json FROM execution_runs WHERE id=?",
+        let (status, text, failure, kind): (String, String, Option<String>, Option<String>) = tx.query_row(
+            "SELECT status,plan_json,failure_json,error_kind FROM execution_runs WHERE id=?",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
         if !matches!(
             status.as_str(),
@@ -281,16 +377,34 @@ impl Store {
         // A root resume starts a fresh execution. Even another Engine in this
         // process must not share an already active root's fencing ticket.
         // Spectator child turns deliberately borrow their live parent's lease.
-        if plan.meta["parentRun"].as_str().is_none()
-            && lease::current(&tx, &plan.world_id)?
-                .is_some_and(|l| !l.ticket.owner_id.is_empty() && l.expires_at_ms > lease::now_ms())
-        {
-            return Err(Error::Invalid("原执行尚未停止，不能重复启动".into()));
+        if plan.meta["parentRun"].as_str().is_none() {
+            if let Some(held) = lease::current(&tx, &lease::key(&plan))?
+                .filter(|l| !l.ticket.owner_id.is_empty() && l.expires_at_ms > lease::now_ms())
+            {
+                let holder = if held.ticket.owner_id == id { "turn".to_owned() } else { lease::holder(&tx, &held.ticket.owner_id) };
+                return Err(Error::Busy { holder, until_ms: held.expires_at_ms });
+            }
         }
         let ticket = Self::acquire_plan_tx(&tx, &plan, lease::now_ms())?;
         plan.meta["executionLease"] = serde_json::to_value(ticket)?;
+        // Resume owns the new lease in this transaction, including for a sequence's child.
+        if status == "failed" {
+            let failure: Option<Value> = failure.as_deref().map(serde_json::from_str).transpose()?;
+            if let Some(stage) = crate::failure::retry_from(failure.as_ref(), kind.as_deref()) {
+                let mut stmt = tx.prepare("SELECT step_key,kind FROM execution_steps WHERE run_id=? AND status='done' AND step_key LIKE 'model:%'")?;
+                let steps = stmt.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for (key, purpose) in steps {
+                    if stage.owns_purpose(&purpose) {
+                        tx.execute("UPDATE execution_steps SET status='stale' WHERE run_id=? AND step_key=?", params![id, key])?;
+                    }
+                }
+            }
+        }
+        // The failure history stays in execution_failures; only the run's
+        // current reason is cleared while it runs again.
         tx.execute(
-            "UPDATE execution_runs SET status='running',error=NULL,error_kind=NULL,plan_json=? WHERE id=?",
+            "UPDATE execution_runs SET status='running',error=NULL,error_kind=NULL,failure_json=NULL,plan_json=? WHERE id=?",
             params![serde_json::to_string(&plan)?, id],
         )?;
         tx.commit()?;

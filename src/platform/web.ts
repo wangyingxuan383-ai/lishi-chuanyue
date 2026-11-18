@@ -48,7 +48,7 @@ async function bridge<T>(path: string, body: unknown): Promise<T> {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new PlatformError(payload?.code ?? "dev_bridge", payload?.message ?? `开发服务器返回 ${response.status}`);
+    throw new PlatformError(payload?.code ?? "dev_bridge", payload?.message ?? `开发服务器返回 ${response.status}`, payload?.failure);
   }
   return payload as T;
 }

@@ -416,7 +416,7 @@ pub(crate) fn client() -> std::result::Result<Client, StreamEvent> {
 pub(crate) fn client_builder()->std::result::Result<reqwest::ClientBuilder,StreamEvent> {
     #[cfg(target_os = "android")]
     if !crate::android_tls::is_ready() {
-        return Err(StreamEvent::error("network"));
+        return Err(StreamEvent::Error { kind: "network".into(), status: None, message: Some("加密连接组件还没准备好，请稍后再试".into()) });
     }
     let builder = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -431,7 +431,7 @@ pub(crate) fn client_builder()->std::result::Result<reqwest::ClientBuilder,Strea
         "system" => builder,
         "custom" => match network.proxy_url.as_deref().map(reqwest::Proxy::all) {
             Some(Ok(proxy)) => builder.proxy(proxy),
-            _ => return Err(StreamEvent::error("network")),
+            _ => return Err(StreamEvent::Error { kind: "network".into(), status: None, message: Some("代理地址无效，请到设置里检查".into()) }),
         },
         _ => builder.no_proxy(),
     };
@@ -474,7 +474,8 @@ impl Budget {
             _ = cancel.cancelled() => Err(StreamEvent::error("cancelled")),
             _ = sleep_until(self.total) => Err(StreamEvent::error("timeout_total")),
             _ = sleep_until(limit) => Err(StreamEvent::error(if self.last.is_none() { "timeout_first" } else { "timeout_idle" })),
-            result = future => result.map_err(|_| StreamEvent::error("network")),
+            // Keep the kind of connection failure (R30): DNS, TLS, proxy, reset.
+            result = future => result.map_err(|e| StreamEvent::Error { kind: "network".into(), status: None, message: Some(story_core::failure::connection_reason(&e).into()) }),
         }
     }
 

@@ -6,6 +6,13 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// How long a model request may take (R30, D167). A model that thinks before
+/// writing needs time for its first word; after that only silence ends it.
+/// The backstop keeps a request that never ends from holding the story.
+pub const FIRST_BYTE_MS: u64 = 180_000;
+pub const IDLE_MS: u64 = 120_000;
+pub const REQUEST_BACKSTOP_MS: u64 = 900_000;
 pub type TextSink = Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

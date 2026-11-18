@@ -172,7 +172,7 @@ fn spectator_children_share_root_ownership_without_unlocking_story() {
             .unwrap(),
         root
     );
-    store.finish("child-1", "committed", None).unwrap();
+    store.finish("child-1", "committed", None, None).unwrap();
     child.id = "child-2".into();
     store.register(&child).unwrap();
     assert_eq!(

@@ -443,7 +443,8 @@ async fn cancellation_during_retry_wait_stops_before_another_request() {
 async fn transient_retry_obeys_request_limit_and_only_retries_eligible_errors() {
     for (kind, status, limit, expected) in [
         ("network", None, 1, "failed"),
-        ("timeout_first", None, 2, "failed"),
+        // Retried like a dropped connection since D167: nothing was received yet.
+        ("timeout_first", None, 2, "committed"),
         ("http", Some(503), 2, "committed"),
         ("timeout_idle", None, 2, "failed"),
         ("timeout_total", None, 2, "failed"),
@@ -1135,5 +1136,225 @@ async fn a_service_error_mid_stream_is_retried_once_and_the_passage_is_written()
     let stopped = g.settled("stream-twice").await;
     assert_eq!(stopped.status, "failed");
     assert!(stopped.error.unwrap().contains("upstream timeout"));
-    assert_eq!(stopped.error_kind.as_deref(), Some("network"));
+    // A break mid-stream is its own kind now (R30), with the service's words kept.
+    assert_eq!(stopped.error_kind.as_deref(), Some("stream"));
+    let failure = stopped.failure.expect("typed failure");
+    assert_eq!((failure["kind"].as_str(), failure["stage"].as_str(), failure["sent"].as_str(), failure["requests"].as_u64()), (Some("stream"), Some("write"), Some("yes"), Some(2)));
+    assert!(failure["said"].as_str().unwrap().contains("upstream timeout"));
+    assert_eq!(stopped.failures.len(), 1);
+}
+
+#[tokio::test]
+async fn a_missing_record_is_typed_and_its_retry_really_asks_again() {
+    // The passage is written; neither it nor the extraction gives a record.
+    let f = Fixture::new(vec![
+        Step::Reply(prose("你付了两文，收好一张纸。")),
+        Step::Reply(prose("不是记录")),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    f.engine.start(f.plan("no-record")).unwrap();
+    let saved = f.settled("no-record").await;
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.error_kind.as_deref(), Some("format"));
+    let failure = saved.failure.clone().expect("typed failure");
+    assert_eq!((failure["kind"].as_str(), failure["stage"].as_str(), failure["requests"].as_u64()), (Some("format"), Some("record"), Some(2)));
+    assert!(failure.get("said").is_none(), "no service words for a local failure");
+    assert_eq!(saved.failures, vec![failure.clone()]);
+    assert_eq!(f.model.count(), 2);
+    // Before 0.16.0 this replayed the saved extraction and failed again with no
+    // request at all. Now only the extraction is asked again; the passage stays.
+    f.engine.resume("no-record").unwrap();
+    let again = f.settled("no-record").await;
+    assert_eq!(again.status, "committed", "{:?}", again.error);
+    assert_eq!(f.model.count(), 3);
+    assert_eq!(f.text("SELECT narrative FROM nodes WHERE id<>'n0'"), "你付了两文，收好一张纸。");
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_failures WHERE run_id='no-record'"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_steps WHERE run_id='no-record' AND status='stale'"), 1);
+}
+
+#[tokio::test]
+async fn a_refused_passage_is_written_again_on_retry() {
+    let mut refused = written();
+    refused.finish_reason = Some("content_filter".into());
+    let f = Fixture::new(vec![Step::Reply(refused), Step::Reply(written())]);
+    f.engine.start(f.plan("refused-retry")).unwrap();
+    let saved = f.settled("refused-retry").await;
+    assert_eq!((saved.status.as_str(), saved.error_kind.as_deref()), ("failed", Some("refused")));
+    assert_eq!(saved.failure.as_ref().unwrap()["stage"], "write");
+    f.engine.resume("refused-retry").unwrap();
+    let again = f.settled("refused-retry").await;
+    assert_eq!(again.status, "committed", "{:?}", again.error);
+    assert_eq!(f.model.count(), 2);
+}
+
+#[tokio::test]
+async fn a_story_held_by_another_passage_is_refused_as_busy_not_as_settings() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let f = Fixture::new(vec![Step::Wait { started: started.clone(), release: release.clone(), reply: written() }]);
+    f.engine.start(f.plan("holder")).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    let refused = f.engine.start(f.plan("second")).unwrap_err();
+    assert!(matches!(&refused, Error::Busy { holder, .. } if holder == "turn"), "{refused:?}");
+    assert_eq!(story_core::failure_kind(&refused), "busy");
+    let record = story_core::failure::refused_at_start(&refused);
+    assert_eq!((record["kind"].as_str(), record["sent"].as_str(), record["requests"].as_u64()), (Some("busy"), Some("no"), Some(0)));
+    release.notify_one();
+    assert_eq!(f.settled("holder").await.status, "committed");
+}
+
+#[tokio::test]
+async fn a_run_whose_owner_is_gone_is_interrupted_instead_of_blocking_the_story() {
+    let f = Fixture::new(vec![Step::Reply(written())]);
+    // A run left "running" by a process that ended: its lease lapsed long ago.
+    let plan = f.plan("orphan");
+    f.store.register(&plan).unwrap();
+    f.store.lock().unwrap().execute("UPDATE world_execution_leases SET expires_at_ms=1", []).unwrap();
+    let seen = f.engine.snapshot("orphan", 0).unwrap();
+    assert_eq!(seen.status, "interrupted");
+    assert_eq!(seen.failure.as_ref().unwrap()["kind"], "interrupted");
+    assert!(seen.events.iter().any(|e| e.event["type"] == "failed" && e.event["reason"] == "interrupted"));
+    // The story is free: a new passage starts and is written.
+    f.engine.start(f.plan("after-orphan")).unwrap();
+    assert_eq!(f.settled("after-orphan").await.status, "committed");
+}
+
+#[tokio::test]
+async fn a_look_up_neither_holds_the_story_nor_waits_for_a_passage() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let f = Fixture::new(vec![Step::Wait { started: started.clone(), release: release.clone(), reply: prose("王掌柜是邸店掌柜。") }, Step::Reply(written())]);
+    let mut ask = f.plan("look-up");
+    ask.kind = "ask".into();
+    f.engine.start(ask).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    // Opening another native host must recognize the question's private lease.
+    f.engine.recover_on_start().unwrap();
+    assert_eq!(f.store.snapshot("look-up", 0).unwrap().status, "running");
+    // A passage starts while the question is still being answered.
+    f.engine.start(f.plan("while-asking")).unwrap();
+    release.notify_one();
+    assert_eq!(f.settled("look-up").await.status, "previewed");
+    assert_eq!(f.settled("while-asking").await.status, "committed");
+}
+
+#[tokio::test]
+async fn a_stop_by_the_phone_system_is_not_recorded_as_the_players_stop() {
+    let started = Arc::new(Notify::new());
+    let f = Fixture::new(vec![Step::Wait { started: started.clone(), release: Arc::new(Notify::new()), reply: written() }, Step::Reply(written())]);
+    f.engine.start(f.plan("system-stop")).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    f.engine.system_stop_all("android");
+    let saved = f.settled("system-stop").await;
+    assert_eq!((saved.status.as_str(), saved.error_kind.as_deref()), ("interrupted", Some("system_stop")));
+    // It continues like any interruption.
+    f.engine.resume("system-stop").unwrap();
+    assert_eq!(f.settled("system-stop").await.status, "committed");
+}
+
+#[tokio::test]
+async fn tidying_runs_after_the_passage_is_saved_and_never_holds_the_story() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let upkeep = prose(r#"{"cards":[{"kind":"物品","name":"铜鹰符","keys":["鹰符"],"content":"平卢军的调兵信物"}],"places":[]}"#);
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Wait { started: started.clone(), release: release.clone(), reply: upkeep }, Step::Reply(written())]);
+    let mut plan = f.plan("tidy");
+    plan.meta = json!({"upkeepVersion":"upkeep-test","upkeepMessages":[{"role":"system","content":"替作者维护“设定集”"},{"role":"user","content":"{{NARRATIVE}}"}]});
+    f.engine.start(plan).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    // The passage is saved and shown while 设定集整理 is still being asked.
+    assert_eq!(f.engine.snapshot("tidy", 0).unwrap().status, "committed");
+    assert_eq!(f.engine.snapshot("tidy~maintain", 0).unwrap().status, "running");
+    let node = f.text("SELECT node_id FROM lines WHERE id='line'");
+    release.notify_one();
+    assert_eq!(f.settled("tidy~maintain").await.status, "committed");
+    let head = f.text("SELECT node_id FROM lines WHERE id='line'");
+    assert_ne!(head, node, "the 设定集 edit follows the passage");
+    assert_eq!(f.text(&format!("SELECT action_text FROM nodes WHERE id='{head}'")), "AI 整理了设定集");
+    assert_eq!(f.scalar(&format!("SELECT json_extract(meta_json,'$.upkeep') FROM nodes WHERE id='{head}'")), 1);
+    // The next passage starts from there.
+    let mut next = f.plan("next");
+    next.head_id = head.clone();
+    next.base_id = Some(head);
+    f.engine.start(next).unwrap();
+    assert_eq!(f.settled("next").await.status, "committed");
+}
+
+#[tokio::test]
+async fn old_run_records_are_trimmed_but_runs_in_progress_and_recent_ones_stay() {
+    let f = Fixture::new(vec![Step::Reply(written())]);
+    f.engine.start(f.plan("recent")).unwrap();
+    assert_eq!(f.settled("recent").await.status, "committed");
+    let db = f.store.lock().unwrap();
+    let old = "2026-01-01T00:00:00+00:00";
+    for (id, world, status) in [("old-saved", "world", "committed"), ("old-failed", "world", "failed"), ("old-running", "world", "running"), ("gone-world", "deleted", "committed")] {
+        db.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at) VALUES(?,?,'line','n0',?,'{}','{}','{\"text\":\"很长的草稿\"}',?,?)", rusqlite::params![id, world, status, old, old]).unwrap();
+        db.execute("INSERT INTO execution_events(run_id,seq,event_json) VALUES(?,1,'{}')", [id]).unwrap();
+    }
+    drop(db);
+    let mut opening = f.plan("unfinished-opening");
+    opening.new_world = Some(json!({}));
+    opening.world_id = "world-not-committed-yet".into();
+    f.store.register(&opening).unwrap();
+    f.store.prune(chrono::Utc::now()).unwrap();
+    assert_eq!(f.store.snapshot("unfinished-opening", 0).unwrap().status, "running");
+    let count = |sql: &str| f.scalar(sql);
+    assert_eq!(count("SELECT COUNT(*) FROM execution_runs WHERE id IN ('old-failed','gone-world')"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM execution_runs WHERE id='old-saved' AND draft_json='{}'"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM execution_events WHERE run_id IN ('old-saved','old-failed','gone-world')"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM execution_events WHERE run_id='old-running'"), 1);
+    assert!(count("SELECT COUNT(*) FROM execution_events WHERE run_id='recent'") > 0);
+}
+
+#[tokio::test]
+async fn retry_of_sequence_invalidates_only_the_failed_child_stage() {
+    let f = Fixture::new(vec![
+        Step::Reply(written()),
+        Step::Reply(prose("你买好纸，经过城门。")),
+        Step::Reply(prose("无有效记录")),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    let mut plan = f.plan("sequence-retry");
+    plan.kind = "autoplay".into();
+    plan.meta = json!({"autoplayCount":2, "autoplayPauseMs":0});
+    plan.settings["pilot"] = "ai".into();
+    f.store.lock().unwrap().execute("UPDATE worlds SET settings_json=?", [plan.settings.to_string()]).unwrap();
+    f.engine.start(plan).unwrap();
+    let failed = f.settled("sequence-retry").await;
+    assert_eq!(failed.status, "failed", "{:?}", failed.error);
+    assert_eq!(failed.failure.as_ref().unwrap()["stage"], "record");
+    assert_eq!(failed.draft["steps"], 1);
+    f.engine.resume("sequence-retry").unwrap();
+    let complete = f.settled("sequence-retry").await;
+    assert_eq!(complete.status, "committed", "{:?}", complete.error);
+    assert_eq!(f.model.count(), 4);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes WHERE kind='turn'"), 2);
+}
+
+#[tokio::test]
+async fn deferred_upkeep_does_not_move_the_next_writers_base() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let upkeep = prose(r#"{"cards":[{"kind":"物品","name":"铜鹰符","keys":["鹰符"],"content":"调兵信物"}],"places":[]}"#);
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Wait { started:started.clone(), release:release.clone(), reply:upkeep }]);
+    let mut plan = f.plan("tidy-busy");
+    plan.meta = json!({"upkeepMessages":[{"role":"user","content":"{{NARRATIVE}}"}]});
+    f.engine.start(plan).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    let head = f.text("SELECT node_id FROM lines WHERE id='line'");
+    let mut next = f.plan("new-writer");
+    next.head_id = head.clone();
+    next.base_id = Some(head.clone());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match f.store.register(&next) {
+                Ok(()) => break,
+                Err(Error::Busy { .. }) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(error) => panic!("could not start the next passage: {error:?}"),
+            }
+        }
+    }).await.unwrap();
+    release.notify_one();
+    assert_eq!(f.settled("tidy-busy~maintain").await.status, "committed");
+    assert_eq!(f.text("SELECT node_id FROM lines WHERE id='line'"), head);
 }

@@ -1,7 +1,7 @@
 import {assertSqlWritable,restoreWithFence} from "./sql-maintenance";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
-import { PlatformError, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText, type NotifyPrefs } from "./types";
+import { PlatformError, type Failure, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText, type NotifyPrefs } from "./types";
 import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
 import { cancellable } from "./bookFiles";
 
@@ -10,8 +10,8 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
     return await invoke<T>(command, args);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error) {
-      const { code, message } = error as { code: string; message?: string };
-      throw new PlatformError(code, message ?? code);
+      const { code, message, failure } = error as { code: string; message?: string; failure?: Failure };
+      throw new PlatformError(code, message ?? code, failure);
     }
     throw new PlatformError("ipc", String(error));
   }

@@ -4,8 +4,9 @@
 // here through `start`, so they all reserve space, reset the timers and set
 // up 再试一次 the same way (R28-T006).
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import type { AutoplayEvent, AutoplayHandle, TurnEvent, TurnHandle } from "../../../engine/game";
+import type { AutoplayEvent, AutoplayHandle, FailReason, SavedExecution, TurnEvent, TurnHandle } from "../../../engine/game";
 import type { Game } from "../../../engine/game";
+import type { Failure } from "../../../platform";
 import { explainFailure } from "../../../engine/llm/providers";
 import type { ActionMode, StoryNode } from "../../../engine/types";
 import type { AppValue } from "../../app/context";
@@ -13,8 +14,39 @@ import { buzz } from "../../app/motion";
 import type { Gen } from "./types";
 
 export type Restore = { mode: ActionMode; text: string; note: string };
-export type Notice = { text: string; actions: { label: string; run: () => void }[] };
-type SavedRun = { id: string; status: string; error: string | null; kind?: string; steps?: number; total?: number; hasText?: boolean };
+export type Notice = { text: string; actions: { label: string; run: () => void }[]; failure?: Failure; failures?: Failure[]; reason?: FailReason; detail?: string };
+type SavedRun = Pick<SavedExecution, "id" | "status" | "error"> & Partial<SavedExecution>;
+
+/**
+ * What the player can do about a failure (R30, D166): one main action per kind,
+ * never a generic button that replays the same failure.
+ * - continue: the saved run goes on (nothing was lost; a failed request is sent again);
+ * - redo: the stage the model's answer broke is asked again (the passage, or only its record);
+ * - fresh: the same action is written anew with what is set now;
+ * - settings / wait: nothing to retry until something else changes.
+ */
+export function failurePlan(reason: FailReason, hasRun: boolean): { main: "continue" | "redo" | "fresh" | "settings" | "wait"; label: string; switchService: boolean } {
+  switch (reason) {
+    case "network": case "timeout": case "stream": case "system_stop": case "interrupted": case "limit": case "cancelled":
+      return { main: hasRun ? "continue" : "fresh", label: hasRun ? "接着写完" : "再试一次", switchService: false };
+    case "http": case "storage": case "other":
+      return { main: hasRun ? "continue" : "fresh", label: "再试一次", switchService: false };
+    case "quota":
+      return { main: hasRun ? "continue" : "fresh", label: "再试一次", switchService: true };
+    case "refused": case "empty":
+      return { main: hasRun ? "redo" : "fresh", label: "重新写这一段", switchService: reason === "refused" };
+    case "format": case "review": case "settle":
+      return { main: hasRun ? "redo" : "fresh", label: reason === "settle" ? "重新写这一段" : "重试这一步", switchService: false };
+    case "stale": case "context":
+      return { main: "fresh", label: "按现在的情况重写", switchService: false };
+    case "busy":
+      return { main: "wait", label: "等它结束再写", switchService: false };
+    case "auth": case "setup":
+      return { main: "settings", label: "去设置", switchService: false };
+    case "unsupported":
+      return { main: "settings", label: "换个模型", switchService: false };
+  }
+}
 
 export interface GenerationDeps {
   game: Game;
@@ -95,7 +127,7 @@ export function useGeneration(d: GenerationDeps) {
 
   const onEvent = (restore: Restore | null) => (e: TurnEvent | AutoplayEvent) => {
     if (!screenActive.current) return;
-    const { game, refresh, showSaved, push, profileId } = deps.current;
+    const { game, refresh, showSaved } = deps.current;
     if (e.type === "step") { resumedAutoplay.current = true; stepStarted(e.index, e.total); }
     else if (e.type === "finished") { resumedAutoplay.current = false; setAuto(null); setGen(null); handle.current = null; void refresh(); }
     else if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
@@ -113,35 +145,34 @@ export function useGeneration(d: GenerationDeps) {
       resumedAutoplay.current = false;
       setAuto(null);
       handle.current = null;
-      if (e.partialSaved) {
-        if (e.node || e.cursor) { showSaved(e.node ?? e.cursor!.head); setGen(null); }
-        else void refresh().then(() => setGen(null));
-        // The interrupted passage shows its own 续写 / 重说; here only why it stopped.
-        void refresh();
-        if (e.reason !== "cancelled") setNotice({ text: `${e.detail ?? explainFailure(e.reason, e.status)} 已写出的部分保留了。`, actions: [] });
-        return;
-      }
       setGen(null);
-      // A paused run still holds the action; giving it back would invite sending it twice.
-      if (restore && e.reason !== "limit") deps.current.restoreDraft(restore);
-      if (e.reason === "cancelled") { if (e.runId) void inspectSavedExecution(e.detail, e.runId); return; }
-      // Paused at its allowance: offer to continue that run (not a new one), via the saved run.
-      if (e.reason === "limit") {
-        setNotice({ text: explainFailure("limit"), actions: e.runId ? [{ label: "接着写完", run: () => resumeExecution(e.runId!, true) }] : [] });
-        if (e.runId) void inspectSavedExecution(e.detail, e.runId);
-        return;
-      }
-      failures.current++;
-      buzz(game.platform);
-      const actions: Notice["actions"] = [];
-      if (e.reason === "config" || e.reason === "auth") actions.push({ label: "去设置", run: () => push({ name: "setup", profileId }) });
-      else {
-        if (retry.current) { const again = retry.current; actions.push({ label: e.reason === "refused" ? "原样再试" : "再试一次", run: again }); }
-        if (failures.current >= 2 || e.reason === "quota" || e.reason === "refused") actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
-      }
-      setNotice({ text: e.detail ?? explainFailure(e.reason, e.status), actions });
-      if (e.runId) void inspectSavedExecution(e.detail, e.runId);
+      // A paused or stopped run still holds the action; giving it back would invite sending it twice.
+      if (restore && !e.runId) deps.current.restoreDraft(restore);
+      if (e.reason !== "cancelled" && e.reason !== "limit") { failures.current++; buzz(game.platform); }
+      setNotice(failureNotice({ reason: e.reason, status: e.status, detail: e.detail, runId: e.runId, failure: e.failure, failures: e.failures }));
     }
+  };
+
+  /** The notice for a stopped passage: one sentence, its main action, and the record behind “查看原因”. */
+  const failureNotice = (f: { reason: FailReason; status?: number; detail?: string; runId?: string; failure?: Failure; failures?: Failure[]; saved?: SavedRun }): Notice => {
+    const { push, profileId } = deps.current;
+    const plan = failurePlan(f.reason, !!f.runId);
+    const actions: Notice["actions"] = [];
+    const again = retry.current;
+    if (plan.main === "settings") actions.push({ label: plan.label, run: () => push({ name: f.reason === "unsupported" ? "settings" : "setup", profileId }) });
+    else if (plan.main === "wait") {
+      const until = f.failure?.untilMs ?? 0;
+      if (again) actions.push({ label: plan.label, run: () => { const delay = Math.min(Math.max(until - Date.now(), 0), 45_000); setNotice({ text: "等这个故事空出来就写…", actions: [] }); setTimeout(() => { if (screenActive.current && !handle.current) again(); }, delay + 300); } });
+    } else if ((plan.main === "continue" || plan.main === "redo") && f.runId) {
+      const id = f.runId;
+      actions.push({ label: plan.label, run: () => retryExecution(id) });
+    } else if (plan.main === "fresh") {
+      if (f.runId) { const id = f.runId; actions.push({ label: plan.label, run: () => retryExecution(id) }); }
+      else if (again) actions.push({ label: plan.label, run: again });
+    }
+    if (plan.switchService || failures.current >= 2) actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
+    // The HTTP status lives in the failure record: 500 and 400 read differently.
+    return { text: noticeText(f.reason, f.status ?? f.failure?.status, f.saved), actions, reason: f.reason, ...(f.detail ? { detail: f.detail } : {}), ...(f.failure ? { failure: f.failure } : {}), ...(f.failures?.length ? { failures: f.failures } : {}) };
   };
 
   /** Starts one passage. `run` gets the event handler and returns the engine's handle. */
@@ -151,27 +182,22 @@ export function useGeneration(d: GenerationDeps) {
     handle.current = o.run(onEvent(o.restore ?? null));
   };
 
+  /** Follows a run still being written (also one started before the page opened). */
   const resumeExecution = (id: string, resume = false) => {
     if (!screenActive.current || handle.current || deps.current.isBusy()) return;
     recoveryNoticeVersion.current++;
-    start({ action: null, retry: () => resumeExecution(id, true), run: (on) => deps.current.game.followExecution(id, on, resume) });
+    start({ action: null, retry: () => retryExecution(id), run: (on) => deps.current.game.followExecution(id, on, resume) });
   };
-  const showSavedExecution = (run: SavedRun, fallback?: string) => {
-    const detail = run.error?.trim() || fallback?.trim() || (run.status === "paused" ? "这段写得比较久，已先停下，进度已保存" : "");
-    const saved = run.kind === "autoplay" ? `连播已完成 ${run.steps ?? 0}/${run.total ?? 0} 段。` : "上次生成的进度已保存。";
-    const text = detail ? `${detail}${/[。！？]$/.test(detail) ? "" : "。"}${detail.includes("进度已保存") ? "" : ` ${saved}`}` : saved;
-    // Opening the page never starts a request by itself. A paused run (its allowance
-    // used) continues only when the player asks, with the same allowance again (D159).
-    const label = run.kind === "autoplay" ? run.hasText ? "续写并继续连播" : "重试剩余连播" : run.status === "paused" ? "接着写完" : "继续上次生成";
-    setNotice({ text, actions: [{ label, run: () => resumeExecution(run.id, true) }] });
+  /** Tries a stopped run again: continued, asked again from the failed stage, or rebuilt (D166). */
+  const retryExecution = (id: string) => {
+    if (!screenActive.current || handle.current || deps.current.isBusy()) return;
+    recoveryNoticeVersion.current++;
+    start({ action: null, retry: () => retryExecution(id), run: (on) => deps.current.game.retryRun(id, on) });
   };
-  const inspectSavedExecution = async (fallback?: string, expectedId?: string) => {
-    const version = ++recoveryNoticeVersion.current;
-    try {
-      const run = await deps.current.game.currentExecution(deps.current.worldId);
-      if (!run || (expectedId && run.id !== expectedId) || !screenActive.current || handle.current || version !== recoveryNoticeVersion.current) return;
-      if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run, fallback);
-    } catch { /* The existing failure notice remains available. */ }
+  /** Reopening the story after a stop: the same notice the failure gave, never a request by itself. */
+  const showSavedExecution = (run: SavedRun) => {
+    const reason = run.reason ?? (run.status === "paused" ? "limit" : run.status === "cancelled" ? "cancelled" : run.status === "interrupted" ? "interrupted" : "other");
+    setNotice(failureNotice({ reason, detail: run.error ?? undefined, runId: run.id, failure: run.failure ?? undefined, saved: run }));
   };
 
   // Opening the story: show it, then follow a run still being written (also one
@@ -183,8 +209,10 @@ export function useGeneration(d: GenerationDeps) {
       await deps.current.refresh();
       const run = await deps.current.game.currentExecution(deps.current.worldId);
       if (disposed || !run || handle.current || deps.current.isBusy()) return;
-      if (["running", "committing", "interrupted"].includes(run.status)) resumeExecution(run.id, run.status === "interrupted");
-      else if (["cancelled", "failed", "paused"].includes(run.status)) showSavedExecution(run);
+      // A passage still being written is followed; an interrupted one costs a
+      // request to continue, so the player decides (R30).
+      if (["running", "committing"].includes(run.status)) resumeExecution(run.id);
+      else if (["cancelled", "failed", "paused", "interrupted"].includes(run.status)) showSavedExecution(run);
     })().catch(() => {
       if (!disposed) setNotice({ text: "暂时没能读取上次生成的进度，请稍后重新打开故事。", actions: [] });
     });
@@ -221,7 +249,6 @@ export function useGeneration(d: GenerationDeps) {
         setGen(null);
         void refresh();
         if (e.reason === "count") toast(`连播了 ${e.steps} 段`);
-        else if (e.reason === "busy") toast("正在写，稍后再连播");
         else if (e.reason === "player") toast("主角由你来演时不能连播");
       } else {
         if (e.type === "done") played++;
@@ -238,8 +265,15 @@ export function useGeneration(d: GenerationDeps) {
 
   return {
     gen, setGen, auto, notice, setNotice, slow, waited,
-    start, startAutoplay, resumeExecution, stop,
+    start, startAutoplay, resumeExecution, retryExecution, stop,
     /** True while a request of this page is in flight (a ref, so it is current inside callbacks). */
     inFlight: () => !!handle.current || !!autoHandle.current,
   };
+}
+
+/** One sentence for the notice: what happened, in the player's words; the cause is behind “查看原因”. */
+function noticeText(reason: FailReason, status?: number, saved?: SavedRun): string {
+  const base = reason === "cancelled" ? "已停止，进度已保存。" : explainFailure(reason, status);
+  if (saved?.kind === "autoplay" && reason !== "busy") return `${base} 连播已完成 ${saved.steps ?? 0}/${saved.total ?? 0} 段。`;
+  return base;
 }

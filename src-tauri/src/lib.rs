@@ -79,9 +79,10 @@ pub fn run() {
             engine
                 .recover_on_start()
                 .map_err(|_| std::io::Error::other("无法读取运行进度"))?;
+            // Every caller is Android stopping background work, never the player (R30).
             keep_alive::set_timeout_handler(move || {
                 if let Some(engine) = weak.upgrade() {
-                    engine.stop_all();
+                    engine.system_stop_all("android");
                 }
             });
             let weak = Arc::downgrade(&engine);

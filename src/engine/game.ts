@@ -7,10 +7,10 @@ import { validateContinuity, readContinuity } from "./continuity";
 import { formatDate } from "./calendar/date";
 import { eraContext, eraPack } from "./era";
 import { packCards } from "./era/card";
-import type { ExecutionSnapshot, Platform, SqlStatement } from "../platform";
+import { PlatformError, type ExecutionSnapshot, type Failure, type Platform, type SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
-import { ChatError, compactChatMessages, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
+import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
 import { hasChinese, isNotice, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, writingContextTemplate, renderState, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
@@ -66,29 +66,84 @@ export interface ContextPreview {
   calibrated: boolean;
 }
 
-/** `limit`: the run used its own allowance and paused; it can be continued (D159). */
-export type FailReason = "network" | "timeout" | "http" | "auth" | "quota" | "empty" | "refused" | "cancelled" | "config" | "no_record" | "limit";
+/**
+ * Why a generation stopped (R30, D166). The native engine records the kind with
+ * the run; it is never guessed from the error's words for new runs.
+ * `limit`: the run used its own allowance and paused; it can be continued (D159).
+ * `busy`: another task holds the story. `interrupted`: the app closed or lost the
+ * story before the passage finished. `setup`: no key, or the key is bound elsewhere.
+ */
+export type FailReason =
+  | "network" | "timeout" | "stream" | "http" | "auth" | "quota" | "context"
+  | "refused" | "empty" | "format" | "review" | "settle" | "stale" | "busy"
+  | "system_stop" | "interrupted" | "cancelled" | "limit" | "setup" | "storage" | "unsupported" | "other";
 
-export function nativeFailReason(status: string, message: string | null, errorKind?: string | null): FailReason {
-  if (errorKind != null) {
-    switch (errorKind) {
-      case "cancelled": case "timeout": case "network": case "auth": case "quota":
-      case "http": case "refused": case "no_record": case "empty": case "limit": return errorKind;
-      default: return "config";
-    }
+const FAIL_REASONS = new Set<string>(["network", "timeout", "stream", "http", "auth", "quota", "context", "refused", "empty", "format", "review", "settle", "stale", "busy", "system_stop", "interrupted", "cancelled", "limit", "setup", "storage", "unsupported", "other"]);
+
+/** Reads the typed record first; older runs only stored a kind, or only the words. */
+export function nativeFailReason(status: string, message: string | null, errorKind?: string | null, failure?: Failure | null): FailReason {
+  const kind = failure?.kind ?? errorKind;
+  if (kind != null) {
+    if (FAIL_REASONS.has(kind)) return kind as FailReason;
+    // Kinds written before 0.16.0.
+    if (kind === "no_record") return "format";
+    return "other";
   }
   if (status === "cancelled") return "cancelled";
   if (status === "paused") return "limit";
+  if (status === "interrupted") return "interrupted";
   const text = message ?? "";
   if (/拒绝|refus|safety|blocked/i.test(text)) return "refused";
   if (/timeout|timed out|超时|流空闲/i.test(text)) return "timeout";
   if (/\b40[13]\b|密钥|凭据|认证/i.test(text)) return "auth";
   if (/\b(?:402|429)\b|余额不足|限流/i.test(text)) return "quota";
-  if (/上限|预算|装配|超出|超过/.test(text)) return "config";
-  if (/记录.*不完整|没有记录|记录块/.test(text)) return "no_record";
+  if (/上限|预算|装配|超出|超过/.test(text)) return "context";
+  if (/记录.*不完整|没有记录|记录块/.test(text)) return "format";
+  if (/还有任务正在运行|还在生成|尚未停止/.test(text)) return "busy";
   if (/network|connection|connect error|网络|连接中断/i.test(text)) return "network";
   if (/\bHTTP\b|status.?[45]\d\d/i.test(text)) return "http";
-  return "config";
+  return "other";
+}
+
+/**
+ * The passages the native assembly reads (D169): the last 200, enough for the
+ * window and for 相关旧事, numbered from the opening by `historyOffset`.
+ */
+function nativeHistory(input: { history: StoryNode[]; allTurns?: StoryNode[] }) {
+  const path = input.allTurns ?? input.history;
+  const recent = path.slice(-200);
+  const historyOffset = path.slice(0, path.length - recent.length).filter((n) => n.kind !== "edit").length;
+  return { history: recent.map(({ id, kind, actionMode, actionText, narrative }) => ({ id, kind, actionMode, actionText, narrative })), historyOffset };
+}
+
+/** A saved passage run of the current head, as the play screen shows it after reopening. */
+export interface SavedExecution {
+  id: string; status: string; error: string | null; kind: string; steps: number; total: number; hasText: boolean;
+  failure: Failure | null;
+  /** Why it stopped, when it did. */
+  reason: FailReason | null;
+}
+
+/** What decides whether a saved run was planned for the service set now. */
+function modelIdentity(model: { slot?: string; url?: string; model?: string; auxModel?: string | null }) {
+  return { slot: model.slot ?? "", url: model.url ?? "", model: model.model ?? "", auxModel: model.auxModel ?? null };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().filter((k) => (value as Record<string, unknown>)[k] !== undefined).map((k) => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(value ?? null);
+}
+
+/** A start-up refusal (a busy story, a missing key) as the same failed event a stopped run gives. */
+export function thrownFailure(error: unknown, stopped: boolean, fallback: string): Extract<TurnEvent, { type: "failed" }> {
+  if (stopped) return { type: "failed", reason: "cancelled", partialSaved: false };
+  const failure = error instanceof PlatformError ? error.failure : undefined;
+  const detail = error instanceof Error ? error.message : fallback;
+  const reason = failure ? nativeFailReason("failed", detail, null, failure)
+    : error instanceof ChatError ? (error.kind === "no_secret" || error.kind === "url_not_bound" ? "setup" : nativeFailReason("failed", detail, error.kind.startsWith("timeout") ? "timeout" : error.kind))
+    : "other";
+  return { type: "failed", reason, detail, partialSaved: false, ...(failure ? { failure } : {}) };
 }
 
 export type TurnEvent =
@@ -98,7 +153,7 @@ export type TurnEvent =
   | { type: "text"; delta: string; full: string }
   | { type: "organizing" }
   | { type: "done"; cursor: tree.Cursor; node: StoryNode; chips: Chip[] }
-  | { type: "failed"; reason: FailReason; status?: number; detail?: string; partialSaved: boolean; runId?: string; cursor?: tree.Cursor; node?: StoryNode };
+  | { type: "failed"; reason: FailReason; status?: number; detail?: string; partialSaved: boolean; runId?: string; cursor?: tree.Cursor; node?: StoryNode; failure?: Failure; failures?: Failure[] };
 
 export interface NewWorld {
   /** @deprecated Accepted from legacy opening drafts and ignored. */
@@ -127,7 +182,6 @@ export type AutoplayStop =
   | "died"      // the protagonist died
   | "challenge" // the challenge ended
   | "script"    // the last beat was played
-  | "busy"      // something was already being written; nothing started
   | "player";   // the player plays the protagonist (not 旁观); nothing started
 
 export type AutoplayEvent =
@@ -164,9 +218,10 @@ interface UsageScope { worldId: string | null; nodeId: string | null; purpose: s
 type CarriedEdit = Pick<StoryNode, "record" | "actionText">;
 
 const DEFAULT_CONTEXT_TOKENS = 12_000;
-const CODEX_TIMEOUT = { firstByteMs: 30_000, idleMs: 30_000, totalMs: 75_000 };
+/** Helper tasks wait like passages do (D167): thinking models are slow to start. */
+const CODEX_TIMEOUT = DEFAULT_TIMEOUTS;
 /** A note reads up to 16 000 characters and writes up to 3 000. */
-const NOTE_TIMEOUT = { firstByteMs: 60_000, idleMs: 45_000, totalMs: 240_000 };
+const NOTE_TIMEOUT = DEFAULT_TIMEOUTS;
 // Free-mode wording is applied at the call site, keeping the shared chapter helper unchanged.
 const FREE_CHAPTER_PROMPT_VERSION = "chapter-2-free";
 
@@ -253,6 +308,23 @@ export class Game {
     while (this.background.size) await Promise.allSettled([...this.background]);
   }
 
+  /**
+   * 设定集整理 and 章节摘要 run after the passage is shown (D168), in a run of
+   * their own that never holds the story; the screen refreshes when they land.
+   */
+  private followMaintenance(runId: string, worldId: string): void {
+    if (!this.platform.execution) return;
+    const id = `${runId}~maintain`;
+    this.inBackground((async () => {
+      const [row] = await this.platform.sql.query("SELECT 1 AS found FROM execution_runs WHERE id=?", [id]);
+      if (!row) return;
+      const handle = startRun(this.platform, null, () => {}, id);
+      handle.detach();
+      await handle.done.catch(() => null);
+      for (const fn of this.listeners) fn(worldId);
+    })());
+  }
+
   private inBackground(work: Promise<void>): void {
     this.background.add(work);
     void work.catch(() => {}).then(() => this.background.delete(work));
@@ -284,8 +356,9 @@ export class Game {
   }
 
   private nativeFailure(snapshot: ExecutionSnapshot, fallback: string): Extract<TurnEvent, { type: "failed" }> {
-    return { type: "failed", reason: nativeFailReason(snapshot.status, snapshot.error, snapshot.errorKind),
-      runId: snapshot.id, detail: snapshot.error ?? fallback, partialSaved: false };
+    return { type: "failed", reason: nativeFailReason(snapshot.status, snapshot.error, snapshot.errorKind, snapshot.failure),
+      runId: snapshot.id, detail: snapshot.error ?? fallback, partialSaved: false,
+      ...(snapshot.failure ? { failure: snapshot.failure } : {}), ...(snapshot.failures?.length ? { failures: snapshot.failures } : {}) };
   }
 
   // ---------- model calls ----------
@@ -354,7 +427,7 @@ export class Game {
   /** Expands a rough idea into a full setup; fields the player filled are kept. */
   async assist(idea: string, current: Partial<SetupDraft>): Promise<Partial<SetupDraft> | null> {
     try {
-      const result = await this.call(await this.withOpeningSources(assistMessages(idea, current), current, idea), { usage: { worldId: null, nodeId: null, purpose: "assist" }, aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
+      const result = await this.call(await this.withOpeningSources(assistMessages(idea, current), current, idea), { usage: { worldId: null, nodeId: null, purpose: "assist" }, aux: true, timeouts: DEFAULT_TIMEOUTS });
       const value = lenientJson(result.text) as Partial<SetupDraft> | null;
       await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
@@ -385,7 +458,7 @@ export class Game {
 
   private async draft<T>(messages: ChatMessage[], purpose: string, parse: (value: unknown) => T | null): Promise<T | null> {
     try {
-      const result = await this.call(messages, { usage: { worldId: null, nodeId: null, purpose }, aux: true, timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 } });
+      const result = await this.call(messages, { usage: { worldId: null, nodeId: null, purpose }, aux: true, timeouts: DEFAULT_TIMEOUTS });
       const value = parse(lenientJson(result.text));
       await this.platform.sql.batch([this.usage(null, null, purpose, result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
@@ -469,7 +542,7 @@ export class Game {
     this.requireExecution();
     if (input.source) {
       const book = validBinding(input.source) ? await getBook(this.repo, input.source.bookId) : null;
-      if (!book || input.source.position >= book.sections.length || input.source.through !== null && (input.source.through >= book.sections.length || input.source.position > input.source.through)) { onEvent({ type: "failed", reason: "config", partialSaved: false }); return null; }
+      if (!book || input.source.position >= book.sections.length || input.source.through !== null && (input.source.through >= book.sections.length || input.source.position > input.source.through)) { onEvent({ type: "failed", reason: "other", detail: "参考的原著位置无效，请重新选择", partialSaved: false }); return null; }
     }
     const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
     const free = settings.mode === "free";
@@ -544,7 +617,7 @@ export class Game {
       if (!node) throw new Error("开场提交结果不完整");
       onEvent({ type: "done", cursor: await tree.cursor(this.repo, worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
       return worldId;
-    } catch (error) { onEvent({ type: "failed", reason: "config", detail: error instanceof Error ? error.message : "开场未能完成", partialSaved: false }); return null; }
+    } catch (error) { onEvent(thrownFailure(error, false, "开场未能完成")); return null; }
   }
 
   /** How a world began, for "再来一局同样设定": the opening's protagonist and arrival with the world's current settings. */
@@ -602,12 +675,48 @@ export class Game {
     // Completion is reconstructed from durable nodes after the terminal snapshot.
   }
 
-  async currentExecution(worldId: string): Promise<{ id: string; status: string; error: string | null; kind: string; steps: number; total: number; hasText: boolean } | null> {
+  async currentExecution(worldId: string): Promise<SavedExecution | null> {
     if (!this.platform.execution) return null;
     const cursor = await tree.cursor(this.repo, worldId);
-    const [row] = await this.platform.sql.query(`SELECT id,status,error,json_extract(plan_json,'$.kind') AS kind,COALESCE(json_extract(draft_json,'$.steps'),0) AS steps,COALESCE(json_extract(plan_json,'$.meta.autoplayCount'),0) AS total,EXISTS(SELECT 1 FROM execution_events e WHERE e.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END AND json_extract(e.event_json,'$.type')='text') AS has_text FROM execution_runs WHERE world_id=? AND line_id=? AND base_head_id=?
-      AND status NOT IN ('committed','previewed','stale') AND json_extract(plan_json,'$.kind') IN ('turn','variant','continue','autoplay') ORDER BY created_at DESC LIMIT 1`, [worldId, cursor.line.id, cursor.head.id]);
-    return row ? { id: String(row.id), status: String(row.status), error: row.error === null ? null : String(row.error), kind: String(row.kind), steps: Number(row.steps), total: Number(row.total), hasText: !!row.has_text } : null;
+    const [row] = await this.platform.sql.query(`SELECT id,status,error,error_kind,failure_json,json_extract(plan_json,'$.kind') AS kind,COALESCE(json_extract(draft_json,'$.steps'),0) AS steps,COALESCE(json_extract(plan_json,'$.meta.autoplayCount'),0) AS total,EXISTS(SELECT 1 FROM execution_events e WHERE e.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END AND json_extract(e.event_json,'$.type')='text') AS has_text FROM execution_runs WHERE world_id=? AND line_id=? AND base_head_id=?
+      AND parent_run IS NULL AND status NOT IN ('committed','previewed','stale') AND json_extract(plan_json,'$.kind') IN ('turn','variant','continue','autoplay') ORDER BY created_at DESC LIMIT 1`, [worldId, cursor.line.id, cursor.head.id]);
+    if (!row) return null;
+    const failure = typeof row.failure_json === "string" ? JSON.parse(row.failure_json) as Failure : null;
+    const status = String(row.status), error = row.error === null ? null : String(row.error);
+    return { id: String(row.id), status, error, kind: String(row.kind), steps: Number(row.steps), total: Number(row.total), hasText: !!row.has_text,
+      failure, reason: ["failed", "cancelled", "paused", "interrupted"].includes(status) ? nativeFailReason(status, error, row.error_kind === null ? null : String(row.error_kind), failure) : null };
+  }
+
+  /**
+   * Tries a stopped passage again (R30, D166). The saved run continues when it
+   * still fits the story; the engine itself asks the model again from the stage
+   * that failed. When the story moved on, or the service, model or story
+   * settings changed since, the same action is written anew with what is set now.
+   */
+  retryRun(id: string, onEvent: (event: TurnEvent) => void): TurnHandle {
+    let inner: TurnHandle | null = null, stopped = false, detached = false;
+    const done = (async () => {
+      const [row] = await this.platform.sql.query("SELECT status,world_id,plan_json,error_kind,failure_json FROM execution_runs WHERE id=?", [id]);
+      if (!row) throw new Error("找不到这次生成");
+      const plan = JSON.parse(String(row.plan_json)) as Partial<RunPlan> & { meta?: Record<string, unknown> };
+      const worldId = String(row.world_id), world = await this.repo.getWorld(worldId), cursor = await tree.cursor(this.repo, worldId);
+      const failure = typeof row.failure_json === "string" ? JSON.parse(row.failure_json) as Failure : null;
+      const kind = failure?.kind ?? (row.error_kind === null ? null : String(row.error_kind));
+      const same = (a: unknown, b: unknown) => stableJson(a) === stableJson(b);
+      const llm = this.llm;
+      const expired = row.status === "stale" || kind === "stale" || plan.headId !== cursor.head.id
+        || !llm || !plan.model || !same(modelIdentity(plan.model), modelIdentity(llm))
+        || !!world && !same(plan.settings, world.settings);
+      const runKind = plan.kind;
+      if (stopped) return;
+      if (expired && (runKind === "turn" || runKind === "variant" || runKind === "continue")) {
+        inner = runKind === "turn" ? this.nativeTurn(worldId, plan.action as PlayerAction, "turn", null, onEvent)
+          : this.nativeTurn(worldId, null, runKind, (plan.meta?.rewriteHint as string | undefined) ?? null, onEvent);
+      } else inner = this.followExecution(id, onEvent, true);
+      if (detached) inner.detach?.();
+      await inner.done;
+    })().catch((error) => { if (!detached) onEvent(thrownFailure(error, stopped, "暂时不能重试这次生成")); });
+    return { done, stop() { stopped = true; inner?.stop(); }, async catchUp() { detached = false; await inner?.catchUp(); }, detach() { detached = true; inner?.detach?.(); } };
   }
 
   followExecution(id: string, onEvent: (event: TurnEvent) => void, resume = false): TurnHandle {
@@ -652,7 +761,7 @@ export class Game {
           if (!detached) onEvent({ type: "done", cursor: await tree.cursor(this.repo, snapshot.worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
         }
         for (const fn of this.listeners) fn(snapshot.worldId);
-      } catch (error) { if (!detached) onEvent({ type: "failed", reason: "config", detail: error instanceof Error ? error.message : "暂时不能恢复这次生成", partialSaved: false }); }
+      } catch (error) { if (!detached) onEvent(thrownFailure(error, stopped, "暂时不能恢复这次生成")); }
     })();
     return { done, stop() { stopped = true; active?.cancel(); }, async catchUp() { detached = false; await active?.catchUp(); }, detach() { detached = true; active?.detach(); } };
   }
@@ -689,7 +798,7 @@ export class Game {
         const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, headState.source);
         if (batch) input.settings = { ...input.settings, pilot: "ai" };
         const template = writingContextTemplate(input);
-        const context = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, history: input.history.map(({ id, kind, actionMode, actionText, narrative }) => ({ id, kind, actionMode, actionText, narrative })), template })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
+        const context = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, ...nativeHistory(input), template })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
         const path = await this.repo.path(base.id);
         const upkeepTurns: StoryNode[] = [];
         for (const node of [...path].reverse()) { if (node.kind === "opening" || node.meta.upkeep) break; if (node.kind === "turn") upkeepTurns.unshift(node); }
@@ -753,7 +862,8 @@ export class Game {
         if (!node) throw new Error("生成提交结果不完整");
         if (!detached) onEvent({ type: "done", cursor: await tree.cursor(this.repo, worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
         for (const fn of this.listeners) fn(worldId);
-      } catch (error) { if (!detached) onEvent({ type: "failed", reason: stopped ? "cancelled" : "config", detail: error instanceof Error ? error.message : "这次生成没有完成", partialSaved: false }); batch?.onFinished(0, stopped ? "stopped" : "failed"); }
+        this.followMaintenance(snapshot.id, worldId);
+      } catch (error) { if (!detached) onEvent(thrownFailure(error, stopped, "这次生成没有完成")); batch?.onFinished(0, stopped ? "stopped" : "failed"); }
     });
     return { done, stop() { stopped = true; active?.cancel(); }, catchUp: async () => { detached = false; await active?.catchUp(); }, detach() { detached = true; active?.detach(); } };
   }
@@ -984,7 +1094,8 @@ export class Game {
    * 查一查 (R07-T001): answers a question from this world's records, marking
    * general knowledge as 【仅供参考】. Nothing advances or changes; one auxiliary call.
    */
-  async ask(worldId: string, question: string, onText: (full: string) => void): Promise<string> {
+  /** 查一查: reads the story without holding it (D170); `signal` stops it. */
+  async ask(worldId: string, question: string, onText: (full: string) => void, signal?: AbortSignal): Promise<string> {
     this.requireExecution();
     const world = (await this.repo.getWorld(worldId))!;
     const head = (await tree.cursor(this.repo, worldId)).head;
@@ -1016,8 +1127,12 @@ export class Game {
       options: {}, action: { mode: "continue", text: question }, reference,
       meta: { ...(await this.nativeGuard(worldId, head.id)), budgetChars: askBudget },
     };
+    if (signal?.aborted) throw new DOMException("已停止", "AbortError");
     const handle = startRun(this.platform, plan, (event) => { if (event.type === "text" && typeof event.full === "string" && hasChinese(event.full)) onText(event.full); });
-    const snapshot = await handle.done;
+    const stop = () => handle.cancel();
+    signal?.addEventListener("abort", stop, { once: true });
+    const snapshot = await handle.done.finally(() => signal?.removeEventListener("abort", stop));
+    if (snapshot.status === "cancelled") throw new DOMException("已停止", "AbortError");
     if (snapshot.status !== "previewed") throw new Error(snapshot.error ?? "这次查阅未完成");
     const result = snapshot.result as { text?: string };
     return result.text ?? "资料不足，暂时无法确定。";
@@ -1028,7 +1143,7 @@ export class Game {
     const head = (await tree.cursor(this.repo, worldId)).head;
     const ratio = await this.tokenRatio();
     const input = await this.turnInput(worldId, head, action);
-    const { messages, layers, chars, budgetChars } = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, history: input.history.map(({ id, kind, actionMode, actionText, narrative }) => ({ id, kind, actionMode, actionText, narrative })), template: writingContextTemplate(input) })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
+    const { messages, layers, chars, budgetChars } = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, ...nativeHistory(input), template: writingContextTemplate(input) })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
     return { messages, layers, chars, budgetChars, ratio: ratio.value, calibrated: ratio.calibrated };
   }
 
@@ -1113,15 +1228,19 @@ export class Game {
   }
 
   /** Reattaches native runs after a restart and discards legacy TS pending data. */
-  async recoverPending(): Promise<string | null> {
+  async recoverPending(): Promise<void> {
     if (this.platform.execution) {
       for (const run of await this.platform.execution.list()) {
-        if (run.status !== "running" && run.status !== "interrupted") continue;
+        // Only a run still being written is followed. One whose process ended is
+        // marked interrupted by the engine and waits for the player: continuing
+        // costs requests, and a silent resume held the story so the player's own
+        // 继续 was refused (R30).
+        if (run.status !== "running") continue;
         const [stored] = await this.platform.sql.query("SELECT plan_json FROM execution_runs WHERE id=?", [run.id]);
         const plan = stored ? JSON.parse(String(stored.plan_json)) as { kind?: string } : null;
         // Only ordinary runs belong to this executor.
         if (!plan?.kind || !["turn", "variant", "continue", "opening", "correction", "ask", "autoplay"].includes(plan.kind)) continue;
-        const handle = this.followExecution(run.id, () => {}, true);
+        const handle = this.followExecution(run.id, () => {}, false);
         this.inBackground(handle.done);
       }
     }
@@ -1130,6 +1249,5 @@ export class Game {
     if (pending !== null) {
       console.warn("已清除旧版 TS 回合待恢复数据，不再尝试恢复");
     }
-    return null;
   }
 }

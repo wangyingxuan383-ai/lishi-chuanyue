@@ -100,7 +100,7 @@ impl Model for DevModel {
                 .redirect(reqwest::redirect::Policy::none())
                 .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(30))
-                .timeout(Duration::from_secs(180))
+                .timeout(Duration::from_millis(story_core::chat::REQUEST_BACKSTOP_MS))
                 .build()
                 .map_err(|_| Error::Invalid("无法初始化模型连接".into()))?;
             agent_model::complete(client, config, body, key.to_owned(), cancel, text).await

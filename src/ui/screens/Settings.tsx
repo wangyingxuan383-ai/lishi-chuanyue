@@ -18,6 +18,7 @@ import { useUpdateNotice } from "../app/updateStore";
 import { exportWorldFile } from "../../engine/archive";
 import { purposeLabel } from "../../engine/usage";
 import { Seal } from "../components/Seal";
+import { recentDiagnosis } from "../components/FailureSheet";
 import { BackupRestore } from "../components/BackupRestore";
 import { Icon, type IconName } from "../components/Icon";
 import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget";
@@ -45,7 +46,7 @@ const FIND_WORDS: Record<string, string> = {
   sources: "原著 同人 书库 参考资料 TXT EPUB PDF DOCX 导入 通读",
   guide: "帮助 操作说明 怎么玩 常见问题",
   notify: "通知 提醒 后台",
-  data: "存档 备份 恢复 导入 导出 数据",
+  data: "存档 备份 恢复 导入 导出 数据 诊断 失败 原因",
   budget: "用量 费用 花费 单价 预算 请求次数 tokens",
   network: "联网 网络 代理 连接方式",
   about: "版本 更新 升级 下载 反馈 Github",
@@ -435,6 +436,9 @@ function DataPage() {
       <h3 className="settings-sub">导出</h3>
       <Note>导出的文件，在另一台手机或电脑的首页用“从文件导入世界…”打开。只导出一个世界：点首页卡片上的“⋯”。</Note>
       <button disabled={exporting} onClick={() => void exportAll()}>{exporting ? "正在准备导出…" : `导出全部世界${worldCount !== null ? `（${worldCount} 个）` : ""}`}</button>
+      <h3 className="settings-sub">生成失败诊断</h3>
+      <Note>最近 20 次没写成的原因：出错的步骤、服务原话和时间。不含故事正文、提示词、Key 或服务地址，可以放心发给开发者。</Note>
+      <button onClick={() => void recentDiagnosis(game.platform.sql).then((text) => navigator.clipboard.writeText(text)).then(() => toast("已复制诊断"), () => toast("没能复制诊断"))}>复制诊断</button>
     </>
   );
 }

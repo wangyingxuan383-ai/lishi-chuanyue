@@ -89,17 +89,24 @@ impl Model for NativeModel {
                     config.slot,
                     config.url,
                     body,
+                    // No total cap on a reply that keeps coming (R30, D167): a model
+                    // that thinks first may need minutes before and while writing.
                     Timeouts {
-                        first_byte_ms: 120_000,
-                        idle_ms: 120_000,
-                        total_ms: 180_000,
+                        first_byte_ms: story_core::chat::FIRST_BYTE_MS,
+                        idle_ms: story_core::chat::IDLE_MS,
+                        total_ms: story_core::chat::REQUEST_BACKSTOP_MS,
                     },
                     Arc::new(move |event| {
                         let _ = send.send(event);
                     }),
                 )
                 .await
-                .map_err(|e| Error::Invalid(e.message.into()))?;
+                // Refused before sending: a missing or unbound key is a setup problem.
+                .map_err(|e| match e.code {
+                    "llm_no_secret" => Error::Provider { kind: "no_secret".into(), status: None, message: e.message.into(), partial: false },
+                    "llm_url_not_bound" => Error::Provider { kind: "url_not_bound".into(), status: None, message: e.message.into(), partial: false },
+                    _ => Error::Invalid(e.message.into()),
+                })?;
             // Dropping the request future must cancel its native network work too.
             let drop_cancel = cancel.clone();
             let drop_streams = streams.clone();
@@ -156,7 +163,7 @@ impl Model for NativeModel {
     }
 }
 fn message(error: story_core::Error) -> Value {
-    serde_json::json!({"code":"execution","message":error.to_string()})
+    serde_json::json!({"code":"execution","message":error.to_string(),"failure":story_core::failure::refused_at_start(&error)})
 }
 
 #[tauri::command]

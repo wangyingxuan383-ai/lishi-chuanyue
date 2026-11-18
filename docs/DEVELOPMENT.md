@@ -88,6 +88,12 @@ node scripts/fake-llm.mjs            # 默认端口 18800，可用 --port 改
 | `fake-stall` | 发两块后不再出声 |
 | `fake-nostream` | 不管 `stream: true`，一次返回整段 |
 | `fake-plain` | 只有正文、没有记录（用来试补记） |
+| `fake-refuse` | 写完后报告内容过滤（这一段被拒绝） |
+| `fake-norecord` | 只有正文，第一次补记也答非所问；之后的补记正常（重试这一步能写成） |
+| `fake-midstream` | 发三块后在流里报错 |
+| `fake-flaky` | 前两次请求返回 500，之后正常 |
+
+所有模式对连接测试（“只回复两个字”）都正常回答，所以能在设置里选中；只在第一次出错的模式按进程计数，重跑前重启模拟模型。
 
 `GET /debug/last-request` 返回最近一次聊天请求，测试可以用它检查发出去的内容。
 
@@ -143,6 +149,7 @@ Agent 会话和任务独立保存在 SQLite，服务／模型配置随任务固�
 
 | 命令 | 检查什么 |
 | --- | --- |
+| `node scripts/ui/dev-isolated.mjs --fresh` 后 `node scripts/ui/failure-matrix.mjs` | 手机尺寸上逐项触发生成失败（补记坏掉、拒答、两次 500、流中途断开），检查提示只有一句话、主动作对、“查看原因”能打开、重试真的写成，以及设置里的“复制诊断”；报告和截图在 `output/playwright/failure-matrix/` |
 | `node scripts/ui/dev-isolated.mjs --fresh` 后 `node scripts/ui/play-check.mjs` | 前者在 1421 端口启动只用 `.cache/ui-isolated` 的开发台（不碰你的存档和 Key，只许访问本机）；后者配合 `node scripts/fake-llm.mjs` 检查首次启动、三种开局、游玩页菜单、长按、助手页、主题与大字号、流式生成、动效退场、草稿、正文里的选项、变化行和生成中离开；报告和截图在 `output/playwright/play-check/` |
 | 同一个隔离开发台上再跑 `node scripts/ui/style-shots.mjs` | 两种外观风格（宣纸书卷、墨韵）各自浅色与深色下的首页、设置、开局、游玩、菜单、变化清单、打字、发送和写完时的截图，含几张动画进行中的画面，首页有场景和书架两种；在 `output/playwright/style-shots/` |
 | 同一个隔离开发台上跑 `node scripts/ui/feature-shots.mjs [scroll\|ink] [paper\|night]` | 给第一个故事挂一本小样书，截生成档位、原著札记（新建、整理完成）、每段用量、本局用量、让 AI 改时间与货币、两种首页和开书中途的画面；在 `output/playwright/feature-shots/` |

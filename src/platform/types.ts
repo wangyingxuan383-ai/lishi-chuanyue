@@ -77,11 +77,35 @@ export interface UpdateRequest {
 
 export type InstallStatus = "started" | "permission" | "unsupported";
 
+/** Why a generation stopped, as the native engine records it (R30, D166). */
+export interface Failure {
+  kind: string;
+  /** prepare | write | record | review | settle | commit | maintain */
+  stage: string;
+  /** Whether the failing attempt reached the service: yes | no | unknown. */
+  sent: string;
+  partial?: boolean;
+  /** Model requests this attempt sent; 0 means nothing was sent. */
+  requests: number;
+  status?: number;
+  /** What the service said, cleaned: no links or keys, at most 300 characters. */
+  said?: string;
+  /** The engineering detail, for the details sheet only. */
+  detail?: string;
+  /** For `busy`: ask | assistant | autoplay | turn | other, and when its hold ends. */
+  holder?: string;
+  untilMs?: number;
+  at: string;
+}
+
 export interface ExecutionSnapshot {
   id: string; worldId: string; status: string;
   budget: { modelRequests: number; toolCalls: number; corrections: number; activeMs: number };
   draft: Json; result: Json; error: string | null;
   errorKind?: string | null;
+  failure?: Failure | null;
+  /** Earlier failed attempts, oldest first (only once the run has stopped). */
+  failures?: Failure[];
   events: { seq: number; event: Json }[];
 }
 
@@ -215,7 +239,8 @@ export interface Platform {
 }
 
 export class PlatformError extends Error {
-  constructor(readonly code: string, message: string) {
+  /** A run refused before it started carries the same typed record as a stopped run (R30). */
+  constructor(readonly code: string, message: string, readonly failure?: Failure) {
     super(message);
     this.name = "PlatformError";
   }

@@ -140,6 +140,7 @@ function NoteDetail({ note, running, onBack, onResume, onPause, onSave, onDelete
       {note.status !== "done" && <div className="stack gap-2">
         <div className="bar" aria-hidden="true"><i style={{ width: `${Math.round((note.progress.parts.length / total) * 100)}%` }} /></div>
         <p className="muted m-0">{running ? `正在整理：${note.progress.parts.length}/${total}` : note.status === "failed" ? note.progress.error ?? "没整理完" : `已暂停：${note.progress.parts.length}/${total}`}</p>
+        {!running && note.status === "failed" && note.progress.detail && <details><summary className="muted">查看原因</summary><p className="field-hint m-0">{note.progress.detail}</p></details>}
         <div className="row">{running ? <button onClick={onPause}>暂停</button> : <button className="primary" onClick={onResume}>{note.progress.parts.length ? "接着整理" : "开始整理"}</button>}</div>
       </div>}
       {note.status === "done" && <>

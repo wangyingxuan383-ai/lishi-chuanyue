@@ -23,12 +23,39 @@ pub enum Error {
     Cancelled,
     #[error("{0}，进度已保存")]
     Limit(&'static str),
+    /// A failure whose cause is known where it happens (R30, D166).
+    #[error("{message}")]
+    Fail { kind: crate::failure::FailKind, message: String },
+    /// Another task holds the story: a passage, a look-up, the assistant.
+    #[error("{}", busy_message(.holder))]
+    Busy { holder: String, until_ms: i64 },
+    /// The phone stopped background work; not the player's stop.
+    #[error("手机系统停止了后台生成，进度已保存")]
+    SystemStop(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    pub fn fail(kind: crate::failure::FailKind, message: impl Into<String>) -> Error {
+        Error::Fail { kind, message: message.into() }
+    }
+}
+
+fn busy_message(holder: &str) -> &'static str {
+    match holder {
+        "ask" => "“查一查”还在进行，等它结束后再写",
+        "assistant" => "助手正在处理这个故事，等它结束后再写",
+        "autoplay" => "连播还在进行，等它停下后再写",
+        "turn" => "上一段还在生成或收尾",
+        _ => "这个故事还有任务正在运行",
+    }
+}
+
 fn provider_message(kind: &str, status: &Option<u16>, message: &str) -> String {
     if let Some(status) = status {
-        format!("AI 服务返回 {status}：{message}")
+        // Only what the service said, cleaned; never a raw response body (R30).
+        let said = crate::failure::service_words(message).unwrap_or_default();
+        format!("AI 服务返回 {status}：{said}")
     } else if message.is_empty() {
         format!("模型请求未完成（{kind}）")
     } else {
@@ -36,35 +63,10 @@ fn provider_message(kind: &str, status: &Option<u16>, message: &str) -> String {
     }
 }
 
+/// The stored failure category (D166): read from the error's type, never
+/// guessed from its words.
 pub fn failure_kind(error: &Error) -> &'static str {
-    match error {
-        Error::Cancelled => "cancelled",
-        Error::ContextWindow => "context",
-        Error::Limit(_) => "limit",
-        Error::Stale => "stale",
-        Error::Refused(_) => "refused",
-        Error::Provider { kind, status, .. } => match kind.as_str() {
-            k if k.starts_with("timeout") => "timeout",
-            "network" | "stream" => "network",
-            "http" => match status {
-                Some(401 | 403) => "auth",
-                Some(402 | 429) => "quota",
-                _ => "http",
-            },
-            _ => "config",
-        },
-        Error::Invalid(message) => {
-            if ["拒绝", "内容政策", "安全"].iter().any(|s| message.contains(s)) {
-                "refused"
-            } else if message.contains("记录")
-                && ["不完整", "没有记录", "记录块"].iter().any(|s| message.contains(s)) {
-                "no_record"
-            } else {
-                "config"
-            }
-        },
-        _ => "config",
-    }
+    crate::failure::kind_of(error).as_str()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +290,13 @@ pub struct RunSnapshot {
     pub error: Option<String>,
     #[serde(default)]
     pub error_kind: Option<String>,
+    /// The typed record of why it stopped (R30, D166).
+    #[serde(default)]
+    pub failure: Option<Value>,
+    /// Earlier failed attempts of this run, oldest first; filled only once
+    /// the run has stopped, so polling a live run stays light.
+    #[serde(default)]
+    pub failures: Vec<Value>,
     pub events: Vec<RunEvent>,
 }
 
@@ -302,24 +311,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn failure_kind_uses_structured_errors_before_message_fallbacks() {
+    fn failure_kind_comes_from_the_error_type() {
+        use crate::failure::FailKind;
         for (error, expected) in [
             (Error::Cancelled, "cancelled"),
             (Error::ContextWindow, "context"),
             (Error::Limit("请求额度已用完"), "limit"),
             (Error::Stale, "stale"),
             (Error::Refused("AI 这次没有给出可用的故事".into()), "refused"),
-            (Error::Invalid("AI 服务拒绝请求".into()), "refused"),
-            (Error::Invalid("触发内容政策".into()), "refused"),
-            (Error::Invalid("安全限制".into()), "refused"),
-            (Error::Invalid("回合记录不完整".into()), "no_record"),
-            (Error::Invalid("配置不完整".into()), "config"),
-            (Error::Invalid("完整记录".into()), "config"),
+            (Error::fail(FailKind::Format, "回合记录不完整"), "format"),
+            (Error::fail(FailKind::Empty, "模型没有写出正文"), "empty"),
+            (Error::Busy { holder: "ask".into(), until_ms: 0 }, "busy"),
+            (Error::SystemStop("destroyed".into()), "system_stop"),
+            // Words no longer decide the category.
+            (Error::Invalid("AI 服务拒绝请求".into()), "other"),
+            (Error::Invalid("回合记录不完整".into()), "other"),
         ] {
             assert_eq!(failure_kind(&error), expected, "{error}");
         }
         for (kind, status, expected) in [
             ("network", None, "network"),
+            ("stream", None, "stream"),
             ("timeout_first", None, "timeout"),
             ("timeout_idle", None, "timeout"),
             ("timeout_total", None, "timeout"),
@@ -329,13 +341,21 @@ mod tests {
             ("http", Some(429), "quota"),
             ("http", Some(500), "http"),
             ("http", None, "http"),
-            ("future", None, "config"),
+            ("no_secret", None, "setup"),
+            ("future", None, "other"),
         ] {
             for partial in [false, true] {
                 let error = Error::Provider { kind: kind.into(), status, message: "拒绝 网络 超时 记录不完整".into(), partial };
                 assert_eq!(failure_kind(&error), expected);
             }
         }
+    }
+
+    #[test]
+    fn a_busy_story_names_what_holds_it() {
+        assert!(Error::Busy { holder: "ask".into(), until_ms: 0 }.to_string().contains("查一查"));
+        assert!(Error::Busy { holder: "assistant".into(), until_ms: 0 }.to_string().contains("助手"));
+        assert_eq!(Error::Busy { holder: "x".into(), until_ms: 0 }.to_string(), "这个故事还有任务正在运行");
     }
 
     #[test]

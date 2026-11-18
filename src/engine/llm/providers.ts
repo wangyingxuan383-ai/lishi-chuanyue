@@ -155,20 +155,32 @@ export async function fetchModels(platform: Platform, slot: string, baseUrl: str
   return data.map((m: { id?: string }) => m.id).filter((id: unknown): id is string => typeof id === "string").sort();
 }
 
-/** Plain-language explanation of a failed connection or turn. */
+/** Plain-language explanation of a failed connection or turn: one sentence, no raw error text. */
 export function explainFailure(kind: string, status?: number): string {
   if (kind === "auth" || status === 401 || status === 403) return "Key 不对或没有权限，请检查 API Key。";
   if (kind === "quota" || status === 402 || status === 429) return "服务额度不足或请求太频繁，稍后再试，或检查账户余额。";
   if (status === 404) return "地址或模型名不对，请检查服务地址和模型。";
   if (kind === "timeout" || kind?.startsWith("timeout")) return "服务太久没有回应，可能网络不稳或服务繁忙。";
+  if (kind === "stream") return "服务写到一半断开了，已写出的部分保留了。";
   if (kind === "http" && (status ?? 0) >= 500) return "服务暂时出了问题，稍后再试，或换一个服务。";
-  if (kind === "config" || kind === "no_secret" || kind === "url_not_bound") return "还没有配置好 AI 服务，请先到设置里连接。";
+  if (kind === "http") return "服务没有接受这次请求。";
+  if (kind === "setup" || kind === "config" || kind === "no_secret" || kind === "url_not_bound") return "还没有配置好 AI 服务，请先到设置里连接。";
+  if (kind === "context") return "这次要发给 AI 的内容太多，超出了模型能读的长度。";
   if (kind === "refused") return "这段被服务拒绝了。可以换个说法、调整内容尺度，或换一个模型。";
-  if (kind === "empty") return "服务没有写出内容，再试一次？";
-  if (kind === "no_record") return "开场没准备好，再试一次？";
+  if (kind === "empty") return "AI 这次没有写出正文。";
+  if (kind === "format" || kind === "no_record") return "正文写好了，但整理记录没有成功。";
+  if (kind === "review") return "正文写好了，但原著核对没有通过。";
+  if (kind === "settle") return "这段的变化没能记进故事。";
+  if (kind === "stale") return "故事在这期间有了变化，这段需要按现在的情况重写。";
+  if (kind === "busy") return "这个故事还有别的任务在进行。";
+  if (kind === "system_stop") return "手机系统停掉了后台生成，进度已保存。";
+  if (kind === "interrupted") return "上一段在写完前被中断了，进度已保存。";
   if (kind === "cancelled") return "已停止。";
   if (kind === "limit") return "这段写得比较久，已先停下并保存进度，可以接着写完。";
-  return "连不上服务，请检查网络和服务地址。";
+  if (kind === "storage") return "保存时出了问题，请稍后再试。";
+  if (kind === "unsupported") return "这个模型不支持这次需要的工具，请换一个模型。";
+  if (kind === "network") return "连不上服务，请检查网络和服务地址。";
+  return "这次没有写成。";
 }
 
 export { chatCompletionsUrl, serviceBase, type ChatError };

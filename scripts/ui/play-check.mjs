@@ -240,7 +240,12 @@ async function main() {
     await page.goto(`${origin}/`, { waitUntil: "domcontentloaded", timeout: 180_000 });
 
     await step(1, async () => {
-      await page.getByRole("button", { name: /^服务商：/ }).waitFor({ timeout: 120_000 });
+      // A fresh store opened first by another page (a preview pane) starts at home.
+      const service = page.getByRole("button", { name: /^服务商：/ });
+      const begin = page.getByRole("button", { name: /^开始穿越/ });
+      await service.or(begin).first().waitFor({ timeout: 120_000 });
+      if (!await service.isVisible()) await begin.click();
+      await service.waitFor({ timeout: 120_000 });
       verify("首次启动进入连接 AI 服务页", await page.getByText("连接 AI 服务", { exact: true }).isVisible());
       await shot("first-launch");
       await connectFake(page, { port: 18800, model: "fake-normal" });

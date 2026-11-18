@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AGENT_TASK_RECIPES, taskRecipeText } from "../../../content/agentTasks";
 import { useApp } from "../../app/context";
 import { MenuSheet, Sheet } from "../../components/Sheet";
@@ -12,27 +12,35 @@ export function AskSheet({ worldId, bookId, onClose }: { worldId: string; bookId
   const [recipes, setRecipes] = useState(false);
   const [asked, setAsked] = useState<{ q: string; a: string; pending: boolean }[]>([]);
   const pending = asked.some((x) => x.pending);
+  /** The question in flight; closing the sheet stops it too (R30, D170). */
+  const running = useRef<AbortController | null>(null);
+  useEffect(() => () => running.current?.abort(), []);
   const update = (patch: { a: string; pending: boolean }) => setAsked((list) => list.map((x, i) => (i === list.length - 1 ? { ...x, ...patch } : x)));
   const ask = async () => {
     const q = question.trim();
     if (!q || pending) return;
     setQuestion("");
     setAsked((list) => [...list, { q, a: "", pending: true }]);
+    const control = new AbortController();
+    running.current = control;
     try {
-      const answer = await game.ask(worldId, q, (full) => update({ a: full, pending: true }));
+      const answer = await game.ask(worldId, q, (full) => update({ a: full, pending: true }), control.signal);
       update({ a: answer || "没有查到。", pending: false });
     } catch {
-      update({ a: "这次没查到，稍后再试。", pending: false });
+      update({ a: control.signal.aborted ? "已停止。" : "这次没查到，稍后再试。", pending: false });
+    } finally {
+      if (running.current === control) running.current = null;
     }
   };
   return (
     <Sheet title="查一查" onClose={onClose}>
       <div className="stack">
-        <p className="muted m-0">问这个世界里的人和事，或者这个时代的常识。只是查资料，故事不会往下走。</p>
+        <p className="muted m-0">问这个世界里的人和事，或者这个时代的常识。只是查资料，故事不会往下走；查的时候也可以照常写故事。</p>
         {asked.map((x, i) => (
           <div key={i} className="ask-item">
             <b>{x.q}</b>
             {x.a ? <StoryText text={x.a} /> : <p className="muted">查找中…</p>}
+            {!x.pending && x.a && <button className="ghost small" onClick={() => void navigator.clipboard?.writeText(x.a).then(() => toast("已复制"), () => toast("没能复制"))}>复制</button>}
             {bookId && !x.pending && x.a && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); })}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
           </div>
         ))}
@@ -41,7 +49,8 @@ export function AskSheet({ worldId, bookId, onClose }: { worldId: string; bookId
         <div className="row">
           <input className="grow" aria-label="想问什么" value={question} onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") void ask(); }} placeholder="如：王掌柜是什么来头？一斗米多少钱？" />
-          <button className="primary" disabled={!question.trim() || pending} onClick={() => void ask()}>问</button>
+          {pending ? <button onClick={() => running.current?.abort()}>停止</button>
+            : <button className="primary" disabled={!question.trim()} onClick={() => void ask()}>问</button>}
         </div>
       </div>
     </Sheet>

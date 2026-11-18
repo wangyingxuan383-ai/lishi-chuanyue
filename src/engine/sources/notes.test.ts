@@ -89,6 +89,33 @@ describe("原著札记 (D162)", () => {
     expect((await notesForTurn(repo,{...binding,through:null},"","唐三")).length).toBe(5);
   });
 
+  it("a request that never answers is freed by 暂停, and 接着整理 works afterwards (R30)", async () => {
+    const { repo, book } = await setup();
+    const note = newNote(book.id, "plot", { from: 0, to: 0 }, "挂起的札记");
+    await saveNote(repo, note);
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const pending = runNote(repo, note, book.title, { model: "aux", call: () => { started(); return new Promise<string>(() => {}); } }, controller.signal, () => {});
+    await ready;
+    controller.abort();
+    expect((await pending).status).toBe("paused");
+    const done = await runNote(repo, (await getNote(repo, note.id))!, book.title, { model: "aux", call: async () => "第1章主线" }, new AbortController().signal, () => {});
+    expect(done.status).toBe("done");
+  });
+
+  it("a failure is one sentence for the player, the cause kept apart (R30)", async () => {
+    const { repo, book } = await setup();
+    const note = newNote(book.id, "plot", { from: 0, to: 0 }, "失败的札记");
+    await saveNote(repo, note);
+    const failing = Object.assign(new Error("HTTP 500 upstream overloaded, see https://relay.invalid/status"), { kind: "http", status: 500 });
+    const failed = await runNote(repo, note, book.title, { model: "aux", call: async () => { throw failing; } }, new AbortController().signal, () => {});
+    expect(failed.status).toBe("failed");
+    expect(failed.progress.error).toBe("服务暂时出了问题，稍后再试，或换一个服务。已完成的部分保留了，可以接着整理。");
+    expect(failed.progress.detail).toContain("upstream overloaded");
+    expect(failed.progress.detail).not.toContain("relay.invalid");
+  });
+
   it.each(["reject","resolve"])("does not recreate a deleted note when cancellation later %ss", async (outcome) => {
     const {repo,book}=await setup();
     const note=newNote(book.id,"plot",{from:0,to:0},"删除中的札记");await saveNote(repo,note);

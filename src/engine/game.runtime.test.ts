@@ -64,10 +64,10 @@ describe("auxiliary request accounting", () => {
     const resume = vi.spyOn(s.llm, "resume"), ack = vi.spyOn(s.llm, "ack");
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      expect(await s.game.recoverPending()).toBeNull();
+      await expect(s.game.recoverPending()).resolves.toBeUndefined();
       expect(await s.game.repo.getSetting("pending", null)).toBeNull();
       expect(await s.platform.sql.query("SELECT key FROM settings WHERE key='pending'")).toEqual([]);
-      expect(await s.game.recoverPending()).toBeNull();
+      await expect(s.game.recoverPending()).resolves.toBeUndefined();
       expect(warning).toHaveBeenCalledExactlyOnceWith("已清除旧版 TS 回合待恢复数据，不再尝试恢复");
       expect(resume).not.toHaveBeenCalled();
       expect(ack).not.toHaveBeenCalled();

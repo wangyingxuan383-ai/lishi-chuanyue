@@ -729,7 +729,8 @@ pub async fn complete(
         .post(url)
         .header(header::ACCEPT, "text/event-stream, application/json")
         .header(header::ACCEPT_ENCODING, "identity")
-        .timeout(Duration::from_secs(180))
+        // The whole request may take long while words keep coming (D167).
+        .timeout(Duration::from_millis(story_core::chat::REQUEST_BACKSTOP_MS))
         .json(&body);
     let auth = match p {
         Protocol::Anthropic => "x-api-key",
@@ -752,7 +753,7 @@ pub async fn complete(
     // TCP connection still has the client's 30s connect timeout. A service
     // can accept it and then spend longer prefilling/reasoning before headers
     // or the next content chunk; keep the overall request deadline at 180s.
-    let mut response = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_secs(120),request.send())=>r.map_err(|_|provider("timeout_first",None,"等待模型响应超时",false))?.map_err(|_|provider("network",None,"无法连接模型服务",false))?};
+    let mut response = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(story_core::chat::FIRST_BYTE_MS),request.send())=>r.map_err(|_|provider("timeout_first",None,"等待模型响应超时",false))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),false))?};
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let detail = response.text().await.unwrap_or_default().replace(&key, "***");
@@ -773,7 +774,7 @@ pub async fn complete(
     let mut total = 0;
     let mut first = None;
     'read: loop {
-        let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_secs(120),response.chunk())=>r.map_err(|_|provider(if first.is_none() {"timeout_first"} else {"timeout_idle"},None,"等待模型内容超时",first.is_some()))?.map_err(|_|provider("network",None,"模型连接中断",first.is_some()))?};
+        let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(if first.is_none() {story_core::chat::FIRST_BYTE_MS} else {story_core::chat::IDLE_MS}),response.chunk())=>r.map_err(|_|provider(if first.is_none() {"timeout_first"} else {"timeout_idle"},None,"等待模型内容超时",first.is_some()))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),first.is_some()))?};
         let Some(chunk) = chunk else {
             break;
         };

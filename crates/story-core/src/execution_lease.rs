@@ -75,7 +75,7 @@ pub fn acquire_tx(
     let fence = if let Some(previous) = previous {
         if previous.expires_at_ms > now && !previous.ticket.owner_id.is_empty() {
             if previous.ticket.owner_id != owner || previous.ticket.owner_instance != instance {
-                return Err(Error::Invalid("这个故事还有任务正在运行".into()));
+                return Err(Error::Busy { holder: holder(tx, &previous.ticket.owner_id), until_ms: previous.expires_at_ms });
             }
             previous.ticket.fence
         } else {
@@ -95,6 +95,30 @@ pub fn acquire_tx(
         owner_instance: instance.into(),
         fence,
     })
+}
+
+/// What kind of task a lease owner is, for the "busy" notice (R30).
+pub fn holder(db: &Connection, owner: &str) -> String {
+    let kind: Option<String> = db
+        .query_row("SELECT json_extract(plan_json,'$.kind') FROM execution_runs WHERE id=?", [owner], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten();
+    if let Some(kind) = kind {
+        return match kind.as_str() {
+            "ask" => "ask",
+            "autoplay" => "autoplay",
+            _ => "turn",
+        }
+        .into();
+    }
+    let assistant = db
+        .query_row("SELECT 1 FROM pi_tasks WHERE id=?", [owner], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if assistant { "assistant" } else { "other" }.into()
 }
 
 pub fn guard(db: &Connection, ticket: &LeaseTicket, now: i64) -> Result<()> {
@@ -126,12 +150,36 @@ pub fn release_tx(tx: &Transaction<'_>, ticket: &LeaseTicket) -> Result<()> {
     }
 }
 
+/// Runs that never hold the story (R30): 查一查 only reads it (D170), and the
+/// tidying after a saved passage applies its result only if it still fits (D168).
+pub fn own_lease(plan: &RunPlan) -> bool {
+    matches!(plan.kind.as_str(), "ask" | "maintain")
+}
+
+/// The lease a run holds: the story's own for every passage, a private one
+/// for a run that never holds the story, so it neither keeps the story from
+/// being written nor waits for a passage.
+pub fn key(plan: &RunPlan) -> String {
+    if own_lease(plan) {
+        format!("{}#read:{}", plan.world_id, plan.id)
+    } else {
+        plan.world_id.clone()
+    }
+}
+
+/// Whether a run still has a live owner: its lease (or its sequence's) is held
+/// by it and has not expired.
+pub fn alive(db: &Connection, plan: &RunPlan, now: i64) -> Result<bool> {
+    let owner = plan.meta["parentRun"].as_str().unwrap_or(&plan.id).to_owned();
+    Ok(current(db, &key(plan))?.is_some_and(|l| l.expires_at_ms > now && l.ticket.owner_id == owner))
+}
+
 pub fn ticket(plan: &RunPlan) -> Result<Option<LeaseTicket>> {
     let Some(value) = plan.meta.get("executionLease") else {
         return Ok(None);
     };
     let ticket: LeaseTicket = serde_json::from_value(value.clone())?;
-    if ticket.world_id != plan.world_id
+    if ticket.world_id != key(plan)
         || ticket.owner_id.is_empty()
         || ticket.owner_instance.is_empty()
         || ticket.fence <= 0

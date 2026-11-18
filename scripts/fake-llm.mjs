@@ -8,12 +8,20 @@
 //   fake-stall    sends two chunks, then goes silent
 //   fake-nostream ignores stream:true and returns one JSON body
 //   fake-plain    narrative only, no record (exercises the extraction fallback)
+//   fake-refuse   writes, then reports a content filter (the passage is refused)
+//   fake-norecord narrative only, and the first record request answers nonsense;
+//                 later record requests are fine (a retry of that step succeeds)
+//   fake-midstream three chunks, then an error event inside the stream
+//   fake-flaky    the first two requests answer 500, then it behaves normally
 // fake-normal/slow/stall reply in the game's record format (opening, turns).
+// Every mode answers the connection test normally.
 // Play modes have their own trigger words, listed in docs/DEVELOPMENT.md (本地模拟模型).
 // GET /debug/last-request returns the last chat request, so UI tests can see the prompt.
 import http from "node:http";
 
 let lastRequest = null;
+/** Requests seen per model, for the modes that fail only at first. */
+const seen = new Map();
 
 const portArg = process.argv.indexOf("--port");
 const port = portArg > 0 ? Number(process.argv[portArg + 1]) : 18800;
@@ -104,7 +112,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && req.url?.endsWith("/models")) {
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ data: ["fake-normal", "fake-slow", "fake-http500", "fake-stall", "fake-nostream", "fake-plain"].map((id) => ({ id })) }));
+    return res.end(JSON.stringify({ data: ["fake-normal", "fake-slow", "fake-http500", "fake-stall", "fake-nostream", "fake-plain", "fake-refuse", "fake-norecord", "fake-midstream", "fake-flaky"].map((id) => ({ id })) }));
   }
   if (!req.url?.endsWith("/chat/completions")) {
     res.writeHead(404);
@@ -112,8 +120,13 @@ const server = http.createServer(async (req, res) => {
   }
   const request = JSON.parse(body || "{}");
   lastRequest = request;
-  const model = request.model ?? "fake-normal";
-  if (model === "fake-http500") {
+  // The connection test ("只回复两个字") always succeeds, so a failing mode can be selected.
+  const probe = JSON.stringify(request.messages ?? []).includes("只回复两个字");
+  const model = probe ? "fake-normal" : request.model ?? "fake-normal";
+  const count = (seen.get(model) ?? 0) + 1;
+  seen.set(model, count);
+  const asksRecord = JSON.stringify(request.messages ?? []).includes("互动小说的记录员");
+  if (model === "fake-http500" || (model === "fake-flaky" && count <= 2)) {
     res.writeHead(500, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ error: { message: "fake server error" } }));
   }
@@ -129,14 +142,20 @@ const server = http.createServer(async (req, res) => {
   res.on("close", () => (closed = true));
   send({ choices: [{ delta: { reasoning_content: "（构思）" } }] });
   await wait(300);
-  const parts = chunks(model === "fake-plain" ? TEXT : gameReply(request));
+  if (model === "fake-norecord" && asksRecord) {
+    const first = !seen.get("fake-norecord:record");
+    seen.set("fake-norecord:record", 1);
+    if (first) { send({ choices: [{ index: 0, delta: { content: "我整理不出来。" }, finish_reason: "stop" }] }); res.write("data: [DONE]\n\n"); return res.end(); }
+  }
+  const parts = chunks(model === "fake-plain" || (model === "fake-norecord" && !asksRecord) ? TEXT : gameReply(request));
   for (let i = 0; i < parts.length && !closed; i++) {
     if (model === "fake-stall" && i === 2) return; // keep the socket open, send nothing
+    if (model === "fake-midstream" && i === 3) { send({ error: { message: "upstream timeout", type: "server_error" } }); return res.end(); }
     send({ id: "x", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: parts[i] }, finish_reason: null }], unknown_field: { a: 1 } });
     await wait(delay);
   }
   if (closed) return;
-  send({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+  send({ choices: [{ index: 0, delta: {}, finish_reason: model === "fake-refuse" && !asksRecord ? "content_filter" : "stop" }] });
   if (request.stream_options?.include_usage) send({ choices: [], usage: { prompt_tokens: 50, completion_tokens: 120 } });
   res.write("data: [DONE]\n\n");
   res.end();

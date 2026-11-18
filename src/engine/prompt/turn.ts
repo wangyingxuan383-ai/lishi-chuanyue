@@ -404,10 +404,29 @@ const DEFAULT_BUDGET_CHARS = 12000;
  * target) the recap shrinks to gists, then cards go, least recently mentioned first.
  */
 /** Static writing rules stay in one existing template; native code owns selection. */
+/** 程序提示: last turn's results, era-word reminders and luck (R11-T008). */
+function notesText(input: TurnPromptInput): string {
+  const luck = fortuneNote(input.fortune, fortuneMode(input.settings.fortune));
+  const taboo = isFree(input.settings) || input.settings.tabooHints === false ? "" : tabooReminder(input.taboos ?? []);
+  return `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${taboo}${luck}`;
+}
+
+/** 玩家行动, with the director's note and a rewrite request. */
+function actionText(input: TurnPromptInput): string {
+  const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
+  const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
+  return `\n\n${actionLine(input.mode, input.text, input.settings)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
+}
+
+/**
+ * The fixed wording the native assembly puts around the story (D169): rules,
+ * era, record spec, 程序提示 and the action line. Everything else, including
+ * 天下大事 and 相关旧事, the native side builds from the story itself;
+ * buildTurnContext stays as the reference the native result is checked against.
+ */
 export function writingContextTemplate(input: TurnPromptInput) {
   const parts = systemParts(input, snapshotPanel(input.state), input.state);
-  const old = buildTurnContext(input);
-  return { ...parts, notes: old.layers.find(l => l.key === "notes")?.content ?? "", action: old.layers.find(l => l.key === "action")?.content ?? "" };
+  return { ...parts, notes: notesText(input), action: actionText(input) };
 }
 
 export function buildTurnContext(input: TurnPromptInput): TurnContext {
@@ -423,14 +442,10 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const world = isFree(input.settings) ? "" : worldBlock(input.state, 0);
   const directive = input.settings.directive ? `\n【叙事方针】${input.settings.directive}` : "";
   const modes = `${scriptBlock(input.state.script, input.settings)}${challengeBlock(input.state)}`;
-  // Luck as the world has it (R11-T008): 有影响, 只作参考 (the default) or 关; era-word reminders can be turned off too.
   const luckMode = fortuneMode(input.settings.fortune);
   const luck = fortuneNote(input.fortune, luckMode);
-  const taboo = isFree(input.settings) || input.settings.tabooHints === false ? "" : tabooReminder(input.taboos ?? []);
-  const notes = `${input.notes?.length ? `\n【上回合的实际结果，请在叙述中自然体现】\n- ${input.notes.join("\n- ")}` : ""}${taboo}${luck}`;
-  const director = input.directorNote ? `\n【幕后要求，照做但不要在正文中提及】${input.directorNote}` : "";
-  const hint = input.rewriteHint ? `\n【重写要求】${input.rewriteHint}` : "";
-  const action = `\n\n${actionLine(input.mode, input.text, input.settings)}${director}${hint}\n\n（写完正文后，别忘了输出 <record> 记录块。）`;
+  const notes = notesText(input);
+  const action = actionText(input);
   const target = input.budgetChars ?? DEFAULT_BUDGET_CHARS;
   const hardCap = input.reference ? target : Math.round((target * 7) / 6);
   const chapters = input.chapters ?? [];

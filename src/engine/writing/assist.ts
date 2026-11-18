@@ -1,7 +1,7 @@
 // Optional writing tools. No story turn is generated and nothing is saved until adoption.
 import { remapContinuity, validateContinuity } from "../continuity";
 import type { Game } from "../game";
-import { ChatError, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
+import { ChatError, DEFAULT_TIMEOUTS, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
 import { isRefusal } from "../llm/refusal";
 import * as tree from "../tree";
 import type { ActionMode, FactCitation, World, WorldState, WorldSettings } from "../types";
@@ -176,7 +176,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
         handle = streamChat(game.platform, {
           slot: llm.slot, url: llm.url, model, messages, maxTokens: llm.maxTokens ?? 2048,
           includeUsage: llm.includeUsage, extra: llm.extra as never,
-          timeouts: { firstByteMs: 30_000, idleMs: 30_000, totalMs: 90_000 },
+          timeouts: DEFAULT_TIMEOUTS,
         }, { onText: (_delta, full) => { if (!cancelled) onText(withoutRecord(full)); } });
         result = await Promise.race([handle.result, cancellation]);
         if (cancelled) throw new ChatError("cancelled");
