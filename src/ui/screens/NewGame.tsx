@@ -15,6 +15,7 @@ import { FORTUNE_MODES } from "../../engine/fortune";
 import { explainFailure } from "../../engine/llm/providers";
 import type { Failure } from "../../platform";
 import { FailureSheet } from "../components/FailureSheet";
+import { CarryNotes } from "./CarryNotes";
 import type { Intensity, Perspective, WorldSettings } from "../../engine/types";
 import { newId } from "../../engine/db/repo";
 import { useApp, useBack } from "../app/context";
@@ -559,6 +560,8 @@ export default function NewGame() {
           <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} aria-label="一句话想法" placeholder={draft.fanfic ? "想在原著中怎样开始？也可以先选书，让 AI 帮你构思。" : "写一句想法，或直接填写下面的设定"} />
           <button className="assist-btn" aria-label={assisting ? "构思中…" : "AI 补全空着的设定"} disabled={assisting} onClick={() => void assist()}><Icon name="sparkle" size={18} />{assisting ? "构思中…" : "AI 补全空着的设定"}</button>
         </section>
+        <details open={!!draft.carry}><summary>{draft.carry ? `带上《${draft.carry.fromTitle}》的 ${draft.carry.ids.length} 份札记` : "带上以前故事的札记（可选）"}</summary>
+          <CarryNotes value={draft.carry ?? null} onChange={(carry) => setDraft((d) => ({ ...d, carry }))} /></details>
         <details><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
 
         {filled && <div className="row form-tools"><button className="link" onClick={clearForm}>清空重填</button></div>}

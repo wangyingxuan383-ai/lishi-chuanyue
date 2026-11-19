@@ -33,6 +33,8 @@ enum Step {
 struct FakeModel {
     steps: Mutex<VecDeque<Step>>,
     requests: Mutex<Vec<Value>>,
+    /// The model name each request went to (备用服务, D179).
+    services: Mutex<Vec<String>>,
 }
 
 impl FakeModel {
@@ -40,6 +42,7 @@ impl FakeModel {
         Arc::new(Self {
             steps: Mutex::new(steps.into()),
             requests: Mutex::new(vec![]),
+            services: Mutex::new(vec![]),
         })
     }
 
@@ -51,12 +54,13 @@ impl FakeModel {
 impl Model for FakeModel {
     fn complete(
         &self,
-        _config: ModelConfig,
+        config: ModelConfig,
         body: Value,
         cancel: CancellationToken,
         text: TextSink,
     ) -> BoxFuture<Result<Completion>> {
         self.requests.lock().unwrap().push(body);
+        self.services.lock().unwrap().push(config.model.clone());
         let step = self.steps.lock().unwrap().pop_front();
         Box::pin(async move {
             let reply = match step {
@@ -173,6 +177,7 @@ impl Fixture {
             carried_edits: vec![],
             trailing_ids: vec![],
             new_world: None,
+            fallback_model: None,
         }
     }
 
@@ -439,6 +444,59 @@ async fn consecutive_transient_errors_stop_after_one_retry_with_persisted_kind()
     }
 }
 
+fn backup() -> ModelConfig {
+    ModelConfig {
+        slot: "isolated-backup".into(),
+        url: "https://backup.invalid/v1".into(),
+        model: "backup".into(),
+        aux_model: None,
+        include_usage: true,
+        max_tokens: Some(1024),
+        extra: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn backup_service_takes_over_after_the_main_service_fails_twice() {
+    for (kind, status) in [("http", Some(503)), ("network", None), ("http", Some(429))] {
+        let f = Fixture::new(vec![Step::Fail(provider(kind, status, false)), Step::Fail(provider(kind, status, false)), Step::Reply(written())]);
+        let mut plan = f.plan("backup-takes-over");
+        plan.fallback_model = Some(backup());
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("backup-takes-over").await;
+        assert_eq!(saved.status, "committed", "{kind}: {:?}", saved.error);
+        assert_eq!(*f.model.services.lock().unwrap(), ["fake", "fake", "backup"]);
+        assert!(saved.events.iter().any(|e| e.event["type"] == "fallback" && e.event["from"] == "fake" && e.event["to"] == "backup"));
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 3);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 2);
+    }
+}
+
+#[tokio::test]
+async fn backup_service_does_not_take_over_refusals_keys_or_the_same_service() {
+    for (error, expected) in [
+        (Error::Refused("隔离拒绝".into()), "refused"),
+        (provider("http", Some(401), false), "auth"),
+        (provider("http", Some(402), false), "quota"),
+    ] {
+        let f = Fixture::new(vec![Step::Fail(error), Step::Reply(written())]);
+        let mut plan = f.plan("no-takeover");
+        plan.fallback_model = Some(backup());
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("no-takeover").await;
+        assert_eq!(saved.status, "failed");
+        assert_eq!(saved.error_kind.as_deref(), Some(expected));
+        assert!(f.model.services.lock().unwrap().iter().all(|s| s == "fake"));
+    }
+    // The backup is the service already in use: nothing to switch to.
+    let f = Fixture::new(vec![Step::Fail(provider("http", Some(500), false)), Step::Fail(provider("http", Some(500), false)), Step::Reply(written())]);
+    let mut plan = f.plan("same-service");
+    plan.fallback_model = Some(plan.model.clone());
+    f.engine.start(plan).unwrap();
+    assert_eq!(f.settled("same-service").await.status, "failed");
+    assert_eq!(f.model.count(), 2);
+}
+
 #[tokio::test]
 async fn context_and_transient_recovery_share_one_retry_in_both_orders() {
     for context_first in [true, false] {
@@ -680,6 +738,32 @@ async fn canon_correction_delivers_required_text_and_evidence_above_the_history_
     assert!(messages.iter().any(|m| m["tool_call_id"] == "original" && m["content"].as_str().unwrap().contains(quote)));
     assert!(!followup.to_string().contains("可省略的旧剧情"));
     assert_eq!(fixture.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed'"), 1);
+}
+
+#[tokio::test]
+async fn a_correction_that_finds_no_basis_must_answer_after_six_lookup_rounds() {
+    // The model keeps searching for something the book does not have (a fanfic
+    // protagonist's own setting); after six rounds it is told to answer.
+    let mut steps: Vec<Step> = ["s0", "s1", "s2", "s3", "s4", "s5"].into_iter().map(|id| Step::Reply(calls(vec![(id, "search_original", json!({"query":"紫色魂环"}))]))).collect();
+    steps.push(Step::Reply(prose(&json!({"replacement":"四文纸。","recordPatch":{},"unresolved":["原著没有写到主角的魂环"],"corrections":[]}).to_string())));
+    let fixture = Fixture::new(steps);
+    let binding = json!({"bookId":"book","position":0,"through":0,"instructions":"保留玩家设定"});
+    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','短篇','txt','test','{}'); INSERT INTO source_sections VALUES('book',0,'第一章',NULL); INSERT INTO source_chunks VALUES('book',0,0,'纸铺一张纸售价两文。');").unwrap();
+    let mut plan = fixture.plan("correction-rounds");
+    plan.kind = "correction".into();
+    plan.state["source"] = binding.clone();
+    plan.reference = Some(json!({"bookId":"book","binding":binding,"passages":[]}));
+    plan.messages = vec![json!({"role":"system","content":"依据已读原文改稿。"}), json!({"role":"user","content":"【玩家要求】魂环是紫紫"})];
+    plan.meta = json!({"budgetChars":14545,"anchor":{"original":"前文。四文纸。后文。"},"correctionRange":{"start":3,"end":7},"originalRecord":{"time":5}});
+    fixture.engine.start(plan).unwrap();
+    let snapshot = fixture.settled("correction-rounds").await;
+    // No basis was found: it ends with a reason, not by running out of lookups.
+    assert_eq!(snapshot.status, "failed");
+    assert_ne!(snapshot.error_kind.as_deref(), Some("limit"), "{:?}", snapshot.error);
+    let requests = fixture.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    assert!(requests[6].to_string().contains("查阅到此为止"));
+    assert!(!requests[5].to_string().contains("查阅到此为止"));
 }
 
 #[tokio::test]

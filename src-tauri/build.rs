@@ -26,6 +26,9 @@ fn main() {
                     "open_autostart_settings",
                     "set_notify_prefs",
                     "take_launch_target",
+                    "reminder_status",
+                    "test_reminder",
+                    "open_reminder_settings",
                 ]),
             )
             .plugin(

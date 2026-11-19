@@ -163,7 +163,7 @@ describe("canon correction revisions", () => {
   it("round-trips version four revisions, roots, fact/book references and execution snapshots under new IDs", async () => {
     const s = await setup(1, true), revised = await adoptCanonCorrection(s.game, s.preview);
     const file = await exportWorld(s.game.repo, s.world.id);
-    expect(file.version).toBe(7); expect(file).not.toHaveProperty("runs"); expect(archiveProblems(file)).toEqual([]);
+    expect(file.version).toBe(8); expect(file).not.toHaveProperty("runs"); expect(archiveProblems(file)).toEqual([]);
     const copy = await importWorld(s.game.repo, file, "new"), current = await tree.cursor(s.game.repo, copy), state = await s.game.repo.getState(current.head.id);
     const revision = current.head.meta.revision as { nodeId: string; lineId: string; corrections: CanonCorrectionPreview["corrections"] };
     expect(current.head.id).not.toBe(revised.head.id);

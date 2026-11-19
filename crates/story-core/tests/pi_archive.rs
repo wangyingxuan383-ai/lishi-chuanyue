@@ -264,7 +264,7 @@ fn formal_export_preserves_external_proof_and_revision_without_device_capabiliti
     db.execute("INSERT INTO agent_capability_grants VALUES('private','file',?,'write',1,1,'test','test')",[json!({"uri":PRIVATE}).to_string()]).unwrap();
     let store=story_core::Store(std::sync::Arc::new(std::sync::Mutex::new(db)));
     let archive=story_core::world_archive::export(&store,"world").unwrap();
-    assert_eq!(archive["version"],7);
+    assert_eq!(archive["version"],8);
     let evidence:Value=serde_json::from_str(archive["factSources"][0]["source_json"].as_str().unwrap()).unwrap();
     assert_eq!(evidence["sourceClaim"],"网页记载青桥旧称");assert_eq!(evidence["revisionDecision"]["summary"],"补充地名");
     assert_eq!(evidence["references"][0]["location"]["url"],"https://source.example/read?id=2");

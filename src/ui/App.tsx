@@ -18,18 +18,7 @@ import Play from "./screens/Play";
 import AgentConversation from "./screens/AgentConversation";
 import Settings from "./screens/Settings";
 import Guide from "./screens/Guide";
-
-export function llmFor(profile: Profile | null): LlmConfig | null {
-  if (!profile) return null;
-  return {
-    slot: profile.keySlot,
-    url: chatCompletionsUrl(profile.baseUrl),
-    model: profile.mainModel,
-    auxModel: profile.auxModel ?? undefined,
-    includeUsage: profile.includeUsage,
-    contextTokens: profile.contextTokens,
-  };
-}
+import { applyFallback, llmFor } from "./app/llmConfig";
 
 /** Each style and theme's --bg (tokens.css), for the phone's status and navigation bars. */
 const BAR_COLORS = {
@@ -142,6 +131,7 @@ export default function App() {
       const activeId = await game.repo.getSetting<string | null>("activeProfile", null);
       const active = profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null;
       game.llm = llmFor(active);
+      await applyFallback(game, active);
       const r = normalizeReading(await game.repo.getSetting<Partial<Reading>>("reading", {}));
       // The network choice applies to every request from the start.
       const network = await game.repo.getSetting<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>("network", { proxy: "none" });
@@ -234,7 +224,7 @@ export default function App() {
     setProfile(p) {
       setProfileState(p);
       boot.game.llm = llmFor(p);
-      void boot.game.repo.setSetting("activeProfile", p?.id ?? null);
+      void boot.game.repo.setSetting("activeProfile", p?.id ?? null).then(() => applyFallback(boot.game, p));
     },
     reading,
     setReading(r) {

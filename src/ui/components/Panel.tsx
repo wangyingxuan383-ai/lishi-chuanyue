@@ -189,6 +189,44 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
   );
 }
 
+/** 整理状况 (R30 step 2): AI suggests which statuses are over; the player keeps what to remove checked. */
+function StatusTidySheet({ worldId, onClose, onSave }: { worldId: string; onClose: () => void; onSave: Save }) {
+  const { game, toast } = useApp();
+  const [found, setFound] = useState<{ name: string; why: string }[] | null>(null);
+  const [off, setOff] = useState<Set<string>>(new Set());
+  const [problem, setProblem] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { void game.tidyStatuses(worldId).then(setFound).catch((e) => setProblem(e instanceof Error ? e.message : "没能整理")); }, [worldId]);
+  const chosen = found?.filter((x) => !off.has(x.name)) ?? [];
+  const apply = async () => {
+    setSaving(true);
+    try {
+      await onSave({ status: chosen.map((x) => ({ op: "remove" as const, name: x.name })) }, `整理状况：去掉${chosen.map((x) => x.name).join("、")}`);
+      toast(`去掉了 ${chosen.length} 项状况，可撤销`);
+      onClose();
+    } catch (e) { setProblem(rejectedReason(e)); } finally { setSaving(false); }
+  };
+  return (
+    <Sheet title="整理身上的状况" onClose={onClose}>
+      <div className="stack">
+        {!found && !problem && <p className="muted m-0">AI 正在对照最近的剧情看哪些已经好了…</p>}
+        {found?.length === 0 && <p className="m-0">看下来都还在，没有要去掉的。</p>}
+        {!!found?.length && <>
+          <p className="muted m-0">AI 认为这些可以去掉。取消勾选的会留下。</p>
+          {found.map((x) => (
+            <label key={x.name} className="row status-tidy-row">
+              <input type="checkbox" className="check-20" checked={!off.has(x.name)} onChange={(e) => setOff((set) => { const next = new Set(set); if (e.target.checked) next.delete(x.name); else next.add(x.name); return next; })} />
+              <span className="grow"><b>{x.name}</b>{x.why && <small className="muted"> · {x.why}</small>}</span>
+            </label>
+          ))}
+          <button className="primary" disabled={saving || !chosen.length} onClick={() => void apply()}>{saving ? "正在保存…" : `去掉 ${chosen.length} 项`}</button>
+        </>}
+        {problem && <p role="alert" className="notice m-0">{problem}</p>}
+      </div>
+    </Sheet>
+  );
+}
+
 export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false }: {
   worldId: string; headId: string; chapterEvery: number;
   onContinuitySaved?: () => void | Promise<void>;
@@ -206,6 +244,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   const [problem, setProblem] = useState<string | null>(null);
   const [bio, setBio] = useState(false);
   const [item, setItem] = useState<{ item: Item | null } | null>(null);
+  const [tidy, setTidy] = useState(false);
   const editing = draft !== null;
   const change = (fn: (s: WorldState) => void) => setDraft((s) => { const next = structuredClone(s!); fn(next); return next; });
   // Closing slides the panel back out to the right before it is removed (R28).
@@ -333,6 +372,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
                   {editing && <button onClick={() => change((d) => { d.protagonist.statuses.splice(i, 1); })}>去掉</button>}
                 </div>
               )) : <p className="muted">无</p>}
+              {!editing && me.statuses.some((x) => x.name !== "垂危") && <button className="ghost" disabled={busy} onClick={() => setTidy(true)}>看看哪些已经好了</button>}
               {editing && <button onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}><Icon name="plus" size={18} />添加状况</button>}
             </div>
             {problem && <p className="notice m-0">{problem}</p>}
@@ -358,6 +398,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
         <button className="primary" disabled={saving || busy} onClick={() => void save()}>{busy ? "等这段写完" : "保存修改"}</button>
       </div>}
       {bio && <BioSheet state={state} onClose={() => setBio(false)} onSave={onSave} />}
+      {tidy && <StatusTidySheet worldId={worldId} onClose={() => setTidy(false)} onSave={onSave} />}
       {item && <ItemSheet item={item.item} state={state} onClose={() => setItem(null)} onSave={onSave} />}
     </div>
   );

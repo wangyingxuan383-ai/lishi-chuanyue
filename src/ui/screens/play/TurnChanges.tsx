@@ -9,6 +9,7 @@ import { Sheet } from "../../components/Sheet";
 import { motionLevel } from "../../app/motion";
 
 const GROUPS: { name: string; icon: IconName; test: RegExp }[] = [
+  { name: "原著", icon: "book", test: /^原著进度/ },
   { name: "地点", icon: "pin", test: /^(到|来到|离开) / },
   { name: "时间", icon: "clock", test: /^(过了|过年|快进|第.+天)/ },
   { name: "数值", icon: "coin", test: /^(钱|健康|精力|名望|体力|声望)/ },
@@ -44,7 +45,9 @@ function CountUp({ text }: { text: string }) {
 /** How many labels the line shows before “另 N 项”. */
 const SHOWN = 3;
 
-export function TurnChanges({ chips, onPanel, fresh }: { chips: Chip[]; onPanel?: () => void; fresh?: boolean }) {
+/** `extra`: an action shown in the sheet, such as 改回 for the book position (D178). */
+export function TurnChanges({ chips, onPanel, fresh, extra, notes, onNotes }: { chips: Chip[]; onPanel?: () => void; fresh?: boolean; extra?: { label: string; run: () => void };
+  /** 参考了哪些札记 for this passage (R30 step 2). */ notes?: string[]; onNotes?: () => void }) {
   const [open, setOpen] = useState(false);
   if (!chips?.length) return null;
   const shown = chips.slice(0, SHOWN), rest = chips.length - shown.length;
@@ -70,6 +73,12 @@ export function TurnChanges({ chips, onPanel, fresh }: { chips: Chip[]; onPanel?
                 <ul>{g.chips.map((c, i) => <li key={i} className={`change-row ${c.tone}`} style={{ ["--i" as string]: i }}>{chipLabel(c.text)}</li>)}</ul>
               </section>
             ))}
+            {!!notes?.length && <section className="changes-group">
+              <h3><Icon name="book" size={18} />写这段时参考的札记</h3>
+              <p className="muted m-0">{notes.join("、")}</p>
+              {onNotes && <button className="ghost" onClick={() => { setOpen(false); onNotes(); }}>查看札记</button>}
+            </section>}
+            {extra && <button onClick={() => { setOpen(false); extra.run(); }}>{extra.label}</button>}
             {onPanel && <button className="primary" onClick={() => { setOpen(false); onPanel(); }}>在角色面板里查看和修改</button>}
           </div>
         </Sheet>

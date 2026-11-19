@@ -141,6 +141,9 @@ export async function createTauriPlatform(): Promise<Platform> {
         openAutostart: () => call<void>("plugin:notifications|open_autostart_settings"),
         setNotifyPrefs: (prefs: NotifyPrefs) => call<void>("plugin:notifications|set_notify_prefs", { ...prefs }),
         takeLaunchTarget: () => call<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>("plugin:notifications|take_launch_target"),
+        reminderStatus: () => call<{ sound: boolean; audible: boolean }>("plugin:notifications|reminder_status"),
+        testReminder: () => call<void>("plugin:notifications|test_reminder"),
+        openReminderSettings: () => call<void>("plugin:notifications|open_reminder_settings"),
       } : {}),
       setSystemBars: (background, dark) =>
         name === "android" ? call("plugin:notifications|set_system_bars", { background, dark }) : Promise.resolve(),

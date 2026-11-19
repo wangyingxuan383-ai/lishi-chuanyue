@@ -401,7 +401,7 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     // 相关旧事 numbers passages from the opening; history holds the last 200.
     let total: i64 = store.lock()?.query_row("WITH RECURSIVE path AS (SELECT id,parent_id,kind FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.kind FROM nodes n JOIN path p ON n.id=p.parent_id) SELECT COUNT(*) FROM path WHERE kind<>'edit'", [&plan.head_id], |r| r.get(0))?;
     let offset = (total as usize).saturating_sub(history.iter().filter(|n| n["kind"] != "edit").count());
-    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters});
+    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters,"canonNotes":saved["canonNotes"]});
     let mut input=input;
     input["continuity"]=crate::continuity::project(&*store.lock()?,&plan.world_id,plan.base_id.as_deref().unwrap_or(&plan.head_id)).unwrap_or_else(|_|json!({"unavailable":true}));
     let context=crate::writing_context::build(&input)?;

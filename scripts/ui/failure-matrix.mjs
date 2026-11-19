@@ -138,6 +138,35 @@ const streamText = await notice.textContent();
 check("mid-stream break: says it broke off, offers 接着写完", streamText.includes("断开") && (await notice.locator("button.primary").textContent()) === "接着写完", streamText);
 await shot("stream-notice");
 
+// 6. 备用服务 (D179): the main service keeps failing with 500; the backup writes the passage.
+step("adding a second service as the backup");
+await page.goto(origin, { waitUntil: "domcontentloaded" });
+await page.getByRole("button", { name: /^设置/ }).click();
+await page.getByRole("button", { name: /^AI 服务/ }).first().click();
+await page.getByRole("button", { name: /添加服务/ }).click();
+await connectFake(page, { model: "fake-normal" });
+// Saving returns to the settings home with the new service in use.
+await page.getByText(/127\.0\.0\.1 2/).first().waitFor({ timeout });
+await page.goto(origin, { waitUntil: "domcontentloaded" });
+await page.getByRole("button", { name: /^设置/ }).click();
+await page.getByRole("button", { name: /^AI 服务/ }).first().click();
+// Adding a service may switch to it; the first one stays the main service here.
+await page.locator(".service-card .service-main").first().click();
+await page.waitForTimeout(300);
+const backupId = await page.locator("select").last().evaluate((el) => [...el.options].find((o) => o.value && o.textContent.includes("fake-normal"))?.value ?? "");
+await page.locator("select").last().selectOption(backupId);
+check("settings offers 备用服务 once a second service is connected", !!backupId);
+await shot("fallback-setting");
+await useModel("fake-http500");
+before = await passages();
+await tapChoice();
+const takeover = page.locator(".toast", { hasText: "备用服务" });
+await takeover.waitFor({ timeout });
+check("backup: says the backup took over", (await takeover.textContent()).includes("主服务出错"), await takeover.textContent());
+await page.waitForFunction((n) => document.querySelectorAll(".turn").length > n && !document.querySelector(".writing-turn"), before, { timeout: timeout * 2 });
+check("backup: the passage is written without a failure notice", (await passages()) > before && (await page.locator(".notice[role=status] button.primary").count()) === 0);
+await shot("fallback-done");
+
 // 5. Settings → 存档与数据 → 复制诊断 lists the failures.
 await page.goto(origin, { waitUntil: "domcontentloaded" });
 await page.getByRole("button", { name: /^设置/ }).click();

@@ -4,7 +4,7 @@ import type { Game } from "../game";
 import { ChatError, DEFAULT_TIMEOUTS, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, outputWasTruncated, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
 import { isRefusal } from "../llm/refusal";
 import * as tree from "../tree";
-import type { ActionMode, FactCitation, World, WorldState, WorldSettings } from "../types";
+import type { ActionMode, FactCitation, StoryNode, World, WorldState, WorldSettings } from "../types";
 import { openingExtra, recordFields } from "../prompt/turn";
 import { validBinding, type ReferenceContext } from "../sources/types";
 import { chunksOf, getBook } from "../sources/library";
@@ -16,13 +16,13 @@ import { newId } from "../db/repo";
 import { packCards } from "../era/card";
 import { packTimeline } from "../timeline";
 import { isFortune } from "../fortune";
-import { parseRecord } from "../record/parse";
+import { completeJson, parseRecord } from "../record/parse";
 
 /** writing-2: the version is kept with each adopted rewrite; it is not sent to the model. */
 export const WRITING_PROMPT_VERSION = "writing-3";
-export const CANON_WRITING_PROMPT_VERSION = "writing-canon-3";
+export const CANON_WRITING_PROMPT_VERSION = "writing-canon-4";
 export function canonCorrectionRules(settings: WorldSettings, state: WorldState, opening = false): string {
-  return `对这个回合按原著纠错。主动读取 canon-reference 技能，搜索并阅读原著原文，必要时补查邻段；核对身份、关系、称谓、时间、地点、物品和事件。玩家明确改变的事实及合理后果保留，AI自行写错不等于玩家改写。独立查证可同批完成，沿检索返回编号阅读，复用已读证据。只预览，不改当前路线。只改选中范围，允许按要求补全遗漏，不续写其后。范围外正文由程序原样保留。原回合记录默认保留，只对受改稿影响的字段返回最小recordPatch；数组只给受影响项目，不重写无关钱物/时间/目标。跨回合问题放related，资料不足放unresolved，不擅自改历史。最后只返回JSON：{"replacement":"选中范围的替换正文","recordPatch":{受影响的回合记录字段},"related":["关联问题"],"unresolved":["待核对问题"],"correctionPatch":{仅可用于校正继承的profile/people/place/places/cards，无法查证则省略},"corrections":[{"detail":"有原著依据的更正说明","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}]}。corrections只放原著更正，每项citations非空；玩家分支不是原著证据，不放进这个列表或伪造引文。原文没有依据时明确资料不足。record只记录本回合实际变化，不返回read_world的WorldState，不包含protagonist/source/facts/executionMode等整局字段。time写本回合经过多久，money写增减，choices为文字数组。字段沿用正常回合：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
+  return `对这个回合按原著纠错。主动读取 canon-reference 技能，搜索并阅读原著原文，必要时补查邻段；核对身份、关系、称谓、时间、地点、物品和事件。玩家明确改变的事实及合理后果保留，AI自行写错不等于玩家改写。独立查证可同批完成，沿检索返回编号阅读，复用已读证据。只预览，不改当前路线。只改选中范围，允许按要求补全遗漏，不续写其后。范围外正文由程序原样保留。原回合记录默认保留，只对受改稿影响的字段返回最小recordPatch；数组只给受影响项目，不重写无关钱物/时间/目标。跨回合问题放related，资料不足放unresolved，不擅自改历史。查阅只有几轮：同一件事查两次仍没有原文依据（比如它是本局自己的设定或玩家的分支），就不再搜索，写进unresolved。最后只返回JSON：{"replacement":"选中范围的替换正文","recordPatch":{受影响的回合记录字段},"related":["关联问题"],"unresolved":["待核对问题"],"correctionPatch":{仅可用于校正继承的profile/people/place/places/cards，无法查证则省略},"corrections":[{"detail":"有原著依据的更正说明","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}]}。corrections只放原著更正，每项citations非空；玩家分支不是原著证据，不放进这个列表或伪造引文。原文没有依据时明确资料不足。record只记录本回合实际变化，不返回read_world的WorldState，不包含protagonist/source/facts/executionMode等整局字段。time写本回合经过多久，money写增减，choices为文字数组。字段沿用正常回合：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
 }
 export interface WritingAnchor { worldId: string; lineId: string; headId: string; nodeId: string; original: string }
 export interface TextRange { start: number; end: number }
@@ -222,6 +222,14 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
   };
 }
 
+/** When 按原著纠错 finds no quotable basis, the player hears that and where to go instead, not “进度已保存”. */
+export const CANON_NOT_FOUND = "原著里没有查到这处的依据，原文没有改动。如果这是本局自己的设定，或者就想这样改，用“按我的要求改”。";
+export function canonStopText(error?: string | null): string {
+  if (!error) return "原著改稿尚未完成，原路线未改动。";
+  if (/已先停下|尚未查出带原文依据|每项更正都需要原著引文|没有实际读取|出处没有对应/.test(error)) return CANON_NOT_FOUND;
+  return error.replace(/，进度已保存$/, "");
+}
+
 export function writingError(error: unknown): string {
   if (error instanceof WritingError) return error.message;
   if (error instanceof ChatError) {
@@ -275,6 +283,102 @@ export function checkedCorrectionPatch(patch: TurnRecord): TurnRecord {
   return structuredClone(patch);
 }
 
+// 按我的要求改 (R30 step 2): the player's words are the evidence. Facts change as
+// asked, the turn's record follows, earlier facts the player corrected are fixed
+// in the 设定集 too; no book quote is needed, unlike 按原著纠错.
+export const REVISION_PROMPT_VERSION = "revise-passage-1";
+export interface PlayerRevisionRequest { anchor: WritingAnchor; range: TextRange; hint: string }
+export interface PlayerRevisionPreview {
+  anchor: WritingAnchor; range: TextRange; hint: string; replacement: string; narrative: string;
+  record: TurnRecord; recordChanges: { name: string; before: string; after: string }[]; correctionPatch?: TurnRecord;
+  /** One sentence on what changed, from the model. */ note: string; writingVersion: string;
+}
+export { abilityCardName } from "../memory/cards";
+import { abilityCardName } from "../memory/cards";
+
+export function playerRevisionRules(settings: WorldSettings, state: WorldState, opening = false): string {
+  return `按玩家的要求修改互动小说里选中的这段正文。玩家的要求就是依据：要求改的事实（人物、身份、数字、等级、年限、能力、物品、关系、时间、地点等）照改，选中范围里与之矛盾的说法一并改顺；没要求改的内容和写法尽量保持原样。只改选中范围，不续写其后的剧情，范围外的正文由程序原样保留。
+改动影响本回合记录时，只对受影响的字段返回最小 recordPatch（字段同正常回合，数组只给受影响的项目）；不影响就省略。
+玩家改的如果是这一段之前就已成立的事实（主角已有的能力或修为、身份、人物的关系或来历、地点、设定），用 correctionPatch 把之前的资料也一起改正，只能用 profile、people、place、places、cards：profile 只改 name、age、identity、origin；cards 用 {"name":"卡片名","kind":"设定","content":"改正后的全文"}，主角自己的本事写在“${abilityCardName(state.protagonist.name)}”这张卡里（没有就新建）。
+不需要原著引文。最后只返回一个 JSON 对象：{"replacement":"选中范围改好的正文","recordPatch":{},"correctionPatch":{},"note":"一句话说明改了什么"}。
+记录字段：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
+}
+
+const WHOLE_STORY_KEYS = ["protagonist", "source", "executionMode", "facts", "settings", "rules", "sourceSet", "executionSet", "setStats", "scriptSet", "challengeSet"];
+/** The turn's record with only the patched fields changed: arrays by id or name, objects merged (as 按原著纠错 does). */
+export function mergeRecordPatch(original: TurnRecord | null, patch: unknown): TurnRecord {
+  const record = structuredClone((original ?? {}) as Record<string, unknown>);
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return record as TurnRecord;
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    if (WHOLE_STORY_KEYS.includes(key) || value == null) continue;
+    if (key === "choices" && Array.isArray(value) && value.every((v) => typeof v === "string")) record[key] = value;
+    else if (Array.isArray(value)) {
+      const list = Array.isArray(record[key]) ? [...(record[key] as Record<string, unknown>[])] : [];
+      for (const change of value) {
+        if (!change || typeof change !== "object" || Array.isArray(change)) continue;
+        const id = (change as Record<string, unknown>).id ?? (change as Record<string, unknown>).name;
+        const at = id === undefined ? -1 : list.findIndex((v) => (v?.id ?? v?.name) === id);
+        if (at >= 0) list[at] = { ...list[at], ...(change as Record<string, unknown>) };
+        else list.push(change as Record<string, unknown>);
+      }
+      record[key] = list;
+    } else if (typeof value === "object") record[key] = { ...((record[key] as Record<string, unknown>) ?? {}), ...(value as Record<string, unknown>) };
+    else record[key] = value;
+  }
+  return record as TurnRecord;
+}
+
+/** The model's answer as a preview; null when it gave no replacement. Cards it corrects stay the AI's to keep up. */
+export function parsePlayerRevision(text: string, request: PlayerRevisionRequest, original: TurnRecord | null): PlayerRevisionPreview | null {
+  const value = completeJson(text) as Record<string, unknown> | null;
+  const replacement = typeof value?.replacement === "string" ? value.replacement.trim() : "";
+  if (!value || !replacement) return null;
+  const record = mergeRecordPatch(original, value.recordPatch);
+  let correctionPatch: TurnRecord | undefined;
+  const raw = value.correctionPatch;
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length) {
+    const patch = structuredClone(raw) as TurnRecord;
+    if (Array.isArray(patch.cards)) patch.cards = patch.cards.filter((c) => c && typeof c.name === "string" && c.name.trim()).map((c) => ({ ...c, kind: c.kind ?? "设定", source: "AI" as const }));
+    try { correctionPatch = checkedCorrectionPatch(patch); } catch { correctionPatch = undefined; }
+  }
+  return {
+    anchor: request.anchor, range: request.range, hint: request.hint, replacement,
+    narrative: replaceRange(request.anchor.original, request.range, replacement), record,
+    recordChanges: correctionRecordChanges(original, record), ...(correctionPatch ? { correctionPatch } : {}),
+    note: typeof value.note === "string" ? value.note.trim().slice(0, 200) : "", writingVersion: REVISION_PROMPT_VERSION,
+  };
+}
+
+/**
+ * The passage is the latest one: after it come at most the AI's own background
+ * 设定集 tidy-ups (meta.upkeep edits), which belong to it.
+ */
+export async function isLatestPassage(game: Game, anchor: WritingAnchor): Promise<boolean> {
+  let node = await game.repo.getNode(anchor.headId);
+  while (node && node.id !== anchor.nodeId) {
+    if (node.kind !== "edit" || node.meta.upkeep !== true || !node.parentId) return false;
+    node = await game.repo.getNode(node.parentId);
+  }
+  return !!node && !!node.parentId;
+}
+
+/** 采用: like 按原著纠错, settled from the parent; the latest passage gets another version, an earlier one a revision route. */
+export async function adoptPlayerRevision(game: Game, preview: PlayerRevisionPreview): Promise<tree.Cursor> {
+  const { anchor } = preview;
+  await assertWritingAnchor(game, anchor);
+  const [target, world, targetState] = await Promise.all([game.repo.getNode(anchor.nodeId), game.repo.getWorld(anchor.worldId), game.repo.getState(anchor.nodeId)]);
+  if (!target || !world || target.kind === "edit" || !preview.narrative.trim()) throw new WritingError(STALE_WRITING);
+  if (replaceRange(anchor.original, preview.range, preview.replacement) !== preview.narrative) throw new WritingError("改稿超出了选中范围，请重新生成。");
+  const current = await game.repo.getState(anchor.headId);
+  return commitRevision(game, {
+    anchor, target, world, correctionPatch: preview.correctionPatch, record: preview.record, narrative: preview.narrative,
+    source: targetState.source ?? null, sourceGuard: JSON.stringify(current.source ?? null),
+    facts: (nodeId) => [{ id: newId(), detail: `玩家修订：${preview.note || preview.hint}`.slice(0, 300), origin: "player" as const, citations: [], nodeId }],
+    meta: { writingVersion: preview.writingVersion, revision: { kind: "playerRevision", nodeId: target.id, lineId: anchor.lineId, hint: preview.hint.slice(0, 300) } },
+    asVersion: true, lineName: target.parentId ? "改写后的路线" : "修订开场后的路线",
+  });
+}
+
 /** The preview's complete passage is settled once from its parent, never from its old result. */
 export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionPreview): Promise<tree.Cursor> {
   const { anchor } = preview;
@@ -305,20 +409,46 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
       }
     }
   }
-  const seed = target.parentId ? await game.repo.getState(target.parentId) : target.meta.openingSeed ?? preview.baseline;
+  return commitRevision(game, {
+    anchor, target, world, baseline: preview.baseline, correctionPatch: preview.correctionPatch, record: preview.record, narrative: preview.narrative,
+    source: reference.binding, sourceGuard: preview.sourceGuard,
+    checkSeed: (seed) => {
+      for (const fact of preview.preservedPlayerFacts ?? []) {
+        if (!seed.facts?.some((f) => f.origin === "player" && f.id === fact.id && f.detail === fact.detail)) throw new WritingError("玩家分支的来源已经改变，请重新查证。");
+      }
+    },
+    facts: (nodeId) => preview.corrections.map((c) => ({ id: newId(), detail: c.detail, origin: "correction" as const, citations: structuredClone(c.citations), nodeId })),
+    meta: {
+      reference: structuredClone(reference), writingVersion: typeof preview.writingVersion === "string" ? preview.writingVersion : "unknown", preservedPlayerFacts: structuredClone(preview.preservedPlayerFacts ?? []),
+      revision: { kind: "canonCorrection", nodeId: target.id, lineId: anchor.lineId, corrections: structuredClone(preview.corrections) },
+    },
+  });
+}
+
+/**
+ * The revised passage settled once from its parent (or the opening's seed), with
+ * any earlier facts the revision corrected applied first. An earlier passage
+ * gets a revision route, so what followed it stays on the original one; the
+ * latest passage gets another version beside the old one (按我的要求改).
+ */
+async function commitRevision(game: Game, r: {
+  anchor: WritingAnchor; target: StoryNode; world: World; baseline?: WorldState; correctionPatch?: TurnRecord; record: TurnRecord; narrative: string;
+  source: WorldState["source"]; sourceGuard: string; checkSeed?: (seed: WorldState) => void; facts: (nodeId: string) => NonNullable<WorldState["facts"]>;
+  meta: Record<string, unknown>; asVersion?: boolean; lineName?: string;
+}): Promise<tree.Cursor> {
+  const { anchor, target, world } = r;
+  const seed = target.parentId ? await game.repo.getState(target.parentId) : target.meta.openingSeed ?? r.baseline;
   if (!target.parentId && !isOpeningSeed(seed)) throw new WritingError(MISSING_OPENING_SEED);
   if (!seed || typeof seed !== "object") throw new WritingError("找不到修订前的状态。");
-  for (const fact of preview.preservedPlayerFacts ?? []) {
-    if (!(seed as WorldState).facts?.some((f) => f.origin === "player" && f.id === fact.id && f.detail === fact.detail)) throw new WritingError("玩家分支的来源已经改变，请重新查证。");
-  }
+  r.checkSeed?.(seed as WorldState);
   let baseline = structuredClone(seed as WorldState);
   let era = eraContext(world.eraId, baseline);
-  if (preview.correctionPatch) {
-    const patch = checkedCorrectionPatch(preview.correctionPatch);
+  if (r.correctionPatch) {
+    const patch = checkedCorrectionPatch(r.correctionPatch);
     baseline = (await game.settleRecord(baseline, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock }, { advanceTime: false })).state;
     era = eraContext(world.eraId, baseline);
   }
-  const normalized = parseRecord(JSON.stringify(preview.record)).record;
+  const normalized = parseRecord(JSON.stringify(r.record)).record;
   if (!normalized) throw new WritingError("改稿的事实整理尚未完成。");
   let record = structuredClone(normalized);
   if (!target.parentId) {
@@ -343,23 +473,23 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
   const nodeId = newId();
   if (normalized.continuity) {
     normalized.continuity = remapContinuity(normalized.continuity, id => id === target.id ? nodeId : id);
-    normalized.continuity = (await validateContinuity(game.repo, anchor.worldId, target.parentId, nodeId, preview.narrative, `${target.actionText ?? ""}\n${target.directorNote ?? ""}`, result.state, normalized.continuity, false)).changes;
+    normalized.continuity = (await validateContinuity(game.repo, anchor.worldId, target.parentId, nodeId, r.narrative, `${target.actionText ?? ""}\n${target.directorNote ?? ""}`, result.state, normalized.continuity, false)).changes;
     if (!Object.keys(normalized.continuity).length) delete normalized.continuity;
   }
-
-  result.state.source = structuredClone(reference.binding);
-  result.state.facts = [...result.state.facts ?? [], ...preview.corrections.map((c) => ({ id: newId(), detail: c.detail, origin: "correction" as const, citations: structuredClone(c.citations), nodeId }))];
+  result.state.source = structuredClone(r.source ?? null);
+  result.state.facts = [...result.state.facts ?? [], ...r.facts(nodeId)];
+  const node = {
+    id: nodeId, parentId: target.parentId, kind: target.kind, narrative: r.narrative.trim(), state: result.state,
+    actionMode: target.actionMode, actionText: target.actionText, directorNote: target.directorNote, record: normalized, choices: normalized.choices ?? [],
+    meta: {
+      ...r.meta,
+      ...(target.parentId ? {} : { openingSeed: structuredClone(seed), ...(target.meta.setup ? { setup: structuredClone(target.meta.setup) } : {}) }),
+      chips: result.chips, notes: result.notes, log: result.log,
+    },
+  };
   try {
-    return await tree.forkRevision(game.repo, { ...anchor, sourceGuard: preview.sourceGuard }, {
-      id: nodeId, parentId: target.parentId, kind: target.kind, narrative: preview.narrative.trim(), state: result.state,
-      actionMode: target.actionMode, actionText: target.actionText, directorNote: target.directorNote, record: normalized, choices: normalized.choices ?? [],
-      meta: {
-        reference: structuredClone(reference), writingVersion: typeof preview.writingVersion === "string" ? preview.writingVersion : "unknown", preservedPlayerFacts: structuredClone(preview.preservedPlayerFacts ?? []),
-        revision: { kind: "canonCorrection", nodeId: target.id, lineId: anchor.lineId, corrections: structuredClone(preview.corrections) },
-        ...(target.parentId ? {} : { openingSeed: structuredClone(seed), ...(target.meta.setup ? { setup: structuredClone(target.meta.setup) } : {}) }),
-        chips: result.chips, notes: result.notes, log: result.log,
-      },
-    });
+    const asVersion = !!(r.asVersion && target.parentId && await isLatestPassage(game, anchor));
+    return await tree.forkRevision(game.repo, { ...anchor, sourceGuard: r.sourceGuard, requireIdle: true }, node, r.lineName, asVersion);
   } catch (error) {
     if (error instanceof Error && error.message.includes("已经改变")) throw new WritingError(STALE_WRITING);
     throw error;

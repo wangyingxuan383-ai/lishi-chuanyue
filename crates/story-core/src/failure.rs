@@ -371,6 +371,21 @@ pub fn player_line(kind: FailKind) -> &'static str {
     }
 }
 
+/// Whether the backup service may take over (D179): only failures of the
+/// main service that another service can avoid. A refusal or a bad key would
+/// most likely repeat; running out of credit is for the player to know.
+pub fn fallback_eligible(error: &Error) -> bool {
+    match error {
+        Error::Provider { kind, status, .. } => match kind.as_str() {
+            "network" | "stream" => true,
+            k if k.starts_with("timeout") => true,
+            "http" => status.is_some_and(|s| s == 429 || s >= 500),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// The record for a run refused before it started: nothing was sent.
 pub fn refused_at_start(error: &Error) -> Value {
     record(error, Stage::Prepare, 0)

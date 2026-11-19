@@ -50,6 +50,8 @@ export interface Draft {
   challengeId: string | null;
   /** 运势 chosen for this story; null follows the play defaults (有影响 for a challenge). */
   fortune: FortuneMode | null;
+  /** 带到新的一局 (D177): notes of an earlier story chosen to come along. */
+  carry?: { fromWorldId: string; fromTitle: string; ids: string[] } | null;
 }
 
 export const EMPTY_SCRIPT: ScriptDraft = { line: "", beats: ["", "", ""], ending: "", steer: "gentle" };
@@ -147,6 +149,7 @@ export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "dif
     organize: !d.eraId && d.organize,
     ...(d.play === "script" && beats.length ? { script: { line: d.script.line.trim(), beats, ending: d.script.ending.trim(), steer: d.script.steer } } : {}),
     ...(d.play === "challenge" && d.challenge.goal.trim() ? { challenge: { goal: d.challenge.goal.trim(), limit: d.challenge.limit.trim(), failIf: d.challenge.failIf.trim() } } : {}),
+    ...(d.carry?.ids.length ? { carry: d.carry } : {}),
   };
 }
 
@@ -171,6 +174,7 @@ export function fromSetup(setup: NewWorld): Draft {
     script: setup.script ?? EMPTY_SCRIPT,
     challenge: setup.challenge ?? EMPTY_CHALLENGE,
     fortune: setup.challenge ? s.fortune ?? null : null,
+    carry: setup.carry ?? null,
   });
 }
 
@@ -190,7 +194,8 @@ function playLine(d: Draft): string {
 
 export function shareText(d: Draft): string {
   const era = ERAS.find((e) => e.id === d.eraId)?.title ?? "按故事设定";
-  const { templateId: _t, challengeId: _c, ...data } = d;
+  // Carried notes are this device's own stories: a shared setup never names them.
+  const { templateId: _t, challengeId: _c, carry: _n, ...data } = d;
   return [
     `【穿越小说模拟 · 开局设定】${d.title || "未命名"}`,
     `${d.settings.mode === "free" ? "世界" : "时代"}：${d.settings.mode === "free" ? "自由世界" : era}`,
@@ -210,6 +215,15 @@ export const OPENING_TEXT_LIMIT = 4 * 1024 * 1024;
 const oneOf = <T extends string | number>(v: unknown, options: readonly T[], fallback: T): T => (options.includes(v as T) ? (v as T) : fallback);
 
 /** Unknown options fall back; authored text is preserved, never silently truncated. */
+/** A saved draft's carried notes, if they still look right. */
+function carryOf(raw: unknown): Draft["carry"] {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.fromWorldId !== "string" || typeof c.fromTitle !== "string" || !Array.isArray(c.ids)) return null;
+  const ids = c.ids.filter((id): id is string => typeof id === "string").slice(0, 50);
+  return ids.length ? { fromWorldId: c.fromWorldId, fromTitle: c.fromTitle.slice(0, 80), ids } : null;
+}
+
 export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
   const s = (raw.settings && typeof raw.settings === "object" ? raw.settings : {}) as Record<string, unknown>;
   const intensity = (s.intensity && typeof s.intensity === "object" ? s.intensity : {}) as Record<string, unknown>;
@@ -229,6 +243,7 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
     script: { line: str(script.line), beats: beats.length ? beats : [...EMPTY_SCRIPT.beats], ending: str(script.ending), steer: script.steer === "firm" ? "firm" : "gentle" },
     challenge: { goal: str(challenge.goal), limit: str(challenge.limit), failIf: str(challenge.failIf) },
     fortune: raw.fortune === "on" || raw.fortune === "hint" || raw.fortune === "off" ? raw.fortune : null,
+    ...(raw.carry ? { carry: carryOf(raw.carry) } : {}),
     lockedGender: locked,
     title: str(raw.title),
     titlePolicy: raw.titlePolicy === "auto" ? "auto" : str(raw.title).trim() ? "manual" : "auto",
@@ -273,7 +288,7 @@ export function parseShare(text: string): Draft | null {
   try {
     const raw = JSON.parse(body.trim()) as unknown;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    const draft = normalizeOpeningDraft(raw as Record<string, unknown>);
+    const { carry: _carry, ...draft } = normalizeOpeningDraft(raw as Record<string, unknown>);
     return draft.premise.trim() || draft.identity.trim() || draft.openingText.trim() ? draft : null;
   } catch {
     return null;

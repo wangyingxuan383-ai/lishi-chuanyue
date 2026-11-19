@@ -297,10 +297,10 @@ export class Repo {
     return (await this.getNode(nodeId))!;
   }
 
-  /** A preview becomes a new route atomically; an old route is never moved or rewritten. */
-  async forkRevision(guard: RevisionGuard, node: NewNode, name: string): Promise<{ node: StoryNode; line: Line }> {
-    const t = now(), lineId = newId();
-    const unique = await this.uniqueLineName(guard.worldId, name);
+  /** Adopt a preview atomically, either on a new route or as the latest passage's sibling. */
+  async forkRevision(guard: RevisionGuard, node: NewNode, name: string, asVersion = false): Promise<{ node: StoryNode; line: Line }> {
+    const t = now(), lineId = asVersion ? guard.lineId : newId();
+    const unique = asVersion ? undefined : await this.uniqueLineName(guard.worldId, name);
     const [next] = await this.q("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM nodes WHERE world_id=?", [guard.worldId]);
     const { statements, nodeId } = this.nodeStatements(guard.worldId, Number(next.seq), node, t);
     const condition = `EXISTS (
@@ -328,7 +328,10 @@ export class Repo {
         guard.parentStateGuard ?? null, guard.parentStateGuard ?? null, guard.targetMetaGuard ?? null, guard.targetMetaGuard ?? null,
         guard.parentMetaGuard ?? null, guard.parentMetaGuard ?? null, guard.requireIdle ? 1 : 0, Date.now()] },
       this.nodeStateStatement(nodeId, node.state, true),
-      { sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique, nodeId, t, nodeId] },
+      ...(asVersion ? [
+        { sql: "UPDATE nodes SET last_child_id=? WHERE id=? AND " + exists, params: [nodeId, node.parentId, nodeId] },
+        { sql: "UPDATE lines SET node_id=? WHERE id=? AND " + exists, params: [nodeId, lineId, nodeId] },
+      ] : [{ sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique!, nodeId, t, nodeId] }]),
       { sql: "UPDATE worlds SET current_line_id=?,updated_at=?,played_at=? WHERE id=? AND " + exists, params: [lineId, t, t, guard.worldId, nodeId] },
     ]);
     const created = await this.getNode(nodeId), line = await this.getLine(lineId);

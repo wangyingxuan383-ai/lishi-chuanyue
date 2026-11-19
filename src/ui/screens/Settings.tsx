@@ -19,9 +19,11 @@ import { exportWorldFile } from "../../engine/archive";
 import { purposeLabel } from "../../engine/usage";
 import { Seal } from "../components/Seal";
 import { recentDiagnosis } from "../components/FailureSheet";
+import { applyFallback } from "../app/llmConfig";
 import { BackupRestore } from "../components/BackupRestore";
 import { Icon, type IconName } from "../components/Icon";
 import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget";
+import { SpeedCheck } from "../components/SpeedCheck";
 import { WhatsNewSheet } from "../components/WhatsNew";
 import { UpdateButton, UpdateDevSource } from "../components/UpdateSheet";
 import { SourceLibrary } from "../components/Sources";
@@ -38,16 +40,16 @@ export const THEMES: [Reading["theme"], string][] = [["auto", "跟随系统"], [
 export const SIZES: [number, string][] = [[16, "小"], [18, "中"], [20, "大"], [22, "特大"]];
 // Search only these public descriptions, never service addresses or credentials.
 const FIND_WORDS: Record<string, string> = {
-  services: "连接 模型 服务 Key 密钥 主模型 辅助模型",
+  services: "连接 模型 服务 Key 密钥 主模型 辅助模型 备用服务 自动接替",
   writing: "文风 篇幅 每段长短 叙述视角 第一人称 第二人称 第三人称 建议选项 写作",
-  memory: "上下文 输入预算 前文 章节摘要 设定集 自动整理 记忆",
+  memory: "上下文 输入预算 前文 章节摘要 设定集 自动整理 记忆 主线梗概 札记",
   play: "难度 运势 运气 用词提醒 内容尺度 战斗 感情 死亡",
   reading: "主题 字号 字体 宋体 黑体 行距 段距 段首空两格 自动滚动 动画 触感 振动 阅读不锁屏 亮屏",
   sources: "原著 同人 书库 参考资料 TXT EPUB PDF DOCX 导入 通读",
   guide: "帮助 操作说明 怎么玩 常见问题",
-  notify: "通知 提醒 后台",
+  notify: "通知 提醒 后台 声音 提示音 振动 静音",
   data: "存档 备份 恢复 导入 导出 数据 诊断 失败 原因",
-  budget: "用量 费用 花费 单价 预算 请求次数 tokens",
+  budget: "用量 费用 花费 单价 预算 请求次数 tokens 速度 太慢 等待 首字 整理用模型 辅助模型",
   network: "联网 网络 代理 连接方式",
   about: "版本 更新 升级 下载 反馈 Github",
   dev: "开发者 日志 调试",
@@ -140,7 +142,7 @@ export default function Settings() {
         {page === "reading" && <ReadingPage />}
         {page === "notify" && <NotifyPage status={notify} onRefresh={() => void game.platform.system.notificationStatus().then(setNotify)} />}
         {page === "data" && <DataPage />}
-        {page === "budget" && <MonthlyBudgetSettings />}
+        {page === "budget" && <><MonthlyBudgetSettings /><h3 className="settings-sub">速度</h3><SpeedCheck /></>}
         {page === "network" && <NetworkPage value={network} onChange={setNetwork} />}
         {page === "about" && <AboutPage />}
         {page === "dev" && <DevPage />}
@@ -170,6 +172,8 @@ function Note({ children }: { children: ReactNode }) {
 
 function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged: () => void }) {
   const { game, push, profile, setProfile, toast, ask, askName } = useApp();
+  const [fallbackId, setFallbackId] = useState("");
+  useEffect(() => { void game.repo.getSetting<string | null>("fallbackProfile", null).then((id) => setFallbackId(id ?? "")); }, []);
   return (
     <>
       <Note>故事由你自己的 AI 服务来写。可以连好几个，点一下就切换。</Note>
@@ -177,7 +181,7 @@ function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged:
         {profiles.map((p) => (
           <div key={p.id} className={`card service-card${p.id === profile?.id ? " selected" : ""}`}>
             <button className="service-main" onClick={() => { if (p.id !== profile?.id) { setProfile(p); toast(`已改用“${p.name}”`); } }}>
-              <h3>{p.name}{p.id === profile?.id && <span className="tag">正在用</span>}</h3>
+              <h3>{p.name}{p.id === profile?.id ? <span className="tag">正在用</span> : p.id === fallbackId && <span className="tag">备用</span>}</h3>
               <p>{p.mainModel}{p.auxModel ? ` · 整理用 ${p.auxModel}` : ""}</p>
             </button>
             <div className="row service-actions">
@@ -192,6 +196,7 @@ function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged:
               <button className="ghost danger-text" onClick={async () => {
                 if (!await ask({ title: `删除“${p.name}”？`, message: "保存在这台设备上的 Key 也会一起删掉。", confirm: "删除", danger: true })) return;
                 await deleteProfile(game.repo, p);
+                if (p.id === fallbackId) { setFallbackId(""); await game.repo.setSetting("fallbackProfile", null); game.fallbackLlm = null; }
                 const rest = profiles.filter((x) => x.id !== p.id);
                 if (p.id === profile?.id) setProfile(rest[0] ?? null);
                 onChanged();
@@ -202,6 +207,33 @@ function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged:
         ))}
         <button onClick={() => push({ name: "setup", profileId: "new" })}><Icon name="plus" size={18} />添加服务</button>
       </div>
+      <FallbackChoice profiles={profiles} chosen={fallbackId} onChosen={setFallbackId} />
+    </>
+  );
+}
+
+/**
+ * 备用服务 (D179): when the service in use fails a request for a passing reason
+ * (no connection, a timeout, the service overloaded), this one answers instead.
+ */
+function FallbackChoice({ profiles, chosen, onChosen: setChosen }: { profiles: Profile[]; chosen: string; onChosen: (id: string) => void }) {
+  const { game, profile } = useApp();
+  const others = profiles.filter((p) => p.id !== profile?.id);
+  if (!others.length) return <Note>连上第二个服务后，可以把它设成备用：正在用的服务暂时出错时，自动改用它接着写。</Note>;
+  return (
+    <>
+      <h3 className="settings-sub">备用服务</h3>
+      <label className="field">正在用的服务暂时出错时，改用
+        <select value={chosen} onChange={async (e) => {
+          const id = e.target.value; setChosen(id);
+          await game.repo.setSetting("fallbackProfile", id || null);
+          await applyFallback(game, profile);
+        }}>
+          <option value="">不用备用服务</option>
+          {others.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mainModel}</option>)}
+        </select>
+      </label>
+      <Note>只在连不上、等太久、服务繁忙或限流时接替，这一段剩下的部分都由备用服务写，提示里会说明。服务拒绝、Key 不对或额度用完不会自动换。</Note>
     </>
   );
 }
@@ -257,8 +289,18 @@ function MemoryPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: 
       <Choice label="设定集自动整理" note="每过几回合，AI 把新出现的人物、地点、势力记进设定集；只改它自己写的卡，你写的不会动" value={defaults.autoUpkeep}
         options={[[true, "开"], [false, "关"]]} onChange={(v) => onChange({ ...defaults, autoUpkeep: v })} />
       <Note>章节和整理的设定是新开一局的默认，已经开始的故事在“本局设置”里改。</Note>
+      <AutoPlotChoice />
     </>
   );
+}
+
+/** 主线梗概 (D174): each new chapter summary is merged into the story's own plot note. */
+function AutoPlotChoice() {
+  const { game } = useApp();
+  const [on, setOn] = useState(true);
+  useEffect(() => { void game.repo.getSetting("autoStoryPlot", true).then(setOn); }, []);
+  return <Choice label="本局主线梗概" note={on ? "每写好一章摘要，AI 顺带把它合进这局的“主线梗概”札记（一次辅助模型请求），长故事里 AI 不会忘了前面的大事" : "不自动整理；需要时在 ⋯ → 札记 里手动新建或更新"}
+    value={on} options={[[true, "自动整理"], [false, "关"]]} onChange={(v) => { setOn(v); void game.repo.setSetting("autoStoryPlot", v); }} />;
 }
 
 function PlayPage({ defaults, onChange }: { defaults: PlayDefaults; onChange: (d: PlayDefaults) => void }) {
@@ -348,9 +390,16 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
   const system = game.platform.system;
   const [background, setBackground] = useState<{ ignoringBattery: boolean; xiaomi: boolean } | null>(null);
   const [prefs, setPrefs] = useState<NotifyPrefs>(DEFAULT_NOTIFY);
-  const readBackground = () => void system.backgroundStatus?.().then(setBackground).catch(() => setBackground(null));
+  const [reminder, setReminder] = useState<{ sound: boolean; audible: boolean } | null>(null);
+  const readBackground = () => {
+    void system.backgroundStatus?.().then(setBackground).catch(() => setBackground(null));
+    void system.reminderStatus?.().then(setReminder).catch(() => setReminder(null));
+  };
   useEffect(() => { readBackground(); void loadNotifyPrefs(game.repo).then(setPrefs); }, []);
-  const change = (patch: Partial<NotifyPrefs>) => { const next = { ...prefs, ...patch }; setPrefs(next); void saveNotifyPrefs(game.repo, next, system.setNotifyPrefs); };
+  const change = (patch: Partial<NotifyPrefs>) => {
+    const next = { ...prefs, ...patch }; setPrefs(next);
+    void saveNotifyPrefs(game.repo, next, system.setNotifyPrefs).then(() => system.reminderStatus?.().then(setReminder).catch(() => {}));
+  };
   // Coming back from the system screen: read the switch again.
   useEffect(() => {
     const again = () => { if (document.visibilityState === "visible") { onRefresh(); readBackground(); } };
@@ -367,6 +416,16 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
           <button className="primary" onClick={async () => { const granted = await game.platform.system.requestNotifications().catch(() => false); if (!granted) await game.platform.system.openSystemSettings("notifications"); onRefresh(); }}>打开通知</button>
         </div>}
       </div>
+      <h3 className="settings-sub">提醒的声音</h3>
+      <Choice label="写好了、没写完时响一声" note={prefs.sound ? "切到后台时，提醒会响提示音并振动（跟手机的通知音）" : "只显示在通知栏，不响"} value={prefs.sound} options={[[true, "响"], [false, "不响"]]} onChange={(v) => change({ sound: v })} />
+      {system.testReminder && <div className="row wrap">
+        <button onClick={() => void system.testReminder?.().then(() => system.reminderStatus?.().then(setReminder))}>试一下提醒</button>
+      </div>}
+      {prefs.sound && reminder && !reminder.audible && <div className="status-card">
+        <b>系统把这个提醒设成了静音</b>
+        <small>手机里这个提醒的声音被关了（小米等手机新装应用时常默认如此）。点下面打开，把“声音”或“提示音”打开。</small>
+        <div className="row"><button className="primary" onClick={() => void system.openReminderSettings?.()}>去打开声音</button></div>
+      </div>}
       <h3 className="settings-sub">通知里显示什么</h3>
       <Choice label="写的时候显示进度" note={prefs.progress ? "通知栏显示故事名、正在构思还是在写、已写多少字和用时，可以直接停止" : "只显示“正在写下一段”"} value={prefs.progress} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ progress: v })} />
       <Choice label="写好了显示第一句" note={prefs.excerpt ? "提醒里带上新一段的第一句，点开直接回到那个故事" : "只提醒写好了"} value={prefs.excerpt} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ excerpt: v })} />

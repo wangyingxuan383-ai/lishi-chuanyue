@@ -6,6 +6,7 @@ import { MIGRATIONS } from "./db/migrations";
 import { Repo } from "./db/repo";
 import { newChallenge, newScript } from "./modes";
 import { sampleState } from "./testing/fixtures";
+import { listStoryNotes, newStoryNote, saveNote } from "./sources/notes";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS } from "./types";
 
@@ -86,11 +87,32 @@ describe("world archive", () => {
     expect(await platform.sql.listBackups()).toHaveLength(1);
   });
 
-  it("exports version seven and continues to read earlier formal stories", async () => {
+  it("carries 本局札记 in format eight, gaps and all, and leaves them out of older files", async () => {
+    const repo = await emptyRepo();
+    const { worldId } = await richWorld(repo);
+    const note = { ...newStoryNote(worldId, "plot", { to: 3, auto: true }, "主线梗概"), content: "开场到第三段", status: "done" as const, model: "aux",
+      previousContent: "旧版", progress: { parts: ["甲", ""], total: 2, gaps: [{ batch: 1, sections: [2], reason: "blocked" as const }] } };
+    await saveNote(repo, note);
+    await saveNote(repo, { ...newStoryNote(worldId, "person", { subject: "王掌柜" }, "人物：王掌柜"), status: "running" as const, originWorldId: "old", originTitle: "前作" });
+    const file = await exportWorld(repo, worldId);
+    expect(archiveProblems(file)).toEqual([]);
+    expect(file.storyNotes).toHaveLength(2);
+    const copy = await importWorld(repo, file, "new");
+    const notes = await listStoryNotes(repo, copy);
+    expect(notes.map((n) => [n.title, n.status, n.content, n.scope.to ?? null]).sort()).toEqual([["主线梗概", "done", "开场到第三段", 3], ["人物：王掌柜", "paused", "", null]]);
+    expect(notes.find((n) => n.kind === "plot")).toMatchObject({ previousContent: "旧版", progress: { gaps: [{ batch: 1 }] } });
+    expect(notes.find((n) => n.kind === "person")).toMatchObject({ originTitle: "前作" });
+    expect(notes.every((n) => n.worldId === copy && !file.storyNotes!.some((o) => o.id === n.id))).toBe(true);
+    expect(archiveProblems({ ...file, storyNotes: [{ ...file.storyNotes![0], worldId: "other" }] })).toEqual(["本局札记损坏或不属于这个故事"]);
+    const older = await importWorld(repo, { ...file, version: 7 }, "new");
+    expect(await listStoryNotes(repo, older)).toEqual([]);
+  });
+
+  it("exports version eight and continues to read earlier formal stories", async () => {
     const repo = await emptyRepo();
     const { worldId } = await richWorld(repo);
     const file = await exportWorld(repo, worldId);
-    expect(file.version).toBe(7);
+    expect(file.version).toBe(8);
     const old = { ...file, version: 1 };
     const copy = await importWorld(repo, old, "new");
     expect(await content(repo, copy)).toEqual(await content(repo, worldId));
@@ -116,7 +138,7 @@ describe("world archive", () => {
     const external={sourceClaim:"网页确实记载青桥旧称",contentHash:"sha256:page",readAt:"2026-11-01",revisionDecision:{summary:"补充地名",reason:"与本局位置一致",appliesTo:"world_rule",localReferences:[{quote:"本局青桥",location:{nodeId:cursor.head.id},authorization:hidden}]},references:[{quote:"青桥旧称",sourceKind:"external",location:{url:"https://example.invalid/page?id=2&token="+hidden+"#secret",contentHash:"sha256:page",readAt:"2026-11-01",grantId:hidden},apiKey:hidden}],grantId:hidden,packageCode:hidden};
     await repo.platform.sql.batch([{sql:"INSERT INTO story_fact_sources VALUES('web-source',?,?,?,'state',?,'batch','pt','external','地名依据',?,?)",params:[worldId,cursor.line.id,cursor.head.id,cursor.head.id,JSON.stringify(external),at]}]);
     const file=await exportWorld(repo,worldId);
-    expect(file.version).toBe(7);expect(archiveProblems(file)).toEqual([]);expect(file.pi?.tasks).toHaveLength(1);
+    expect(file.version).toBe(8);expect(archiveProblems(file)).toEqual([]);expect(file.pi?.tasks).toHaveLength(1);
     expect(JSON.stringify(file)).not.toContain(hidden);
     const copy=await importWorld(repo,file,"new");
     const [task]=await repo.platform.sql.query("SELECT * FROM pi_tasks WHERE world_id=?",[copy]);

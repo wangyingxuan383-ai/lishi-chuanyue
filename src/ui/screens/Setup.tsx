@@ -324,7 +324,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
 }
 
 /** A searchable list of the service's chat models, the recommended one first (J-03). */
-function ModelPicker({ models, current, recommended, title, note, onPick, onClose }: {
+export function ModelPicker({ models, current, recommended, title, note, onPick, onClose }: {
   models: string[]; current: string; recommended: string | null; title: string; note?: string; onPick: (m: string) => void; onClose: () => void;
 }) {
   const [query, setQuery] = useState("");

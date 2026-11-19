@@ -3,7 +3,8 @@
 // becomes an edit node that can be undone.
 import { useApp } from "../app/context";
 import { rejectedReason } from "../../engine/game";
-import { useState } from "react";
+import { useContext, useState } from "react";
+import { NoteEntry } from "./CanonNotes";
 import { agoText } from "../../engine/calendar/clock";
 import type { EraContext } from "../../engine/era";
 import type { TurnRecord } from "../../engine/state/apply";
@@ -26,6 +27,7 @@ function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = f
   person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>; worldId?: string; headId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { ask, toast } = useApp();
+  const noteEntry = useContext(NoteEntry);
   const [name, setName] = useState(person?.name ?? "");
   const [aliases, setAliases] = useState(person?.aliases.join("、") ?? "");
   const [role, setRole] = useState(person?.role ?? "");
@@ -78,6 +80,7 @@ function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = f
         {person && worldId && headId && <KnowledgeRecords worldId={worldId} headId={headId} person={person} busy={busy || saving} onSaved={onContinuitySaved} />}
         <label className="row"><input type="checkbox" className="check-20" checked={!alive} onChange={(e) => setAlive(!e.target.checked)} />已故</label>
         {clash && <p className="notice m-0">人物表里已经有“{clash.name}”了，点开它修改即可。</p>}
+        {person && noteEntry && <button className="ghost" onClick={() => { onClose(); noteEntry({ kind: "person", subject: person.name, aliases: person.aliases }); }}>整理成札记（这个人在本局的经历）</button>}
         <div className="row">
           {person && <button className="danger-text" disabled={saving} onClick={remove}>删除</button>}
           <button className="primary grow" disabled={saving || !clean || !!clash} onClick={save}>保存</button>

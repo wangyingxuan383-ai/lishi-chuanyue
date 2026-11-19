@@ -17,7 +17,7 @@ import { beatTitle, challengeView } from "../modes";
 
 import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-25";
+export const PROMPT_VERSION = "turn-26";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -311,18 +311,31 @@ export interface TurnPromptInput extends StoryContext {
   /** 原著札记 chosen for this passage (D162), most relevant first. */
   canonNotes?: CanonNoteBrief[];
 }
-export interface CanonNoteBrief { title: string; kind: string; content: string }
-/** The notes as one block within `max` characters, most relevant first. */
+export interface CanonNoteBrief { title: string; kind: string; content: string; source?: "book" | "story" }
+const NOTE_HEADERS = {
+  book: "\n【原著札记】（整理或录入的原著梗概，可能有误；本局已发生的事实优先）",
+  story: "\n【本局札记】（整理自本局已写的正文，可能有误；以最近的正文和当前状态为准）",
+};
+/** The notes as one block within `max` characters, most relevant first; 本局札记 and 原著札记 under their own headings (D174). */
 export function canonNotesBlock(notes: CanonNoteBrief[] | undefined, max: number): string {
-  let block = "";
-  for (const n of notes ?? []) {
-    const header = block ? "" : "\n【原著札记】（玩家让 AI 整理的原著梗概，可能有误；本局已发生的事实优先）";
-    const item = `\n· ${n.title}\n${n.content.trim()}\n`;
-    if (block.length + header.length + item.length <= max) block += header + item;
-    else if (!block && max > 400) block = header + item.slice(0, max - header.length);
-  }
-  return block;
+  return fitNotes(notes, max).block;
 }
+/** The notes that fit the room, with their titles (shown under a passage as 参考了哪些札记). */
+export function fitNotes(notes: CanonNoteBrief[] | undefined, max: number): { block: string; titles: string[] } {
+  let block = "";
+  const titles: string[] = [];
+  const opened = new Set<string>();
+  for (const n of notes ?? []) {
+    const source = n.source === "story" ? "story" : "book";
+    const header = opened.has(source) ? "" : NOTE_HEADERS[source];
+    const item = `\n· ${n.title}\n${n.content.trim()}\n`;
+    if (block.length + header.length + item.length <= max) { block += header + item; opened.add(source); titles.push(n.title); }
+    else if (!block && max > 400) { block = header + item.slice(0, max - header.length); opened.add(source); titles.push(n.title); }
+  }
+  return { block, titles };
+}
+/** The writing room for notes in a turn: a fifth of the budget. */
+export const notesRoom = (budgetChars: number | undefined) => Math.floor((budgetChars ?? DEFAULT_BUDGET_CHARS) / 5);
 
 /** Recent turns as chat history, newest kept first until the budget runs out (minimum three); `ids` are the turns it kept. */
 function historyWindow(history: StoryNode[], budget: number, settings: PromptOptions, strict = false): { messages: ChatMessage[]; ids: Set<string> } {
@@ -453,7 +466,7 @@ export function buildTurnContext(input: TurnPromptInput): TurnContext {
   const query = input.mode === "continue" || input.mode === "skip" ? "" : [input.text, input.directorNote ?? ""].join("\n");
   const allCards = activeCardLines(input.state, recent, undefined, query);
   let cardLines = allCards;
-  const referenceRules = referenceInstructionsBlock(input.reference) + canonNotesBlock(input.canonNotes, Math.floor(target / 5));
+  const referenceRules = referenceInstructionsBlock(input.reference) + canonNotesBlock(input.canonNotes, notesRoom(target));
   const fixed = parts.rules.length + parts.premise.length + parts.era.length + parts.spec.length + state.length + essentials.length + world.length + directive.length + modes.length + notes.length + action.length + referenceRules.length + (input.reference ? 6 : 0);
   const usedReference = fitReference(input.reference, Math.max(0, Math.min(Math.floor(target / 4), target - fixed)));
   const referenceEvidence = referenceEvidenceBlock(usedReference);

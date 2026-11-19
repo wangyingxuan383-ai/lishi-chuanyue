@@ -1,7 +1,7 @@
 // Game session facade: native opening, turns, variants and recovery, plus
 // local edits, context previews and auxiliary writing jobs.
 import { depthBudget, depthOf, referenceReview } from "./depth";
-import { getNote, newNote, noteReplyProblem, notesForTurn, runNote, saveNote, type CanonNote } from "./sources/notes";
+import { carryNotes, getNote, listStoryNotes, newNote, newStoryNote, noteOffRoute, noteReplyProblem, notesForTurn, restartOnRoute, runNote, saveNote, startNoteUpdate, type CanonNote, type NoteBrief } from "./sources/notes";
 import { parseReviseEntry, parseReviseRules, reviseEntryMessages, reviseRulesMessages, type ReviseContext, type ReviseEntry, type ReviseEntryResult, type ReviseRules } from "./prompt/revise";
 import { validateContinuity, readContinuity } from "./continuity";
 import { formatDate } from "./calendar/date";
@@ -11,14 +11,16 @@ import { PlatformError, type ExecutionSnapshot, type Failure, type Platform, typ
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
 import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, outputWasTruncated, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
-import { hasChinese, refusedFinish } from "./llm/refusal";
+import { hasChinese, isRefusal, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, writingContextTemplate, renderState, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
   type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
   canonNotesBlock,
+  fitNotes,
+  notesRoom,
 } from "./prompt/turn";
 import { CODEX_FREE_PROMPT_VERSION, CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
-import { UPKEEP_EVERY, UPKEEP_FREE_PROMPT_VERSION, UPKEEP_PROMPT_VERSION, upkeepMessages } from "./prompt/upkeep";
+import { UPKEEP_EVERY, UPKEEP_FREE_PROMPT_VERSION, UPKEEP_PROMPT_VERSION, parseStatusTidy, statusTidyMessages, upkeepMessages } from "./prompt/upkeep";
 import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
 import { askMessages } from "./prompt/ask";
 import type { TabooHit } from "./era/taboo";
@@ -36,7 +38,7 @@ import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenc
 import { sourceAnalysisMessages, sourceAnalysisResult } from "./sources/analysis";
 import { validBinding, type SourceBinding, type AnalysisJob } from "./sources/types";
 import { asJson, startRun, type RunPlan } from "./execution";
-import { assertWritingAnchor, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview } from "./writing/assist";
+import { assertWritingAnchor, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStopText, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
 
 export type { ChallengeInput, ScriptInput } from "./modes";
 
@@ -142,6 +144,17 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
+function sameService(a: LlmConfig, b: LlmConfig): boolean {
+  return a.slot === b.slot && a.url === b.url && a.model === b.model;
+}
+
+/** Failures the backup service may take over (D179): passing ones, not a refusal, a key or credit. */
+export function fallbackEligible(error: unknown): boolean {
+  if (!(error instanceof ChatError)) return false;
+  if (error.kind === "network" || error.kind.startsWith("timeout")) return true;
+  return error.kind === "http" && (error.status === 429 || (error.status ?? 0) >= 500);
+}
+
 /** A start-up refusal (a busy story, a missing key) as the same failed event a stopped run gives. */
 export function thrownFailure(error: unknown, stopped: boolean, fallback: string): Extract<TurnEvent, { type: "failed" }> {
   if (stopped) return { type: "failed", reason: "cancelled", partialSaved: false };
@@ -160,6 +173,8 @@ export type TurnEvent =
   | { type: "execution-status"; state: "reconnecting" | "connected" | "stop-requested" | "stop-unconfirmed" }
   | { type: "text"; delta: string; full: string }
   | { type: "organizing" }
+  /** 备用服务 (D179) took over from the main service for the rest of this passage. */
+  | { type: "fallback"; from: string; to: string }
   | { type: "done"; cursor: tree.Cursor; node: StoryNode; chips: Chip[] }
   | { type: "failed"; reason: FailReason; status?: number; detail?: string; partialSaved: boolean; runId?: string; cursor?: tree.Cursor; node?: StoryNode; failure?: Failure; failures?: Failure[] };
 
@@ -180,6 +195,8 @@ export interface NewWorld {
   /** 剧本 and 挑战 (R14); 旁观 is settings.pilot. */
   script?: ScriptInput | null;
   challenge?: ChallengeInput | null;
+  /** 带到新的一局 (D177): notes of an earlier story to bring along. */
+  carry?: { fromWorldId: string; fromTitle: string; ids: string[] } | null;
 }
 
 /** Why a 连播 ended (R14). */
@@ -281,6 +298,8 @@ export class Game {
   private background = new Set<Promise<void>>();
   private listeners = new Set<(worldId: string) => void>();
 
+  /** 备用服务 (D179): answers what the main service could not for a passing reason; set from 设置 → AI 服务. */
+  public fallbackLlm: LlmConfig | null = null;
   private constructor(readonly platform: Platform, public llm: LlmConfig | null) {
     this.repo = new Repo(platform);
   }
@@ -331,7 +350,46 @@ export class Game {
       handle.detach();
       await handle.done.catch(() => null);
       for (const fn of this.listeners) fn(worldId);
+      await this.autoStoryPlot(worldId).catch(() => {});
     })());
+  }
+
+  /**
+   * 主线梗概 (D174): once the story has chapter summaries, its own plot note is
+   * made from them and extended with each new one — one helper request, in the
+   * background, never blocking a passage. 设置 → 记忆与整理 can turn it off.
+   */
+  async autoStoryPlot(worldId: string): Promise<void> {
+    if (!this.llm || !(await this.repo.getSetting("autoStoryPlot", true))) return;
+    const head = (await tree.cursor(this.repo, worldId)).head;
+    const chapters = await this.repo.chaptersOnPath(worldId, head.id);
+    const last = chapters.at(-1);
+    if (!last) return;
+    const path = (await this.repo.path(head.id)).filter((n) => n.kind !== "edit");
+    const end = path.findIndex((n) => n.id === last.lastNodeId);
+    if (end < 0) return;
+    const own = (await listStoryNotes(this.repo, worldId)).filter((n) => n.kind === "plot" && !n.originWorldId);
+    // A 主线梗概 the player made from the start is kept up instead of adding a second one.
+    let note = own.find((n) => n.scope.auto) ?? own.find((n) => (n.scope.from ?? 0) === 0 && n.status === "done");
+    const offRoute = !!note && note.status === "done" && noteOffRoute(note, new Set(path.map((n) => n.id)));
+    if (note && offRoute) {
+      // The player went back or switched route: the automatic summary follows the route being
+      // played; one the player wrote is only marked in 札记, never redone without asking.
+      if (!note.scope.auto || this.noteRuns.has(note.id)) return;
+      note = { ...restartOnRoute(note, end), scope: { from: 0, to: end, auto: true } };
+      await saveNote(this.repo, note, true);
+    } else if (!note) {
+      // A long story from before 0.17.0 is offered the summary in 札记 instead, with its cost shown.
+      if (chapters.length > 3) return;
+      note = newStoryNote(worldId, "plot", { from: 0, to: end, auto: true }, "主线梗概");
+      await saveNote(this.repo, note);
+    } else if (note.status === "done" && (note.scope.to ?? -1) < end && !this.noteRuns.has(note.id)) {
+      note = startNoteUpdate(note, end);
+      await saveNote(this.repo, note, true);
+    } else return;
+    for (const fn of this.listeners) fn(worldId);
+    await this.runCanonNote(note.id, () => {});
+    for (const fn of this.listeners) fn(worldId);
   }
 
   private inBackground(work: Promise<void>): void {
@@ -375,7 +433,28 @@ export class Game {
   /** One streamed call with a single retry before any data arrives. */
   private async call(
     messages: ChatMessage[],
-    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope; configuration?: LlmConfig },
+    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope; configuration?: LlmConfig; noFallback?: boolean; onText?: (full: string) => void },
+  ): Promise<ChatResult> {
+    const llm = opts.configuration ?? this.requireLlm();
+    try { return await this.callOnce(messages, { ...opts, configuration: llm }); }
+    catch (error) {
+      // 备用服务 (D179): the same rule as native passages.
+      const backup = this.fallbackLlm;
+      if (opts.noFallback || !backup || sameService(backup, llm) || opts.signal?.aborted || !fallbackEligible(error)) throw error;
+      return await this.callOnce(messages, { ...opts, configuration: backup });
+    }
+  }
+
+  /** A plan's backup service, when one is set and differs from the main one. */
+  private fallbackFor(aux = false): { fallbackModel?: LlmConfig } {
+    const backup = this.fallbackLlm, main = this.llm;
+    if (!backup || !main || sameService(backup, main)) return {};
+    return { fallbackModel: aux ? { ...backup, model: backup.auxModel || backup.model } : backup };
+  }
+
+  private async callOnce(
+    messages: ChatMessage[],
+    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope; configuration?: LlmConfig; onText?: (full: string) => void },
   ): Promise<ChatResult> {
     const llm = opts.configuration ?? this.requireLlm();
     const model = opts.aux ? llm.auxModel || llm.model : llm.model;
@@ -390,7 +469,7 @@ export class Game {
         includeUsage: llm.includeUsage, timeouts: opts.timeouts,
         extra: llm.extra as never,
       }, {
-        onText: (_delta, full) => { if (!opts.signal?.aborted) partial = full; },
+        onText: (_delta, full) => { if (!opts.signal?.aborted) { partial = full; opts.onText?.(full); } },
       });
       let cancel!: () => void;
       const cancellation = new Promise<never>((_, reject) => {
@@ -495,6 +574,24 @@ export class Game {
     return `${notes}${passages}`.trim().slice(0, max);
   }
 
+  /**
+   * 整理状况 (R30 step 2): which statuses the recent story says are over, with a
+   * reason each; one auxiliary request. The panel shows them and removes only
+   * what the player keeps checked, as an ordinary undoable edit.
+   */
+  async tidyStatuses(worldId: string): Promise<{ name: string; why: string }[]> {
+    const cursor = await tree.cursor(this.repo, worldId);
+    const state = await this.repo.getState(cursor.head.id);
+    if (!state.protagonist.statuses.some((x) => x.name !== "垂危")) return [];
+    const turns = (await this.repo.path(cursor.head.id)).filter((n) => n.kind === "turn" || n.kind === "opening").slice(-8);
+    const result = await this.call(statusTidyMessages(state, turns), { aux: true, usage: { worldId, nodeId: null, purpose: "upkeep" }, timeouts: CODEX_TIMEOUT });
+    const ok = helperReplyAvailable(result);
+    const found = ok ? parseStatusTidy(completeJson(result.text), state.protagonist.statuses) : [];
+    await this.platform.sql.batch([this.usage(worldId, null, "upkeep", result, ok ? "ok" : "no_record", this.auxModelName())]);
+    if (!ok) throw new Error("AI 这次没有给出结果，过一会儿再试");
+    return found;
+  }
+
   /** 让 AI 改设定 (R29-T005): one entry of the 设定集, changed as asked; the editor shows it before saving. */
   async reviseEntry(worldId: string, entry: ReviseEntry, instruction: string, opts: { useSource?: boolean } = {}): Promise<ReviseEntryResult> {
     const { messages } = await this.reviseContext(worldId, `${entry.name}\n${entry.aliases.join("\n")}\n${instruction}`, opts.useSource, (c) => reviseEntryMessages(entry, instruction, c));
@@ -594,7 +691,10 @@ export class Game {
     const depth = depthOf(settings);
     const inputBudget = depthBudget(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value), depth);
     const openingReference = fitReference(await referenceContext(this.repo, initial.source, [settings.premise, p.name, p.identity, input.opening.mode === "ai" ? input.opening.hint : ""].join("\n"), Math.floor(inputBudget / 4)), Math.min(3000, Math.floor(inputBudget / 4)));
-    const openingNotes = initial.source ? (await notesForTurn(this.repo, initial.source, "", [settings.premise, p.name, p.identity].join("\n")).catch(() => [])) : [];
+    const openingNotes = [
+      ...(input.carry ? await this.carriedBriefs(input.carry) : []),
+      ...(initial.source ? (await notesForTurn(this.repo, initial.source, "", [settings.premise, p.name, p.identity].join("\n")).catch(() => [])) : []),
+    ];
     const opening = {
       reference: openingReference, canonNotes: openingNotes,
       era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "",
@@ -608,7 +708,7 @@ export class Game {
     const worldId = newId(), lineId = newId();
     const plan: RunPlan = {
       id: newId(), worldId, lineId, headId: "", baseId: null, kind: "opening",
-      model: this.requireLlm(),
+      model: this.requireLlm(), ...this.fallbackFor(),
       messages: nameOpening(input.opening.mode === "player" ? openingExtractMessages({ ...opening, text: input.opening.text.trim() }) : openingMessages(opening)),
       extractMessages: nameOpening(openingExtractMessages({ ...opening, text: "{{NARRATIVE}}" })),
       state: initial, settings,
@@ -630,9 +730,31 @@ export class Game {
       const result = snapshot.result as { nodeId?: string };
       const node = result.nodeId ? await this.repo.getNode(result.nodeId) : null;
       if (!node) throw new Error("开场提交结果不完整");
+      // The world exists now: the carried notes join it (they already informed the opening).
+      if (input.carry?.ids.length) await carryNotes(this.repo, input.carry.ids, worldId, { worldId: input.carry.fromWorldId, title: input.carry.fromTitle }).catch(() => 0);
       onEvent({ type: "done", cursor: await tree.cursor(this.repo, worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
       return worldId;
     } catch (error) { onEvent(thrownFailure(error, false, "开场未能完成")); return null; }
+  }
+
+  /** The notes a new story brings along, as the opening reads them (前作 background). */
+  private async carriedBriefs(carry: NonNullable<NewWorld["carry"]>): Promise<NoteBrief[]> {
+    const briefs: NoteBrief[] = [];
+    for (const id of carry.ids) {
+      const note = await getNote(this.repo, id).catch(() => null);
+      if (!note || note.status !== "done" || !note.content.trim()) continue;
+      const origin = note.originTitle ?? carry.fromTitle;
+      briefs.push({ title: note.source === "story" ? `${note.title}（前作《${origin}》）` : note.title, kind: note.kind, content: note.content.slice(0, 2400), source: note.source === "story" ? "story" : "book" });
+    }
+    return briefs;
+  }
+
+  /** Notes of a story that can go with a new one (D177): its finished 本局札记 and its own book notes. */
+  async carryableNotes(worldId: string): Promise<CanonNote[]> {
+    const own = (await listStoryNotes(this.repo, worldId)).filter((n) => n.status === "done" && n.content.trim());
+    const rows = await this.platform.sql.query("SELECT id FROM canon_notes WHERE world_id=? AND status='done' AND content<>''", [worldId]);
+    const book = (await Promise.all(rows.map((r) => getNote(this.repo, String(r.id))))).filter((n): n is CanonNote => !!n);
+    return [...own, ...book];
   }
 
   /** How a world began, for "再来一局同样设定": the opening's protagonist and arrival with the world's current settings. */
@@ -654,6 +776,8 @@ export class Game {
       // The script and challenge as the story began, for “再挑战一次”.
       ...(state.script ? { script: scriptInputOf(state.script) } : {}),
       ...(state.challenge ? { challenge: challengeInputOf(state.challenge) } : {}),
+      // 再来一局 brings this story's notes along by default (D177).
+      ...await this.carryableNotes(worldId).then((notes) => notes.length ? { carry: { fromWorldId: worldId, fromTitle: world.title, ids: notes.map((n) => n.id) } } : {}).catch(() => ({})),
     };
   }
 
@@ -686,6 +810,7 @@ export class Game {
 
   private nativeEvent(event: Record<string, unknown>, onEvent: (event: TurnEvent) => void): void {
     if (event.type === "thinking" || event.type === "organizing") onEvent({ type: event.type });
+    else if (event.type === "fallback") onEvent({ type: "fallback", from: String(event.from ?? ""), to: String(event.to ?? "") });
     else if (event.type === "text" && typeof event.full === "string") onEvent({ type: "text", delta: typeof event.delta === "string" ? event.delta : "", full: event.full });
     else if (event.type === "execution-status") {
       const state = event.state;
@@ -736,7 +861,8 @@ export class Game {
         inner = runKind === "turn" ? this.nativeTurn(worldId, plan.action as PlayerAction, "turn", null, onEvent)
           : this.nativeTurn(worldId, null, runKind, (plan.meta?.rewriteHint as string | undefined) ?? null, onEvent);
       } else if (expired && runKind === "autoplay") {
-        if (plan.lineId !== cursor.line.id) throw new Error("这次连播属于另一条路线。回到原路线后再接着写。");
+        // The player went to another route since: that 连播 simply ends here; nothing to fix or go back for.
+        if (plan.lineId !== cursor.line.id) { onEvent({ type: "finished", steps: Math.max(0, Number(row.steps) || 0), reason: "stopped" }); return; }
         const completed = Math.max(0, Number(row.steps) || 0);
         const total = Math.max(0, Number(plan.meta?.autoplayCount) || 0);
         const turns = total - completed;
@@ -840,7 +966,7 @@ export class Game {
         const futureTurn = { actionText: action.text, narrative: "{{NARRATIVE}}" };
         const plan: RunPlan = {
           id: newId(), worldId, lineId: world.lineId, headId: world.head.id, baseId: base.id, kind: batch ? "autoplay" : kind,
-          model: this.requireLlm(),
+          model: this.requireLlm(), ...this.fallbackFor(),
           messages: kind === "continue" ? continueMessages(context.messages, target.narrative) : context.messages,
           extractMessages: extractMessages({ era, state, action: action.text || "（继续）", narrative: "{{NARRATIVE}}", settings: world.settings }),
           state, settings: world.settings,
@@ -850,8 +976,10 @@ export class Game {
           carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ record, actionText }) => ({ record, actionText }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
             ...world.guard,
-            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", world.guard.sourceGuard ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
+            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", world.guard.sourceGuard ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings, ...(batch ? { canonNotes: input.canonNotes ?? [] } : {}) }, ...(kind === "continue" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
+            // 参考了哪些札记 under the passage (R30 step 2).
+            ...(input.canonNotes?.length ? { notesUsed: fitNotes(input.canonNotes, notesRoom(input.budgetChars)).titles } : {}),
             ...(batch ? {
               autoplayCount: batch.turns, autoplayPilot: "temporary-ai", autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
               upkeepVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION,
@@ -888,6 +1016,7 @@ export class Game {
           if (snapshot.status !== "committed" && !detached) onEvent(this.nativeFailure(snapshot, "连播进度已保存"));
           batch.onFinished(result?.steps ?? draft?.steps ?? 0, result?.reason ?? (stopped ? "stopped" : "failed"));
           for (const fn of this.listeners) fn(worldId);
+          this.inBackground(this.autoStoryPlot(worldId).catch(() => {}));
           return;
         }
         if (snapshot.status !== "committed") { onEvent(this.nativeFailure(snapshot, "进度已保存，可以稍后恢复")); return; }
@@ -900,6 +1029,46 @@ export class Game {
       } catch (error) { if (!detached) onEvent(thrownFailure(error, stopped, "这次生成没有完成")); batch?.onFinished(0, stopped ? "stopped" : "failed"); }
     });
     return { done, stop() { stopped = true; active?.cancel(); }, catchUp: async () => { detached = false; await active?.catchUp(); }, detach() { detached = true; active?.detach(); } };
+  }
+
+  /**
+   * 按我的要求改 (R30 step 2): rewrites the chosen part of a passage as the player
+   * asks, with the turn's record and any earlier fact it corrects; one request on
+   * the writing model. Nothing is saved until adoptPlayerRevision.
+   */
+  runPlayerRevision(request: PlayerRevisionRequest, onText: (text: string) => void): { done: Promise<PlayerRevisionPreview>; cancel(): void } {
+    const controller = new AbortController();
+    const done = (async (): Promise<PlayerRevisionPreview> => {
+      await assertWritingAnchor(this, request.anchor);
+      const { anchor } = request, world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
+      const before = target.parentId ? await this.repo.getState(target.parentId) : (target.meta.openingSeed as WorldState | undefined) ?? await this.repo.getState(anchor.nodeId);
+      const era = eraContext(world.eraId, before);
+      const focus = anchor.original.slice(request.range.start, request.range.end);
+      const surrounding = anchor.original.slice(Math.max(0, request.range.start - 700), request.range.start) + "\n【选中范围之后】" + anchor.original.slice(request.range.end, request.range.end + 700);
+      const relevant = focus + surrounding + request.hint;
+      const focused = { ...before, people: before.people.filter((p) => [p.name, ...p.aliases].some((name) => name && relevant.includes(name))) };
+      const cards = before.cards.filter((c) => c.kind !== "时代").map((c) => `- ${c.kind} · ${c.name}${c.source === "AI" ? "" : "（玩家写的）"}：${c.content.slice(0, 120)}`).join("\n");
+      const source = await this.sourceBrief(anchor.worldId, before.source, `${focus}\n${request.hint}`, 2400).catch(() => "");
+      const messages: ChatMessage[] = [
+        { role: "system", content: playerRevisionRules(world.settings, before, !target.parentId) },
+        { role: "user", content: `【选中范围】\n${focus}\n【必要前后文】\n${surrounding}\n【玩家要求】\n${request.hint.trim() || "让这段更通顺，事实不变"}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${renderState(focused, era, new Set(focused.people.map((p) => p.id)), world.settings)}${cards ? `\n【设定集】\n${cards}` : ""}${source ? `\n【参考资料，仅供参考，以玩家要求为准】\n${source}` : ""}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}` },
+      ];
+      let result: ChatResult;
+      try {
+        result = await this.call(messages, { signal: controller.signal, usage: { worldId: anchor.worldId, nodeId: anchor.nodeId, purpose: "revise-passage" }, timeouts: DEFAULT_TIMEOUTS, outputTokens: 4096,
+          onText: (full) => { const value = lenientJson(full) as { replacement?: string } | null; if (typeof value?.replacement === "string") onText(value.replacement); } });
+      } catch (error) {
+        if (error instanceof ChatError && error.kind === "cancelled") throw new WritingError("已取消，原文没有改动。");
+        throw error;
+      }
+      const preview = helperReplyAvailable(result) ? parsePlayerRevision(result.text, request, target.record as TurnRecord | null) : null;
+      await this.platform.sql.batch([this.usage(anchor.worldId, anchor.nodeId, "revise-passage", result, preview ? "ok" : "no_record", this.llm?.model ?? "")]);
+      if (!preview) throw new WritingError(isRefusal({ narrative: result.text, finishReason: result.finishReason, hasRecord: false }) ? "AI 服务没有接受这次改写，可以换个说法再试。" : "这次没有给出完整的改稿，再试一次。");
+      await assertWritingAnchor(this, anchor);
+      onText(preview.replacement);
+      return preview;
+    })();
+    return { done, cancel() { controller.abort(); } };
   }
 
   runCanonCorrection(request: CanonCorrectionRequest, onText: (text: string) => void): CanonCorrectionHandle {
@@ -927,7 +1096,7 @@ export class Game {
       ];
       const plan: RunPlan = {
         id: newId(), worldId: anchor.worldId, lineId: anchor.lineId, headId: anchor.headId, baseId: target.parentId, kind: "correction",
-        model: this.requireLlm(), messages, extractMessages: [], state, settings: world.settings,
+        model: this.requireLlm(), ...this.fallbackFor(), messages, extractMessages: [], state, settings: world.settings,
         options: { mode: target.actionMode ?? "continue", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock },
         action: { mode: target.actionMode ?? "continue", text: target.actionText ?? "" }, reference,
         meta: { ...(await this.nativeGuard(anchor.worldId, anchor.headId)), anchor, correctionRange: request.range, originalRecord: target.record, writingVersion: CANON_WRITING_PROMPT_VERSION, rewriteHint: request.hint, budgetChars: budget, baseline: target.parentId ? undefined : baseline },
@@ -936,7 +1105,7 @@ export class Game {
       active = startRun(this.platform, plan, (event) => { if (!detached && event.type === "text" && typeof event.full === "string") { const value = lenientJson(event.full) as { replacement?: string; narrative?: string } | null; if (value?.replacement) onText(value.replacement); } });
       if (detached) active.detach();
       const snapshot = await active.done;
-      if (snapshot.status !== "previewed") throw new WritingError(snapshot.error ?? "原著改稿尚未完成，原路线未改动");
+      if (snapshot.status !== "previewed") throw new WritingError(canonStopText(snapshot.error));
       const preview = snapshot.result as unknown as CanonCorrectionPreview;
       preview.recordChanges = correctionRecordChanges(target.record as TurnRecord | null, preview.record);
       await assertWritingAnchor(this, anchor);
@@ -955,9 +1124,13 @@ export class Game {
     try {
       const note = await getNote(this.repo, id); if (!note) throw new Error("札记不存在");
       controller.signal.throwIfAborted();
-      const [book] = await this.platform.sql.query("SELECT title FROM source_books WHERE id=?", [note.bookId]);
+      // 本局札记 (D174) read the story itself; 原著札记 the bound book.
+      const [book] = note.source === "story"
+        ? [{ title: (await this.repo.getWorld(note.worldId ?? ""))?.title ?? "本局" }]
+        : await this.platform.sql.query("SELECT title FROM source_books WHERE id=?", [note.bookId]);
       controller.signal.throwIfAborted();
       if (!book) throw new Error("书籍不存在");
+      if (note.originWorldId) throw new Error("这份札记来自前作，只能手改，不会随这个故事更新。");
       const config = this.llm ? structuredClone(this.llm) : null;
       if (!config && !resume) this.requireLlm();
       const model = config?.auxModel || config?.model || note.model;
@@ -965,8 +1138,17 @@ export class Game {
         ? Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stableJson(config)))),
           (byte) => byte.toString(16).padStart(2, "0")).join("")
         : undefined;
+      const backup = this.fallbackLlm && config && !sameService(this.fallbackLlm, config) ? structuredClone(this.fallbackLlm) : null;
       return await runNote(this.repo, note, String(book.title), {
         model, configuration,
+        // 备用服务 (D179): a batch the main service will not take is tried there before it becomes a gap.
+        ...(backup ? { fallback: async (messages: ChatMessage[], signal: AbortSignal) => {
+          const result = await this.callOnce(messages, { configuration: backup, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
+          const problem = noteReplyProblem(result);
+          await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result, problem ? "refused" : "ok", backup.auxModel || backup.model)]);
+          if (problem) throw problem;
+          return result.text;
+        } } : {}),
         call: async (messages, signal) => {
           if (!config) throw new ChatError("no_secret");
           const result = await this.call(messages, { configuration: config, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
@@ -1181,7 +1363,7 @@ export class Game {
     appendReference(referenceBlock(reference) + "\n可以主动使用遵循原著技能查阅原文再回答，不得用记忆冒充查证。");
     const plan: RunPlan = {
       id: newId(), worldId, lineId: world.lineId, headId: head.id, baseId: head.id, kind: "ask",
-      model: { ...this.requireLlm(), model: this.auxModelName() }, messages, extractMessages: [], state, settings: world.settings,
+      model: { ...this.requireLlm(), model: this.auxModelName() }, ...this.fallbackFor(true), messages, extractMessages: [], state, settings: world.settings,
       options: {}, action: { mode: "continue", text: question }, reference,
       meta: { ...world.guard, budgetChars: askBudget },
     };

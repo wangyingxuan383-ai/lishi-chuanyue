@@ -23,12 +23,13 @@ input::-ms-reveal, input::-ms-clear { display: none; }
 
 /* 原著札记 (components/CanonNotes.tsx). */
 .note-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.note-row { width: 100%; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "tag title" "tag status"; align-items: center; column-gap: 10px; row-gap: 2px; padding: 10px 12px; text-align: left; justify-content: stretch; }
+.note-row { width: 100%; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "tag title" "tag status" "tag hint"; align-items: center; column-gap: 10px; row-gap: 2px; padding: 10px 12px; text-align: left; justify-content: stretch; }
 .note-row .tag { grid-area: tag; align-self: center; }
 .note-row b { grid-area: title; font-family: var(--serif); font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .note-status { grid-area: status; font-size: 12px; color: var(--muted); }
 .note-status.running { color: var(--accent); }
 .note-status.failed { color: var(--loss); }
+.note-hint { grid-area: hint; font-size: 12px; color: var(--accent); }
 .note-kinds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .note-kind { display: grid; gap: 2px; justify-items: start; padding: 10px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); }
 .note-kind:last-child { grid-column: 1 / -1; }

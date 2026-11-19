@@ -3,7 +3,7 @@
 import type { Repo } from "../../engine/db/repo";
 import type { NotifyPrefs } from "../../platform";
 
-export const DEFAULT_NOTIFY: NotifyPrefs = { progress: true, excerpt: true, lockscreen: false };
+export const DEFAULT_NOTIFY: NotifyPrefs = { progress: true, excerpt: true, lockscreen: false, sound: true };
 export async function loadNotifyPrefs(repo: Repo): Promise<NotifyPrefs> {
   return { ...DEFAULT_NOTIFY, ...(await repo.getSetting<Partial<NotifyPrefs>>("notifyPrefs", {})) };
 }

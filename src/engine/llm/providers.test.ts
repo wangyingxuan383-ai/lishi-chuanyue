@@ -34,5 +34,6 @@ describe("service setup helpers (UX_PROVIDERS J-02, J-03, J-05)", () => {
     expect(recommendModel(list, preset("deepseek"))).toBe("deepseek-flash");
     expect(recommendAuxModel(["gpt-x", "gpt-x-mini"], "gpt-x")).toBe("gpt-x-mini");
     expect(recommendAuxModel(["gpt-x"], "gpt-x")).toBe("gpt-x");
+    expect(recommendAuxModel(["gemini-3-pro", "gemini-3-flash", "gemini-3.8"], "gemini-3.8")).toBe("gemini-3-flash");
   });
 });

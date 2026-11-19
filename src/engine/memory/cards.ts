@@ -67,16 +67,28 @@ function shadowed(text: string, at: number, term: string, longer: string[]): boo
  * first, then those the player's `action` describes without naming them
  * ("乌木包银腰牌" for 乌木包银鹰牌), as long as they fit the budget.
  */
+/** The name of the card for the protagonist's abilities and growth. */
+export const abilityCardName = (protagonist: string) => `${protagonist.trim() || "主角"}的本事`;
+/** “唐舞的本事”: the one card for the protagonist's abilities and growth (upkeep-6). */
+export function isAbilityCard(name: string, protagonist: string): boolean {
+  const n = name.trim();
+  return n.endsWith("的本事") && (n === `${protagonist.trim() || "主角"}的本事` || n === "主角的本事");
+}
+
 export function activeCardLines(state: WorldState, recent: string, budget = CARD_BUDGET, action = ""): string[] {
   const entries: (Entry & { id: string })[] = [
     ...state.places.filter((p) => p.description.trim()).map((p) => ({ id: p.id, terms: termsOf(p.name, p.aliases ?? []), line: placeLine(p) })),
     ...state.cards.filter((c) => c.kind !== "时代" && c.content.trim()).map((c) => ({ id: c.id, terms: termsOf(c.name, c.keys), line: cardLine(c) })),
   ];
   const ordered: Entry[] = [];
+  // The protagonist's own abilities (“某某的本事”) are needed in every passage, named or not.
+  const ability = state.cards.find((c) => isAbilityCard(c.name, state.protagonist.name));
+  const own = ability && entries.find((e) => e.id === ability.id);
+  if (own) ordered.push(own);
   const here = entries.find((e) => e.id === state.placeId);
   if (here) ordered.push(here);
   const mentioned = entries
-    .filter((e) => e !== here)
+    .filter((e) => e !== here && e !== own)
     .map((e) => ({ e, at: lastMention(recent, e.terms, entries.filter((x) => x !== e).flatMap((x) => x.terms)) }))
     .filter((m) => m.at >= 0)
     .sort((a, b) => b.at - a.at);

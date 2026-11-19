@@ -1,4 +1,4 @@
-import { diagnosis, recentDiagnosis } from "../../components/FailureSheet";
+import { diagnosis, recentDiagnosis, saidForCopy } from "../../components/FailureSheet";
 import type { Failure, Platform } from "../../../platform";
 import { describe, expect, it } from "vitest";
 import type { FailReason } from "../../../engine/game";
@@ -38,4 +38,15 @@ it("keeps arbitrary service echoes out of both copied diagnoses", async () => {
     expect(text).toContain("400");
     expect(text).not.toContain("private-fixture-echo");
   }
+});
+
+it("adds the service's words only when asked, short and without addresses or key-like strings", () => {
+  const failure: Failure = { kind: "refused", stage: "write", sent: "yes", requests: 1, partial: false,
+    at: "2026-11-18T12:00:00Z", said: `The prompt contains sensitive words. see https://relay.example/x key sk-abcdefghijklmnop ${"字".repeat(300)}` };
+  expect(diagnosis(failure, [])).not.toContain("sensitive");
+  const text = diagnosis(failure, [], true);
+  expect(text).toContain("服务原话：The prompt contains sensitive words.");
+  expect(text).not.toContain("relay.example");
+  expect(text).not.toContain("abcdefghijklmnop");
+  expect(saidForCopy("字".repeat(300))).toHaveLength(201);
 });

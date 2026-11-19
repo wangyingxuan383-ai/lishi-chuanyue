@@ -46,6 +46,7 @@ class NotifyPrefsArgs {
     var progress: Boolean = true
     var excerpt: Boolean = true
     var lockscreen: Boolean = false
+    var sound: Boolean = true
 }
 
 @InvokeArg
@@ -114,7 +115,43 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
             .putBoolean(GenerationService.PREF_PROGRESS, args.progress)
             .putBoolean(GenerationService.PREF_EXCERPT, args.excerpt)
             .putBoolean(GenerationService.PREF_LOCKSCREEN, args.lockscreen)
+            .putBoolean(GenerationService.PREF_SOUND, args.sound)
             .apply()
+        invoke.resolve()
+    }
+
+    /** Whether "写好了" will ring: `sound` is the app's switch, `audible` what the system will actually do. */
+    @Command
+    fun reminder_status(invoke: Invoke) {
+        val (sound, audible) = GenerationService.reminderAudible(activity)
+        invoke.resolve(JSObject().put("sound", sound).put("audible", audible))
+    }
+
+    /** Posts one sample reminder so the player hears what it sounds like. */
+    @Command
+    fun test_reminder(invoke: Invoke) {
+        GenerationService.testReminder(activity)
+        invoke.resolve()
+    }
+
+    /** The reminder channel's own settings, where its sound can be turned back on. */
+    @Command
+    fun open_reminder_settings(invoke: Invoke) {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
+                .putExtra(Settings.EXTRA_CHANNEL_ID, GenerationService.reminderChannel(activity, issue = false))
+        } else {
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
+        }
+        try {
+            activity.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (error: Exception) {
+            activity.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
         invoke.resolve()
     }
 

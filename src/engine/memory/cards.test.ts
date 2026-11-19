@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyRecord } from "../state/apply";
 import { TANG_CURRENCY } from "../money";
 import { sampleState } from "../testing/fixtures";
-import { activeCardLines, eraCardOf } from "./cards";
+import { abilityCardName, activeCardLines, eraCardOf, isAbilityCard } from "./cards";
 
 function world() {
   const s = sampleState();
@@ -24,6 +24,16 @@ describe("cards in context", () => {
   it("finds the era card", () => {
     expect(eraCardOf(world())?.content).toBe("时代卡");
     expect(eraCardOf(sampleState())).toBeNull();
+  });
+
+  it("always brings in the protagonist's abilities, named or not, ahead of the rest", () => {
+    const s = world();
+    s.protagonist.name = "唐舞";
+    s.cards.push({ id: "ab", kind: "设定", name: abilityCardName("唐舞"), keys: [], content: "武魂蓝银草；魂环两紫", source: "AI" });
+    expect(activeCardLines(s, "风很大")).toEqual(["【设定】唐舞的本事：武魂蓝银草；魂环两紫"]);
+    expect(activeCardLines(s, "他拿出玉玺。")[0]).toBe("【设定】唐舞的本事：武魂蓝银草；魂环两紫");
+    expect(isAbilityCard("主角的本事", "唐舞")).toBe(true);
+    expect(isAbilityCard("王掌柜的本事", "唐舞")).toBe(false);
   });
 
   it("brings in cards whose name or alias was mentioned, newest first", () => {

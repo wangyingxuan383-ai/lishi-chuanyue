@@ -83,7 +83,8 @@ export function chatModels(models: string[], preset: ProviderPreset): string[] {
 /** A cheaper sibling for 整理记录 (J-12): flash, mini, lite, air, turbo… or the main model when none. */
 export function recommendAuxModel(models: string[], main: string): string {
   const chat = models.filter((m) => !NOT_CHAT.test(m) && m !== main);
-  return chat.find((m) => /flash|mini|lite|air|turbo|haiku|small/i.test(m)) ?? main;
+  // “mini” only as its own word: every “gemini” contains it.
+  return chat.find((m) => /flash|lite|turbo|haiku|(^|[^a-z])(mini|small|air)([^a-z]|$)/i.test(m)) ?? main;
 }
 
 const NOT_CHAT = /embed|image|tts|audio|whisper|vision|rerank|moderation|dall|speech|ocr/i;

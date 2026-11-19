@@ -1,9 +1,11 @@
 // The 设定 tab of the character panel: the world's 设定集 (PLAN §4.14, D121).
 // The era card, places and the other cards, each editable on its own; every
 // save becomes an edit node that can be undone.
+import { abilityCardName, isAbilityCard } from "../../engine/memory/cards";
 import { useApp } from "../app/context";
 import { rejectedReason } from "../../engine/game";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { NoteEntry } from "./CanonNotes";
 import type { EraContext } from "../../engine/era";
 import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
 import type { TurnRecord } from "../../engine/state/apply";
@@ -16,7 +18,7 @@ import { deletionPatch, selectionKey, type CodexKind, type CodexSelection } from
 import "./writing.css";
 
 type Editing =
-  | { type: "card"; kind: CardKind; card: Card | null }
+  | { type: "card"; kind: CardKind; card: Card | null; /** A new card's suggested name. */ name?: string }
   | { type: "place"; place: Place | null };
 
 const GROUPS: { kind: "地点" | CardKind; hint: string }[] = [
@@ -32,12 +34,13 @@ const preview = (text: string, max = 60) => (text.length > max ? `${text.slice(0
 
 function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing; state: WorldState; worldId: string; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void> }) {
   const { ask, toast, game } = useApp();
+  const noteEntry = useContext(NoteEntry);
   const isEra = editing.type === "card" && editing.kind === "时代";
   const eraLabel = (state.era as { mode?: string }).mode === "free" ? "世界卡" : "时代卡";
   const original = editing.type === "card" ? editing.card : editing.place;
   // The era card of an old save comes from its pack and is not stored yet.
   const stored = !!original && !original.id.startsWith("pack:");
-  const [name, setName] = useState(original?.name ?? "");
+  const [name, setName] = useState(original?.name ?? (editing.type === "card" ? editing.name ?? "" : ""));
   const [aliases, setAliases] = useState((editing.type === "card" ? editing.card?.keys : editing.place?.aliases)?.join("、") ?? "");
   const [text, setText] = useState(editing.type === "card" ? editing.card?.content ?? "" : editing.place?.description ?? "");
   const [saving, setSaving] = useState(false);
@@ -107,6 +110,7 @@ function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing
             {before && <p className="field-hint m-0">上面已换成 AI 改过的内容，满意再点“保存”；保存后也能在 ⋯ 里撤销。</p>}
           </div>
         </details>
+        {stored && !isEra && noteEntry && original && <button className="ghost" onClick={() => { onClose(); noteEntry({ kind: "setting", subject: original.name, aliases: editing.type === "card" ? editing.card?.keys : editing.place?.aliases }); }}>整理成札记（它在本局的来龙去脉）</button>}
         <div className="row">
           {stored && <button className="danger-text" disabled={saving || isHere} onClick={remove}>{isHere ? "当前所在地不能删" : "删除"}</button>}
           <button className="primary grow" disabled={saving || !name.trim() || !!taken} onClick={save}>保存</button>
@@ -151,7 +155,10 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
     kind === "地点"
       ? [...state.places].sort((a, b) => Number(b.id === state.placeId) - Number(a.id === state.placeId))
         .map((p) => ({ id: p.id, name: p.name, text: p.description, tag: p.id === state.placeId ? "所在" : p.source === "AI" ? "AI 整理" : undefined, edit: { type: "place", place: p } }))
-      : state.cards.filter((c) => c.kind === kind).map((c) => ({ id: c.id, name: c.name, text: c.content, tag: c.source === "AI" ? "AI 整理" : undefined, edit: { type: "card", kind, card: c } }));
+      // The protagonist's abilities (“某某的本事”) first: the AI keeps it up as the story goes.
+      // The protagonist's abilities (“某某的本事”) have their own place above, next to the era card.
+      : state.cards.filter((c) => c.kind === kind && !isAbilityCard(c.name, state.protagonist.name))
+        .map((c) => ({ id: c.id, name: c.name, text: c.content, tag: c.source === "AI" ? "AI 整理" : undefined, edit: { type: "card", kind, card: c } }));
   const matches = (item: { name: string; text: string; edit: Editing }) => {
     const aliases = item.edit.type === "place" ? item.edit.place?.aliases : item.edit.card?.keys;
     return [item.name, item.text, ...(aliases ?? [])].join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
@@ -190,6 +197,20 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
         </> : <p className="muted codex-note mb-0">还没有{eraLabel}，AI 只按故事设定来写。可以写下这个世界的称谓、货币、风俗和其他背景。</p>}
         {state.source && <Switch label="AI 整理时参考原著" note={organizeSource ? "带上原著札记和相关原文，整理出原著里的势力、地点和规矩" : "只按故事设定整理"} checked={organizeSource} onChange={setOrganizeSource} />}
       </section>
+      {(() => {
+        // 主角的本事 (D181): where the protagonist's abilities live, next to the era card, not deep in a group.
+        const ability = state.cards.find((c) => isAbilityCard(c.name, state.protagonist.name));
+        const name = abilityCardName(state.protagonist.name);
+        return <section className="codex-era">
+          <div className="row between">
+            <b className="grow">{ability?.name ?? name}</b>
+            <button className="ghost" disabled={busy || organizing} onClick={() => open({ type: "card", kind: "设定", card: ability ?? null, name })}>{ability ? "编辑" : "写一张"}</button>
+          </div>
+          {ability?.content.trim()
+            ? <><p className="muted codex-note">{ability.source === "AI" ? "AI 随剧情更新" : "你写的，AI 不会改"} · 每回合都交给 AI</p><p className="codex-text">{ability.content}</p></>
+            : <p className="muted codex-note mb-0">主角自己的本事（武魂、魂环、等级、境界、功法等）记在这里，每回合都交给 AI。AI 整理设定集时会随剧情补上，也可以自己写。</p>}
+        </section>;
+      })()}
       <button className="ghost t-left" onClick={onOpenStory}>故事设定与要点 ›</button>
       <button className="ghost t-left" disabled={busy || organizing || deleting} onClick={() => setBuiltin(true)}>内置资料与灵感 ›</button>
       {builtin && <BuiltinContent state={state} headId={headId} busy={busy || organizing || deleting} onSave={onSave} onClose={() => setBuiltin(false)} />}

@@ -132,7 +132,8 @@ export interface AgentExecutionSnapshot<TTask = Json> {
   hasMore?: boolean; nextAfter?: number; nextCallAfter?: number; hasMoreCalls?: boolean; incremental?: boolean;
 }
 
-export interface NotifyPrefs { progress: boolean; excerpt: boolean; lockscreen: boolean }
+/** `sound`: "写好了" and "没写完" ring and vibrate (R30 step 2, D176). */
+export interface NotifyPrefs { progress: boolean; excerpt: boolean; lockscreen: boolean; sound: boolean }
 
 export interface Platform {
   readonly name: "android" | "windows" | "web-dev" | "other";
@@ -229,6 +230,12 @@ export interface Platform {
     openAutostart?(): Promise<void>;
     /** What the notifications show: live progress, the passage's first line, that line on the lock screen. */
     setNotifyPrefs?(prefs: NotifyPrefs): Promise<void>;
+    /** Whether "写好了" will ring: the app's switch and what the system will actually do (Android). */
+    reminderStatus?(): Promise<{ sound: boolean; audible: boolean }>;
+    /** Posts one sample reminder now, so the player hears it. */
+    testReminder?(): Promise<void>;
+    /** The reminder's own system settings, where its sound can be turned back on. */
+    openReminderSettings?(): Promise<void>;
     /** The story a tapped notification asked to open, once. */
     takeLaunchTarget?(): Promise<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>;
     /** The handler returns true when it consumed the back press. */

@@ -344,17 +344,26 @@ pub fn build(input: &Value) -> Result<Value> {
     // the budget, in the fixed system part so the service can cache it.
     let notes_room = (cap / 5).min(cap.saturating_sub(fixed + overhead + 400));
     let mut notes = String::new();
+    // 本局札记 (D174) and 原著札记 share the room, each under its own heading.
+    let mut opened = std::collections::HashSet::new();
     for n in list(&input["canonNotes"]) {
-        let header = if notes.is_empty() { "\n【原著札记】（玩家让 AI 整理的原著梗概，可能有误；本局已发生的事实优先）" } else { "" };
+        let story = n["source"] == "story";
+        let header = if opened.contains(&story) { "" } else if story {
+            "\n【本局札记】（整理自本局已写的正文，可能有误；以最近的正文和当前状态为准）"
+        } else {
+            "\n【原著札记】（整理或录入的原著梗概，可能有误；本局已发生的事实优先）"
+        };
         let block = format!("\n· {}\n{}\n", text(&n["title"]), text(&n["content"]).trim());
         if size(&notes) + size(header) + size(&block) <= notes_room {
             notes += header;
             notes += &block;
+            opened.insert(story);
         } else if notes.is_empty() && notes_room > 400 {
             notes = format!("{header}{}\n", head(&block, notes_room - size(header) - 1));
+            opened.insert(story);
         }
     }
-    layers.push(json!({"key":"canonNotes","label":"原著札记","chars":size(&notes),"content":notes,"note":"当前位置的主线与本段提到的人物、设定，最多五分之一预算"}));
+    layers.push(json!({"key":"canonNotes","label":"札记","chars":size(&notes),"content":notes,"note":"本局主线梗概、当前位置的原著主线与本段提到的人物、设定，最多五分之一预算"}));
     let mut remaining = (cap / 4).min(cap.saturating_sub(fixed + overhead + size(&notes) + 400));
     let mut evidence = String::new();
     let mut fitted = vec![];
@@ -414,10 +423,12 @@ pub fn build(input: &Value) -> Result<Value> {
     let older_room = if story_turns > 3 { crate::recall::RECALL_BUDGET.saturating_sub(size(&continuity)).min(room / 4) } else { 0 };
     room = room.saturating_sub(older_room);
     let mut cards = String::new();
-    for c in list(&state["cards"])
-        .iter()
-        .filter(|c| c["kind"] != "时代" && mentioned(c, &recent))
-    {
+    // The protagonist's own abilities (“某某的本事”, upkeep-6) come first, named or not.
+    let me = text(&state["protagonist"]["name"]).trim().to_owned();
+    let ability = |c: &&Value| { let n = text(&c["name"]).trim(); n == format!("{}的本事", if me.is_empty() { "主角" } else { me.as_str() }) || n == "主角的本事" };
+    let mut ordered: Vec<&Value> = list(&state["cards"]).iter().filter(|c| c["kind"] != "时代" && ability(c)).collect();
+    ordered.extend(list(&state["cards"]).iter().filter(|c| c["kind"] != "时代" && !ability(c) && mentioned(c, &recent)));
+    for c in ordered {
         let line = format!(
             "\n【{}】{}：{}",
             text(&c["kind"]),
@@ -587,7 +598,7 @@ pub fn build(input: &Value) -> Result<Value> {
     let chars = message_chars + overhead;
     layers.push(json!({"key":"tools","label":"工具与技能目录及消息包装","chars":overhead,"content":"按当前只读工具说明与技能目录预留，正式请求会优先精简可选资料。","note":"计入输入估算，必要内容完整保留"}));
     Ok(
-        json!({"messages":messages,"layers":layers,"reference":reference,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-2"}),
+        json!({"messages":messages,"layers":layers,"reference":reference,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-3"}),
     )
 }
 
@@ -676,6 +687,35 @@ mod tests {
         let user = context["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
         assert!(user.contains("以上面的原著札记为准") && !user.contains("需要补查"));
         assert!(context["reference"]["notes"].as_str().unwrap().contains("结识七怪"));
+    }
+    #[test]
+    fn the_protagonists_abilities_card_comes_in_without_being_named() {
+        let mut i = input();
+        i["state"]["protagonist"]["name"] = "唐舞".into();
+        i["state"]["cards"] = json!([
+            {"kind":"设定","name":"唐舞的本事","keys":[],"content":"武魂蓝银草；两个千年紫环"},
+            {"kind":"物品","name":"玉玺","keys":[],"content":"传国玉玺"}
+        ]);
+        let context = build(&i).unwrap();
+        let layer = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "cards").unwrap();
+        let cards = layer["content"].as_str().unwrap();
+        assert!(cards.contains("唐舞的本事：武魂蓝银草；两个千年紫环"), "{cards}");
+        assert!(!cards.contains("传国玉玺"));
+    }
+    #[test]
+    fn story_notes_and_book_notes_each_open_their_own_heading() {
+        let mut i = input();
+        i["canonNotes"] = json!([
+            {"title":"主线梗概","content":"开场到第十回合：主角进城。","source":"story"},
+            {"title":"人物：王掌柜（前作）","content":"上一局的掌柜。","source":"story"},
+            {"title":"第1～100章主线","content":"主角拜入学院。"}
+        ]);
+        let context = build(&i).unwrap();
+        let system = context["messages"][0]["content"].as_str().unwrap();
+        let story = system.find("【本局札记】").expect("story heading");
+        let book = system.find("【原著札记】").expect("book heading");
+        assert!(story < book && system.matches("【本局札记】").count() == 1);
+        assert!(system.contains("主角进城") && system.contains("上一局的掌柜") && system.contains("拜入学院"));
     }
     #[test]
     fn fixed_player_requirements_outweigh_the_history_target() {

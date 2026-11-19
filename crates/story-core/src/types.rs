@@ -276,6 +276,17 @@ pub struct RunPlan {
     pub trailing_ids: Vec<String>,
     #[serde(default)]
     pub new_world: Option<Value>,
+    /// 备用服务 (R30 step 2, D179): takes over a step the main service could
+    /// not answer for a passing reason (connection, timeout, 5xx, 429).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<ModelConfig>,
+}
+
+impl ModelConfig {
+    /// The same service and model (keys and options aside).
+    pub fn same_service(&self, other: &ModelConfig) -> bool {
+        self.slot == other.slot && self.url == other.url && self.model == other.model
+    }
 }
 
 impl RunPlan {

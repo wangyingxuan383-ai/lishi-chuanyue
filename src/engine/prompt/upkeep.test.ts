@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sampleState } from "../testing/fixtures";
 import type { WorldState } from "../types";
-import { upkeepMessages } from "./upkeep";
+import { parseStatusTidy, statusTidyMessages, upkeepMessages } from "./upkeep";
 
 function world(): WorldState {
   const state = sampleState();
@@ -54,3 +54,40 @@ describe("设定集 upkeep", () => {
     expect(user.content).not.toContain("时代 · ");
   });
 });
+
+describe("整理状况 (R30 step 2)", () => {
+  it("shows each status with how long it has lasted, and asks for reasons", () => {
+    const state = sampleState();
+    state.time.elapsedMinutes = 5 * 1440;
+    state.protagonist.statuses = [{ name: "左臂刀伤", detail: "被山贼砍伤", sinceMinute: 0 }, { name: "醉酒", detail: "", sinceMinute: 5 * 1440 - 30 }];
+    const [system, user] = statusTidyMessages(state, [{ actionText: "去医馆", narrative: "大夫说伤口已经长好了。" }]);
+    expect(system.content).toContain("一句话写理由");
+    expect(user.content).toContain("- 左臂刀伤：被山贼砍伤，已有 5 天");
+    expect(user.content).toContain("- 醉酒\n");
+    expect(user.content).toContain("大夫说伤口已经长好了");
+  });
+
+  it("offers only statuses the protagonist has, never 垂危, each once", () => {
+    const statuses = [{ name: "左臂刀伤" }, { name: "垂危" }, { name: "醉酒" }];
+    expect(parseStatusTidy({ remove: [{ name: "左臂刀伤", why: "第十回合写到伤已痊愈" }, { name: "垂危", why: "x" }, { name: "不存在", why: "x" }, { name: "左臂刀伤" }, { name: " 醉酒 " }] }, statuses))
+      .toEqual([{ name: "左臂刀伤", why: "第十回合写到伤已痊愈" }, { name: "醉酒", why: "" }]);
+    expect(parseStatusTidy(null, statuses)).toEqual([]);
+    expect(parseStatusTidy({ remove: "左臂刀伤" }, statuses)).toEqual([]);
+  });
+
+  it("upkeep keeps the protagonist's abilities in one card, prefers concrete details and may drop its own one-offs", () => {
+    const state = world();
+    state.protagonist.name = "唐舞";
+    const [system] = upkeepMessages({ premise: "", state, turns: [] });
+    expect(system.content).toContain("“唐舞的本事”");
+    expect(system.content).toContain("不是剧情梗概");
+    expect(system.content).toContain("\"drop\"");
+  });
+
+  it("upkeep asks to merge two names for one thing, only among cards it may change", () => {
+    const [system] = upkeepMessages({ premise: "", state: world(), turns: [] });
+    expect(system.content).toContain("merges");
+    expect(system.content).toContain("只合并确定是同一个的");
+  });
+});
+

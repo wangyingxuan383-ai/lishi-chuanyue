@@ -8,6 +8,8 @@ export interface RunPlan {
   id: string; worldId: string; lineId: string; headId: string; baseId: string | null;
   kind: "turn" | "variant" | "continue" | "opening" | "correction" | "ask" | "autoplay";
   model: LlmConfig;
+  /** 备用服务 (D179). */
+  fallbackModel?: LlmConfig;
   messages: ChatMessage[];
   extractMessages: ChatMessage[];
   state: WorldState; settings: WorldSettings;

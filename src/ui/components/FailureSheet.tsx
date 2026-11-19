@@ -3,6 +3,7 @@
 // request went out, earlier attempts, and a copyable diagnosis without the
 // story text or any key.
 import type { Failure, Platform } from "../../platform";
+import { useState } from "react";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 
@@ -46,12 +47,23 @@ function time(at: string): string {
   return Number.isNaN(date.getTime()) ? at : date.toLocaleString("zh-CN", { hour12: false });
 }
 
-/** A plain-text diagnosis: no story text, no prompts, no keys or addresses. */
-export function diagnosis(failure: Failure | undefined, earlier: Failure[]): string {
+/** What the service said, for a copied diagnosis: 200 characters, key-like strings and addresses hidden. */
+export function saidForCopy(said: string): string {
+  const clean = said.replace(/https?:\/\/\S+/gi, "[地址已隐去]").replace(/\b(sk|key|token|bearer)[-_ ]?[A-Za-z0-9_\-]{12,}/gi, "[已隐去]").replace(/\s+/g, " ").trim();
+  return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean;
+}
+
+/**
+ * A plain-text diagnosis: no story text we sent, no prompts, no keys or addresses.
+ * `withSaid` adds what the service answered (R30 review #4): it is what explains
+ * most failures, but it may echo a bit of the story, so the player can leave it out.
+ */
+export function diagnosis(failure: Failure | undefined, earlier: Failure[], withSaid = false): string {
   const lines = [`穿越小说模拟 ${typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : ""} 生成失败诊断`.trim()];
   const one = (f: Failure, label: string) => {
     lines.push(`${label}：${KINDS[f.kind] ?? f.kind}（${f.kind}）· ${STAGES[f.stage] ?? f.stage} · ${SENT[f.sent] ?? f.sent} · 请求 ${f.requests} 次${f.status ? ` · HTTP ${f.status}` : ""}${f.partial ? " · 已收到部分内容" : ""} · ${f.at}`);
     if (f.holder) lines.push(`  占用者：${f.holder}`);
+    if (withSaid && f.said?.trim()) lines.push(`  服务原话：${saidForCopy(f.said)}`);
   };
   if (failure) one(failure, "这次");
   else lines.push("这次没有结构化失败记录。");
@@ -75,9 +87,11 @@ export async function recentDiagnosis(sql: Pick<Platform["sql"], "query">, limit
 
 export function FailureSheet({ text, failure, failures = [], detail, onClose }: { text: string; failure?: Failure; failures?: Failure[]; detail?: string; onClose: () => void }) {
   const { toast } = useApp();
+  const [withSaid, setWithSaid] = useState(true);
   const earlier = failures.filter((f) => f.at !== failure?.at);
+  const hasSaid = [failure, ...earlier].some((f) => f?.said?.trim());
   const copy = async () => {
-    try { await navigator.clipboard.writeText(diagnosis(failure, earlier)); toast("已复制诊断"); }
+    try { await navigator.clipboard.writeText(diagnosis(failure, earlier, withSaid)); toast("已复制诊断"); }
     catch { toast("没能复制，请长按选中后复制"); }
   };
   return (
@@ -101,8 +115,9 @@ export function FailureSheet({ text, failure, failures = [], detail, onClose }: 
           ))}
         </>}
         <p className="muted m-0">{advice(failure?.kind ?? "other")}</p>
+        {hasSaid && <label className="row"><input type="checkbox" className="check-20" checked={withSaid} onChange={(e) => setWithSaid(e.target.checked)} />带上服务原话（可能含一点故事内容）</label>}
         <div className="notice-actions"><button onClick={() => void copy()}>复制诊断</button></div>
-        <p className="field-hint m-0">复制内容包括出错步骤、请求次数、状态和时间。服务原话仅在这里查看。</p>
+        <p className="field-hint m-0">复制内容包括出错步骤、请求次数、状态和时间{hasSaid && withSaid ? "，以及服务原话的前 200 字（网址和像密钥的字样会隐去）" : ""}。不含你的 Key 和发出的故事正文。</p>
       </div>
     </Sheet>
   );

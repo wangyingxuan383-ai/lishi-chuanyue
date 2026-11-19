@@ -323,6 +323,8 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let query = query.trim();
     let words: Vec<&str> = query.split(|c: char| c.is_whitespace() || "，、,；;。".contains(c)).filter(|w| !w.is_empty()).collect();
+    let mut keys = Vec::new();
+    add(&mut keys, query, 1, 12);
     let through = plan.reading_source()["through"].as_u64();
     let rows: Vec<_> = rows.into_iter().filter(|(_,kind,_,scope,_,refs)| note_within_scope(kind,scope,refs,through)).collect();
     let total = rows.len();
@@ -339,14 +341,16 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         let size = cost(&value);
         if size > remaining {
             if notes.is_empty() && remaining > 400 {
-                notes.push(json!({"id":id,"kind":kind,"title":title,"content":slice(&content, 0, remaining - 200).0,"partial":true}));
+                let (body, _, _) = window(&content, &keys, remaining - 200);
+                let excerpt = json!({"id":id,"kind":kind,"title":title,"content":body,"partial":true});
+                if cost(&excerpt) <= remaining { notes.push(excerpt); }
             }
             break;
         }
         remaining -= size;
         notes.push(value);
     }
-    Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记是玩家让 AI 整理的原著梗概，可能有误，不等于已读原文；需要原句或与原文冲突时以原文为准。"}))
+    Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记是整理或录入的原著梗概，可能有误。查证时请阅读原文。"}))
 }
 
 fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>) -> bool {
@@ -730,6 +734,19 @@ mod tests {
     }
 
     #[test]
+    fn long_canon_note_tool_can_read_a_match_after_the_opening_pages() {
+        let (store, plan) = setup(&["短原文".into()]);
+        let db = store.lock().unwrap();
+        let content = "旧章梗概。".repeat(4800) + "后章才发现青铜钥匙。";
+        db.execute("INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES('n','book',NULL,'plot','长札记','{\"from\":0,\"to\":0}',?,'[]','','done',1,'{}','t','t')", [&content]).unwrap();
+        let result = read_notes(&db, &plan, "青铜钥匙").unwrap();
+        let note = &result["notes"][0];
+        assert!(note["content"].as_str().unwrap().contains("后章才发现青铜钥匙"));
+        assert_eq!(note["partial"], true);
+        assert!(result.get("excerpts").is_none());
+    }
+
+    #[test]
     fn versioned_source_reads_reuse_only_the_same_run_and_chapter_scope() {
         let (store,mut plan)=setup(&["甲在桥边交回密信。".into()]);
         store.lock().unwrap().execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at) VALUES(?,'world','line','head','running','{}','{}','{}','test','test')",[&plan.id]).unwrap();
@@ -968,6 +985,92 @@ mod tests {
         assert!(keys.iter().any(|(k, _)| k == "梅花"));
         assert!(keys.iter().any(|(k, _)| k == "沈青"));
     }
+
+    /// Twelve chapters that share a filler line and differ by seven characters each.
+    fn following_book() -> (Store, Vec<String>) {
+        let pool: Vec<char> = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥金木水火土日月星云雷电霜雨露江河湖海山川林泉松柏梅兰竹菊龙虎凤鹤狮象豹鹿琴棋书画笔墨纸砚剑刀枪戟弓箭盾冠带袍靴珠玉翠珀铜铁锡银".chars().collect();
+        let marks: Vec<String> = (0..12).map(|i| pool[i * 7..i * 7 + 7].iter().collect()).collect();
+        let sections: Vec<String> = marks.iter().map(|m| format!("他走在路上看见风雪。{m}。他走在路上看见风雪。")).collect();
+        let (store, _) = setup(&sections);
+        (store, marks)
+    }
+
+    #[test]
+    fn book_position_follows_the_passage_forward_only_and_at_most_five_chapters() {
+        let (store, marks) = following_book();
+        let db = store.lock().unwrap();
+        let binding = |position: i64, plot: &str| json!({"bookId":"book","fanfic":true,"plot":plot,"position":position,"through":null});
+        let passage = |i: usize| format!("他走在路上看见风雪，忽然想起{}。", marks[i]);
+        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(7)).unwrap(), Some(7));
+        assert_eq!(follow_position(&db, &binding(0, "canon"), &passage(9)).unwrap(), Some(5), "five chapters at a time");
+        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(2)).unwrap(), None, "never backwards");
+        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(3)).unwrap(), None, "still in the same chapter");
+        assert_eq!(follow_position(&db, &binding(3, "rewrite"), &passage(7)).unwrap(), None, "a rewritten plot is left alone");
+        assert_eq!(follow_position(&db, &binding(3, "canon"), "他走在路上看见风雪。").unwrap(), None, "nothing distinctive");
+        let limited = json!({"bookId":"book","fanfic":true,"plot":"canon","position":3,"through":5});
+        assert_eq!(follow_position(&db, &limited, &passage(7)).unwrap(), None, "past the reading limit");
+    }
+
 }
 
 fn utf16_slice(text:&str,start:usize,end:usize)->String { let mut at=0; text.chars().filter(|c|{let old=at;at+=c.len_utf16();old>=start&&at<=end}).collect() }
+
+/// 原著进度跟随 (R30 step 2, D178): which chapter of the bound book a passage
+/// most likely follows, from the book's own search index, no model request.
+/// Only forward from `position`, at most five chapters at a time, and only
+/// when one chapter clearly leads; otherwise None and the position stays.
+pub(crate) fn follow_position(db: &rusqlite::Connection, binding: &Value, narrative: &str) -> Result<Option<i64>> {
+    let Some(book) = binding["bookId"].as_str() else { return Ok(None) };
+    if binding["fanfic"] != true || binding["plot"] != "canon" {
+        return Ok(None);
+    }
+    let last: Option<i64> = db.query_row("SELECT MAX(section) FROM source_sections WHERE book_id=?", [book], |r| r.get(0)).optional()?.flatten();
+    let Some(last) = last else { return Ok(None) };
+    let through = binding["through"].as_i64().unwrap_or(last).min(last);
+    let position = binding["position"].as_i64().unwrap_or(0).clamp(0, through);
+    if position >= through {
+        return Ok(None);
+    }
+    // Look a little behind (the passage may still be in the current chapter) and some way ahead.
+    let (from, to) = ((position - 1).max(0), (position + 30).min(through));
+    let mut stmt = db.prepare("SELECT ordinal,section FROM source_chunks WHERE book_id=? AND section BETWEEN ? AND ?")?;
+    let window: HashMap<i64, i64> = stmt.query_map(params![book, from, to], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+    if window.is_empty() {
+        return Ok(None);
+    }
+    let total: f64 = db.query_row("SELECT COUNT(*) FROM source_chunks WHERE book_id=?", [book], |r| r.get::<_, i64>(0))? as f64;
+    let mut keys = terms(narrative);
+    keys.truncate(400);
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    let placeholders = vec!["?"; keys.len()].join(",");
+    let mut values = vec![book.to_owned()];
+    values.extend(keys.iter().cloned());
+    let mut stmt = db.prepare(&format!("SELECT postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| r.get::<_, String>(0))?;
+    let mut chunk_scores = HashMap::<i64, f64>::new();
+    for raw in rows {
+        let postings = serde_json::from_str::<Vec<i64>>(&raw?).unwrap_or_default();
+        let df = postings.len() as f64;
+        // Words found all over the book (names, common phrases) say nothing about where we are.
+        if df == 0.0 || df > (total * 0.08).max(3.0) {
+            continue;
+        }
+        let weight = (total / df).ln();
+        for chunk in postings.into_iter().filter(|c| window.contains_key(c)) {
+            *chunk_scores.entry(chunk).or_default() += weight;
+        }
+    }
+    let mut sections = HashMap::<i64, f64>::new();
+    for (chunk, score) in chunk_scores {
+        let entry = sections.entry(window[&chunk]).or_default();
+        *entry = entry.max(score);
+    }
+    let Some((&best, &top)) = sections.iter().max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0))) else { return Ok(None) };
+    let runner_up = sections.iter().filter(|(s, _)| s.abs_diff(best) > 1).map(|(_, v)| *v).fold(0.0, f64::max);
+    if best <= position || top < 12.0 || top < runner_up * 1.4 {
+        return Ok(None);
+    }
+    Ok(Some(best.min(position + 5)))
+}

@@ -137,6 +137,7 @@ impl Fixture {
             carried_edits: vec![],
             trailing_ids: vec![],
             new_world: None,
+            fallback_model: None,
         }
     }
     async fn settled(&self) -> RunSnapshot {

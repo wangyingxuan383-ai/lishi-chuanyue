@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{fs, path::Path};
 
-pub const LATEST_VERSION: i64 = 15;
+pub const LATEST_VERSION: i64 = 16;
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/001.sql")),
     (2, include_str!("migrations/002.sql")),
@@ -21,6 +21,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (13, include_str!("migrations/013.sql")),
     (14, include_str!("migrations/014.sql")),
     (15, include_str!("migrations/015.sql")),
+    (16, include_str!("migrations/016.sql")),
 ];
 
 pub fn version(connection: &Connection) -> Result<i64> {

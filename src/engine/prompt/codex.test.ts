@@ -83,4 +83,12 @@ describe("organizing the 设定集", () => {
     expect(codexPatch("抱歉，我无法完成", sampleState())).toBeNull();
     expect(codexPatch(JSON.stringify({ era: {}, cards: [] }), sampleState())).toBeNull();
   });
+
+  it("keeps five ordinary cards and adds the protagonist's 本事 card on top, with room for its details", () => {
+    const cards = [...Array.from({ length: 6 }, (_, i) => ({ kind: "设定", name: `卡${i}`, content: "内容" })), { kind: "设定", name: "唐舞的本事", content: "魂环：".padEnd(300, "紫") }];
+    const patch = codexPatch(JSON.stringify({ era: { name: "世界", content: "规则" }, cards }), { cards: [], places: [], era: { mode: "free" } as never })!;
+    const names = patch.cards!.filter((c) => c.kind !== "时代").map((c) => c.name);
+    expect(names).toEqual(["卡0", "卡1", "卡2", "卡3", "卡4", "唐舞的本事"]);
+    expect(patch.cards!.find((c) => c.name === "唐舞的本事")!.content!.length).toBe(300);
+  });
 });

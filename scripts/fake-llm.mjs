@@ -66,6 +66,12 @@ function gameReply(request) {
 ${JSON.stringify(r)}
 </record>`;
   if (prompt.includes("只回复两个字")) return "你好";
+  // 按我的要求改: the chosen part rewritten as asked, the turn's record and the 本事 card corrected.
+  if (String(request.messages?.[0]?.content ?? "").includes("按玩家的要求修改互动小说里选中的这段正文")) {
+    const name = String(request.messages?.[0]?.content ?? "").match(/“([^”]+的本事)”/)?.[1] ?? "主角的本事";
+    return JSON.stringify({ replacement: "（按要求改过的这段）你的两个紫色魂环亮起，你开始吸收第三魂环。", recordPatch: { log: "开始吸收第三魂环" },
+      correctionPatch: { cards: [{ name, kind: "设定", content: "魂环：两个千年紫环，正在吸收第三环。" }] }, note: "魂环改为两个紫环，正在吸收第三环" });
+  }
   // R29: 原著札记, 让 AI 改设定 and the lite canon check.
   if (prompt.includes("整理“原著札记”") || prompt.includes("同一份原著札记分段整理")) return "主角在青石桥边的书铺落脚，结识阿青（第1章）。\n阿青把青铜钥匙交给阿白，二人约定救下阿兰（第2章）。\n雪夜里真相渐明，阿白身世不凡（第3章）。";
   if (prompt.includes("修改互动小说“设定集”里的一条")) return JSON.stringify({ name: "漕帮", aliases: ["帮里", "运河帮"], text: "运河上的帮会，把持南北漕运，帮主姓沈，规矩森严：不碰官粮，不欺老弱。" });

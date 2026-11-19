@@ -459,7 +459,7 @@ impl Engine {
         final_only: bool,
     ) -> Result<Completion> {
         self.check(shared)?;
-        let plan = {
+        let mut plan = {
             let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
             c.stage = crate::failure::Stage::of_purpose(purpose);
             c.last_reply_step = None;
@@ -667,6 +667,23 @@ impl Engine {
                             continue;
                         }
                     }
+                    // 备用服务 (D179): the main service failed this step again for a
+                    // passing reason; the backup answers it, and the rest of this run.
+                    let backup = plan.fallback_model.clone().filter(|backup| !backup.same_service(&plan.model) && crate::failure::fallback_eligible(&error));
+                    if let Some(backup) = backup {
+                        if shared.lock().map_err(|_| Error::Cancelled)?.step_budget().model_requests < request_limit {
+                            let from = plan.model.model.clone();
+                            plan.model = backup.clone();
+                            {
+                                let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+                                c.plan.model = backup.clone();
+                                c.draft["fallbackUsed"] = json!({"from": from, "to": backup.model, "reason": crate::failure_kind(&error)});
+                            }
+                            self.store.run_event(&plan, json!({"type":"fallback","from":from,"to":backup.model}))?;
+                            retried = false;
+                            continue;
+                        }
+                    }
                     return match error {
                         Error::Cancelled | Error::Limit(_) | Error::Stale | Error::ContextWindow
                         | Error::Provider { .. } | Error::Refused(_) | Error::SystemStop(_) | Error::Busy { .. } => Err(error),
@@ -847,7 +864,10 @@ impl Engine {
         let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t["function"]["name"].as_str().unwrap_or(""))).filter(|t|tier!=Tier::Standard||STANDARD_TOOLS.contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
         // Lookup rounds before the model must write; questions and checks keep
         // the open loop, bounded only by the run allowance.
-        let tool_rounds = if ordinary { tier.tool_rounds() } else { None };
+        // A correction or a question gets a handful of lookup rounds, then must
+        // answer with what it found: one that cannot find a basis says so instead
+        // of searching until the run's allowance stops it (R30 step 2).
+        let tool_rounds = if ordinary { tier.tool_rounds() } else if matches!(plan.kind.as_str(), "correction" | "ask") { Some(LOOKUP_ROUNDS) } else { None };
         // The native validator owns machine-width bounds. Avoid repeating the
         // 16-digit JS safe-integer ceiling for every locator in each request;
         // meaningful limits (neighbours, batch sizes, text) remain visible.
@@ -1395,6 +1415,20 @@ impl Engine {
             facts.push(json!({"id":uuid::Uuid::new_v4().simple().to_string(),"nodeId":id,"detail":detail,"origin":"ai","citations":[]}));
         }
         state["facts"] = Value::Array(facts);
+        // 原著进度跟随 (D178): the passage moves the book position forward when
+        // it clearly follows a later chapter. Kept in this node's state, so it
+        // goes with the route and is undone with the passage.
+        if matches!(plan.kind.as_str(), "turn" | "variant" | "continue") && state["source"].is_object() {
+            if let Ok(Some(next)) = crate::runtime_sources::follow_position(&tx, &state["source"], narrative) {
+                let from = state["source"]["position"].as_i64().unwrap_or(0);
+                state["source"]["position"] = next.into();
+                meta["sourceAdvanced"] = json!({"from": from, "to": next});
+                if !meta["chips"].is_array() { meta["chips"] = json!([]); }
+                if let Some(chips) = meta["chips"].as_array_mut() {
+                    chips.push(json!({"text": format!("原著进度 → 第 {} 章", next + 1), "tone": "info"}));
+                }
+            }
+        }
         let (record, continuity_issues)=crate::continuity::validate_record(&tx,&plan.world_id,plan.base_id.as_deref().unwrap_or(""),&id,narrative,&plan.action,&state,&record,false)?;
         if !continuity_issues.is_empty(){let mut logs=meta["log"].as_array().cloned().unwrap_or_default();logs.extend(continuity_issues.into_iter().map(Value::String));meta["log"]=json!(logs);}
 
@@ -1995,6 +2029,8 @@ impl Tier {
         match self { Tier::Fast => Some(0), Tier::Standard => Some(1), Tier::Deep => Some(4) }
     }
 }
+/// Lookup rounds for 按原著纠错 and 查一查 before they must answer; each round may read several things.
+const LOOKUP_ROUNDS: u64 = 6;
 /// The standard tier's lookups: notes first, then the original and the story so far.
 const STANDARD_TOOLS: [&str; 4] = ["read_canon_notes", "search_original", "read_original", "read_history"];
 const ORDINARY_RULES_FAST:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料都已在上下文中，直接写本回合正文及<record>。";

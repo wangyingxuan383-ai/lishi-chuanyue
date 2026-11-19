@@ -91,9 +91,13 @@ pub fn codex_patch(raw: &str, state: &Value, options: &Value) -> Option<Value> {
         cards.push(json!({"op":"add", "kind":"时代", "name": if era_name.is_empty() { if free {"世界"} else {"时代"} } else {&era_name}, "content":era_content, "source":"AI"}));
     }
     // The first five supplied items count, including unusable entries.
-    for c in values(&value["cards"]).iter().take(5) {
+    // Five cards, plus the protagonist's abilities (“某某的本事”) when the premise gives them.
+    let ability = |c: &&Value| text(&c["name"], 20).ends_with("的本事");
+    let listed = values(&value["cards"]);
+    let chosen: Vec<&Value> = listed.iter().filter(|c| !ability(c)).take(5).chain(listed.iter().filter(|c| ability(c)).take(1)).collect();
+    for c in chosen {
         let name = text(&c["name"], 20);
-        let content = text(&c["content"], 200);
+        let content = text(&c["content"], if name.ends_with("的本事") { 400 } else { 200 });
         if name.is_empty() || content.is_empty() {
             continue;
         }
@@ -157,12 +161,17 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
     let mut cards = Vec::<Value>::new();
     let mut places = Vec::<Value>::new();
     let mut people = Vec::<Value>::new();
+    // “某某的本事” (upkeep-6): the protagonist's abilities, kept in one longer card.
+    let me = text(&state["protagonist"]["name"], 20);
+    let ability_name = format!("{}的本事", if me.is_empty() { "主角" } else { me.as_str() });
+    let is_ability = |name: &str| name == ability_name || name == "主角的本事";
+    let room = |name: &str| if is_ability(name) { 400 } else { 200 };
     for item in values(&value["cards"]) {
         if cards.len() >= MAX_EACH {
             break;
         }
         let name = text(&item["name"], 20);
-        let content = text(&item["content"], 200);
+        let content = text(&item["content"], room(&name));
         if name.is_empty()
             || content.is_empty()
             || known(&name)
@@ -184,7 +193,7 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
                 .iter()
                 .find(|c| c.get("id") == found.get("id"))
         });
-        let content = text(&item["content"], 200);
+        let content = text(&item["content"], room(&name));
         if content.is_empty() {
             continue;
         }
@@ -258,6 +267,71 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
                 people.push(json!({"id":person["id"], "name":person["name"], "alive":false}));
             }
         }
+    }
+    // One thing under two names (upkeep-5): AI-written duplicates become one card
+    // or place, the dropped name kept as an alias so it still brings it in.
+    let mut merged = 0;
+    for item in values(&value["merges"]) {
+        if merged >= MAX_EACH {
+            break;
+        }
+        let (keep, drop) = (text(&item["keep"], 20), text(&item["drop"], 20));
+        if keep.is_empty() || drop.is_empty() || keep == drop {
+            continue;
+        }
+        let card = |name: &str| {
+            match_name(&card_names, name, true).and_then(|i| {
+                values(&state["cards"]).iter().find(|c| c.get("id") == card_names[i].get("id"))
+            })
+        };
+        let touched = |id: &Value, list: &[Value]| list.iter().any(|x| x.get("id") == Some(id) && x["op"] == "remove");
+        if let (Some(k), Some(d)) = (card(&keep), card(&drop)) {
+            if k["id"] != d["id"] && k["source"] == "AI" && d["source"] == "AI" && k["kind"] == d["kind"] && !touched(&k["id"], &cards) && !touched(&d["id"], &cards) {
+                let mut keys = values(&k["keys"]).to_vec();
+                keys.push(d["name"].clone());
+                keys.extend(values(&d["keys"]).iter().cloned());
+                let content = text(&item["content"], 200);
+                let content = if content.is_empty() { k["content"].clone() } else { json!(content) };
+                cards.push(json!({"op":"update", "id":k["id"], "name":k["name"], "keys":keys, "content":content, "source":"AI"}));
+                cards.push(json!({"op":"remove", "id":d["id"], "name":d["name"]}));
+                merged += 1;
+            }
+            continue;
+        }
+        let list = values(&state["places"]);
+        let mergeable = |p: &Value| p["source"] == "AI" || text(&p["description"], usize::MAX).is_empty();
+        if let (Some(mut k), Some(mut d)) = (match_name(list, &keep, true), match_name(list, &drop, true)) {
+            if k == d || !mergeable(&list[k]) || !mergeable(&list[d]) || touched(&list[k]["id"], &places) || touched(&list[d]["id"], &places) {
+                continue;
+            }
+            // Where the protagonist stands stays; the other name joins it.
+            if list[d]["id"] == state["placeId"] {
+                std::mem::swap(&mut k, &mut d);
+            }
+            let (kp, dp) = (&list[k], &list[d]);
+            let mut aliases = values(&kp["aliases"]).to_vec();
+            aliases.push(dp["name"].clone());
+            aliases.extend(values(&dp["aliases"]).iter().cloned());
+            let given = text(&item["content"], 200);
+            let description = if !given.is_empty() { given } else if text(&kp["description"], usize::MAX).is_empty() { text(&dp["description"], 200) } else { text(&kp["description"], 200) };
+            places.push(json!({"op":"update", "id":kp["id"], "name":kp["name"], "aliases":aliases, "description":description, "source":"AI"}));
+            places.push(json!({"op":"remove", "id":dp["id"], "name":dp["name"]}));
+            merged += 1;
+        }
+    }
+    // The AI's own cards that turned out to be one-offs (upkeep-6); never the
+    // player's, a pack's, the protagonist's abilities, or one changed above.
+    let mut dropped = 0;
+    for name in values(&value["drop"]).iter().map(|v| text(v, 20)).filter(|s| !s.is_empty()) {
+        if dropped >= MAX_EACH {
+            break;
+        }
+        let Some(card) = match_name(&card_names, &name, true).and_then(|i| values(&state["cards"]).iter().find(|c| c.get("id") == card_names[i].get("id"))) else { continue };
+        if card["source"] != "AI" || is_ability(text(&card["name"], 20).as_str()) || cards.iter().any(|c| c.get("id") == card.get("id")) {
+            continue;
+        }
+        cards.push(json!({"op":"remove", "id":card["id"], "name":card["name"]}));
+        dropped += 1;
     }
     let mut status = Vec::<Value>::new();
     for name in values(&value["statusRemove"])
@@ -335,6 +409,47 @@ mod tests {
                 json!({"cards":[{"op":"add","kind":"设定","name":"新帮会","keys":[],"content":"可建","source":"AI"},{"op":"update","id":"ai","name":"信物","content":"已失","source":"AI"}],"places":[{"op":"update","id":"aip","name":"码头","description":"已毁","source":"AI"},{"op":"update","id":"blank","name":"东市","aliases":["东集","早市"],"description":"已到访","source":"AI"}],"people":[{"name":"王六","role":"舟子","attitude":"友善","note":"引路"},{"id":"person","name":"孙管事","alive":false}],"status":[{"op":"remove","name":"旧伤"}]})
             )
         );
+    }
+
+    #[test]
+    fn upkeep_merges_ai_duplicates_and_keeps_where_the_protagonist_stands() {
+        let state = json!({"placeId":"hall","cards":[
+            {"id":"letter","name":"密信","kind":"物品","keys":[],"content":"藏在袖中","source":"AI"},
+            {"id":"that","name":"那封信","kind":"物品","keys":["信"],"content":"写着地址","source":"AI"},
+            {"id":"own","name":"玉佩","kind":"物品","keys":[],"content":"玩家写","source":"玩家"},
+            {"id":"jade","name":"那块玉","kind":"物品","keys":[],"content":"AI 写","source":"AI"}],
+            "places":[{"id":"yamen","name":"县衙","aliases":[],"description":"","source":null},{"id":"hall","name":"县衙大堂","aliases":[],"description":"升堂之处","source":"AI"},
+            {"id":"inn","name":"客栈","aliases":[],"description":"玩家写","source":"玩家"},{"id":"tavern","name":"酒肆","aliases":[],"description":"","source":null}],
+            "people":[],"protagonist":{"statuses":[]}});
+        let raw = json!({"merges":[
+            {"keep":"密信","drop":"那封信","content":"藏在袖中，写着地址"},
+            {"keep":"玉佩","drop":"那块玉"},
+            {"keep":"县衙","drop":"县衙大堂"},
+            {"keep":"客栈","drop":"酒肆"},
+            {"keep":"密信","drop":"密信"}]}).to_string();
+        assert_eq!(
+            upkeep_patch(&raw, &state),
+            Some(json!({
+                "cards":[{"op":"update","id":"letter","name":"密信","keys":["那封信","信"],"content":"藏在袖中，写着地址","source":"AI"},{"op":"remove","id":"that","name":"那封信"}],
+                "places":[{"op":"update","id":"hall","name":"县衙大堂","aliases":["县衙"],"description":"升堂之处","source":"AI"},{"op":"remove","id":"yamen","name":"县衙"}]
+            }))
+        );
+    }
+
+    #[test]
+    fn upkeep_keeps_a_long_ability_card_and_drops_only_its_own_one_offs() {
+        let state = json!({"protagonist":{"name":"唐舞","statuses":[]},"people":[],"places":[],"cards":[
+            {"id":"ab","name":"唐舞的本事","kind":"设定","keys":[],"content":"一环","source":"AI"},
+            {"id":"scene","name":"雨夜茶摊","kind":"设定","keys":[],"content":"一次性","source":"AI"},
+            {"id":"own","name":"玩家的规矩","kind":"设定","keys":[],"content":"玩家写","source":"玩家"}]});
+        let long = "魂环：".to_owned() + &"千年紫环；".repeat(60);
+        let raw = json!({"updates":[{"name":"唐舞的本事","content":long}],"drop":["雨夜茶摊","玩家的规矩","唐舞的本事","不存在"]}).to_string();
+        let patch = upkeep_patch(&raw, &state).unwrap();
+        let cards = patch["cards"].as_array().unwrap();
+        assert_eq!(cards[0]["id"], "ab");
+        assert!(cards[0]["content"].as_str().unwrap().encode_utf16().count() > 200);
+        assert_eq!(cards[1], json!({"op":"remove","id":"scene","name":"雨夜茶摊"}));
+        assert_eq!(cards.len(), 2);
     }
 
     #[test]

@@ -185,9 +185,37 @@ async fn open_autostart_settings<R: Runtime>(app: tauri::AppHandle<R>) -> Result
 }
 
 /// `progress`: the live notification while writing; `excerpt`: the first line in "写好了"; `lockscreen`: that line on the lock screen too.
+/// `sound`: "写好了" and "没写完" ring and vibrate (R30 step 2); absent from older pages means on.
 #[tauri::command]
-async fn set_notify_prefs<R: Runtime>(app: tauri::AppHandle<R>, progress: bool, excerpt: bool, lockscreen: bool) -> Result<(), String> {
-    android_call::<R, serde_json::Value>(app, "set_notify_prefs", serde_json::json!({ "progress": progress, "excerpt": excerpt, "lockscreen": lockscreen })).await.map(|_| ())
+async fn set_notify_prefs<R: Runtime>(app: tauri::AppHandle<R>, progress: bool, excerpt: bool, lockscreen: bool, sound: Option<bool>) -> Result<(), String> {
+    android_call::<R, serde_json::Value>(app, "set_notify_prefs", serde_json::json!({ "progress": progress, "excerpt": excerpt, "lockscreen": lockscreen, "sound": sound.unwrap_or(true) })).await.map(|_| ())
+}
+
+/// Whether the reminder will ring: the app's switch, and what the system will actually do.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReminderStatus {
+    sound: bool,
+    audible: bool,
+}
+impl Default for ReminderStatus {
+    fn default() -> Self {
+        Self { sound: true, audible: true }
+    }
+}
+
+#[tauri::command]
+async fn reminder_status<R: Runtime>(app: tauri::AppHandle<R>) -> Result<ReminderStatus, String> {
+    android_call(app, "reminder_status", serde_json::json!({})).await
+}
+
+#[tauri::command]
+async fn test_reminder<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    android_call::<R, serde_json::Value>(app, "test_reminder", serde_json::json!({})).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn open_reminder_settings<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    open_system(app, "open_reminder_settings").await
 }
 
 /// The story a tapped notification asked to open, once: `{worldId, action}` or nulls.
@@ -336,7 +364,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             request_battery_exemption,
             open_autostart_settings,
             set_notify_prefs,
-            take_launch_target
+            take_launch_target,
+            reminder_status,
+            test_reminder,
+            open_reminder_settings
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]

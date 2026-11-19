@@ -141,6 +141,8 @@ export function useGeneration(d: GenerationDeps) {
     else if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
     else if (e.type === "text") { lastWords.current = Date.now(); setSlow(false); setGen((g) => g && { ...g, phase: "writing", text: e.full }); }
     else if (e.type === "organizing") setGen((g) => g && { ...g, phase: "organizing" });
+    // 备用服务 (D179): say it once; the passage keeps going on the backup.
+    else if (e.type === "fallback") deps.current.toast(e.to ? `主服务出错，这段改由备用服务（${e.to}）接着写` : "主服务出错，这段改由备用服务接着写");
     else if (e.type === "done") {
       showSaved(e.node);
       setExecutionStatus("");
@@ -252,11 +254,12 @@ export function useGeneration(d: GenerationDeps) {
     const version = recoveryNoticeVersion.current;
     void d.game.currentExecution(d.worldId, d.resumeRunId).then((run) => {
       if (disposed || recoveryNoticeVersion.current !== version || handle.current || autoHandle.current || deps.current.isBusy()) return;
-      if (!run) { setNotice({ text: "这条没写完的提醒已过期。", actions: [] }); return; }
+      // Already finished, retried or cleaned up: the story itself shows where things stand.
+      if (!run) return;
       if (["running", "committing"].includes(run.status)) resumeExecution(run.id);
       else showSavedExecution(run);
     }).catch(() => {
-      if (!disposed && recoveryNoticeVersion.current === version) setNotice({ text: "暂时没能读取这条提醒的进度。", actions: [] });
+      if (!disposed && recoveryNoticeVersion.current === version) setNotice({ text: "暂时没能读取那段的进度。故事里看得到的内容都已保存；没写完的话可以点“续写”或重说。", actions: [] });
     });
     return () => { disposed = true; };
   }, [d.game, d.worldId, d.resumeRunId]);

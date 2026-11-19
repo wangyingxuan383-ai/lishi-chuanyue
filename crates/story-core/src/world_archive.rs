@@ -125,9 +125,10 @@ struct Format7<'a> {
 
 impl Serialize for Format7<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(13))?;
+        let mut map = serializer.serialize_map(Some(14))?;
         map.serialize_entry("format", "lishi-world")?;
-        map.serialize_entry("version", &7)?;
+        // 8: 本局札记 (storyNotes, D174).
+        map.serialize_entry("version", &8)?;
         map.serialize_entry("exportedAt", &ws::now())?;
         map.serialize_entry("world", &self.row)?;
         let ids = BookIds::default();
@@ -140,6 +141,7 @@ impl Serialize for Format7<'_> {
             ("chapters", "SELECT * FROM chapters WHERE world_id=? ORDER BY id", RowKind::Plain),
             ("factSources", "SELECT * FROM story_fact_sources WHERE world_id=? ORDER BY id", RowKind::FactSource(&ids)),
             ("factCorrections", "SELECT * FROM fact_corrections WHERE world_id=? ORDER BY id", RowKind::References(&ids)),
+            ("storyNotes", "SELECT id,world_id AS worldId,kind,title,scope_json AS scope,content,previous_content AS previousContent,refs_json AS refs,model,status,active,progress_json AS progress,origin_world_id AS originWorldId,origin_title AS originTitle,created_at AS createdAt,updated_at AS updatedAt,'story' AS source FROM story_notes WHERE world_id=? ORDER BY created_at,id", RowKind::Note),
         ] {
             map.serialize_entry(name, &Rows { db: self.db, query, args, kind, errors: self.errors })?;
         }
@@ -295,14 +297,16 @@ mod tests {
             INSERT INTO source_books VALUES('b','样书','txt','t','{\"id\":\"b\",\"sections\":[]}');
             INSERT INTO states(node_id,state_json) VALUES('n','{\"source\":{\"bookId\":\"b\"}}');
             INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,status,progress_json,created_at,updated_at)
-            VALUES('note','b','w','question','疑问','{}','已保存部分','[0]','running','{\"parts\":[\"摘要\"],\"total\":2}','t','t');",
+            VALUES('note','b','w','question','疑问','{}','已保存部分','[0]','running','{\"parts\":[\"摘要\"],\"total\":2}','t','t');
+            INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,origin_title,created_at,updated_at)
+            VALUES('sn','w','plot','主线梗概','{\"to\":3}','第一回合起','旧版','[]','m','done',1,'{\"parts\":[],\"total\":0}','前作','t','t');",
         )
         .unwrap();
         Store(Arc::new(Mutex::new(db)))
     }
 
     #[test]
-    fn native_export_preserves_format7_rows_and_notes() {
+    fn native_export_preserves_format8_rows_and_notes() {
         let store = store();
         let mut expected = export(&store, "w").unwrap();
         let mut bytes = Vec::new();
@@ -311,7 +315,13 @@ mod tests {
         expected.as_object_mut().unwrap().remove("exportedAt");
         native.as_object_mut().unwrap().remove("exportedAt");
         assert_eq!(native, expected);
-        assert_eq!(native["version"], 7);
+        assert_eq!(native["version"], 8);
+        let story = &native["storyNotes"][0];
+        assert_eq!(story["source"], "story");
+        assert_eq!(story["scope"]["to"], 3);
+        assert_eq!(story["active"], true);
+        assert_eq!(story["previousContent"], "旧版");
+        assert_eq!(story["originTitle"], "前作");
         assert_eq!(native["lines"][0]["node_id"], "n");
         assert_eq!(native["nodes"][0]["narrative"], "桥边");
         assert_eq!(native["books"][0]["book"]["id"], "b");

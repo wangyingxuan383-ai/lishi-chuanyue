@@ -80,7 +80,7 @@ export function MoreMenu({ mouse, busy, state, dead, watch, head, cursor, noteOp
       items={[
         { icon: "list", group: "阅读", label: "目录与搜索", onSelect: () => setSheet("toc") },
         { icon: "search", group: "阅读", label: mouse ? "查一查（Ctrl+F）" : "查一查", hidden: busy, onSelect: () => setSheet("ask") },
-        { icon: "memo", group: "阅读", label: "原著札记", hidden: !state.source, onSelect: () => setSheet("notes") },
+        { icon: "memo", group: "阅读", label: "札记", onSelect: () => setSheet("notes") },
         { icon: "book", group: "阅读", label: "参考资料", hidden: !state.source, onSelect: () => setSheet("reference") },
         { icon: "person", group: "阅读", label: "这一世小传", onSelect: () => setSheet("life") },
         { icon: "play", group: "推进", label: "连播", hidden: busy || dead || watch, onSelect: () => setSheet("autoplay") },

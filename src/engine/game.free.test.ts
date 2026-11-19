@@ -81,9 +81,10 @@ describe("local free-world snapshots", () => {
     expect((await current(game, worldId)).cursor.head.id).toBe(before.cursor.head.id);
     const archive = await exportWorld(game.repo, worldId);
     await expect(importWorld(game.repo, { ...archive, states: [] }, "replace")).rejects.toThrow("有的回合缺少状态");
-    // A duplicate SQL row fails inside the replacement transaction, after deletes began.
+    // A duplicate row is caught by the archive check before anything is replaced
+    // (0.16.2); the import still rejects and the existing world stays as it was.
     const duplicate = { ...archive, nodes: [...archive.nodes, archive.nodes[0]] };
-    expect(archiveProblems(duplicate)).toEqual([]);
+    expect(archiveProblems(duplicate)).toContain("故事、回合或路线记录无效或重复");
     await expect(importWorld(game.repo, duplicate, "replace")).rejects.toThrow();
     expect((await current(game, worldId)).state).toEqual(before.state);
     expect((await current(game, worldId)).cursor.head.id).toBe(before.cursor.head.id);
