@@ -1,7 +1,7 @@
 import {assertSqlWritable,restoreWithFence} from "./sql-maintenance";
 // Browser dev harness: SQLite and whole story runs live in the resident native
 // host. IndexedDB is read only once for importing the previous browser store.
-import { PlatformError, type BackupInfo, type ExecutionSnapshot, type Platform, type Row, type StreamEvent } from "./types";
+import { PlatformError, type BackupInfo, type ExecutionSnapshot, type Platform, type Row, type RunStopReceipt, type StreamEvent } from "./types";
 import { assertLink, getPublic } from "./linkPolicy";
 import { setBrowserKeepAwake } from "./screenAwake";
 import { simulatedUpdate } from "./webUpdate";
@@ -96,7 +96,7 @@ export async function createWebPlatform(): Promise<Platform> {
       start: (plan) => bridge<string>("host/start", { plan }),
       snapshot: (id, after = 0) => bridge<ExecutionSnapshot>("host/snapshot", { id, after }),
       list: () => bridge<{ id: string; worldId: string; status: string }[]>("host/list", {}),
-      stop: (id) => bridge<void>("host/stop", { id }),
+      stop: (id, executionId) => bridge<RunStopReceipt>("host/stop", { id, executionId }),
       resume: (id) => bridge<void>("host/resume", { id }),
     },
     sql: {

@@ -71,8 +71,29 @@ function toLine(r: Row): Line {
   };
 }
 
+function toPin(r: Row): Pin {
+  return { id: r.id as string, worldId: r.world_id as string, originNodeId: r.origin_node_id as string, text: r.text as string, createdAt: r.created_at as string };
+}
+
+function toChapter(r: Row): Chapter {
+  return {
+    id: r.id as string, worldId: r.world_id as string, firstNodeId: r.first_node_id as string, lastNodeId: r.last_node_id as string,
+    title: r.title as string, gist: r.gist as string, summary: r.summary as string, model: (r.model as string) ?? null,
+    promptVersion: (r.prompt_version as string) ?? null, edited: !!r.edited, createdAt: r.created_at as string,
+  };
+}
+
+// Only fixed schema column names are passed here.
+function rowJson(table: string, columns: string): string {
+  return `json_object(${columns.split(",").map(column => {
+    const key = column.trim();
+    return `'${key}',${table}.${key}`;
+  }).join(",")})`;
+}
+
 /** The node and everything under it, for statements that remove a branch. */
-const SUBTREE = `WITH RECURSIVE down(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN down ON n.parent_id = down.id) SELECT id FROM down`;
+const SUBTREE = `WITH RECURSIVE down(id) AS (SELECT ? UNION SELECT n.id FROM nodes n JOIN down ON n.parent_id = down.id) SELECT id FROM down`;
+class ReferencedRoute extends Error {}
 
 export interface NewNode {
   id?: string;
@@ -119,6 +140,23 @@ export class Repo {
   async getWorld(id: string): Promise<World | null> {
     const rows = await this.q("SELECT * FROM worlds WHERE id = ?", [id]);
     return rows[0] ? toWorld(rows[0]) : null;
+  }
+
+  /** Captures the inputs and guards for a new model run at the same read boundary. */
+  async generationStart(worldId: string) {
+    const [row] = await this.q(`SELECT ${NODE_COLUMNS.split(",").map(column => `n.${column.trim()}`).join(",")},
+        l.id AS line_id,w.era_id,w.settings_json,s.state_json
+      FROM worlds w JOIN lines l ON l.id=w.current_line_id AND l.world_id=w.id
+      JOIN nodes n ON n.id=l.node_id AND n.world_id=w.id JOIN states s ON s.node_id=n.id
+      WHERE w.id=? AND w.archived=0 AND l.deleted_at IS NULL`, [worldId]);
+    if (!row) throw new Error("没有找到这本故事的当前路线。");
+    const rawSettings = JSON.parse(String(row.settings_json)) as Partial<WorldSettings>;
+    const state = JSON.parse(String(row.state_json)) as WorldState;
+    return {
+      lineId: String(row.line_id), eraId: String(row.era_id), head: toNode(row), state,
+      settings: { ...DEFAULT_SETTINGS, ...rawSettings },
+      guard: { settingsGuard: rawSettings, generationSnapshot: true, sourceGuard: state.source ?? null },
+    };
   }
 
   /** Creates a world with its opening node and main line in one transaction. */
@@ -204,7 +242,7 @@ export class Repo {
           JSON.stringify(node.choices ?? []), node.status ?? "ok", node.fate ?? null, JSON.stringify(node.meta ?? {}), t,
         ],
       },
-      { sql: "INSERT INTO states (node_id, state_json) VALUES (?, ?)", params: [nodeId, JSON.stringify(node.state)] },
+      this.nodeStateStatement(nodeId, node.state),
     ];
     if (node.parentId) {
       statements.push({ sql: "UPDATE nodes SET last_child_id = ? WHERE id = ?", params: [nodeId, node.parentId] });
@@ -212,31 +250,42 @@ export class Repo {
     return { statements, nodeId };
   }
 
+  private nodeStateStatement(nodeId: string, state: WorldState, guarded = false): SqlStatement {
+    const sourceBook = state.source?.bookId ?? null;
+    return {
+      sql: `INSERT INTO states(node_id,state_json)
+        SELECT ?,CASE WHEN ? IS NULL OR EXISTS(SELECT 1 FROM source_books WHERE id=?) THEN ? END
+        ${guarded ? "WHERE EXISTS(SELECT 1 FROM nodes WHERE id=?)" : ""}`,
+      params: [nodeId, sourceBook, sourceBook, JSON.stringify(state), ...(guarded ? [nodeId] : [])],
+    };
+  }
+
   /**
    * Appends a node under its parent and moves the given line to it, in one
    * transaction. `extra` statements (usage rows, pins…) join the same commit.
    */
-  async appendNode(worldId: string, lineId: string, node: NewNode, extra: SqlStatement[] = [], guard?: { headId: string; requireIdle?: boolean; preserveNodeId?: string }): Promise<StoryNode> {
+  async appendNode(worldId: string, lineId: string, node: NewNode, extra: SqlStatement[] = [], guard?: { headId: string; settingsJson?: string; requireIdle?: boolean; preserveNodeId?: string }): Promise<StoryNode> {
     const t = now();
     const seqRows = await this.q("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM nodes WHERE world_id = ?", [worldId]);
     const { statements, nodeId } = this.nodeStatements(worldId, seqRows[0].seq as number, node, t);
     if (guard) {
       if (extra.length) throw new Error("受保护的手动追加不接受未校验的附加写入");
       const condition = `EXISTS(SELECT 1 FROM worlds w JOIN lines l ON l.id=w.current_line_id
-        WHERE w.id=? AND w.archived=0 AND l.id=? AND l.world_id=w.id AND l.node_id=? AND l.deleted_at IS NULL AND l.archived=0)
+        WHERE w.id=? AND w.archived=0 AND l.id=? AND l.world_id=w.id AND l.node_id=? AND l.deleted_at IS NULL AND l.archived=0
+          AND (? IS NULL OR w.settings_json=?))
         AND (?=0 OR NOT EXISTS(SELECT 1 FROM world_execution_leases busy WHERE busy.world_id=? AND busy.expires_at_ms>?))`;
       const exists = "EXISTS(SELECT 1 FROM nodes WHERE id=?)";
       const preservedName = guard.preserveNodeId ? await this.uniqueLineName(worldId, "未命名路线") : null;
       await this.platform.sql.batch([
-        { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, worldId, lineId, guard.headId, guard.requireIdle ? 1 : 0, worldId, Date.now()] },
-        { sql: "INSERT INTO states(node_id,state_json) SELECT ?,? WHERE " + exists, params: [nodeId, JSON.stringify(node.state), nodeId] },
+        { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, worldId, lineId, guard.headId, guard.settingsJson ?? null, guard.settingsJson ?? null, guard.requireIdle ? 1 : 0, worldId, Date.now()] },
+        this.nodeStateStatement(nodeId, node.state, true),
         ...(node.parentId ? [{ sql: "UPDATE nodes SET last_child_id=? WHERE id=? AND " + exists, params: [nodeId, node.parentId, nodeId] }] : []),
         { sql: "UPDATE lines SET node_id=? WHERE id=? AND " + exists, params: [nodeId, lineId, nodeId] },
         { sql: "UPDATE worlds SET updated_at=?,played_at=? WHERE id=? AND " + exists, params: [t, t, worldId, nodeId] },
         ...(guard.preserveNodeId ? [{ sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',1,? WHERE " + exists, params: [newId(), worldId, preservedName!, guard.preserveNodeId, t, nodeId] }] : []),
       ]);
       const saved = await this.getNode(nodeId);
-      if (!saved) throw new Error("故事已变化或仍有任务执行，请等任务结束并重新打开时间设置。");
+      if (!saved) throw new Error("故事已变化或仍有任务执行，请等任务结束后重新打开再试。");
       return saved;
     }
     await this.platform.sql.batch([
@@ -278,7 +327,7 @@ export class Repo {
         guard.settingsGuard ?? null, guard.settingsGuard ?? null, guard.targetStateGuard ?? null, guard.targetStateGuard ?? null,
         guard.parentStateGuard ?? null, guard.parentStateGuard ?? null, guard.targetMetaGuard ?? null, guard.targetMetaGuard ?? null,
         guard.parentMetaGuard ?? null, guard.parentMetaGuard ?? null, guard.requireIdle ? 1 : 0, Date.now()] },
-      { sql: "INSERT INTO states(node_id,state_json) SELECT ?,? WHERE " + exists, params: [nodeId, JSON.stringify(node.state), nodeId] },
+      this.nodeStateStatement(nodeId, node.state, true),
       { sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique, nodeId, t, nodeId] },
       { sql: "UPDATE worlds SET current_line_id=?,updated_at=?,played_at=? WHERE id=? AND " + exists, params: [lineId, t, t, guard.worldId, nodeId] },
     ]);
@@ -321,7 +370,7 @@ export class Repo {
        ORDER BY created_at, id`,
       [nodeId, worldId],
     );
-    return rows.map((r) => ({ id: r.id as string, worldId: r.world_id as string, originNodeId: r.origin_node_id as string, text: r.text as string, createdAt: r.created_at as string }));
+    return rows.map(toPin);
   }
 
   async addChapter(c: Omit<Chapter, "id" | "createdAt" | "edited">): Promise<Chapter> {
@@ -335,13 +384,20 @@ export class Repo {
   }
 
   /** A rewrite by the model (edited stays as it was) or by the player (edited = true). */
-  async updateChapter(id: string, fields: Pick<Chapter, "title" | "gist" | "summary"> & Partial<Pick<Chapter, "model" | "promptVersion" | "edited">>): Promise<void> {
+  async updateChapter(id: string, fields: Pick<Chapter, "title" | "gist" | "summary"> & Partial<Pick<Chapter, "model" | "promptVersion" | "edited">>, expected?: Pick<Chapter, "title" | "gist" | "summary" | "edited">): Promise<boolean> {
     const sets = ["title = ?", "gist = ?", "summary = ?"];
     const params: Json[] = [fields.title, fields.gist, fields.summary];
     if (fields.model !== undefined) { sets.push("model = ?"); params.push(fields.model); }
     if (fields.promptVersion !== undefined) { sets.push("prompt_version = ?"); params.push(fields.promptVersion); }
     if (fields.edited !== undefined) { sets.push("edited = ?"); params.push(fields.edited ? 1 : 0); }
-    await this.q(`UPDATE chapters SET ${sets.join(", ")} WHERE id = ?`, [...params, id]);
+    const guard = expected ? " AND title=? AND gist=? AND summary=? AND edited=?" : "";
+    await this.q(`UPDATE chapters SET ${sets.join(", ")} WHERE id = ?${guard}`, [
+      ...params, id, ...(expected ? [expected.title, expected.gist, expected.summary, expected.edited ? 1 : 0] : []),
+    ]);
+    if (!expected) return true;
+    const [saved] = await this.q("SELECT title,gist,summary,edited FROM chapters WHERE id=?", [id]);
+    return !!saved && saved.title === fields.title && saved.gist === fields.gist && saved.summary === fields.summary
+      && (fields.edited === undefined || !!saved.edited === fields.edited);
   }
 
   async deleteChapter(id: string): Promise<void> {
@@ -361,11 +417,36 @@ export class Repo {
        ORDER BY up.depth DESC, c.created_at`,
       [nodeId, worldId],
     );
-    return rows.map((r) => ({
-      id: r.id as string, worldId: r.world_id as string, firstNodeId: r.first_node_id as string, lastNodeId: r.last_node_id as string,
-      title: r.title as string, gist: r.gist as string, summary: r.summary as string, model: (r.model as string) ?? null,
-      promptVersion: (r.prompt_version as string) ?? null, edited: !!r.edited, createdAt: r.created_at as string,
-    }));
+    return rows.map(toChapter);
+  }
+
+  /** One native read of a consistent route's prose, pins and chapter directory. */
+  async promptHistory(worldId: string, nodeId: string): Promise<{ path: StoryNode[]; pins: Pin[]; chapters: Chapter[] }> {
+    const rows = await this.q(`WITH RECURSIVE route(id) AS (
+        SELECT id FROM nodes WHERE id=? AND world_id=?
+        UNION SELECT n.parent_id FROM nodes n JOIN route ON route.id=n.id WHERE n.parent_id IS NOT NULL AND n.world_id=?
+      )
+      SELECT ${NODE_COLUMNS.split(",").map(column => `n.${column.trim()}`).join(",")},
+        CASE WHEN n.id=? THEN (
+          SELECT json_group_array(json(detail)) FROM (
+            SELECT ${rowJson("p", "id,world_id,origin_node_id,text,created_at")} AS detail
+            FROM pins p JOIN route ON route.id=p.origin_node_id WHERE p.world_id=? ORDER BY p.created_at,p.id
+          )
+        ) END AS prompt_pins,
+        CASE WHEN n.id=? THEN (
+          SELECT json_group_array(json(detail)) FROM (
+            SELECT ${rowJson("c", "id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,edited,created_at")} AS detail
+            FROM chapters c JOIN nodes last ON last.id=c.last_node_id
+            WHERE c.world_id=? AND c.first_node_id IN route AND c.last_node_id IN route ORDER BY last.seq,c.created_at,c.id
+          )
+        ) END AS prompt_chapters
+      FROM nodes n JOIN route ON route.id=n.id ORDER BY n.seq`, [nodeId, worldId, worldId, nodeId, worldId, nodeId, worldId]);
+    const head = rows.at(-1);
+    return {
+      path: rows.map(toNode),
+      pins: parse<Row[]>(head?.prompt_pins ?? null, []).map(toPin),
+      chapters: parse<Row[]>(head?.prompt_chapters ?? null, []).map(toChapter),
+    };
   }
 
   async getState(nodeId: string): Promise<WorldState> {
@@ -554,20 +635,39 @@ export class Repo {
       [line.worldId, lineId],
     )).map((r) => r.id as string));
     const first = (await this.path(line.nodeId)).find((n) => !keep.has(n.id));
-    const statements: SqlStatement[] = [{ sql: "DELETE FROM lines WHERE id = ?", params: [lineId] }];
-    let removed = 0;
+    const selection = `purge_${newId().replace(/-/g, "")}`;
+    const nodes = `SELECT id FROM ${selection} WHERE kind='node'`;
+    const lines = `SELECT id FROM ${selection} WHERE kind='line'`;
+    const eligible = `EXISTS(SELECT 1 FROM lines l JOIN worlds w ON w.id=l.world_id
+      WHERE l.id=? AND l.world_id=? AND l.node_id=? AND l.deleted_at IS NOT NULL AND w.current_line_id<>l.id)`;
+    const statements: SqlStatement[] = [{
+      sql: `CREATE TEMP TABLE ${selection} AS
+        WITH gone(id) AS (${SUBTREE}),
+        routes(id) AS (SELECT ? UNION SELECT id FROM lines WHERE node_id IN (SELECT id FROM gone))
+        SELECT * FROM (SELECT 'node' AS kind,id FROM gone WHERE id IS NOT NULL UNION ALL SELECT 'line',id FROM routes)
+        WHERE ${eligible}
+          AND NOT EXISTS(SELECT 1 FROM lines WHERE id IN routes AND id<>? AND deleted_at IS NULL)
+          AND NOT EXISTS(SELECT 1 FROM worlds WHERE current_line_id IN routes)
+          AND NOT EXISTS(SELECT 1 FROM story_fact_sources WHERE line_id IN routes OR node_id IN gone)
+          AND NOT EXISTS(SELECT 1 FROM fact_corrections WHERE node_id IN gone OR original_node_id IN gone)
+          AND NOT EXISTS(SELECT 1 FROM nodes WHERE json_extract(meta_json,'$.revision.nodeId') IN gone)
+          AND NOT EXISTS(SELECT 1 FROM pi_sessions WHERE line_id IN routes)
+          AND NOT EXISTS(SELECT 1 FROM pi_tasks WHERE line_id IN routes)`,
+      params: [first?.id ?? null, lineId, lineId, line.worldId, line.nodeId, lineId],
+    }];
+    const removed = first ? Number((await this.q(`SELECT COUNT(*) AS n FROM (${SUBTREE})`, [first.id]))[0].n) : 0;
+    statements.push({ sql: `DELETE FROM lines WHERE id IN (${lines})` });
     if (first) {
-      removed = Number((await this.q(`SELECT COUNT(*) AS n FROM (${SUBTREE})`, [first.id]))[0].n);
       statements.push(
-        { sql: `DELETE FROM pins WHERE origin_node_id IN (${SUBTREE})`, params: [first.id] },
-        { sql: `DELETE FROM chapters WHERE last_node_id IN (${SUBTREE}) OR first_node_id IN (${SUBTREE})`, params: [first.id, first.id] },
-        // Lines still in the trash that pointed into the branch go with it.
-        { sql: `DELETE FROM lines WHERE node_id IN (${SUBTREE})`, params: [first.id] },
-        { sql: `UPDATE nodes SET last_child_id = NULL WHERE last_child_id IN (${SUBTREE})`, params: [first.id] },
-        { sql: `DELETE FROM nodes WHERE id IN (${SUBTREE})`, params: [first.id] },
+        { sql: `DELETE FROM pins WHERE origin_node_id IN (${nodes})` },
+        { sql: `DELETE FROM chapters WHERE last_node_id IN (${nodes}) OR first_node_id IN (${nodes})` },
+        { sql: `UPDATE nodes SET last_child_id = NULL WHERE last_child_id IN (${nodes})` },
+        { sql: `DELETE FROM nodes WHERE id IN (${nodes})` },
       );
     }
+    statements.push({ sql: `DROP TABLE ${selection}` });
     await this.platform.sql.batch(statements);
+    if (await this.getLine(lineId)) throw new ReferencedRoute("这条路线仍有资料引用，或刚发生变化，已保留在回收站。");
     return removed;
   }
 
@@ -576,7 +676,10 @@ export class Repo {
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
     const old = await this.q("SELECT id FROM lines WHERE world_id = ? AND deleted_at IS NOT NULL AND deleted_at < ?", [worldId, cutoff]);
     let removed = 0;
-    for (const r of old) removed += await this.purgeLine(r.id as string);
+    for (const r of old) {
+      try { removed += await this.purgeLine(r.id as string); }
+      catch (error) { if (!(error instanceof ReferencedRoute)) throw error; }
+    }
     return removed;
   }
 
@@ -585,7 +688,10 @@ export class Repo {
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
     const old = await this.q("SELECT id FROM lines WHERE deleted_at IS NOT NULL AND deleted_at < ?", [cutoff]);
     let removed = 0;
-    for (const r of old) removed += await this.purgeLine(r.id as string);
+    for (const r of old) {
+      try { removed += await this.purgeLine(r.id as string); }
+      catch (error) { if (!(error instanceof ReferencedRoute)) throw error; }
+    }
     return removed;
   }
 

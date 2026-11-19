@@ -463,7 +463,38 @@ pub fn build(input: &Value) -> Result<Value> {
     cards += &facts;
     room = room.saturating_sub(size(&cards));
     layers.push(json!({"key":"cards","label":"相关设定与已更正事实","chars":size(&cards),"content":cards,"note":"相关资料优先，其他资料可通过只读工具读取"}));
-    let recap = list(&input["chapters"])
+    let chapters = list(&input["chapters"]);
+    let recap_budget = 900.min(room / 5);
+    let older = if recap_budget >= 180 && chapters.len() > 3 {
+        let explicit_query = format!("{}\n{}", text(&input["text"]), text(&input["directorNote"]));
+        let chapter_query = if explicit_query.trim().is_empty() {
+            history
+                .iter()
+                .rev()
+                .find(|node| node["kind"] != "edit")
+                .map(|node| {
+                    format!(
+                        "{}\n{}",
+                        head(text(&node["actionText"]), 120),
+                        tail(text(&node["narrative"]), 360)
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            head(&explicit_query, 480)
+        };
+        let older_budget = recap_budget / 3;
+        crate::recall::related_chapter(
+            &chapters[..chapters.len() - 3],
+            &chapter_query,
+            older_budget - 8,
+        )
+        .map(|line| head(&format!("\n较早相关章节：{line}"), older_budget))
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let recap = chapters
         .iter()
         .rev()
         .take(3)
@@ -473,7 +504,7 @@ pub fn build(input: &Value) -> Result<Value> {
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let recap = head(&recap, 900.min(room / 5));
+    let recap = head(&recap, recap_budget - size(&older)) + &older;
     room -= size(&recap);
     layers.push(json!({"key":"recap","label":"前情提要","chars":size(&recap),"content":recap,"note":"原文窗口以外的章节梗概"}));
     let mut pairs = vec![];
@@ -556,7 +587,7 @@ pub fn build(input: &Value) -> Result<Value> {
     let chars = message_chars + overhead;
     layers.push(json!({"key":"tools","label":"工具与技能目录及消息包装","chars":overhead,"content":"按当前只读工具说明与技能目录预留，正式请求会优先精简可选资料。","note":"计入输入估算，必要内容完整保留"}));
     Ok(
-        json!({"messages":messages,"layers":layers,"reference":reference,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-1"}),
+        json!({"messages":messages,"layers":layers,"reference":reference,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-2"}),
     )
 }
 
@@ -607,6 +638,26 @@ mod tests {
         assert!(body.contains("保留玩家主动改变"));
     }
     #[test]
+    fn recap_retrieves_a_relevant_chapter_older_than_the_prose_window() {
+        let mut i = input();
+        i["historyOffset"] = 111.into();
+        i["text"] = "打开青铜密匣，查清去向。".into();
+        i["chapters"] = json!([
+            {"title":"荒庙","gist":"青铜密匣藏在破佛像下。"},
+            {"title":"摆渡","gist":"船家带你渡过长河。"},
+            {"title":"集市","gist":"摊主提到大雪即将封山。"},
+            {"title":"客栈","gist":"商队先在镇上休整。"},
+            {"title":"商队","gist":"掌柜决定分路拜访。"}
+        ]);
+        let context = build(&i).unwrap();
+        let recap = context["layers"].as_array().unwrap().iter().find(|layer| layer["key"] == "recap").unwrap();
+        let content = recap["content"].as_str().unwrap();
+        assert!(content.contains("青铜密匣藏在破佛像下"), "{content}");
+        assert!(content.contains("商队：掌柜决定分路拜访"), "{content}");
+        assert!(!content.contains("船家带你"), "{content}");
+        assert!(recap["chars"].as_u64().unwrap() <= 900);
+    }
+    #[test]
     fn canon_notes_join_the_fixed_part_within_a_fifth_of_the_budget() {
         let mut i = input();
         i["depth"] = "standard".into();
@@ -650,8 +701,8 @@ mod tests {
         let state=json!({"source":{"bookId":"b"},"facts":[{"id":"p","origin":"player","detail":"救下旅人"}]});
         let pages=vec![json!({"kind":"original","section":2,"chunk":3,"text":"青衣客是兄长。"})];
         let mut report=json!({"findings":[{"status":"supported","citations":[{"bookId":"b","section":2,"chunk":3,"quote":"青衣客是兄长"}]}]});
-        validate_findings(&report,&pages,&state,&json!({})).unwrap();report["findings"][0]["citations"][0]["quote"]="青衣客是弟弟".into();assert!(validate_findings(&report,&pages,&state,&json!({})).is_err());
-        report=json!({"findings":[{"status":"branch","playerFactId":"p"}]});validate_findings(&report,&pages,&state,&json!({})).unwrap();report["findings"][0]["playerFactId"]="ai-state".into();assert!(validate_findings(&report,&pages,&state,&json!({"mode":"direct","text":"修正设定"})).is_err());
+        validate_findings(&report,&pages,&state,&state["source"],&json!({})).unwrap();report["findings"][0]["citations"][0]["quote"]="青衣客是弟弟".into();assert!(validate_findings(&report,&pages,&state,&state["source"],&json!({})).is_err());
+        report=json!({"findings":[{"status":"branch","playerFactId":"p"}]});validate_findings(&report,&pages,&state,&state["source"],&json!({})).unwrap();report["findings"][0]["playerFactId"]="ai-state".into();assert!(validate_findings(&report,&pages,&state,&state["source"],&json!({"mode":"direct","text":"修正设定"})).is_err());
     }
     #[test]
     fn unicode_windows_do_not_split_surrogate_pairs() {
@@ -797,6 +848,7 @@ pub fn validate_findings(
     report: &Value,
     passages: &[Value],
     state: &Value,
+    source: &Value,
     action: &Value,
 ) -> Result<()> {
     let Some(findings) = report["findings"].as_array() else {
@@ -812,7 +864,8 @@ pub fn validate_findings(
                     .filter(|a| !a.is_empty())
                     .ok_or_else(|| Error::Invalid("原著已支持的主张必须附实际读到的原句".into()))?;
                 for cite in cites {
-                    if cite["bookId"] != state["source"]["bookId"]
+                    if !source.is_object() || cite["bookId"] != source["bookId"]
+                        || !cite["section"].as_u64().is_some_and(|section| section <= source["through"].as_u64().unwrap_or(u64::MAX))
                         || !passages.iter().any(|p| {
                             p["kind"] == "original"
                                 && p["chunk"] == cite["chunk"]

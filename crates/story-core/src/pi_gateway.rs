@@ -640,7 +640,12 @@ impl StoryToolGateway {
             return Err(Error::Invalid("原执行尚未停止，不能重复启动".into()));
         }
         let old_base=ws::parse(ws::text(&task,"base_json"));
-        let current=ws::base(&tx,ws::text(&task,"world_id"),ws::text(&old_base,"lineId"))?;
+        let world = ws::text(&task, "world_id");
+        let line = ws::text(&old_base, "lineId");
+        if !crate::pi_resume::route_available(&tx, world, line)? {
+            return Err(Error::Invalid("原路线已归档、删除或无法进入。请恢复后再继续。".into()));
+        }
+        let current=ws::base(&tx,world,line)?;
         if current["fingerprint"]!=old_base["fingerprint"] {
             crate::pi_rebase::save(&tx,&task,&task_plan(&tx,&task)?,&ws::parse(ws::text(&task,"workspace_json")),&current)?;
         }
@@ -682,6 +687,7 @@ impl StoryToolGateway {
         if task["status"] != "previewed" {
             return Err(Error::Invalid("这项任务没有待采用的预览".into()));
         }
+        crate::maintenance::guard(&tx)?;
         ws::guard(&tx, &ws::parse(ws::text(&task, "base_json")))?;
         let ticket = lease::acquire_tx(
             &tx,

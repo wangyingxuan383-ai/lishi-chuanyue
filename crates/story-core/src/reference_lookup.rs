@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub fn read(db: &Connection, plan: &RunPlan, name: &str, args: &Value) -> Result<Value> {
-    let binding = &plan.state["source"];
+    let binding = plan.reading_source();
     let Some(book) = binding["bookId"].as_str() else {
         return Ok(json!({"status":"insufficient","reason":"未绑定参考书籍","items":[]}));
     };

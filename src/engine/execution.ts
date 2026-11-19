@@ -1,4 +1,4 @@
-import type { ExecutionSnapshot, Json, Platform } from "../platform";
+import { PlatformError, type ExecutionSnapshot, type Json, type Platform } from "../platform";
 import type { LlmConfig } from "./game";
 import type { ChatMessage } from "./llm/chat";
 import type { WorldSettings, WorldState } from "./types";
@@ -27,35 +27,75 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
   const execution = platform.execution;
   let stopped = false, attached = true, processed = after, timer: ReturnType<typeof setTimeout> | undefined;
   let terminal = false, polling: Promise<void> | null = null;
+  let observationFailures = 0;
+  let currentAttempt: string | null | undefined, stopAttempt: string | null | undefined;
+  let stopSending = false, stopAcknowledged = false, stopRetryAt = 0;
   let settle!: (snapshot: ExecutionSnapshot) => void, fail!: (error: unknown) => void;
   const done = new Promise<ExecutionSnapshot>((resolve, reject) => { settle = resolve; fail = reject; });
   const registered = (async () => {
     if (!execution) throw new Error("当前运行环境没有原生执行核心，请启动本机开发宿主或使用应用");
-    const id = existingId ?? await execution.start(asJson(plan));
-    if (stopped) await execution.stop(id);
-    return id;
+    return existingId ?? execution.start(asJson(plan));
   })();
-  const poll = async () => {
-    const id = await registered;
+  const signal = (state: string) => {
+    if (attached) onEvent({ type: "execution-status", state });
+  };
+  const schedule = (delay: number) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => void next(), delay);
+  };
+  const acknowledgeStop = () => {
+    if (!stopAcknowledged && !terminal) signal("stop-requested");
+    stopAcknowledged = true;
+  };
+  const sendStop = async (id: string) => {
+    if (!execution || terminal || !stopped || stopSending || stopAcknowledged || Date.now() < stopRetryAt) return;
+    // Freeze the first observed attempt; a late click cannot stop a later resume.
+    if (stopAttempt === undefined) stopAttempt = currentAttempt;
+    if (!stopAttempt) return;
+    stopSending = true;
+    try {
+      const receipt = await execution.stop(id, stopAttempt);
+      if (receipt.accepted) acknowledgeStop();
+      if (receipt.settled || receipt.executionId !== stopAttempt) stopAcknowledged = true;
+    } catch {
+      if (!terminal) signal("stop-unconfirmed");
+      stopRetryAt = Date.now() + 1500;
+    } finally {
+      stopSending = false;
+    }
+  };
+  const poll = async (id: string) => {
     if (!execution || terminal) return;
     const snapshot = await execution.snapshot(id, attached ? processed : Number.MAX_SAFE_INTEGER);
+    if (observationFailures > 0) signal("connected");
+    observationFailures = 0;
+    currentAttempt = snapshot.executionId ?? null;
+    const running = ["running", "committing"].includes(snapshot.status);
+    if (running && snapshot.stopRequested && (!stopped || currentAttempt === stopAttempt)) acknowledgeStop();
     if (attached) for (const item of snapshot.events) {
       if (item.seq <= processed) continue;
       processed = item.seq;
       if (item.event && typeof item.event === "object" && !Array.isArray(item.event)) onEvent(item.event as Record<string, unknown>);
     }
-    if (!["running", "committing"].includes(snapshot.status)) { terminal = true; settle(snapshot); return; }
-    timer = setTimeout(() => void next(), attached ? 350 : 1000);
+    if (!running) { terminal = true; settle(snapshot); return; }
+    void sendStop(id);
+    schedule(attached ? 350 : 1000);
+  };
+  const terminate = (error: unknown) => { terminal = true; clearTimeout(timer); fail(error); };
+  const lostObservation = (error: unknown) => {
+    if (error instanceof PlatformError && error.code === "execution_missing") { terminate(error); return; }
+    if (observationFailures++ === 0) signal("reconnecting");
+    schedule(Math.min(5_000, 350 * 2 ** Math.min(observationFailures, 4)));
   };
   const next = () => {
     if (polling) return polling;
-    polling = poll().catch((error) => { terminal = true; fail(error); }).finally(() => { polling = null; });
+    polling = registered.then((id) => poll(id).catch(lostObservation), terminate).finally(() => { polling = null; });
     return polling;
   };
   void next();
   return {
     done,
-    cancel() { stopped = true; void registered.then((id) => execution?.stop(id)).catch(() => {}); },
+    cancel() { stopped = true; void registered.then(sendStop, () => {}); },
     async catchUp() { attached = true; clearTimeout(timer); await next(); },
     detach() { attached = false; },
   };

@@ -53,7 +53,10 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
   const bookmarks = rows.filter((r) => r.line.kind === "bookmark" && !r.line.deletedAt);
   const archived = rows.filter((r) => r.line.kind === "line" && r.line.archived && !r.line.deletedAt);
   const trash = rows.filter((r) => r.line.deletedAt);
-  const act = async (fn: () => Promise<unknown>, message: string) => { await fn(); await load(); onChanged(message); };
+  const act = async (fn: () => Promise<unknown>, message: string) => {
+    try { await fn(); await load(); onChanged(message); }
+    catch (error) { onChanged(error instanceof Error ? error.message : "没能更新路线"); }
+  };
   const card = (r: Row, onTap: () => void) => (
     <div key={r.line.id} className="row line-row">
       <button className={`card grow${r.line.id === current ? " selected" : ""}`} onClick={onTap}>

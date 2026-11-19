@@ -122,7 +122,7 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun take_launch_target(invoke: Invoke) {
         val target = LaunchTarget.take()
-        invoke.resolve(JSObject().put("worldId", target?.first).put("action", target?.second))
+        invoke.resolve(JSObject().put("worldId", target?.worldId).put("action", target?.action).put("runId", target?.runId))
     }
 
     private fun isXiaomi(): Boolean =

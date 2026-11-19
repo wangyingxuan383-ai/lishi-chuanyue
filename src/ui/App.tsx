@@ -181,7 +181,14 @@ export default function App() {
       if (document.visibilityState !== "visible") return;
       const target = await platform.system.takeLaunchTarget?.().catch(() => null);
       if (!target?.worldId || !(await game.repo.getWorld(target.worldId))) return;
-      setStack((s) => (s[s.length - 1]?.name === "play" && (s[s.length - 1] as { worldId: string }).worldId === target.worldId ? s : [{ name: "home" }, { name: "play", worldId: target.worldId! }]));
+      const resumeRunId = target.action === "resume" ? target.runId ?? undefined : undefined;
+      const next: Route = { name: "play", worldId: target.worldId, resumeRunId };
+      setStack((s) => {
+        const top = s.at(-1);
+        return top?.name === "play" && top.worldId === next.worldId
+          ? resumeRunId ? [...s.slice(0, -1), next] : s
+          : [{ name: "home" }, next];
+      });
     };
     void take();
     document.addEventListener("visibilitychange", take);
@@ -275,7 +282,7 @@ export default function App() {
       {route.name === "home" && <Home key={homeKey} />}
       {route.name === "setup" && <Setup first={route.first} profileId={route.profileId} />}
       {route.name === "newgame" && <NewGame />}
-      {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} /></div>}
+      {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} resumeRunId={route.name === "play" ? route.resumeRunId : undefined} /></div>}
       {route.name === "agent" && <AgentConversation key={`${route.worldId}:${route.lineId}`} route={route} />}
       {route.name === "settings" && <Settings />}
       {route.name === "guide" && <Guide />}

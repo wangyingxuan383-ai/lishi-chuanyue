@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
-import type { Platform, StreamEvent } from "../platform";
+import type { ExecutionSnapshot, Platform, StreamEvent } from "../platform";
 import { monthSpend } from "../ui/components/budgetMath";
 import { Game } from "./game";
+import { startRun, type RunPlan } from "./execution";
 import type { ChatResult } from "./llm/chat";
 import { fakeLlm, type Script } from "./testing/fakeLlm";
 import { sampleState } from "./testing/fixtures";
@@ -37,6 +38,35 @@ async function seed(scripts: Script[] = []) {
 async function rows(platform: Platform) {
   return platform.sql.query("SELECT purpose, model, prompt_tokens, completion_tokens, estimated, outcome FROM usage ORDER BY rowid");
 }
+
+it("reconnects to an existing generation and stops only its observed attempt", async () => {
+  vi.useFakeTimers();
+  try {
+    const events: string[] = [];
+    const start = vi.fn(async () => "run");
+    const resume = vi.fn(async () => {});
+    const stop = vi.fn(async () => ({ executionId: "attempt", status: "running", accepted: true, settled: false }));
+    const running: ExecutionSnapshot = { id: "run", worldId: "world", executionId: "attempt", stopRequested: false,
+      status: "running", budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 },
+      draft: null, result: null, error: null, events: [] };
+    const snapshot = vi.fn()
+      .mockRejectedValueOnce(new Error("lost observation"))
+      .mockResolvedValueOnce(running)
+      .mockResolvedValue({ ...running, status: "cancelled", stopRequested: true });
+    const platform = { execution: { start, resume, snapshot, stop } } as unknown as Platform;
+    const run = startRun(platform, { id: "run" } as RunPlan, (e) => { if (e.type === "execution-status") events.push(String(e.state)); });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(["reconnecting"]);
+    await vi.advanceTimersByTimeAsync(700);
+    run.cancel();
+    await vi.advanceTimersByTimeAsync(350);
+    expect(events).toEqual(["reconnecting", "connected", "stop-requested"]);
+    expect(stop).toHaveBeenCalledExactlyOnceWith("run", "attempt");
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(resume).not.toHaveBeenCalled();
+    await expect(run.done).resolves.toMatchObject({ status: "cancelled" });
+  } finally { vi.useRealTimers(); }
+});
 
 describe("auxiliary request accounting", () => {
   it.each(["play", "regenerate", "autoplay", "resumeInterrupted", "ask", "createWorld"] as const)("rejects %s when the native execution core is missing", async (method) => {

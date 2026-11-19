@@ -278,12 +278,29 @@ pub struct RunPlan {
     pub new_world: Option<Value>,
 }
 
+impl RunPlan {
+    /// Rewriting settles against the previous turn's state, but reads the
+    /// current route's reference binding from the captured start snapshot.
+    pub(crate) fn reading_source(&self) -> &Value {
+        if self.meta["generationSnapshot"] == true {
+            if let Some(source) = self.meta.get("sourceGuard") {
+                return source;
+            }
+        }
+        &self.state["source"]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunSnapshot {
     pub id: String,
     pub world_id: String,
     pub status: String,
+    #[serde(default)]
+    pub execution_id: Option<String>,
+    #[serde(default)]
+    pub stop_requested: bool,
     pub budget: RunBudget,
     pub draft: Value,
     pub result: Option<Value>,
@@ -298,6 +315,15 @@ pub struct RunSnapshot {
     #[serde(default)]
     pub failures: Vec<Value>,
     pub events: Vec<RunEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStopReceipt {
+    pub execution_id: Option<String>,
+    pub status: String,
+    pub accepted: bool,
+    pub settled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

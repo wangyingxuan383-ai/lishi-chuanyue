@@ -5,7 +5,7 @@ use crate::{
     Error, Result, RunBudget, RunPlan, Store,
 };
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
     sync::{Arc, Mutex},
@@ -18,6 +18,35 @@ struct Live {
     raw_settings: Value,
     history: Vec<Value>,
     chapters: Vec<Value>,
+}
+
+/// Read only chapter gists, independently of the bounded prose window.
+fn chapters_on_route(db: &Connection, world_id: &str, head_id: &str) -> Result<Vec<Value>> {
+    let mut query = db.prepare(
+        "WITH RECURSIVE route(id) AS (
+            SELECT id FROM nodes WHERE world_id=?1 AND id=?2
+            UNION
+            SELECT n.parent_id FROM nodes n JOIN route r ON n.id=r.id
+            WHERE n.world_id=?1 AND n.parent_id IS NOT NULL
+         )
+         SELECT c.first_node_id, c.last_node_id, c.title, c.gist
+         FROM chapters c
+         JOIN route start ON start.id=c.first_node_id
+         JOIN route finish ON finish.id=c.last_node_id
+         JOIN nodes first ON first.id=start.id AND first.world_id=?1
+         JOIN nodes last ON last.id=finish.id AND last.world_id=?1
+         WHERE c.world_id=?1 AND first.seq<=last.seq
+         ORDER BY last.seq, c.created_at, c.id",
+    )?;
+    let rows = query.query_map(params![world_id, head_id], |row| {
+        Ok(json!({
+            "firstNodeId":row.get::<_, String>(0)?,
+            "lastNodeId":row.get::<_, String>(1)?,
+            "title":row.get::<_, String>(2)?,
+            "gist":row.get::<_, String>(3)?,
+        }))
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 impl Engine {
@@ -212,8 +241,7 @@ impl Engine {
         }
         drop(statement);
         history.reverse();
-        let mut statement = tx.prepare("SELECT first_node_id,last_node_id,title,gist,summary FROM chapters WHERE world_id=? ORDER BY created_at")?;
-        let chapters = statement.query_map([&plan.world_id], |r|Ok(json!({"firstNodeId":r.get::<_,String>(0)?,"lastNodeId":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,"gist":r.get::<_,String>(3)?,"summary":r.get::<_,String>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?.into_iter().filter(|c|history.iter().any(|n|n["id"]==c["lastNodeId"])).collect();
+        let chapters = chapters_on_route(&tx, &plan.world_id, &plan.head_id)?;
         Ok(Live {
             state,
             settings,
@@ -443,5 +471,38 @@ fn prepare_organization(plan: &mut RunPlan, history: &[Value], chapters: &[Value
                 .map(|n| n["id"].clone())
                 .unwrap_or_else(|| json!("{{NODE_ID}}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chapters_follow_route_endpoints_beyond_the_prose_window() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE nodes(id TEXT PRIMARY KEY, parent_id TEXT, world_id TEXT, seq INT);
+             CREATE TABLE chapters(id TEXT PRIMARY KEY, first_node_id TEXT, last_node_id TEXT,
+                world_id TEXT, title TEXT, gist TEXT, created_at TEXT);
+             WITH RECURSIVE sequence(seq) AS (
+                VALUES (0) UNION ALL SELECT seq+1 FROM sequence WHERE seq<300
+             )
+             INSERT INTO nodes
+                SELECT 'n'||seq, CASE WHEN seq>0 THEN 'n'||(seq-1) END, 'w', seq FROM sequence;
+             INSERT INTO nodes VALUES ('side', 'n5', 'w', 301), ('other', NULL, 'z', 0);
+             INSERT INTO chapters VALUES
+                ('early', 'n6', 'n12', 'w', '早期', '找到青铜密匣', 'later-edit'),
+                ('near', 'n272', 'n288', 'w', '近期', '回到古庙', 'earlier-create'),
+                ('side', 'n5', 'side', 'w', '另一条路线', '不应带进正文', 'middle'),
+                ('cross', 'side', 'n289', 'w', '跨支', '不应带进正文', 'middle'),
+                ('reverse', 'n289', 'n288', 'w', '倒序', '不应带进正文', 'middle'),
+                ('other', 'other', 'n290', 'w', '另一部故事', '不应带进正文', 'middle');",
+        ).unwrap();
+        let chapters = chapters_on_route(&db, "w", "n300").unwrap();
+        assert_eq!(chapters.iter().map(|chapter| chapter["title"].as_str().unwrap()).collect::<Vec<_>>(), ["早期", "近期"]);
+        let side = chapters_on_route(&db, "w", "side").unwrap();
+        assert_eq!(side.len(), 1);
+        assert_eq!(side[0]["lastNodeId"], "side");
     }
 }

@@ -8,6 +8,11 @@ CREATE TABLE IF NOT EXISTS execution_events(
  run_id TEXT NOT NULL REFERENCES execution_runs(id) ON DELETE CASCADE, seq INTEGER NOT NULL,
  event_json TEXT NOT NULL, PRIMARY KEY(run_id,seq)
 );
+CREATE TABLE IF NOT EXISTS execution_progress(
+ run_id TEXT PRIMARY KEY REFERENCES execution_runs(id) ON DELETE CASCADE,
+ seq INTEGER NOT NULL,
+ event_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS execution_steps(
  run_id TEXT NOT NULL REFERENCES execution_runs(id) ON DELETE CASCADE, step_key TEXT NOT NULL,
  kind TEXT NOT NULL, status TEXT NOT NULL, input_json TEXT NOT NULL, output_json TEXT,

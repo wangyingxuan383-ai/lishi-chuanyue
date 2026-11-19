@@ -20,6 +20,10 @@ const MAX_BODY: usize = 4 * 1024 * 1024;
 const MAX_HTTP_ERROR: usize = 8 * 1024;
 const MAX_GET: usize = 1024 * 1024;
 
+fn cache_error() -> PlatformError {
+    PlatformError::new("llm_stream_storage", "回复暂时无法保存到本机，请检查可用空间")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum StreamEvent {
@@ -148,7 +152,9 @@ impl Streams {
 
     pub fn open(cache: PathBuf) -> Result<Self> {
         let directory = cache.join("streams");
-        fs::create_dir_all(&directory).map_err(|_| io_error())?;
+        // Existing stories and backup access do not depend on the reply cache.
+        // A generation retries this creation before sending its request.
+        let _ = fs::create_dir_all(&directory);
         Ok(Self {
             directory,
             active: Mutex::new(HashMap::new()),
@@ -224,7 +230,12 @@ impl Streams {
     pub fn list(&self) -> Result<Vec<StreamInfo>> {
         let active = self.active.lock().map_err(|_| io_error())?;
         let mut result = Vec::new();
-        for entry in fs::read_dir(&self.directory).map_err(|_| io_error())? {
+        let entries = match fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+            Err(_) => return Err(cache_error()),
+        };
+        for entry in entries {
             let entry = entry.map_err(|_| io_error())?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(id) = name.strip_suffix(".jsonl").filter(|id| valid_id(id)) else {
@@ -265,11 +276,12 @@ impl Streams {
         let registration_id = id.clone();
         let lifecycle = blocking(move || {
             let mut active = service.active.lock().map_err(|_| io_error())?;
+            fs::create_dir_all(&service.directory).map_err(|_| cache_error())?;
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(service.path(&registration_id)?)
-                .map_err(|_| io_error())?;
+                .map_err(|_| cache_error())?;
             let lease = service.keep_alive.acquire();
             active.insert(registration_id.clone(), registered.clone());
             drop(active);
@@ -370,7 +382,11 @@ impl Emitter {
             Ok(())
         })
         .await
-        .map_err(|_| StreamEvent::error("network"))
+        .map_err(|_| StreamEvent::Error {
+            kind: "storage".into(),
+            status: None,
+            message: Some(cache_error().message.into()),
+        })
     }
 }
 
@@ -547,6 +563,7 @@ async fn receive(
         });
     let mut total = 0;
     let mut pending = Vec::new();
+    let mut reply = ReplyTermination::default();
     while let Some(chunk) = budget.chunk(cancel, &mut response).await? {
         total += chunk.len();
         if total > MAX_BODY {
@@ -557,7 +574,7 @@ async fn receive(
             let mut start = 0;
             while let Some(offset) = pending[start..].iter().position(|b| *b == b'\n') {
                 let end = start + offset;
-                if forward_line(&pending[start..end], key, emitter).await? {
+                if forward_line(&pending[start..end], key, emitter, &mut reply).await? {
                     return Ok(());
                 }
                 start = end + 1;
@@ -566,8 +583,15 @@ async fn receive(
         }
     }
     if sse {
-        if !pending.is_empty() {
-            forward_line(&pending, key, emitter).await?;
+        if !pending.is_empty() && forward_line(&pending, key, emitter, &mut reply).await? {
+            return Ok(());
+        }
+        if reply.saw_delta && !reply.saw_terminal {
+            return Err(StreamEvent::Error {
+                kind: "stream".into(),
+                status: None,
+                message: Some("模型连接在回复结束前断开".into()),
+            });
         }
     } else {
         let data = String::from_utf8_lossy(&pending).into_owned();
@@ -579,10 +603,32 @@ async fn receive(
     Ok(())
 }
 
+#[derive(Default)]
+struct ReplyTermination {
+    saw_delta: bool,
+    saw_terminal: bool,
+}
+
+impl ReplyTermination {
+    fn observe(&mut self, data: &str) {
+        if self.saw_terminal || !data.trim_start().starts_with('{') {
+            return;
+        }
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(data) else { return; };
+        let choice = &frame["choices"][0];
+        self.saw_delta |= choice["delta"].is_object();
+        self.saw_terminal |= !frame["error"].is_null()
+            || choice["finish_reason"].as_str().is_some_and(|reason| !reason.trim().is_empty())
+            || choice["message"].is_object()
+            || choice["delta"]["refusal"].as_str().is_some_and(|refusal| !refusal.trim().is_empty());
+    }
+}
+
 async fn forward_line(
     line: &[u8],
     key: &SecretValue,
     emitter: &Emitter,
+    reply: &mut ReplyTermination,
 ) -> std::result::Result<bool, StreamEvent> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let Some(data) = line.strip_prefix(b"data:") else {
@@ -596,6 +642,7 @@ async fn forward_line(
     if data == "[DONE]" {
         return Ok(true);
     }
+    reply.observe(&data);
     emitter.emit(StreamEvent::Data { data }).await?;
     Ok(false)
 }

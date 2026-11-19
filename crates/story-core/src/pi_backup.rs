@@ -4,7 +4,7 @@ use crate::{agent_workspace as ws, Error, Result};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path};
+use std::{collections::{HashMap, HashSet}, fs, io::{ErrorKind, Write}, path::Path};
 
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn io(_: std::io::Error) -> Error { Error::Invalid("助手会话备份文件未能校验，原存档保留".into()) }
@@ -36,30 +36,76 @@ pub(crate) fn snapshot(db: &Connection, root: &Path, backup: &Path) -> Result<()
 /// live files are never overwritten, even when restoring an older backup.
 pub(crate) fn prepare(db: &Connection, root: &Path, backup: &Path) -> Result<()> {
     let sidecar=backup.with_extension("pi");
-    let manifest=fs::read_to_string(sidecar.join("manifest.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok());
-    if let Some(m)=&manifest {
-        if m["version"]!=1 || m["databaseSha256"]!=digest(&fs::read(backup).map_err(io)?) {return Err(Error::Invalid("数据库和助手备份不匹配，尚未恢复存档".into()));}
-    }
-    for row in ws::rows(db,"SELECT id,session_file FROM pi_sessions WHERE session_file IS NOT NULL",&[])? {
-        let id=ws::text(&row,"id");
-        let entry=manifest.as_ref().and_then(|m|m["files"].as_array()).and_then(|v|v.iter().find(|v|v["sessionId"]==id));
-        if let Some(entry)=entry {
-            let file=ws::text(entry,"file");
-            if file.contains(['/', '\\']) || !file.ends_with(".jsonl") || file.contains("..") {return Err(Error::Invalid("助手会话备份定位无效".into()));}
-            let bytes=fs::read(sidecar.join(file)).map_err(io)?;
-            if entry["sha256"]!=digest(&bytes){return Err(Error::Invalid("助手会话备份校验失败，尚未恢复存档".into()));}
-            if id.contains(['/', '\\']) || id.contains("..") {return Err(Error::Invalid("助手会话标识无效".into()));}
-            let directory=root.join("agent-sessions").join(id);
-            fs::create_dir_all(&directory).map_err(io)?;
-            let destination=directory.join(format!("restored-{}.jsonl",uuid::Uuid::new_v4()));
-            fs::write(&destination,bytes).map_err(io)?;
-            db.execute("UPDATE pi_sessions SET session_file=? WHERE id=?",params![destination.to_string_lossy(),id])?;
-        }else{
-            // Pre-sidecar/active backups retain readable history and drafts,
-            // but cannot safely replay a different on-disk Pi transcript.
-            db.execute("UPDATE pi_tasks SET metadata_json=json_set(metadata_json,'$.restoreContextMissing',json('true')) WHERE session_id=?",[id])?;
-            db.execute("UPDATE pi_sessions SET session_file=NULL WHERE id=?",[id])?;
+    let invalid = || Error::Invalid("助手备份清单无效，尚未恢复存档".into());
+    let mut entries = HashMap::new();
+    match fs::symlink_metadata(&sidecar) {
+        Ok(metadata) if metadata.is_dir() => {
+            let manifest: Value = serde_json::from_str(
+                &fs::read_to_string(sidecar.join("manifest.json")).map_err(io)?,
+            ).map_err(|_| invalid())?;
+            if manifest["version"] != 1 || manifest["databaseSha256"] != digest(&fs::read(backup).map_err(io)?) {
+                return Err(Error::Invalid("数据库和助手备份不匹配，尚未恢复存档".into()));
+            }
+            let mut file_names = HashSet::new();
+            for entry in manifest["files"].as_array().ok_or_else(invalid)? {
+                let id = ws::text(entry, "sessionId");
+                let file = ws::text(entry, "file");
+                let sha = ws::text(entry, "sha256");
+                if !safe_component(id) || !safe_component(file) || !file.ends_with(".jsonl")
+                    || sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit())
+                    || !file_names.insert(file.to_ascii_lowercase())
+                    || entries.insert(id.to_owned(), (file.to_owned(), sha.to_owned())).is_some()
+                {
+                    return Err(invalid());
+                }
+            }
         }
+        // A backup from before the companion-file format has no directory.
+        // An existing directory with a missing or broken manifest is damaged.
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(io(error)),
+        Ok(_) => return Err(invalid()),
     }
-    Ok(())
+    let rows = ws::rows(db, "SELECT id FROM pi_sessions WHERE session_file IS NOT NULL", &[])?;
+    let known = rows.iter().map(|row| ws::text(row, "id")).collect::<HashSet<_>>();
+    if entries.keys().any(|id| !known.contains(id.as_str())) { return Err(invalid()); }
+    let mut created = Vec::new();
+    let result = (|| {
+        for row in &rows {
+            let id = ws::text(row, "id");
+            if let Some((file, sha)) = entries.get(id) {
+                let source = sidecar.join(file);
+                if !fs::symlink_metadata(&source).map_err(io)?.is_file() { return Err(invalid()); }
+                let bytes = fs::read(&source).map_err(io)?;
+                if *sha != digest(&bytes) {
+                    return Err(Error::Invalid("助手会话备份校验失败，尚未恢复存档".into()));
+                }
+                let directory = root.join("agent-sessions").join(id);
+                fs::create_dir_all(&directory).map_err(io)?;
+                let destination = directory.join(format!("restored-{}.jsonl", uuid::Uuid::new_v4()));
+                let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&destination).map_err(io)?;
+                created.push(destination.clone());
+                output.write_all(&bytes).map_err(io)?;
+                db.execute(
+                    "UPDATE pi_sessions SET session_file=? WHERE id=?",
+                    params![destination.to_string_lossy(), id],
+                )?;
+            } else {
+                // Old backups and sessions still active when backed up can
+                // show saved history, but cannot replay a different Pi file.
+                db.execute("UPDATE pi_tasks SET metadata_json=json_set(metadata_json,'$.restoreContextMissing',json('true')) WHERE session_id=?",[id])?;
+                db.execute("UPDATE pi_sessions SET session_file=NULL WHERE id=?", [id])?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for path in created { let _ = fs::remove_file(path); }
+    }
+    result
+}
+
+fn safe_component(value: &str) -> bool {
+    !value.is_empty() && !value.contains(['/', '\\', ':']) && !value.contains("..")
+        && value != "." && !value.ends_with(['.', ' ']) && !value.chars().any(char::is_control)
 }

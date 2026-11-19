@@ -18,6 +18,7 @@ export interface BackupInfo {
 
 export type StreamErrorKind =
   | "network"
+  | "storage"
   | "timeout_first"
   | "timeout_idle"
   | "timeout_total"
@@ -100,6 +101,7 @@ export interface Failure {
 
 export interface ExecutionSnapshot {
   id: string; worldId: string; status: string;
+  executionId?: string | null; stopRequested?: boolean;
   budget: { modelRequests: number; toolCalls: number; corrections: number; activeMs: number };
   draft: Json; result: Json; error: string | null;
   errorKind?: string | null;
@@ -107,6 +109,9 @@ export interface ExecutionSnapshot {
   /** Earlier failed attempts, oldest first (only once the run has stopped). */
   failures?: Failure[];
   events: { seq: number; event: Json }[];
+}
+export interface RunStopReceipt {
+  executionId: string | null; status: string; accepted: boolean; settled: boolean;
 }
 
 /** Safe native Pi projections; raw provider messages never become UI context. */
@@ -140,7 +145,7 @@ export interface Platform {
     start(plan: Json): Promise<string>;
     snapshot(id: string, after?: number): Promise<ExecutionSnapshot>;
     list(): Promise<{ id: string; worldId: string; status: string }[]>;
-    stop(id: string): Promise<void>;
+    stop(id: string, executionId?: string): Promise<RunStopReceipt>;
     resume(id: string): Promise<void>;
   };
   /**
@@ -225,7 +230,7 @@ export interface Platform {
     /** What the notifications show: live progress, the passage's first line, that line on the lock screen. */
     setNotifyPrefs?(prefs: NotifyPrefs): Promise<void>;
     /** The story a tapped notification asked to open, once. */
-    takeLaunchTarget?(): Promise<{ worldId: string | null; action: "read" | "resume" | null }>;
+    takeLaunchTarget?(): Promise<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>;
     /** The handler returns true when it consumed the back press. */
     onBack(handler: () => boolean): () => void;
     /**

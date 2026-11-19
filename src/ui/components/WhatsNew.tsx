@@ -8,10 +8,11 @@ import { Sheet } from "./Sheet";
 
 /** What this version adds, in the player's words: a name and one line each. Update with the version. */
 const NOTES: [string, string][] = [
-  ["长篇札记可以接着整理", "某批资料写不完时，会把这批拆小再试。已经整理的章节和合并好的小组都会保留。"],
-  ["查看札记失败原因", "可以看到卡住的章节或合并步骤，也能分清没有正文、回复被截断和服务拒绝。"],
+  ["札记可以先整理后面的章节", "某批资料反复被服务拒绝时，可将它暂留待补。已整理的内容会保留，也可以手动补好这一批。"],
+  ["生成中断后更容易接上", "回复写到一半会保留进度，继续时只重做需要补的步骤。连播按已保存的段数接着写。"],
+  ["长故事导出更省内存", "大存档分段写入文件。原著核对也会先检查引文，再同步修改正文和回合记录。"],
 ];
-const SUMMARY = "长篇原著札记续跑与失败提示";
+const SUMMARY = "札记待补、生成恢复与长故事导出";
 
 export function WhatsNewSheet({ onClose }: { onClose: () => void }) {
   return (

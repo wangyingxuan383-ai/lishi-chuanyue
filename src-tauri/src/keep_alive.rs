@@ -242,17 +242,28 @@ mod android {
                         &[bridge.context.as_obj().into(), (&run).into(), (&execution).into(), (&phase).into(), (&title).into(), (chars.min(i32::MAX as usize) as i32).into()],
                     )?;
                 }
-                RunSignal::Ended { world_id, title, status, reason, .. } => {
+                RunSignal::Ended { run_id, world_id, title, status, reason } => {
                     let line = story_core::notice::reason(status, &reason);
                     let world = env.new_string(world_id)?;
                     let title = env.new_string(title)?;
                     let status = env.new_string(status)?;
                     let line = env.new_string(line)?;
+                    let run = env.new_string(run_id)?;
                     env.call_static_method(
                         &bridge.class,
                         "storyIssue",
-                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                        &[bridge.context.as_obj().into(), (&world).into(), (&title).into(), (&status).into(), (&line).into()],
+                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                        &[bridge.context.as_obj().into(), (&world).into(), (&title).into(), (&status).into(), (&line).into(), (&run).into()],
+                    )?;
+                }
+                RunSignal::Finished { run_id, execution_id } => {
+                    let run = env.new_string(run_id)?;
+                    let execution = env.new_string(execution_id)?;
+                    env.call_static_method(
+                        &bridge.class,
+                        "finishProgress",
+                        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
+                        &[bridge.context.as_obj().into(), (&run).into(), (&execution).into()],
                     )?;
                 }
             }

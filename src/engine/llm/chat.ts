@@ -43,6 +43,7 @@ export interface ChunkDelta {
   reasoning: string;
   finishReason: string | null;
   usage: ChatUsage | null;
+  failed?: boolean;
   /** Present only when this payload includes supported tool-call fragments. */
   toolCalls?: ToolCallDelta[];
 }
@@ -80,8 +81,9 @@ export function parseChunk(data: string): ChunkDelta | null {
   return {
     content: text(part.content),
     reasoning: text(part.reasoning_content) || text(part.reasoning),
-    finishReason: typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
+    finishReason: text(part.refusal).trim() ? "content_filter" : typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
     usage,
+    ...(value.error != null ? { failed: true } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
   };
 }
@@ -104,7 +106,7 @@ export interface ChatResult {
 
 export class ChatError extends Error {
   constructor(
-    readonly kind: StreamErrorKind | "empty",
+    readonly kind: StreamErrorKind | "empty" | "invalid_stream",
     readonly status?: number,
     readonly partial = "",
     detail?: string,
@@ -112,6 +114,10 @@ export class ChatError extends Error {
     super(detail ?? kind);
     this.name = "ChatError";
   }
+}
+
+export function outputWasTruncated(reason: string | null): boolean {
+  return ["length", "max_tokens", "max_output_tokens"].includes(reason?.toLowerCase() ?? "");
 }
 
 // Keep these markers aligned with provider_context_rejected in crates/story-core/src/chat.rs.
@@ -183,6 +189,7 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
   let usage: ChatUsage | null = null;
   let firstTokenMs: number | null = null;
   let thinking = false;
+  let ended = false;
   const calls = new Map<number, ChatToolCall>();
   let settle!: (result: ChatResult) => void;
   let fail!: (error: ChatError) => void;
@@ -202,9 +209,15 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
     onEvent(event);
   };
   const onEvent = (event: StreamEvent) => {
+    if (ended) return;
     if (event.type === "data") {
       const chunk = parseChunk(event.data);
       if (!chunk) return;
+      if (chunk.failed) {
+        ended = true;
+        fail(new ChatError("invalid_stream", undefined, text || (calls.size ? "[tool]" : ""), "AI 服务在回复途中返回了错误"));
+        return;
+      }
       if (chunk.reasoning && !text && !thinking) {
         thinking = true;
         callbacks.onThinking?.();
@@ -222,29 +235,33 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
         call.function.arguments += delta.arguments ?? "";
         calls.set(delta.index, call);
       }
-      finishReason = chunk.finishReason ?? finishReason;
+      if (finishReason !== "content_filter") finishReason = chunk.finishReason ?? finishReason;
       if (chunk.usage) usage = {
         promptTokens: chunk.usage.promptTokens ?? usage?.promptTokens ?? null,
         completionTokens: chunk.usage.completionTokens ?? usage?.completionTokens ?? null,
       };
     } else if (event.type === "done") {
+      ended = true;
       const toolCalls = [...calls].sort(([a], [b]) => a - b).map(([, call]) => call);
       if (toolCalls.some((call) => !call.id || !call.function.name)) fail(new ChatError("empty", undefined, text, "工具调用不完整，请重试"));
       else if (!text && !toolCalls.length) fail(new ChatError("empty", undefined, "", finishReason ?? undefined));
       else settle({ text, toolCalls, finishReason, usage, firstTokenMs, totalMs: performance.now() - started });
     } else if (event.type === "error") {
+      ended = true;
       fail(new ChatError(event.kind, event.status, text || (calls.size ? "[tool]" : ""), event.message));
     }
   };
 
+  const extra = { ...request.extra };
+  for (const key of ["model", "messages", "stream", "stream_options", "n", "max_tokens", "tools", "tool_choice"]) delete extra[key];
   const body: Record<string, Json> = {
+    ...extra,
     model: request.model,
     messages: request.messages.map(({ compactContent: _compact, ...message }) => message) as unknown as Json,
     stream: true,
     ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.includeUsage ? { stream_options: { include_usage: true } } : {}),
-    ...request.extra,
     ...(request.tools !== undefined ? { tools: request.tools as unknown as Json } : {}),
     ...(request.toolChoice !== undefined ? { tool_choice: request.toolChoice as Json } : {}),
   };
@@ -256,7 +273,8 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
   streamId.catch((error) => {
     const code = String(error?.code ?? "");
     const kind = code === "llm_url_not_bound" || code === "url_not_bound" ? "url_not_bound"
-      : code === "llm_no_secret" || code === "no_secret" ? "no_secret" : "network";
+      : code === "llm_no_secret" || code === "no_secret" || code === "llm_bindings_unavailable" ? "no_secret"
+        : code === "llm_stream_storage" ? "storage" : "network";
     fail(new ChatError(kind, undefined, "", String(error?.message ?? error)));
   });
   return {

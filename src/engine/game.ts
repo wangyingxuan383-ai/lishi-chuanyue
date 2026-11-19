@@ -10,8 +10,8 @@ import { packCards } from "./era/card";
 import { PlatformError, type ExecutionSnapshot, type Failure, type Platform, type SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
-import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
-import { hasChinese, isNotice, refusedFinish } from "./llm/refusal";
+import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, outputWasTruncated, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
+import { hasChinese, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, writingContextTemplate, renderState, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
   type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
@@ -22,7 +22,7 @@ import { UPKEEP_EVERY, UPKEEP_FREE_PROMPT_VERSION, UPKEEP_PROMPT_VERSION, upkeep
 import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
 import { askMessages } from "./prompt/ask";
 import type { TabooHit } from "./era/taboo";
-import { lenientJson } from "./record/parse";
+import { completeJson, lenientJson } from "./record/parse";
 import { applyRecord, type Chip, type TurnRecord } from "./state/apply";
 import { skipSpanMinutes } from "./calendar/duration";
 import { fortuneMode, isFortune, rollFortune, type Fortune } from "./fortune";
@@ -125,8 +125,15 @@ export interface SavedExecution {
 }
 
 /** What decides whether a saved run was planned for the service set now. */
-function modelIdentity(model: { slot?: string; url?: string; model?: string; auxModel?: string | null }) {
-  return { slot: model.slot ?? "", url: model.url ?? "", model: model.model ?? "", auxModel: model.auxModel ?? null };
+function modelIdentity(model: Partial<LlmConfig>) {
+  return { slot: model.slot ?? "", url: model.url ?? "", model: model.model ?? "", auxModel: model.auxModel || null,
+    protocol: model.protocol ?? "chat-completions", extra: model.extra ?? {}, includeUsage: model.includeUsage ?? false,
+    contextTokens: model.contextTokens ?? DEFAULT_CONTEXT_TOKENS, contextWindowTokens: model.contextWindowTokens ?? null,
+    maxOutputTokens: model.maxOutputTokens ?? model.maxTokens ?? null };
+}
+
+function helperReplyAvailable(result: ChatResult): boolean {
+  return !outputWasTruncated(result.finishReason) && !refusedFinish(result.finishReason) && !!result.text.trim();
 }
 
 function stableJson(value: unknown): string {
@@ -150,6 +157,7 @@ export type TurnEvent =
   | { type: "step"; index: number; total: number }
   | { type: "finished"; steps: number; reason: AutoplayStop }
   | { type: "thinking" }
+  | { type: "execution-status"; state: "reconnecting" | "connected" | "stop-requested" | "stop-unconfirmed" }
   | { type: "text"; delta: string; full: string }
   | { type: "organizing" }
   | { type: "done"; cursor: tree.Cursor; node: StoryNode; chips: Chip[] }
@@ -367,9 +375,9 @@ export class Game {
   /** One streamed call with a single retry before any data arrives. */
   private async call(
     messages: ChatMessage[],
-    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope },
+    opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope; configuration?: LlmConfig },
   ): Promise<ChatResult> {
-    const llm = this.requireLlm();
+    const llm = opts.configuration ?? this.requireLlm();
     const model = opts.aux ? llm.auxModel || llm.model : llm.model;
     for (let attempt = 1; ; attempt++) {
       if (opts.signal?.aborted) throw new ChatError("cancelled");
@@ -377,7 +385,7 @@ export class Game {
       let received: ChatResult | null = null;
       const handle = streamChat(this.platform, {
         slot: llm.slot, url: llm.url, model, messages,
-        maxTokens: opts.outputTokens === undefined ? llm.maxTokens ?? 2048
+         maxTokens: opts.outputTokens === undefined ? llm.maxOutputTokens ?? llm.maxTokens ?? 2048
           : Math.min(opts.outputTokens, llm.maxOutputTokens ?? llm.maxTokens ?? opts.outputTokens),
         includeUsage: llm.includeUsage, timeouts: opts.timeouts,
         extra: llm.extra as never,
@@ -431,7 +439,7 @@ export class Game {
   async assist(idea: string, current: Partial<SetupDraft>): Promise<Partial<SetupDraft> | null> {
     try {
       const result = await this.call(await this.withOpeningSources(assistMessages(idea, current), current, idea), { usage: { worldId: null, nodeId: null, purpose: "assist" }, aux: true, timeouts: DEFAULT_TIMEOUTS });
-      const value = lenientJson(result.text) as Partial<SetupDraft> | null;
+      const value = helperReplyAvailable(result) ? completeJson(result.text) as Partial<SetupDraft> | null : null;
       await this.platform.sql.batch([this.usage(null, null, "assist", result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
     } catch {
@@ -462,7 +470,7 @@ export class Game {
   private async draft<T>(messages: ChatMessage[], purpose: string, parse: (value: unknown) => T | null): Promise<T | null> {
     try {
       const result = await this.call(messages, { usage: { worldId: null, nodeId: null, purpose }, aux: true, timeouts: DEFAULT_TIMEOUTS });
-      const value = parse(lenientJson(result.text));
+      const value = helperReplyAvailable(result) ? parse(completeJson(result.text)) : null;
       await this.platform.sql.batch([this.usage(null, null, purpose, result, value ? "ok" : "no_record", this.auxModelName())]);
       return value;
     } catch {
@@ -491,7 +499,7 @@ export class Game {
   async reviseEntry(worldId: string, entry: ReviseEntry, instruction: string, opts: { useSource?: boolean } = {}): Promise<ReviseEntryResult> {
     const { messages } = await this.reviseContext(worldId, `${entry.name}\n${entry.aliases.join("\n")}\n${instruction}`, opts.useSource, (c) => reviseEntryMessages(entry, instruction, c));
     const result = await this.call(messages, { aux: true, usage: { worldId, nodeId: null, purpose: "revise" }, timeouts: CODEX_TIMEOUT });
-    const parsed = parseReviseEntry(lenientJson(result.text), entry);
+    const parsed = helperReplyAvailable(result) ? parseReviseEntry(completeJson(result.text), entry) : null;
     await this.platform.sql.batch([this.usage(worldId, null, "revise", result, parsed ? "ok" : "no_record", this.auxModelName())]);
     if (!parsed) throw new Error("AI 没有给出能用的修改，换个说法再试");
     return parsed;
@@ -500,7 +508,7 @@ export class Game {
   async reviseRules(worldId: string, current: ReviseRules, instruction: string, opts: { useSource?: boolean } = {}): Promise<Partial<ReviseRules> & { note?: string }> {
     const { messages } = await this.reviseContext(worldId, `${instruction}\n纪年 历法 货币 ${current.eraName}`, opts.useSource, (c) => reviseRulesMessages(current, instruction, c));
     const result = await this.call(messages, { aux: true, usage: { worldId, nodeId: null, purpose: "revise" }, timeouts: CODEX_TIMEOUT });
-    const parsed = parseReviseRules(lenientJson(result.text));
+    const parsed = helperReplyAvailable(result) ? parseReviseRules(completeJson(result.text)) : null;
     await this.platform.sql.batch([this.usage(worldId, null, "revise", result, parsed ? "ok" : "no_record", this.auxModelName())]);
     if (!parsed) throw new Error("AI 没有给出能用的修改，换个说法再试");
     return parsed;
@@ -517,9 +525,11 @@ export class Game {
 
   /** Organizes the 设定集 again from the current premise; an undoable edit node, or null if nothing came back. */
   async organize(worldId: string, opts: { replaceOwnEra?: boolean; useSource?: boolean } = {}): Promise<tree.Cursor | null> {
+    const [storedSettings] = await this.platform.sql.query("SELECT settings_json FROM worlds WHERE id=?", [worldId]);
     const world = await this.repo.getWorld(worldId);
-    if (!world) return null;
-    const state = await this.repo.getState((await tree.cursor(this.repo, worldId)).head.id);
+    if (!world || !storedSettings) return null;
+    const start = await tree.cursor(this.repo, worldId);
+    const state = await this.repo.getState(start.head.id);
     const me = state.protagonist;
     const result = await this.codex({
       mode: state.era.mode,
@@ -528,7 +538,7 @@ export class Game {
       known: [...state.cards.filter((c) => c.kind !== "时代").map((c) => c.name), ...state.places.map((p) => p.name)],
       ...(opts.useSource && state.source ? { reference: await this.sourceBrief(worldId, state.source, [world.settings.premise, me.name, me.identity].join("\n"), 4000) } : {}),
     }, { worldId, nodeId: null, purpose: "codex" });
-    let patch = result ? codexPatch(result.text, state, opts) : null;
+    let patch = result && helperReplyAvailable(result) && completeJson(result.text) ? codexPatch(result.text, state, opts) : null;
     // Great events only fill a timeline that has none from a pack or an earlier pass, on a CE-dated start.
     const seeded = state.timeline?.some((e) => e.source === "卡组" || e.source === "AI");
     if (patch?.timeline && (seeded || eraContext(world.eraId, state).clock.date?.ceYear == null)) {
@@ -537,7 +547,9 @@ export class Game {
     }
     if (result) await this.platform.sql.batch([this.usage(worldId, null, "codex", result, patch ? "ok" : "no_record", this.auxModelName())]);
     if (!patch) return null;
-    const edited = await this.serial(worldId, () => this.appendEdit(worldId, patch, codexSummary(patch, state), { by: "AI", promptVersion: state.era.mode === "free" ? CODEX_FREE_PROMPT_VERSION : CODEX_PROMPT_VERSION }));
+    const edited = await this.serial(worldId, () => this.appendEdit(worldId, patch, codexSummary(patch, state),
+      { by: "AI", promptVersion: state.era.mode === "free" ? CODEX_FREE_PROMPT_VERSION : CODEX_PROMPT_VERSION },
+      start.head.id, { lineId: start.line.id, settingsJson: String(storedSettings.settings_json) }));
     return "rejected" in edited ? null : edited;
   }
 
@@ -675,14 +687,19 @@ export class Game {
   private nativeEvent(event: Record<string, unknown>, onEvent: (event: TurnEvent) => void): void {
     if (event.type === "thinking" || event.type === "organizing") onEvent({ type: event.type });
     else if (event.type === "text" && typeof event.full === "string") onEvent({ type: "text", delta: typeof event.delta === "string" ? event.delta : "", full: event.full });
+    else if (event.type === "execution-status") {
+      const state = event.state;
+      if (state === "reconnecting" || state === "connected" || state === "stop-requested" || state === "stop-unconfirmed") onEvent({ type: "execution-status", state });
+    }
     // Completion is reconstructed from durable nodes after the terminal snapshot.
   }
 
-  async currentExecution(worldId: string): Promise<SavedExecution | null> {
+  async currentExecution(worldId: string, expectedRunId?: string): Promise<SavedExecution | null> {
     if (!this.platform.execution) return null;
     const cursor = await tree.cursor(this.repo, worldId);
-    const [row] = await this.platform.sql.query(`SELECT id,status,error,error_kind,failure_json,json_extract(plan_json,'$.kind') AS kind,COALESCE(json_extract(draft_json,'$.steps'),0) AS steps,COALESCE(json_extract(plan_json,'$.meta.autoplayCount'),0) AS total,EXISTS(SELECT 1 FROM execution_events e WHERE e.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END AND json_extract(e.event_json,'$.type')='text') AS has_text FROM execution_runs WHERE world_id=? AND line_id=? AND base_head_id=?
-      AND parent_run IS NULL AND status NOT IN ('committed','previewed','stale') AND json_extract(plan_json,'$.kind') IN ('turn','variant','continue','autoplay') ORDER BY created_at DESC LIMIT 1`, [worldId, cursor.line.id, cursor.head.id]);
+    const [row] = await this.platform.sql.query(`SELECT id,status,error,error_kind,failure_json,json_extract(plan_json,'$.kind') AS kind,COALESCE(json_extract(draft_json,'$.steps'),0) AS steps,COALESCE(json_extract(plan_json,'$.meta.autoplayCount'),0) AS total,EXISTS(SELECT 1 FROM execution_progress e WHERE e.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END) AS has_text FROM execution_runs WHERE world_id=? AND line_id=? AND base_head_id=?
+      AND parent_run IS NULL AND status NOT IN ('committed','previewed','stale') AND json_extract(plan_json,'$.kind') IN ('turn','variant','continue','autoplay')
+      AND (? IS NULL OR id=?) ORDER BY created_at DESC LIMIT 1`, [worldId, cursor.line.id, cursor.head.id, expectedRunId ?? null, expectedRunId ?? null]);
     if (!row) return null;
     const failure = typeof row.failure_json === "string" ? JSON.parse(row.failure_json) as Failure : null;
     const status = String(row.status), error = row.error === null ? null : String(row.error);
@@ -699,7 +716,7 @@ export class Game {
   retryRun(id: string, onEvent: (event: TurnEvent) => void): TurnHandle {
     let inner: TurnHandle | null = null, stopped = false, detached = false;
     const done = (async () => {
-      const [row] = await this.platform.sql.query("SELECT status,world_id,plan_json,error_kind,failure_json FROM execution_runs WHERE id=?", [id]);
+      const [row] = await this.platform.sql.query("SELECT status,world_id,plan_json,error_kind,failure_json,json_extract(draft_json,'$.steps') AS steps FROM execution_runs WHERE id=?", [id]);
       if (!row) throw new Error("找不到这次生成");
       const plan = JSON.parse(String(row.plan_json)) as Partial<RunPlan> & { meta?: Record<string, unknown> };
       const worldId = String(row.world_id), world = await this.repo.getWorld(worldId), cursor = await tree.cursor(this.repo, worldId);
@@ -707,14 +724,29 @@ export class Game {
       const kind = failure?.kind ?? (row.error_kind === null ? null : String(row.error_kind));
       const same = (a: unknown, b: unknown) => stableJson(a) === stableJson(b);
       const llm = this.llm;
+      const head = await this.repo.getState(cursor.head.id);
       const expired = row.status === "stale" || kind === "stale" || plan.headId !== cursor.head.id
+        || plan.lineId !== cursor.line.id
         || !llm || !plan.model || !same(modelIdentity(plan.model), modelIdentity(llm))
-        || !!world && !same(plan.settings, world.settings);
+        || !!world && !same(plan.settings, world.settings)
+        || plan.meta?.sourceGuard !== undefined && !same(plan.meta.sourceGuard, head.source ?? null);
       const runKind = plan.kind;
       if (stopped) return;
       if (expired && (runKind === "turn" || runKind === "variant" || runKind === "continue")) {
         inner = runKind === "turn" ? this.nativeTurn(worldId, plan.action as PlayerAction, "turn", null, onEvent)
           : this.nativeTurn(worldId, null, runKind, (plan.meta?.rewriteHint as string | undefined) ?? null, onEvent);
+      } else if (expired && runKind === "autoplay") {
+        if (plan.lineId !== cursor.line.id) throw new Error("这次连播属于另一条路线。回到原路线后再接着写。");
+        const completed = Math.max(0, Number(row.steps) || 0);
+        const total = Math.max(0, Number(plan.meta?.autoplayCount) || 0);
+        const turns = total - completed;
+        if (turns <= 0) { onEvent({ type: "finished", steps: completed, reason: "count" }); return; }
+        const handle = this.autoplay(worldId, { turns }, (event) => {
+          if (event.type === "step") onEvent({ ...event, index: event.index + completed, total });
+          else if (event.type === "finished") onEvent({ ...event, steps: event.steps + completed });
+          else onEvent(event);
+        });
+        inner = { done: handle.done.then(() => {}), stop: handle.stop, catchUp: handle.catchUp, detach: handle.detach };
       } else inner = this.followExecution(id, onEvent, true);
       if (detached) inner.detach?.();
       await inner.done;
@@ -787,28 +819,27 @@ export class Game {
     let deliveries = Promise.resolve();
     const done = this.serial(worldId, async () => {
       try {
-        const current = await tree.cursor(this.repo, worldId), world = (await this.repo.getWorld(worldId))!;
-        const headState = await this.repo.getState(current.head.id);
-        let target = current.head;
+        const world = await this.repo.generationStart(worldId);
+        let target = world.head;
         const trailing: StoryNode[] = [];
         if (kind !== "turn") while (target.kind === "edit" && target.parentId) { trailing.unshift(target); target = (await this.repo.getNode(target.parentId))!; }
         if (kind !== "turn" && !target.parentId) throw new Error("开场请使用按原著纠错或重新开局");
         if (kind === "continue" && target.status !== "interrupted") throw new Error("这段正文没有待续写的中断");
-        const base = kind === "turn" ? current.head : (await this.repo.getNode(target.parentId!))!;
+        const base = kind === "turn" ? world.head : (await this.repo.getNode(target.parentId!))!;
         const action = actionIn ?? { mode: target.actionMode ?? "continue", text: target.actionText ?? "", directorNote: target.directorNote };
-        const state = await this.repo.getState(base.id), era = eraContext(world.eraId, state);
+        const state = base.id === world.head.id ? world.state : await this.repo.getState(base.id), era = eraContext(world.eraId, state);
         const fortune = luckApplies(action.mode, world.settings) ? await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果") : undefined;
-        const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, headState.source);
+        const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, world.guard.sourceGuard, { settings: world.settings, eraId: world.eraId, state });
         if (batch) input.settings = { ...input.settings, pilot: "ai" };
         const template = writingContextTemplate(input);
         const context = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, ...nativeHistory(input), template })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
-        const path = await this.repo.path(base.id);
+        const path = input.allTurns ?? input.history;
         const upkeepTurns: StoryNode[] = [];
         for (const node of [...path].reverse()) { if (node.kind === "opening" || node.meta.upkeep) break; if (node.kind === "turn") upkeepTurns.unshift(node); }
-        const pending = await this.unsummarized(worldId, base);
+        const pending = this.pendingChapter(path, input.chapters ?? []);
         const futureTurn = { actionText: action.text, narrative: "{{NARRATIVE}}" };
         const plan: RunPlan = {
-          id: newId(), worldId, lineId: current.line.id, headId: current.head.id, baseId: base.id, kind: batch ? "autoplay" : kind,
+          id: newId(), worldId, lineId: world.lineId, headId: world.head.id, baseId: base.id, kind: batch ? "autoplay" : kind,
           model: this.requireLlm(),
           messages: kind === "continue" ? continueMessages(context.messages, target.narrative) : context.messages,
           extractMessages: extractMessages({ era, state, action: action.text || "（继续）", narrative: "{{NARRATIVE}}", settings: world.settings }),
@@ -818,8 +849,8 @@ export class Game {
           trailingIds: kind === "continue" ? trailing.map((n) => n.id) : [],
           carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ record, actionText }) => ({ record, actionText }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
-            ...(await this.nativeGuard(worldId, current.head.id)),
-            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", state.source), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
+            ...world.guard,
+            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", world.guard.sourceGuard ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings }, ...(kind === "continue" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
             ...(batch ? {
               autoplayCount: batch.turns, autoplayPilot: "temporary-ai", autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
@@ -917,7 +948,7 @@ export class Game {
 
   private noteRuns = new Map<string, AbortController>();
   /** 原著札记 (R29-T003, D162): write or resume one note on the helper model; a pause keeps finished parts. */
-  async runCanonNote(id: string, onProgress: (note: CanonNote) => void): Promise<CanonNote> {
+  async runCanonNote(id: string, onProgress: (note: CanonNote) => void, resume?: import("./sources/notes").NoteResume): Promise<CanonNote> {
     if (this.noteRuns.has(id)) throw new Error("这份札记正在整理");
     const controller = new AbortController();
     this.noteRuns.set(id, controller);
@@ -927,19 +958,25 @@ export class Game {
       const [book] = await this.platform.sql.query("SELECT title FROM source_books WHERE id=?", [note.bookId]);
       controller.signal.throwIfAborted();
       if (!book) throw new Error("书籍不存在");
-      this.requireLlm();
-      const model = this.auxModelName();
+      const config = this.llm ? structuredClone(this.llm) : null;
+      if (!config && !resume) this.requireLlm();
+      const model = config?.auxModel || config?.model || note.model;
+      const configuration = config && crypto.subtle
+        ? Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stableJson(config)))),
+          (byte) => byte.toString(16).padStart(2, "0")).join("")
+        : undefined;
       return await runNote(this.repo, note, String(book.title), {
-        model,
+        model, configuration,
         call: async (messages, signal) => {
-          const result = await this.call(messages, { aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
+          if (!config) throw new ChatError("no_secret");
+          const result = await this.call(messages, { configuration: config, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
           const problem = noteReplyProblem(result);
           await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result,
-            signal.aborted ? "cancelled" : problem?.kind === "refused" ? "refused" : problem ? "failed" : "ok", model)]);
+            signal.aborted ? "cancelled" : problem?.kind === "refused" || problem?.kind === "suspected_refusal" ? "refused" : problem ? "failed" : "ok", model)]);
           if (problem) throw problem;
           return result.text;
         },
-      }, controller.signal, onProgress);
+      }, controller.signal, onProgress, resume);
     } finally { this.noteRuns.delete(id); }
   }
   pauseCanonNote(id: string) { this.noteRuns.get(id)?.abort(); }
@@ -955,24 +992,40 @@ export class Game {
   pauseSourceAnalysis(jobId: string) { this.sourceRuns.get(jobId)?.abort(); }
   async analyzeSource(binding: SourceBinding, onProgress: (job: AnalysisJob) => void): Promise<AnalysisJob> {
     const book = await getBook(this.repo, binding.bookId); if (!book) throw new Error("书籍不存在");
-    const model = this.auxModelName(); this.requireLlm();
+    const configuration = structuredClone(this.requireLlm());
+    const model = configuration.auxModel || configuration.model;
     let job = (await analysisJobs(this.repo, book.id)).find((j) => j.id === binding.analysisId);
     if (!job) job = newAnalysisJob(book, binding, model);
     if (job.model !== model || job.instructions !== binding.instructions || job.through !== binding.through || job.promptVersion !== SOURCE_PROMPT_VERSION) throw new Error("用法、范围或整理模型已变化，请新建一次整理；旧结果仍保留");
     if (this.sourceRuns.has(job.id)) throw new Error("这份书籍正在整理");
     const controller = new AbortController(); this.sourceRuns.set(job.id, controller);
-    const chunks = chunksOf(book).filter((c) => job!.through === null || c.section <= job!.through!);
-    const [count] = await this.platform.sql.query("SELECT COUNT(*) AS n FROM source_analysis WHERE job_id=?", [job.id]);
-    job = { ...job, completed: Number(count.n), status: "running", error: undefined }; await saveJob(this.repo, job); onProgress({ ...job });
+    let failure = "这一节没能整理，已完成的部分保留，可继续重试";
     try {
+      const chunks = chunksOf(book).filter((c) => job!.through === null || c.section <= job!.through!);
+      const saved = await this.platform.sql.query("SELECT ordinal FROM source_analysis WHERE job_id=?", [job.id]);
+      const completed = new Set(saved.map(({ ordinal }) => Number(ordinal)));
+      job = { ...job, completed: completed.size, status: "running", error: undefined }; await saveJob(this.repo, job); onProgress({ ...job });
       for (const chunk of chunks) {
         if (controller.signal.aborted) break;
-        const [cached] = await this.platform.sql.query("SELECT ordinal FROM source_analysis WHERE job_id=? AND ordinal=?", [job.id, chunk.ordinal]);
-        if (cached) continue;
-        const result = await this.call(sourceAnalysisMessages(book, chunk, job.instructions), { aux: true, signal: controller.signal, usage: { worldId: null, nodeId: null, purpose: "source" }, timeouts: CODEX_TIMEOUT });
+        if (completed.has(chunk.ordinal)) continue;
+        const result = await this.call(sourceAnalysisMessages(book, chunk, job.instructions), { configuration, aux: true,
+          signal: controller.signal, usage: { worldId: null, nodeId: null, purpose: "source" }, timeouts: CODEX_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
         if (controller.signal.aborted) { await this.platform.sql.batch([this.usage(null, null, "source", result, "cancelled", model)]); break; }
-        if (!result.text.trim() || refusedFinish(result.finishReason) || isNotice(result.text)) { await this.platform.sql.batch([this.usage(null, null, "source", result, "refused", model)]); throw new Error("模型没有返回可用整理，请稍后重试"); }
-        const parsed = sourceAnalysisResult(result.text, book, chunk, job);
+        const rejected = refusedFinish(result.finishReason);
+        if (!helperReplyAvailable(result)) {
+          failure = rejected ? "AI 服务拒绝了这一节，已整理的部分保留"
+            : outputWasTruncated(result.finishReason) ? "这一节的回复写到一半就结束了，已整理的部分保留"
+              : "模型没有写出这一节的整理结果，已整理的部分保留";
+          await this.platform.sql.batch([this.usage(null, null, "source", result, rejected ? "refused" : "failed", model)]);
+          throw new Error(failure);
+        }
+        let parsed: ReturnType<typeof sourceAnalysisResult>;
+        try { parsed = sourceAnalysisResult(result.text, book, chunk, job, true); }
+        catch {
+          failure = "模型没有返回完整的整理格式，已整理的部分保留，可继续重试";
+          await this.platform.sql.batch([this.usage(null, null, "source", result, "no_record", model)]);
+          throw new Error(failure);
+        }
         await this.platform.sql.batch([
           { sql: "INSERT INTO source_analysis(job_id,book_id,ordinal,section,text) VALUES(?,?,?,?,?)", params: [job.id, book.id, chunk.ordinal, chunk.section, parsed.text] },
           ...parsed.statements,
@@ -981,10 +1034,11 @@ export class Game {
         job = { ...job, completed: job.completed + 1 }; await saveJob(this.repo, job); onProgress({ ...job });
       }
       job = { ...job, status: controller.signal.aborted ? "paused" : "done" };
-    } catch (error) {
-      job = { ...job, status: controller.signal.aborted ? "paused" : "failed", error: controller.signal.aborted ? undefined : "这一节没能整理，已完成的部分保留，可继续重试" };
-    } finally { this.sourceRuns.delete(job.id); }
-    await saveJob(this.repo, job); onProgress({ ...job }); return job;
+    } catch {
+      job = { ...job, status: controller.signal.aborted ? "paused" : "failed", error: controller.signal.aborted ? undefined : failure };
+    }
+    try { await saveJob(this.repo, job); onProgress({ ...job }); return job; }
+    finally { this.sourceRuns.delete(job.id); }
   }
 
   /**
@@ -992,8 +1046,9 @@ export class Game {
    * edit, so the summary never claims what did not happen. The AI's own edits
    * keep what applied and are dropped only when nothing changed.
    */
-  private async appendEdit(worldId: string, patch: TurnRecord, summary: string, meta: Record<string, unknown> = {}, expectedHeadId?: string): Promise<tree.Cursor | { rejected: string }> {
+  private async appendEdit(worldId: string, patch: TurnRecord, summary: string, meta: Record<string, unknown> = {}, expectedHeadId?: string, expected?: { lineId: string; settingsJson: string }): Promise<tree.Cursor | { rejected: string }> {
     const c = await tree.cursor(this.repo, worldId);
+    if (expected && (c.line.id !== expected.lineId || c.head.id !== expectedHeadId)) return { rejected: "故事已变化，请重新整理设定集。" };
     if (expectedHeadId && c.head.id !== expectedHeadId) throw new Error("故事已变化，请重新打开时间设置。");
     const state = await this.repo.getState(c.head.id);
     const world = (await this.repo.getWorld(worldId))!;
@@ -1014,7 +1069,7 @@ export class Game {
       id, kind: "edit", narrative: "", actionText: hasContinuity && JSON.stringify(state) === JSON.stringify(applied.state) ? (meta.by === "AI" ? "AI补记了人物知情与线索" : "你更新了人物知情与线索") : summary,
       ...(hasContinuity ? { directorNote: summary } : {}), record: patch, choices: [],
       state: applied.state, meta: { chips: applied.chips, ...meta },
-    }, expectedHeadId || hasContinuity ? { headId: expectedHeadId ?? c.head.id, requireIdle: true } : undefined);
+    }, expectedHeadId || hasContinuity ? { headId: expectedHeadId ?? c.head.id, requireIdle: true, settingsJson: expected?.settingsJson } : undefined);
   }
 
   /** A new turn after the current head. */
@@ -1061,28 +1116,28 @@ export class Game {
   }
 
   /** Everything a turn prompt needs, read for the turn that follows `base`. */
-  private async turnInput(worldId: string, base: StoryNode, action: Pick<TurnPromptInput, "mode" | "text" | "directorNote" | "rewriteHint" | "fortune">, sourceOverride?: SourceBinding | null): Promise<TurnPromptInput> {
-    const world = (await this.repo.getWorld(worldId))!;
-    const state = await this.repo.getState(base.id);
+  private async turnInput(worldId: string, base: StoryNode, action: Pick<TurnPromptInput, "mode" | "text" | "directorNote" | "rewriteHint" | "fortune">, sourceOverride?: SourceBinding | null, prepared?: { settings: WorldSettings; eraId: string; state: WorldState }): Promise<TurnPromptInput> {
+    const world = prepared ?? (await this.repo.getWorld(worldId))!;
+    const state = prepared?.state ?? await this.repo.getState(base.id);
     const ratio = await this.tokenRatio();
-    const path = await this.repo.path(base.id);
+    const { path, pins, chapters } = await this.repo.promptHistory(worldId, base.id);
     const depth = depthOf(world.settings);
     const budgetChars = depthBudget(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value), depth);
-    const reference = await referenceContext(this.repo, sourceOverride === undefined ? state.source : sourceOverride, {
+    const binding = sourceOverride === undefined ? state.source : sourceOverride;
+    const reference = await referenceContext(this.repo, binding, {
       text: action.text, rewriteHint: action.rewriteHint, directorNote: action.directorNote,
       recent: path.slice(-3).map((n) => n.narrative).join("\n"),
       entities: [state.protagonist, ...state.people.slice(-6)].map(({ name, aliases }) => ({ name, aliases })),
       place: state.places.find((p) => p.id === state.placeId)?.name,
     }, Math.floor(budgetChars / 4));
-    const binding = sourceOverride === undefined ? state.source : sourceOverride;
     const canonNotes = await notesForTurn(this.repo, binding, worldId, [path.slice(-3).map((n) => n.narrative).join("\n"), action.text, action.directorNote ?? ""].join("\n")).catch(() => []);
     return {
       reference, canonNotes, continuity: await readContinuity(this.repo, worldId, base.id).catch(() => undefined),
-      era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name, state,
+      era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name,
+      state: binding === state.source ? state : { ...state, source: binding },
       history: path.slice(-40), allTurns: path, notes: (base.meta.notes as string[] | undefined) ?? [],
       taboos: state.era.mode === "free" ? [] : (base.meta.taboos as TabooHit[] | undefined) ?? [],
-      pins: (await this.repo.pinsOnPath(worldId, base.id)).map((p) => p.text),
-      chapters: await this.repo.chaptersOnPath(worldId, base.id),
+      pins: pins.map((p) => p.text), chapters,
       budgetChars, depth,
       ...action,
     };
@@ -1101,13 +1156,12 @@ export class Game {
   /** 查一查: reads the story without holding it (D170); `signal` stops it. */
   async ask(worldId: string, question: string, onText: (full: string) => void, signal?: AbortSignal): Promise<string> {
     this.requireExecution();
-    const world = (await this.repo.getWorld(worldId))!;
-    const head = (await tree.cursor(this.repo, worldId)).head;
-    const state = await this.repo.getState(head.id);
+    const world = await this.repo.generationStart(worldId);
+    const { head, state } = world;
+    const { path, pins, chapters } = await this.repo.promptHistory(worldId, head.id);
     const askInput = {
       question, state, era: eraContext(world.eraId, state), settings: world.settings,
-      chapters: await this.repo.chaptersOnPath(worldId, head.id), history: await this.repo.path(head.id),
-      pins: (await this.repo.pinsOnPath(worldId, head.id)).map((p) => p.text),
+      chapters, history: path, pins: pins.map((p) => p.text),
     };
     const askBudget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
     let reference = await referenceContext(this.repo, state.source, { text: question, entities: [state.protagonist, ...state.people].map(({ name, aliases }) => ({ name, aliases })) }, askBudget / 4);
@@ -1126,10 +1180,10 @@ export class Game {
     };
     appendReference(referenceBlock(reference) + "\n可以主动使用遵循原著技能查阅原文再回答，不得用记忆冒充查证。");
     const plan: RunPlan = {
-      id: newId(), worldId, lineId: (await tree.cursor(this.repo, worldId)).line.id, headId: head.id, baseId: head.id, kind: "ask",
+      id: newId(), worldId, lineId: world.lineId, headId: head.id, baseId: head.id, kind: "ask",
       model: { ...this.requireLlm(), model: this.auxModelName() }, messages, extractMessages: [], state, settings: world.settings,
       options: {}, action: { mode: "continue", text: question }, reference,
-      meta: { ...(await this.nativeGuard(worldId, head.id)), budgetChars: askBudget },
+      meta: { ...world.guard, budgetChars: askBudget },
     };
     if (signal?.aborted) throw new DOMException("已停止", "AbortError");
     const handle = startRun(this.platform, plan, (event) => { if (event.type === "text" && typeof event.full === "string" && hasChinese(event.full)) onText(event.full); });
@@ -1155,6 +1209,10 @@ export class Game {
   private async unsummarized(worldId: string, head: StoryNode): Promise<{ chapters: Chapter[]; turns: StoryNode[]; firstTurn: number }> {
     const chapters = await this.repo.chaptersOnPath(worldId, head.id);
     const path = await this.repo.path(head.id);
+    return this.pendingChapter(path, chapters);
+  }
+
+  private pendingChapter(path: StoryNode[], chapters: Chapter[]): { chapters: Chapter[]; turns: StoryNode[]; firstTurn: number } {
     const last = chapters.at(-1);
     const from = last ? path.findIndex((n) => n.id === last.lastNodeId) + 1 : 0;
     return {
@@ -1175,7 +1233,7 @@ export class Game {
       }
       result = await this.call(messages, { usage: { worldId, nodeId, purpose: "chapter" }, aux: true, timeouts: CODEX_TIMEOUT });
     } catch { /* play goes on without it */ }
-    const parsed = result ? parseChapter(result.text) : null;
+    const parsed = result && helperReplyAvailable(result) && completeJson(result.text) ? parseChapter(result.text) : null;
     if (result) await this.platform.sql.batch([this.usage(worldId, nodeId, "chapter", result, parsed ? "ok" : "no_record", this.auxModelName())]);
     return parsed;
   }
@@ -1227,7 +1285,7 @@ export class Game {
     });
     if (!parsed) return null;
     const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION, edited: false };
-    await this.repo.updateChapter(chapter.id, fields);
+    if (!await this.repo.updateChapter(chapter.id, fields, chapter)) return null;
     return { ...chapter, ...fields };
   }
 

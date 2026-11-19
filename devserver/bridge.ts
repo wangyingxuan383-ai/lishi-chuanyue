@@ -4,6 +4,7 @@
 // requests from non-loopback addresses are refused.
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { isBound, maskSecret, relayStream } from "./relay.ts";
@@ -52,6 +53,20 @@ function sendJson(res: ServerResponse, status: number, value: unknown) {
   res.end(JSON.stringify(value ?? null));
 }
 
+function sameDevPage(req: IncomingMessage): boolean {
+  const remote = req.socket.remoteAddress ?? "";
+  if (!/^(?:::1|(?:::ffff:)?127\.\d+\.\d+\.\d+)$/.test(remote)) return false;
+  if (req.headers["sec-fetch-site"] && !["same-origin", "none"].includes(req.headers["sec-fetch-site"])) return false;
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    const protocol = "encrypted" in req.socket && req.socket.encrypted ? "https:" : "http:";
+    return parsed.protocol === protocol && parsed.host === req.headers.host;
+  }
+  catch { return false; }
+}
+
 export function devBridge(options: { root: string; env: Record<string, string> }): Plugin {
   const isolatedSecrets = process.env.LISHI_DEV_SECRETS_FILE;
   const file = isolatedSecrets ? path.resolve(isolatedSecrets) : path.join(options.root, ".cache", "dev-secrets.json");
@@ -59,14 +74,23 @@ export function devBridge(options: { root: string; env: Record<string, string> }
 
   const load = (): Secrets => {
     try {
-      return JSON.parse(fs.readFileSync(file, "utf8")) as Secrets;
-    } catch {
-      return {};
+      const value = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+      return Object.assign(Object.create(null), value) as Secrets;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.create(null) as Secrets;
+      throw new Error("开发台的连接配置无法读取，请检查本地配置文件。");
     }
   };
   const save = (secrets: Secrets) => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(secrets, null, 2));
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(secrets, null, 2), { mode: 0o600, flag: "wx" });
+      fs.renameSync(temporary, file);
+    } finally {
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    }
   };
 
   // .env.local only pre-fills the "main" slot; the UI can overwrite it.
@@ -74,8 +98,9 @@ export function devBridge(options: { root: string; env: Record<string, string> }
     // An isolated verification store must never inherit personal credentials.
     if (isolatedSecrets) return;
     const { DEV_LLM_BASE_URL: base, DEV_LLM_KEY: key } = options.env;
+    if (!base || !key) return;
     const secrets = load();
-    if (base && key && !secrets.main) {
+    if (!secrets.main) {
       secrets.main = { value: key, boundBaseUrl: normalizeBase(base) };
       save(secrets);
     }
@@ -83,10 +108,10 @@ export function devBridge(options: { root: string; env: Record<string, string> }
 
   async function stream(req: IncomingMessage, res: ServerResponse) {
     const { slot, url, body, timeouts } = await readJson(req);
+    const entry = load()[slot];
     res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" });
     res.flushHeaders();
     const emit = (event: unknown) => res.write(JSON.stringify(event) + "\n");
-    const entry = load()[slot];
     if (!entry) return void (emit({ type: "error", kind: "no_secret" }), res.end());
     if (!isBound(url, entry.boundBaseUrl)) return void (emit({ type: "error", kind: "url_not_bound" }), res.end());
     const controller = new AbortController();
@@ -117,22 +142,28 @@ export function devBridge(options: { root: string; env: Record<string, string> }
     name: "chuanyue-dev-bridge",
     apply: "serve",
     configureServer(server) {
-      seed();
+      try { seed(); } catch { server.config.logger.warn("开发台无法预填模型配置，存档读取仍可用。"); }
       server.httpServer?.once("close", () => host.close());
       server.middlewares.use("/__dev", (req, res) => {
-        const remote = req.socket.remoteAddress ?? "";
-        if (!/^(::1|127\.|::ffff:127\.)/.test(remote)) return sendJson(res, 403, { code: "forbidden", message: "仅限本机" });
-        const route = req.url ?? "";
+        if (!sameDevPage(req)) return sendJson(res, 403, { code: "forbidden", message: "仅限当前开发页面" });
+        const route = (req.url ?? "").split("?", 1)[0];
+        const method = route === "/config" ? "GET" : "POST";
+        if (req.method !== method) return sendJson(res, 405, { code: "method", message: `请使用 ${method}` });
+        if (method === "POST") {
+          const expected = route === "/book/pdf" ? "application/pdf" : "application/json";
+          if (req.headers["content-type"]?.split(";", 1)[0].trim() !== expected)
+            return sendJson(res, 415, { code: "content_type", message: "请求内容类型不支持" });
+        }
         const handle = async () => {
           if (route.startsWith("/host/")) return hostRequest(host, route.slice("/host/".length).split("?")[0], req, res);
           if (route === "/book/pdf" && req.method === "POST") return extractBookPdf(options.root, req, res);
-          if (route.startsWith("/llm/stream")) return stream(req, res);
-          if (route.startsWith("/llm/get")) return get(req, res);
-          if (route.startsWith("/config")) {
+          if (route === "/llm/stream") return stream(req, res);
+          if (route === "/llm/get") return get(req, res);
+          if (route === "/config") {
             // Non-secret pre-fill for the setup form.
             return sendJson(res, 200, { baseUrl: options.env.DEV_LLM_BASE_URL ?? null, model: options.env.DEV_LLM_MODEL ?? null });
           }
-          if (route.startsWith("/secret/set")) {
+          if (route === "/secret/set") {
             const { slot, value, boundBaseUrl } = await readJson(req);
             if (!/^[a-z0-9_-]{1,64}$/.test(slot) || !value || /\s/.test(value)) {
               return sendJson(res, 400, { code: "secret_invalid", message: "槽位或 Key 不合法" });
@@ -142,12 +173,12 @@ export function devBridge(options: { root: string; env: Record<string, string> }
             save(secrets);
             return sendJson(res, 200, null);
           }
-          if (route.startsWith("/secret/has")) {
+          if (route === "/secret/has") {
             const { slot } = await readJson(req);
             const entry = load()[slot];
             return sendJson(res, 200, { configured: !!entry, boundBaseUrl: entry?.boundBaseUrl ?? null });
           }
-          if (route.startsWith("/secret/remove")) {
+          if (route === "/secret/remove") {
             const { slot } = await readJson(req);
             const secrets = load();
             delete secrets[slot];

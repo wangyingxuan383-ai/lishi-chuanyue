@@ -12,6 +12,26 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FilePath;
 
 const MAX_IMPORT: u64 = 64 * 1024 * 1024;
+const ARCHIVE_LIMIT: &str = "完整存档超过当前64MiB导入上限，未写出不可导入的文件。";
+
+struct CappedArchive<W> {
+    inner: W,
+    remaining: u64,
+    exceeded: bool,
+}
+
+impl<W: Write> Write for CappedArchive<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            self.exceeded = true;
+            return Err(std::io::Error::other(ARCHIVE_LIMIT));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+}
 
 #[derive(serde::Serialize)]
 pub struct BookFile {
@@ -152,10 +172,9 @@ pub async fn file_extract_pdf(data: String, request_id: String) -> Result<book_p
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data)
             .map_err(|_| io_error())?;
-        let pages = book_pdf::extract(&bytes)
-            .map_err(|message| PlatformError::new("pdf_extract", message))?;
+        let pages = book_pdf::extract_with_cancel(&bytes, || operation.cancelled.load(Ordering::Relaxed));
         operation.check()?;
-        Ok(pages)
+        pages.map_err(|message| PlatformError::new("pdf_extract", message))
     })
     .await
 }
@@ -270,17 +289,22 @@ pub async fn file_export_world(
     let path=directory.join(format!("{}.json",uuid::Uuid::new_v4()));
     struct Temporary(std::path::PathBuf);
     impl Drop for Temporary{fn drop(&mut self){let _=std::fs::remove_file(&self.0);}}
-    let temporary=Temporary(path.clone());let snapshot=store.shared();let copy=path.clone();
-    tauri::async_runtime::spawn_blocking(move||->std::result::Result<(),String>{
+    let snapshot=store.shared();let copy=path.clone();
+    let temporary=tauri::async_runtime::spawn_blocking(move||->std::result::Result<Temporary,String>{
         std::fs::create_dir_all(directory).map_err(|e|e.to_string())?;
-        let archive=story_core::world_archive::export(&snapshot,&world_id).map_err(|e|e.to_string())?;
-        let mut writer=std::io::BufWriter::new(std::fs::File::create(copy).map_err(|e|e.to_string())?);
-        serde_json::to_writer(&mut writer,&archive).map_err(|e|e.to_string())?;writer.flush().map_err(|e|e.to_string())
+        let temporary=Temporary(copy);
+        let file = std::fs::File::create(&temporary.0).map_err(|e| e.to_string())?;
+        let mut writer = CappedArchive { inner: std::io::BufWriter::new(file), remaining: MAX_IMPORT, exceeded: false };
+        let serialized = story_core::world_archive::export_to(&snapshot, &world_id, &mut writer);
+        if writer.exceeded { return Err(ARCHIVE_LIMIT.into()); }
+        serialized.map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        Ok(temporary)
     }).await.map_err(|e|failure("prepare",e.to_string()))?.map_err(|e|failure("prepare",e))?;
     // Keep the existing 64MiB import boundary symmetrical. Never report success
     // for an archive the application would reject when importing it again.
     if std::fs::metadata(&path).map_err(|e|failure("prepare",e.to_string()))?.len()>MAX_IMPORT{
-        return Err(failure("prepare","完整存档超过当前64MiB导入上限，未写出不可导入的文件。".into()));
+        return Err(failure("prepare",ARCHIVE_LIMIT.into()));
     }
     #[cfg(target_os="android")]
     let selected=crate::document_picker::pick_export(&app,&suggested_name).await.map_err(|e|failure("select",e.to_string()))?;
@@ -293,6 +317,15 @@ pub async fn file_export_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_serialization_never_writes_past_its_input_compatible_limit() {
+        let mut writer = CappedArchive { inner: Vec::new(), remaining: 3, exceeded: false };
+        writer.write_all(b"abc").unwrap();
+        assert!(writer.write_all(b"d").is_err());
+        assert_eq!(writer.inner, b"abc");
+        assert!(writer.exceeded);
+    }
 
     #[test]
     fn import_checks_utf8_and_size() {

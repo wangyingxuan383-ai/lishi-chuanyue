@@ -177,6 +177,19 @@ describe("world lines (R06-T001)", () => {
     expect((await repo.getNode(c.head.id))?.narrative).toBe("一");
   });
 
+  it("retains a deleted route while story evidence still references it", async () => {
+    c = await tree.append(repo, c, turn("一"));
+    const branch = await repo.createLine(c.worldId, c.head.id, "有出处的岔路", false);
+    await repo.setLineDeleted(branch.id, true);
+    await repo.platform.sql.batch([{
+      sql: "INSERT INTO story_fact_sources(id,world_id,line_id,node_id,resource_kind,resource_id,batch_id,task_id,basis,claim,source_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+      params: ["fact", c.worldId, branch.id, c.head.id, "rule", "r", "b", "t", "player", "线索", "{}", "2026-11-18"],
+    }]);
+    await expect(repo.purgeLine(branch.id)).rejects.toThrow("仍有资料引用");
+    expect(await repo.getLine(branch.id)).not.toBeNull();
+    expect(await repo.getNode(c.head.id)).not.toBeNull();
+  });
+
   it("jumps to a bookmark: back along the path, or a new line elsewhere", async () => {
     c = await tree.append(repo, c, turn("一"));
     const one = c.head;

@@ -41,6 +41,20 @@ async function content(repo: Repo, worldId: string) {
 }
 
 describe("world archive", () => {
+  it("rejects invalid parent and redo edges without replacing the existing story", async () => {
+    const repo = await emptyRepo();
+    const { worldId } = await richWorld(repo);
+    const before = await content(repo, worldId);
+    const file = await exportWorld(repo, worldId);
+    const cycle = structuredClone(file);
+    cycle.nodes[1].parent_id = cycle.nodes[2].id;
+    expect(archiveProblems(cycle)).toContain("回合顺序有环或前后颠倒");
+    await expect(importWorld(repo, cycle, "replace")).rejects.toThrow("回合顺序有环或前后颠倒");
+    const wrongRedo = structuredClone(file);
+    wrongRedo.nodes[0].last_child_id = wrongRedo.nodes[2].id;
+    expect(archiveProblems(wrongRedo)).toContain("重做的下一回合不属于这条分支");
+    expect(await content(repo, worldId)).toEqual(before);
+  });
   it.each(["agent", "classic", "unknown", null, { legacy: true }])("ignores legacy executionMode %j without rewriting old snapshots", async (mode) => {
     const repo = await emptyRepo(), { worldId } = await richWorld(repo);
     const cursor = await tree.cursor(repo, worldId);

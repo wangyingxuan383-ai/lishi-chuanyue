@@ -89,6 +89,16 @@ fn close_brackets(s: &str) -> String {
     out
 }
 pub fn lenient_json(text: &str) -> Option<Value> {
+    decode_json(text, true)
+}
+
+/// A fresh model reply may contain minor syntax variation, but missing text
+/// at its end must never be filled in by the engine and settled as a turn.
+pub(crate) fn complete_json(text: &str) -> Option<Value> {
+    decode_json(text, false)
+}
+
+fn decode_json(text: &str, repair_tail: bool) -> Option<Value> {
     let body = Regex::new(r"(?i)<\s*/?\s*record\s*>|```(?:json)?")
         .unwrap()
         .replace_all(text, "");
@@ -97,7 +107,9 @@ pub fn lenient_json(text: &str) -> Option<Value> {
     if let Some(end) = body.rfind('}').filter(|n| *n > 0) {
         candidates.push(body[..=end].to_owned());
     }
-    candidates.push(close_brackets(body));
+    if repair_tail {
+        candidates.push(close_brackets(body));
+    }
     for base in candidates {
         let trailing = trailing_commas(&base);
         let quoted = quote_keys(&trailing);
@@ -328,12 +340,20 @@ pub fn parse_record(text: &str) -> Result<Value, String> {
     if text.is_empty() {
         return Ok(json!({"record":null,"issues":["没有记录块"]}));
     }
-    let Some(value) = lenient_json(text) else {
-        return Ok(json!({"record":null,"issues":["记录块无法解析"]}));
+    Ok(parsed_record(lenient_json(text)))
+}
+
+pub(crate) fn parse_complete_record(text: &str) -> Value {
+    parsed_record(complete_json(text))
+}
+
+fn parsed_record(value: Option<Value>) -> Value {
+    let Some(value) = value else {
+        return json!({"record":null,"issues":["记录块无法解析"]});
     };
     let mut issues = Vec::new();
     let Some(record) = normalize_record(&value, &mut issues) else {
-        return Ok(json!({"record":null,"issues":["记录块不是对象"]}));
+        return json!({"record":null,"issues":["记录块不是对象"]});
     };
     if record.get("time").is_none() {
         issues.push("缺少 time".into());
@@ -342,5 +362,5 @@ pub fn parse_record(text: &str) -> Result<Value, String> {
         issues.push("缺少 choices".into());
     }
     let title=value["storyTitle"].as_str().map(str::trim).filter(|s|!s.is_empty()&&s.chars().count()<=24&&!s.contains(['\n','\r','<','>']));
-    Ok(json!({"record":record,"issues":issues,"openingTitle":title}))
+    json!({"record":record,"issues":issues,"openingTitle":title})
 }

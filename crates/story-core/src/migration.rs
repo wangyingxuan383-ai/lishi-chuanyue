@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{fs, path::Path};
 
-pub const LATEST_VERSION: i64 = 14;
+pub const LATEST_VERSION: i64 = 15;
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/001.sql")),
     (2, include_str!("migrations/002.sql")),
@@ -20,6 +20,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("migrations/012.sql")),
     (13, include_str!("migrations/013.sql")),
     (14, include_str!("migrations/014.sql")),
+    (15, include_str!("migrations/015.sql")),
 ];
 
 pub fn version(connection: &Connection) -> Result<i64> {
@@ -208,7 +209,7 @@ mod tests {
         }
         db.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,error_kind,created_at,updated_at) VALUES('child','w','l','n','failed','{\"meta\":{\"parentRun\":\"seq\"}}','{}','{}','旧错误','network','t','t')", []).unwrap();
         db.execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at) VALUES('root','w','l','n','committed','{\"meta\":{}}','{}','{}','t','t')", []).unwrap();
-        assert_eq!(migrate(&mut db, None).unwrap(), 14);
+        assert_eq!(migrate(&mut db, None).unwrap(), LATEST_VERSION);
         let child: (Option<String>, String, Option<String>) = db.query_row("SELECT parent_run,error_kind,failure_json FROM execution_runs WHERE id='child'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
         assert_eq!(child, (Some("seq".into()), "network".into(), None));
         assert_eq!(db.query_row("SELECT parent_run FROM execution_runs WHERE id='root'", [], |r| r.get::<_, Option<String>>(0)).unwrap(), None);
@@ -224,5 +225,27 @@ mod tests {
         assert_eq!(db.query_row("SELECT status||active FROM canon_notes", [], |r| r.get::<_, String>(0)).unwrap(), "paused1");
         db.execute("DELETE FROM source_books WHERE id='b'", []).unwrap();
         assert_eq!(db.query_row("SELECT COUNT(*) FROM canon_notes", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn v15_preserves_the_latest_old_text_at_its_original_event_number() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE schema_version(version INTEGER NOT NULL)").unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 14) {
+            if *version == 8 { db.execute_batch(include_str!("execution_lease_schema.sql")).unwrap(); }
+            db.execute_batch(sql).unwrap();
+            db.execute("INSERT INTO schema_version VALUES(?)", [version]).unwrap();
+        }
+        db.execute_batch(r#"
+            DROP TABLE execution_progress;
+            INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at)
+            VALUES('run','w','l','n','failed','{}','{}','{}','t','t');
+            INSERT INTO execution_events VALUES('run',1,'{"type":"text","full":"一"}'),
+                    ('run',2,'{"type":"text","full":"一二"}'),('run',3,'{"type":"failed"}');
+        "#).unwrap();
+        assert_eq!(migrate(&mut db, None).unwrap(), LATEST_VERSION);
+        let text: (i64, String) = db.query_row("SELECT seq,json_extract(event_json,'$.full') FROM execution_progress WHERE run_id='run'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(text, (2, "一二".into()));
+        assert_eq!(db.query_row("SELECT seq FROM execution_events WHERE run_id='run'", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
     }
 }

@@ -136,6 +136,60 @@ describe("原著札记 (D162)", () => {
     expect(calls).toBe(2);
   });
 
+  it("defers a persistently refused 202–207 batch, keeps later work after reopening, and fills only the gap", async () => {
+    const { game, repo } = await setup();
+    const book: SourceBook = {
+      ...longBook(),
+      sections: Array.from({ length: 300 }, (_, i) => ({ title: `章节${i + 1}`, text: "风吹过山谷。" })),
+    };
+    await saveBook(repo, book);
+    const note = newNote(book.id, "plot", { from: 100, to: 299 }, "第101～300章");
+    await saveNote(repo, { ...note, status: "failed", progress: {
+      parts: ["前101章已有札记"], total: 4, batchSizes: [101, 6, 93],
+      error: "AI 服务拒绝了这段资料。可以换个整理模型后接着做。已完成的部分保留了。",
+      detail: "正在整理第 202～207 章。",
+    } });
+    const calls: string[] = [];
+    game.platform.llm.stream = async (request, onEvent) => {
+      const content = (request.body as { messages: { content: string }[] }).messages[1].content;
+      calls.push(content);
+      const refused = content.includes("[第202章");
+      onEvent({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: refused ? "" : "后续或合并札记" }, finish_reason: refused ? "content_filter" : "stop" }] }) });
+      onEvent({ type: "done" });
+      return "test-stream";
+    };
+    const deferred = await game.runCanonNote(note.id, () => {}, { kind: "defer", batch: 1 });
+    expect(deferred.status).toBe("paused");
+    expect(deferred.progress.parts).toEqual(["前101章已有札记", "", "后续或合并札记"]);
+    expect(deferred.progress.gaps).toEqual([{ batch: 1, sections: [201, 202, 203, 204, 205, 206] }]);
+    expect(noteStepsDone(deferred.progress)).toBe(2);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("[第208章");
+    expect(await notesForTurn(repo, { ...newBinding(book.id, true), position: 210 }, "world", "")).toEqual([]);
+    const { world } = await repo.createWorld({ title: "札记归档", eraId: "free", opening: {
+      parentId: null, kind: "opening", narrative: "起航", state: { ...sampleState(), source: newBinding(book.id, true) },
+    } });
+    const archive = await exportWorld(repo, world.id);
+    expect(archiveProblems(archive)).toEqual([]);
+    const copy = await importWorld(repo, archive, "new");
+    const copiedLine = await repo.getLine((await repo.getWorld(copy))!.currentLineId!);
+    const copiedBook = (await repo.getState(copiedLine!.nodeId)).source!.bookId;
+    const [copiedNote] = await listNotes(repo, copiedBook);
+    expect(copiedNote.progress.gaps).toEqual(deferred.progress.gaps);
+    expect(copiedNote.status).toBe("paused");
+
+    const reopened = await Game.open(game.platform, game.llm);
+    const refused = await reopened.runCanonNote(note.id, () => {});
+    expect(refused.progress.failure).toMatchObject({ phase: "batch", kind: "refused", batch: 1 });
+    expect(calls).toHaveLength(2);
+    const done = await reopened.runCanonNote(note.id, () => {}, { kind: "fill", batch: 1, text: "手动补上的札记（第202章）" });
+    expect(done.status).toBe("done");
+    expect(calls).toHaveLength(3);
+    expect(calls[2]).toContain("前101章已有札记");
+    expect(calls[2]).toContain("手动补上的札记");
+    expect(calls[2]).toContain("后续或合并札记");
+  });
+
   it("gives a passage the plot around the reading position and the people in play", async () => {
     const { repo, book } = await setup();
     const world = async () => (await repo.createWorld({ title: "试", eraId: "free", settings: { premise: "" }, opening: { parentId: null, kind: "opening", narrative: "开场", state: sampleState(), meta: {} } })).world.id;

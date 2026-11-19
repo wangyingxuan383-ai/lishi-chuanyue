@@ -23,10 +23,12 @@ export async function cursor(repo: Repo, worldId: string): Promise<Cursor> {
 /** Follows last_child links down from a node; returns the chain (excluding the start). */
 async function tail(repo: Repo, from: StoryNode): Promise<StoryNode[]> {
   const chain: StoryNode[] = [];
+  const visited = new Set([from.id]);
   let node = from;
-  while (node.lastChildId) {
+  while (node.lastChildId && !visited.has(node.lastChildId)) {
     const next = await repo.getNode(node.lastChildId);
-    if (!next) break;
+    if (!next || next.parentId !== node.id || next.worldId !== from.worldId) break;
+    visited.add(next.id);
     chain.push(next);
     node = next;
   }
@@ -50,7 +52,7 @@ async function replacedBranchEnd(repo: Repo, c: Cursor, parent: StoryNode): Prom
 }
 
 /** Continue the story: the new node becomes the head of the current line. */
-export async function append(repo: Repo, c: Cursor, node: Omit<NewNode, "parentId">, guard?: { headId: string; requireIdle?: boolean }): Promise<Cursor> {
+export async function append(repo: Repo, c: Cursor, node: Omit<NewNode, "parentId">, guard?: { headId: string; settingsJson?: string; requireIdle?: boolean }): Promise<Cursor> {
   const replaced = await replacedBranchEnd(repo, c, c.head);
   if (replaced && !guard) await repo.createLine(c.worldId, replaced.id, "未命名路线", true);
   const created = await repo.appendNode(c.worldId, c.line.id, { ...node, parentId: c.head.id }, [], guard ? { ...guard, preserveNodeId: replaced?.id } : undefined);
@@ -107,7 +109,8 @@ export function canRedo(c: Cursor): boolean {
 
 export async function redo(repo: Repo, c: Cursor): Promise<Cursor> {
   if (!c.head.lastChildId) return c;
-  const next = (await repo.getNode(c.head.lastChildId))!;
+  const next = await repo.getNode(c.head.lastChildId);
+  if (!next || next.parentId !== c.head.id || next.worldId !== c.worldId) return c;
   await repo.moveLine(c.line.id, next.id);
   return { ...c, line: { ...c.line, nodeId: next.id }, head: next };
 }

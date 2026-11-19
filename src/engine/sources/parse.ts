@@ -40,10 +40,17 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
   if (new TextDecoder().decode(bytes.subarray(0, 5)) === "%PDF-") {
     format = "pdf";
     const { pages, headings } = await platform.files.extractPdf(bytes, signal);
-    sections = pages.map((text, i) => {
-      const heading = [...headings].filter((h) => h.page <= i + 1).sort((a, b) => b.page - a.page)[0];
-      return { title: `${heading?.title ? heading.title + " · " : ""}第 ${i + 1} 页`, text: clean(text), page: i + 1 };
-    }).filter((s) => s.text);
+    const ordered = [...headings].sort((a, b) => a.page - b.page)
+      .filter((heading, index, all) => !index || all[index - 1].page !== heading.page);
+    let next = 0;
+    for (const [i, text] of pages.entries()) {
+      if (i % 40 === 0) { await tick(); checkCancelled(signal); }
+      const page = i + 1;
+      while (next < ordered.length && ordered[next].page <= page) next++;
+      const heading = ordered[next - 1];
+      const body = clean(text);
+      if (body) sections.push({ title: `${heading?.title ? heading.title + " · " : ""}第 ${page} 页`, text: body, page });
+    }
     if (!sections.length) throw new Error("没有提取到文字。这可能是扫描图片型 PDF，本版不支持图片识别。");
   } else if (bytes[0] === 80 && bytes[1] === 75 && [3, 5, 7].includes(bytes[2]) && [4, 6, 8].includes(bytes[3])) {
     const { unzip, strFromU8 } = await import("fflate");

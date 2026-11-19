@@ -15,6 +15,7 @@ pub struct Credentials {
     store: Arc<dyn SecretStore>,
     bindings: Mutex<BTreeMap<String, String>>,
     path: PathBuf,
+    bindings_unavailable: bool,
 }
 
 #[derive(Serialize)]
@@ -73,18 +74,27 @@ pub fn check_bound(base: &str, target: &str) -> Result<()> {
 
 impl Credentials {
     pub fn open(directory: PathBuf, store: Arc<dyn SecretStore>) -> Result<Self> {
-        fs::create_dir_all(&directory).map_err(|_| io_error())?;
+        let directory_ready = fs::create_dir_all(&directory).is_ok();
         let path = directory.join("secret-bindings.json");
         let bindings = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| io_error())?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(_) => return Err(io_error()),
+            Ok(bytes) => serde_json::from_slice(&bytes).ok(),
+            Err(e) if directory_ready && e.kind() == std::io::ErrorKind::NotFound => Some(BTreeMap::new()),
+            Err(_) => None,
         };
+        let bindings_unavailable = bindings.is_none();
         Ok(Self {
             store,
-            bindings: Mutex::new(bindings),
+            bindings: Mutex::new(bindings.unwrap_or_default()),
             path,
+            bindings_unavailable,
         })
+    }
+
+    fn require_bindings(&self) -> Result<()> {
+        if self.bindings_unavailable {
+            return Err(PlatformError::new("llm_bindings_unavailable", "AI 服务配置文件无法读取，故事仍可阅读。"));
+        }
+        Ok(())
     }
 
     fn persist(&self, bindings: &BTreeMap<String, String>) -> Result<()> {
@@ -98,6 +108,7 @@ impl Credentials {
     }
 
     pub fn set(&self, slot: &str, value: String, base: &str) -> Result<()> {
+        self.require_bindings()?;
         let slot = SecretSlot::new(slot).map_err(secret_error)?;
         let value = SecretValue::new(value).map_err(secret_error)?;
         let base = normalize_base(base)?;
@@ -115,6 +126,7 @@ impl Credentials {
     }
 
     pub fn has(&self, slot: &str) -> Result<SecretStatus> {
+        self.require_bindings()?;
         let slot = SecretSlot::new(slot).map_err(secret_error)?;
         let bindings = self.bindings.lock().map_err(|_| io_error())?;
         let base = bindings.get(slot.as_str()).cloned();
@@ -126,6 +138,7 @@ impl Credentials {
     }
 
     pub fn remove(&self, slot: &str) -> Result<()> {
+        self.require_bindings()?;
         let slot = SecretSlot::new(slot).map_err(secret_error)?;
         let mut bindings = self.bindings.lock().map_err(|_| io_error())?;
         self.store.delete(&slot).map_err(secret_error)?;
@@ -134,6 +147,7 @@ impl Credentials {
     }
 
     pub fn authorize(&self, slot: &str, url: &str) -> Result<SecretValue> {
+        self.require_bindings()?;
         let slot = SecretSlot::new(slot).map_err(secret_error)?;
         let bindings = self.bindings.lock().map_err(|_| io_error())?;
         let missing = || PlatformError::new("llm_no_secret", "尚未配置密钥");

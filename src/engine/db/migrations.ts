@@ -4,6 +4,7 @@ import schema12 from "../../../crates/story-core/src/migrations/012.sql?raw";
 import schema10 from "../../../crates/story-core/src/migrations/010.sql?raw";
 import schema13 from "../../../crates/story-core/src/migrations/013.sql?raw";
 import schema14 from "../../../crates/story-core/src/migrations/014.sql?raw";
+import schema15 from "../../../crates/story-core/src/migrations/015.sql?raw";
 // The native host and browser apply these same versioned SQL sources.
 // Shipped migrations remain unchanged; append a new version.
 
@@ -32,4 +33,5 @@ export const MIGRATIONS: { version: number; sql: string }[] = [
   { version: 12, sql: schema12 },
   { version: 13, sql: schema13 },
   { version: 14, sql: schema14 },
+  { version: 15, sql: schema15 },
 ];

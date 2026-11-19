@@ -3,7 +3,7 @@
 // and then reads, edits, switches off or deletes. Each passage carries the ones
 // that matter at the reading position, instead of re-reading the original.
 import { useEffect, useRef, useState } from "react";
-import { NOTE_KINDS, NOTE_KIND_LABEL, deleteNote, estimateNote, listNotes, newNote, noteStepsDone, saveNote, suggestTitle, type CanonNote, type NoteEstimate, type NoteKind, type NoteScope } from "../../engine/sources/notes";
+import { NOTE_KINDS, NOTE_KIND_LABEL, deleteNote, estimateNote, listNotes, newNote, noteChapterRange, noteStepsDone, refusedNoteBatch, saveNote, suggestTitle, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { Switch } from "./Switch";
@@ -27,8 +27,8 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, onClose }: { bo
     reload();
     void game.repo.platform.sql.query("SELECT section,title FROM source_sections WHERE book_id=? ORDER BY section", [bookId]).then((rows) => setSections(rows.map((r) => String(r.title))));
   }, [bookId, worldId]);
-  const run = (note: CanonNote) => {
-    void game.runCanonNote(note.id, (next) => { setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null); setTick((t) => t + 1); })
+  const run = (note: CanonNote, resume?: NoteResume) => {
+    void game.runCanonNote(note.id, (next) => { setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null); setTick((t) => t + 1); }, resume)
       .then((done) => { if (done.status === "done") toast(`“${done.title}”整理好了`); reload(); })
       .catch((e) => { toast(e instanceof Error ? e.message : "没能开始整理"); reload(); });
   };
@@ -53,7 +53,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, onClose }: { bo
         onStart={async (note) => { await saveNote(game.repo, note); setNotes((list) => [...(list ?? []), note]); setView({ name: "note", id: note.id }); run(note); }} />}
       {view.name === "note" && current && <NoteDetail note={current} running={game.canonNoteRunning(current.id)}
         onBack={() => setView({ name: "list" })}
-        onResume={() => run(current)} onPause={() => game.pauseCanonNote(current.id)}
+        onResume={(resume) => run(current, resume)} onPause={() => game.pauseCanonNote(current.id)}
         onSave={async (patch) => { const next = { ...current, ...patch, updatedAt: new Date().toISOString() }; await saveNote(game.repo, next); setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null); }}
         onDelete={async () => {
           if (!await ask({ title: `删除“${current.title}”？`, message: "删除后写作不再用到这份札记，不能撤销。", confirm: "删除", danger: true })) return;
@@ -127,14 +127,21 @@ function NewNote({ bookId, worldId, sections, position, onStart, onCancel }: {
 }
 
 function NoteDetail({ note, running, onBack, onResume, onPause, onSave, onDelete }: {
-  note: CanonNote; running: boolean; onBack: () => void; onResume: () => void; onPause: () => void;
+  note: CanonNote; running: boolean; onBack: () => void; onResume: (resume?: NoteResume) => void; onPause: () => void;
   onSave: (patch: Partial<CanonNote>) => Promise<void>; onDelete: () => void;
 }) {
   const { toast } = useApp();
   const [text, setText] = useState(note.content);
+  const [manual, setManual] = useState<{ batch: number; text: string } | null>(null);
   useEffect(() => { setText(note.content); }, [note.content]);
+  useEffect(() => { setManual(null); }, [note.id]);
   const total = Math.max(1, note.progress.total);
   const done = noteStepsDone(note.progress);
+  const refused = refusedNoteBatch(note.progress);
+  const gaps = note.progress.gaps ?? [];
+  const canDefer = refused !== undefined && (note.progress.parts?.length ?? 0) === refused;
+  const atGaps = gaps.length > 0 && note.progress.parts?.length === note.progress.batchSizes?.length;
+  const parts = note.progress.parts ?? [];
   return (
     <div className="stack">
       <p className="muted m-0"><span className="tag">{NOTE_KIND_LABEL[note.kind]}</span> AI 整理，可能有误，可以直接改。{note.worldId ? "只用于这个故事。" : "用这本书的故事都会用到。"}</p>
@@ -142,7 +149,35 @@ function NoteDetail({ note, running, onBack, onResume, onPause, onSave, onDelete
         <div className="bar" aria-hidden="true"><i style={{ width: `${Math.round((done / total) * 100)}%` }} /></div>
         <p className="muted m-0">{running ? `正在整理：${done}/${total}` : note.status === "failed" ? note.progress.error ?? "没整理完" : `已暂停：${done}/${total}`}</p>
         {!running && note.status === "failed" && note.progress.detail && <details><summary className="muted">查看原因</summary><p className="field-hint m-0">{note.progress.detail}</p></details>}
-        <div className="row">{running ? <button onClick={onPause}>暂停</button> : <button className="primary" onClick={onResume}>{done || note.status === "failed" ? "接着整理" : "开始整理"}</button>}</div>
+        {gaps.length > 0 && <div className="stack gap-2">
+          <p className="muted m-0">还有章节没整理。这份札记补齐后才会用于写作。</p>
+          {gaps.map(({ batch, sections }) => <div className="row" key={batch}>
+            <span className="grow">{noteChapterRange(sections)}待补</span>
+            {!running && <button onClick={() => setManual({ batch, text: "" })}>手动补记</button>}
+          </div>)}
+        </div>}
+        {!running && parts.some(Boolean) && <details>
+          <summary className="muted">查看已整理的内容</summary>
+          {parts.map((part, index) => part && <p className="note-text" key={index}>{part}</p>)}
+        </details>}
+        <div className="row">{running ? <button onClick={onPause}>暂停</button> : <>
+          <button className="primary" onClick={() => onResume()}>{atGaps ? "重试待补章节" : refused !== undefined ? "重试这批" : done || note.status === "failed" ? "接着整理" : "开始整理"}</button>
+        </>}</div>
+        {!running && canDefer && <div className="row">
+          <button onClick={() => onResume({ kind: "defer", batch: refused })}>暂留这批，接着整理</button>
+          <button onClick={() => setManual({ batch: refused, text: "" })}>手动补记</button>
+        </div>}
+        {!running && manual && <div className="stack gap-2">
+          <label>写下这批的要点<textarea rows={4} maxLength={3000} value={manual.text}
+            onChange={(e) => setManual({ batch: manual.batch, text: e.target.value })} /></label>
+          <div className="row">
+            <button className="ghost" onClick={() => setManual(null)}>取消</button>
+            <button disabled={!manual.text.trim()} onClick={() => {
+              onResume({ kind: "fill", ...manual });
+              setManual(null);
+            }}>保存并继续</button>
+          </div>
+        </div>}
       </div>}
       {note.status === "done" && <>
         <Switch label="写作时使用" note={note.active ? "写到相关章节、人物或设定时带上" : "暂时不用，札记保留"} checked={note.active} onChange={(v) => void onSave({ active: v })} />

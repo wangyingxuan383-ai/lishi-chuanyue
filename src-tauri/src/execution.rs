@@ -15,7 +15,7 @@ use std::{sync::Arc, time::Instant};
 use story_core::{
     chat::{Accumulator, BoxFuture, Completion, Model, TextSink},
     runtime::Engine,
-    Error, ModelConfig, RunPlan, RunSnapshot,
+    Error, ModelConfig, RunPlan, RunSnapshot, RunStopReceipt,
 };
 use tauri::State;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,20 @@ use tokio_util::sync::CancellationToken;
 pub struct NativeModel {
     pub credentials: Arc<Credentials>,
     pub streams: Arc<Streams>,
+}
+
+fn model_start_error(error: crate::error::PlatformError) -> Error {
+    use story_core::failure::FailKind;
+    let kind = match error.code {
+        "llm_no_secret" => "no_secret",
+        "llm_url_not_bound" => "url_not_bound",
+        "llm_bindings_unavailable" | "secret_failed" => {
+            return Error::fail(FailKind::Setup, error.message);
+        }
+        "llm_stream_storage" => return Error::fail(FailKind::Storage, error.message),
+        _ => return Error::Invalid(error.message.into()),
+    };
+    Error::Provider { kind: kind.into(), status: None, message: error.message.into(), partial: false }
 }
 
 // A dropped completion future must stop the independent native stream, even
@@ -74,8 +88,8 @@ impl Model for NativeModel {
         Box::pin(async move {
             if config.protocol() != "chat-completions" {
                 let key=credentials.authorize(&config.slot,&config.url)
-                    .map_err(|_|Error::Invalid("模型凭据未配置或地址与绑定不符".into()))?;
-                let client=crate::stream::client().map_err(|_|Error::Invalid("无法初始化模型连接，请检查网络设置".into()))?;
+                    .map_err(model_start_error)?;
+                let client=crate::stream::client().map_err(|_|Error::fail(story_core::failure::FailKind::Network,"无法初始化模型连接，请检查网络设置"))?;
                 return agent_model::complete(client,config,body,key.expose_secret().to_owned(),cancel,text).await;
             }
             let body=story_core::chat::wire_chat_body(body);
@@ -102,11 +116,7 @@ impl Model for NativeModel {
                 )
                 .await
                 // Refused before sending: a missing or unbound key is a setup problem.
-                .map_err(|e| match e.code {
-                    "llm_no_secret" => Error::Provider { kind: "no_secret".into(), status: None, message: e.message.into(), partial: false },
-                    "llm_url_not_bound" => Error::Provider { kind: "url_not_bound".into(), status: None, message: e.message.into(), partial: false },
-                    _ => Error::Invalid(e.message.into()),
-                })?;
+                .map_err(model_start_error)?;
             // Dropping the request future must cancel its native network work too.
             let drop_cancel = cancel.clone();
             let drop_streams = streams.clone();
@@ -141,6 +151,8 @@ impl Model for NativeModel {
                     }) => {
                         break Err(if kind == "cancelled" {
                             Error::Cancelled
+                        } else if kind == "storage" {
+                            Error::fail(story_core::failure::FailKind::Storage, "生成的临时进度无法保存")
                         } else if kind == "http" && story_core::chat::provider_context_rejected(status, message.as_deref().unwrap_or("")) {
                             Error::ContextWindow
                         } else {
@@ -179,15 +191,22 @@ pub async fn execution_snapshot(
     id: String,
     after: u64,
 ) -> Result<RunSnapshot, Value> {
-    engine.snapshot(&id, after).map_err(message)
+    engine.snapshot(&id, after).map_err(|error| match error {
+        Error::Sql(rusqlite::Error::QueryReturnedNoRows) =>
+            serde_json::json!({"code":"execution_missing","message":"找不到这次运行"}),
+        other => message(other),
+    })
 }
 #[tauri::command]
 pub async fn execution_list(engine: State<'_, Arc<Engine>>) -> Result<Value, Value> {
     engine.store.list().map_err(message)
 }
 #[tauri::command]
-pub async fn execution_stop(engine: State<'_, Arc<Engine>>, id: String) -> Result<(), Value> {
-    engine.stop(&id).map_err(message)
+pub async fn execution_stop(engine: State<'_, Arc<Engine>>, id: String, execution_id: Option<String>) -> Result<RunStopReceipt, Value> {
+    match execution_id {
+        Some(execution_id) => engine.stop_execution(&id, &execution_id),
+        None => engine.stop(&id),
+    }.map_err(message)
 }
 #[tauri::command]
 pub async fn execution_resume(engine: State<'_, Arc<Engine>>, id: String) -> Result<(), Value> {

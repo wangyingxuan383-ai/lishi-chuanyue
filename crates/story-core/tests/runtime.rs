@@ -306,6 +306,44 @@ async fn failed_opening_leaves_no_partial_world_or_nodes() {
 }
 
 #[tokio::test]
+async fn a_truncated_self_written_opening_record_keeps_the_players_text_for_retry() {
+    let player_text = "城门刚开。\n我攥着纸，朝城里走。";
+    let f = Fixture::new(vec![
+        Step::Reply(Completion {
+            finish_reason: Some("length".into()),
+            ..prose(r#"{"money":99,"choices":["入城""#)
+        }),
+        Step::Reply(prose(r#"{"money":6,"choices":["问路"],"log":"主角进城"}"#)),
+    ]);
+    let mut plan = f.plan("self-written-opening");
+    plan.kind = "opening".into();
+    plan.world_id = "new-world".into();
+    plan.line_id = "new-line".into();
+    plan.head_id.clear();
+    plan.base_id = None;
+    plan.new_world = Some(json!({"title":"城门","eraId":"free"}));
+    plan.settings["choiceCount"] = 1.into();
+    plan.meta["playerNarrative"] = player_text.into();
+    plan.messages = vec![json!({"role":"user","content":player_text})];
+
+    f.engine.start(plan).unwrap();
+    let stopped = f.settled("self-written-opening").await;
+    assert_eq!(stopped.status, "failed");
+    assert_eq!(stopped.error_kind.as_deref(), Some("format"));
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM worlds WHERE id='new-world'"), 0);
+    assert_eq!(f.model.count(), 1);
+
+    f.engine.resume("self-written-opening").unwrap();
+    let saved = f.settled("self-written-opening").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.text("SELECT narrative FROM nodes WHERE world_id='new-world'"), player_text);
+    let record: Value = serde_json::from_str(&f.text("SELECT record_json FROM nodes WHERE world_id='new-world'")).unwrap();
+    assert_eq!(record["money"], 6);
+    assert_eq!(record["choices"], json!(["问路"]));
+}
+
+#[tokio::test]
 async fn model_refusal_does_not_commit_a_turn_even_with_a_record() {
     let mut reply = written();
     reply.finish_reason = Some("content_filter".into());
@@ -698,6 +736,23 @@ async fn large_character_results_offer_a_readable_location_and_advance_the_page(
 }
 
 #[tokio::test]
+async fn reconnect_reads_the_latest_stream_text_without_replaying_older_full_copies() {
+    let f = Fixture::new(vec![]);
+    f.store.register(&f.plan("buffered")).unwrap();
+    let first = f.store.event("buffered", json!({"type":"thinking"})).unwrap();
+    for size in 1..=200 {
+        f.store.event("buffered", json!({"type":"text","full":"字".repeat(size)})).unwrap();
+    }
+    let phase = f.store.event("buffered", json!({"type":"organizing"})).unwrap();
+    let snapshot = f.store.snapshot("buffered", first.seq).unwrap();
+    assert_eq!(snapshot.events.len(), 2);
+    assert_eq!(snapshot.events[0].event["full"], "字".repeat(200));
+    assert_eq!(snapshot.events[1].seq, phase.seq);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_progress WHERE run_id='buffered'"), 1);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_events WHERE run_id='buffered'"), 2);
+}
+
+#[tokio::test]
 async fn classic_commits_without_a_subscriber_and_events_can_be_replayed_once() {
     let fixture = Fixture::new(vec![Step::Reply(written())]);
     fixture
@@ -845,6 +900,21 @@ async fn moving_the_route_during_a_model_wait_refuses_the_entire_commit() {
 }
 
 #[tokio::test]
+async fn a_new_setting_after_generation_preparation_cannot_be_overlooked() {
+    let fixture = Fixture::new(vec![]);
+    let mut plan = fixture.plan("settings-changed");
+    plan.meta["settingsGuard"] = json!({});
+    plan.meta["generationSnapshot"] = true.into();
+    fixture.store.lock().unwrap().execute(
+        "UPDATE worlds SET settings_json=? WHERE id='world'", [json!({"rules":"新规则"}).to_string()],
+    ).unwrap();
+
+    assert!(matches!(fixture.engine.start(plan), Err(Error::Stale)));
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM execution_runs"), 0);
+    assert_eq!(fixture.scalar("SELECT COUNT(*) FROM usage"), 0);
+}
+
+#[tokio::test]
 async fn a_storage_failure_rolls_back_body_state_and_route_together() {
     let fixture = Fixture::new(vec![Step::Reply(written())]);
     fixture.store.lock().unwrap().execute_batch("CREATE TRIGGER reject_new_state BEFORE INSERT ON states WHEN NEW.node_id <> 'n0' BEGIN SELECT RAISE(ABORT, 'isolated fault'); END;").unwrap();
@@ -942,7 +1012,7 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
         Step::Reply(calls(vec![("h", "read_history", json!({"query":"纸"}))])),
         // A service that ignores tool_choice "none" and calls again still ends the loop.
         Step::Reply(Completion { tool_calls: calls(vec![("again", "search_original", json!({"query":"纸"}))]).tool_calls, ..written() }),
-        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文","recordPatch":{"money":-3}}]}"#)),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"原著一张纸三文","fix":"三文","citations":[{"section":1,"chunk":1,"quote":"一张纸卖三文"}],"recordPatch":{"money":-3}}]}"#)),
     ]);
     let mut plan = bound(&fixture, "standard", "standard");
     plan.meta["referenceReviewVersion"] = "reference-review-lite-1".into();
@@ -964,7 +1034,7 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
     drop(requests);
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
     assert_eq!(narrative, "你付了三文，收好一张纸。");
-    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-2");
+    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-3");
     assert_eq!(snapshot.draft["referenceReview"]["skipped"], 0);
     let saved: String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[&node],|r|r.get(0)).unwrap();
     let record: Value=serde_json::from_str(&saved).unwrap();
@@ -1170,6 +1240,60 @@ async fn a_missing_record_is_typed_and_its_retry_really_asks_again() {
     assert_eq!(f.text("SELECT narrative FROM nodes WHERE id<>'n0'"), "你付了两文，收好一张纸。");
     assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_failures WHERE run_id='no-record'"), 1);
     assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_steps WHERE run_id='no-record' AND status='stale'"), 1);
+}
+
+#[tokio::test]
+async fn a_length_stopped_reply_never_advances_story_and_retries_only_the_broken_stage() {
+    let limited = |text: &str| Completion { finish_reason: Some("length".into()), ..prose(text) };
+    let cut_writing = Fixture::new(vec![Step::Reply(limited("你沿着城墙走了几步，还")), Step::Reply(written())]);
+    cut_writing.engine.start(cut_writing.plan("cut-prose")).unwrap();
+    let failed = cut_writing.settled("cut-prose").await;
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.draft["partialNarrative"], "你沿着城墙走了几步，还");
+    assert_eq!(cut_writing.scalar("SELECT COUNT(*) FROM nodes"), 1);
+    cut_writing.engine.resume("cut-prose").unwrap();
+    assert_eq!(cut_writing.settled("cut-prose").await.status, "committed");
+    assert_eq!(cut_writing.model.count(), 2);
+
+    let cut_extraction = Fixture::new(vec![
+        Step::Reply(prose("你付了两文，收好一张纸。")),
+        Step::Reply(limited(&record().to_string())),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    cut_extraction.engine.start(cut_extraction.plan("cut-extract")).unwrap();
+    let failed = cut_extraction.settled("cut-extract").await;
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.failure.as_ref().unwrap()["stage"], "record");
+    assert_eq!(cut_extraction.scalar("SELECT COUNT(*) FROM nodes"), 1);
+    cut_extraction.engine.resume("cut-extract").unwrap();
+    assert_eq!(cut_extraction.settled("cut-extract").await.status, "committed");
+    assert_eq!(cut_extraction.model.count(), 3);
+    assert_eq!(cut_extraction.scalar("SELECT COUNT(*) FROM usage WHERE outcome='no_record'"), 1);
+}
+
+#[tokio::test]
+async fn completing_missing_time_and_choices_keeps_existing_purchase_changes() {
+    let f = Fixture::new(vec![
+        Step::Reply(prose(r#"你付了两文，收好一张纸。<record>{"money":-2,"items":[{"name":"纸","delta":1}]}</record>"#)),
+        Step::Reply(prose(r#"{"time":5,"choices":["去找先生"],"money":-7,"items":[{"name":"伞","delta":1}]}"#)),
+    ]);
+    let mut plan = f.plan("complete-selected-action");
+    plan.settings["choiceCount"] = 1.into();
+    f.engine.start(plan).unwrap();
+
+    let saved = f.settled("complete-selected-action").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes WHERE kind='turn'"), 1);
+    assert_eq!(f.text("SELECT narrative FROM nodes WHERE kind='turn'"), "你付了两文，收好一张纸。");
+    let record: Value = serde_json::from_str(&f.text("SELECT record_json FROM nodes WHERE kind='turn'")).unwrap();
+    assert_eq!(record["time"], 5);
+    assert_eq!(record["choices"], json!(["去找先生"]));
+    assert_eq!(record["money"], -2);
+    let items = record["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "纸");
+    assert_eq!(items[0]["delta"].as_f64(), Some(1.0));
 }
 
 #[tokio::test]

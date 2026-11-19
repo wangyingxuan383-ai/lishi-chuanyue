@@ -162,6 +162,7 @@ export function explainFailure(kind: string, status?: number): string {
   if (status === 404) return "地址或模型名不对，请检查服务地址和模型。";
   if (kind === "timeout" || kind?.startsWith("timeout")) return "服务太久没有回应，可能网络不稳或服务繁忙。";
   if (kind === "stream") return "服务写到一半断开了，已写出的部分保留了。";
+  if (kind === "invalid_stream") return "服务的回复没有完整送到。";
   if (kind === "http" && (status ?? 0) >= 500) return "服务暂时出了问题，稍后再试，或换一个服务。";
   if (kind === "http") return "服务没有接受这次请求。";
   if (kind === "setup" || kind === "config" || kind === "no_secret" || kind === "url_not_bound") return "还没有配置好 AI 服务，请先到设置里连接。";

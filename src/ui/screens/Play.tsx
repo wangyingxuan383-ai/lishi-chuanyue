@@ -57,7 +57,7 @@ import { usePlayDraft } from "./play/usePlayDraft";
 import { useAssistantBusy } from "./play/useAssistantBusy";
 import { useNotificationGate } from "./play/useNotificationGate";
 
-export default function Play({ worldId, active = true }: { worldId: string; active?: boolean }) {
+export default function Play({ worldId, active = true, resumeRunId }: { worldId: string; active?: boolean; resumeRunId?: string }) {
   const { game, push, replace, toast, devMode, pop, profile, reading } = useApp();
   const [world, setWorld] = useState<World | null>(null);
   const [cursor, setCursor] = useState<tree.Cursor | null>(null);
@@ -206,9 +206,9 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
   const generation = useGeneration({
     game, worldId, autoScroll: reading.autoScroll, follow, refresh, showSaved, streamFloor,
     restoreDraft: draft.restore, onDone: (node) => { void countTurn(); celebrate(node); }, isBusy: () => busyRef.current,
-    toast, push, profileId: profile?.id,
+    toast, push, profileId: profile?.id, resumeRunId,
   });
-  const { gen, auto, notice, setNotice, slow, waited } = generation;
+  const { gen, auto, notice, setNotice, slow, waited, executionStatus } = generation;
   // A finished passage settles with a gold sweep; a milestone is stamped down (华丽, D160).
   const [fresh, setFresh] = useState<string | null>(null);
   const [stamp, setStamp] = useState<{ label: string; sub: string; key: number } | null>(null);
@@ -625,7 +625,8 @@ export default function Play({ worldId, active = true }: { worldId: string; acti
             })}
             {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
               onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); }} />}
-            {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow} />}
+            {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
+            {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
             {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
               <NoticeCard notice={notice} onAction={(run) => { setNotice(null); run(); }} />
             )}

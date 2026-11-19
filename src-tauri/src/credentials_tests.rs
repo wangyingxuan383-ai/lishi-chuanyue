@@ -35,6 +35,17 @@ impl SecretStore for MemoryStore {
 }
 
 #[test]
+fn a_damaged_binding_file_disables_auth_without_replacing_existing_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secret-bindings.json");
+    fs::write(&path, b"damaged").unwrap();
+    let service = Credentials::open(dir.path().into(), Arc::new(MemoryStore::default())).unwrap();
+    assert_eq!(service.has("model").err().unwrap().code, "llm_bindings_unavailable");
+    assert!(service.set("model", "test-only-key".into(), "https://example.invalid").is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"damaged");
+}
+
+#[test]
 fn binding_and_secret_status_persist_without_plaintext() {
     let dir = tempfile::tempdir().unwrap();
     let adapter = Arc::new(MemoryStore::default());

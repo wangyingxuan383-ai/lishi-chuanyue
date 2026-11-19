@@ -227,6 +227,18 @@ async fn done_terminates_without_waiting_for_connection_close() {
 }
 
 #[tokio::test]
+async fn chat_delta_without_finish_is_a_transport_interruption() {
+    let (_dir, service) = service();
+    let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"半截正文\"}}]}";
+    let (url, task) = server(200, "text/event-stream", vec![(0, wire.as_bytes().to_vec())], 0, 0).await;
+    let (id, rx) = start(&service, url, timeouts()).await;
+    let events = collect(&service, &id, rx).await;
+    assert_eq!(events.len(), 3);
+    assert!(matches!(events.last(), Some(StreamEvent::Error { kind, .. }) if kind == "stream"));
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn non_sse_body_is_one_data_event_then_done() {
     let (_dir, service) = service();
     let text = "{\"中文\":\"完整响应\",\"any\":[1,2]}";
@@ -500,6 +512,23 @@ fn restart_appends_interrupted_once_and_repairs_partial_last_append() {
     assert!(restarted.list().unwrap()[0].finished);
     assert!(restarted.resume("../../not-allowed").is_err());
     assert!(restarted.resume("abcdef1234567890").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn unavailable_cache_still_allows_startup_and_refuses_generation_before_connecting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("streams");
+    fs::write(&path, b"occupied").unwrap();
+    let service = Arc::new(Streams::open(dir.path().into()).unwrap());
+    let error = service.start(
+        "http://127.0.0.1:1/unused".into(),
+        json!({}),
+        timeouts(),
+        Some(SecretValue::new(FAKE_KEY.into()).unwrap()),
+        Arc::new(|_| {}),
+    ).await.unwrap_err();
+    assert_eq!(error.code, "llm_stream_storage");
+    assert!(service.active.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -85,6 +85,24 @@ fn meaningless(pair: &str) -> bool {
     pair.chars().any(|c| "什么谁哪何吗呢".contains(c)) || pair.chars().all(|c| FUNCTION.contains(c))
 }
 
+/// Find one older chapter gist linked to the current scene without reading its full prose.
+pub(crate) fn related_chapter(chapters: &[Value], query: &str, cap: usize) -> Option<String> {
+    let terms: HashSet<_> = pairs_of(query).into_iter().filter(|pair| !meaningless(pair)).collect();
+    if terms.len() < 3 {
+        return None;
+    }
+    let (_, best) = chapters
+        .iter()
+        .map(|chapter| {
+            let gist = format!("{}：{}", text(&chapter["title"]), text(&chapter["gist"]));
+            let hits = pairs_of(&gist).iter().filter(|pair| terms.contains(*pair)).count();
+            (hits, gist)
+        })
+        .filter(|(hits, _)| *hits >= 3)
+        .max_by_key(|(hits, _)| *hits)?;
+    Some(excerpt(&best, query, cap))
+}
+
 /// How rare each meaningful pair of the query is among `docs`, and which pairs each doc holds.
 fn pair_index(query: &str, docs: &[&str]) -> (HashMap<String, f64>, Vec<HashSet<String>>) {
     let pairs: Vec<String> = pairs_of(query).into_iter().filter(|p| !meaningless(p)).collect();

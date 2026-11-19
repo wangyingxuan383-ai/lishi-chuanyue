@@ -10,6 +10,15 @@ export interface ParsedRecord {
 
 /** Tries progressively stronger repairs on a JSON-ish object string. */
 export function lenientJson(text: string): unknown {
+  return parseObject(text, true);
+}
+
+/** Allow harmless syntax repairs, but never invent the end of a live reply. */
+export function completeJson(text: string): unknown {
+  return parseObject(text, false);
+}
+
+function parseObject(text: string, repairTruncation: boolean): unknown {
   let body = text.replace(/<\s*\/?\s*record\s*>/gi, "").replace(/```(?:json)?/gi, "");
   const start = body.indexOf("{");
   if (start < 0) return null;
@@ -17,7 +26,7 @@ export function lenientJson(text: string): unknown {
   const end = body.lastIndexOf("}");
   const candidates: string[] = [];
   if (end > 0) candidates.push(body.slice(0, end + 1));
-  candidates.push(closeBrackets(body));
+  if (repairTruncation) candidates.push(closeBrackets(body));
   for (const base of candidates) {
     for (const repair of REPAIRS) {
       try {

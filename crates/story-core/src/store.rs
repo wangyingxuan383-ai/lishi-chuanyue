@@ -1,4 +1,4 @@
-use crate::{execution_lease as lease, Error, Result, RunBudget, RunEvent, RunPlan, RunSnapshot};
+use crate::{execution_lease as lease, Error, Result, RunBudget, RunEvent, RunPlan, RunSnapshot, RunStopReceipt};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
@@ -42,12 +42,12 @@ impl Store {
         let stopped = (now - chrono::Duration::days(30)).to_rfc3339();
         let gone = "(SELECT id FROM execution_runs WHERE (status IN ('failed','cancelled','stale','interrupted','paused') AND updated_at<?1) OR (world_id NOT IN (SELECT id FROM worlds) AND (COALESCE(json_type(plan_json,'$.newWorld'),'null') <> 'object' OR status IN ('committed','previewed'))))";
         let mut changed = 0;
-        for table in ["execution_events", "execution_steps", "execution_failures"] {
+        for table in ["execution_events", "execution_progress", "execution_steps", "execution_failures"] {
             changed += tx.execute(&format!("DELETE FROM {table} WHERE run_id IN {gone}"), params![stopped])?;
         }
         changed += tx.execute(&format!("DELETE FROM execution_runs WHERE id IN {gone}"), params![stopped])?;
         let old = "(SELECT id FROM execution_runs WHERE status IN ('committed','previewed') AND updated_at<?1)";
-        for table in ["execution_events", "execution_steps"] {
+        for table in ["execution_events", "execution_progress", "execution_steps"] {
             changed += tx.execute(&format!("DELETE FROM {table} WHERE run_id IN {old}"), params![saved])?;
         }
         changed += tx.execute("UPDATE execution_runs SET draft_json='{}' WHERE status IN ('committed','previewed') AND updated_at<?1 AND draft_json<>'{}'", params![saved])?;
@@ -63,6 +63,7 @@ impl Store {
     }
     pub(crate) fn register_tx(tx: &Transaction<'_>, plan: &RunPlan) -> Result<()> {
         crate::maintenance::guard(tx)?;
+        Self::guard_opening_book(tx, plan)?;
         lease::ensure_schema(tx)?;
         if tx
             .query_row(
@@ -94,6 +95,18 @@ impl Store {
             params![plan.id, plan.world_id, plan.line_id, plan.head_id, serde_json::to_string(&stored)?, serde_json::to_string(&RunBudget::default())?, "{}", time, time, plan.meta["parentRun"].as_str()])?;
         Ok(())
     }
+
+    pub(crate) fn guard_opening_book(db: &Connection, plan: &RunPlan) -> Result<()> {
+        if plan.kind == "opening" {
+            if let Some(book) = plan.state["source"]["bookId"].as_str() {
+                let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_books WHERE id=?)", [book], |row| row.get(0))?;
+                if !exists {
+                    return Err(Error::fail(crate::failure::FailKind::Stale, "开场使用的参考书已移除，请重新选择"));
+                }
+            }
+        }
+        Ok(())
+    }
     /// Runs left "running" by an owner that is gone (closed app, lost
     /// lease) are stopped as interrupted, with a record, so they neither
     /// block the story nor look like the player's stop (R30).
@@ -109,15 +122,38 @@ impl Store {
             if lease::alive(tx, &plan, now)? {
                 continue;
             }
-            Self::interrupt_tx(tx, &id, &phase)?;
+            Self::interrupt_tx(tx, &plan, &id, &phase)?;
         }
         Ok(())
     }
-    fn interrupt_tx(tx: &Transaction<'_>, id: &str, phase: &str) -> Result<()> {
-        let error = Error::fail(crate::failure::FailKind::Interrupted, "上一段在写完前被中断，进度已保留");
+    pub(crate) fn recover_orphans(&self) -> Result<()> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let worlds = {
+            let mut statement = tx.prepare("SELECT DISTINCT world_id FROM execution_runs WHERE status IN ('running','committing')")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for world in worlds {
+            Self::interrupt_dead_tx(&tx, &world)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    fn interrupt_tx(tx: &Transaction<'_>, plan: &RunPlan, id: &str, phase: &str) -> Result<()> {
+        let stopped = match lease::ticket(plan)? {
+            Some(ticket) => Self::stop_requested(tx, &ticket)?,
+            None => false,
+        };
+        let (status, error) = if stopped {
+            ("cancelled", Error::Cancelled)
+        } else {
+            ("interrupted", Error::fail(crate::failure::FailKind::Interrupted, "上一段在写完前被中断，进度已保留"))
+        };
         let failure = crate::failure::record(&error, crate::failure::Stage::of_purpose(phase), 0);
-        Self::finish_tx(tx, id, "interrupted", Some(&error), Some(&failure))?;
-        tx.execute("INSERT INTO execution_events(run_id,seq,event_json) VALUES(?,(SELECT COALESCE(MAX(seq),0)+1 FROM execution_events WHERE run_id=?),?)", params![id, id, json!({"type":"failed","reason":"interrupted","detail":error.to_string(),"failure":failure}).to_string()])?;
+        Self::finish_tx(tx, id, status, Some(&error), Some(&failure))?;
+        crate::runtime::write_usage(tx, id, &plan.world_id, None, status)?;
+        Self::append_event(tx, id, json!({"type":"failed","reason":status,"detail":error.to_string(),"failure":failure}))?;
         Ok(())
     }
     /// A run whose owner is gone (a closed app, a lost lease) and that nobody
@@ -136,9 +172,59 @@ impl Store {
         if lease::alive(&tx, &plan, lease::now_ms())? && ours.is_none() {
             return Ok(false);
         }
-        Self::interrupt_tx(&tx, id, &phase)?;
+        Self::interrupt_tx(&tx, &plan, id, &phase)?;
         tx.commit()?;
         Ok(true)
+    }
+    /// Persist a request before sending any process-local cancel signal.
+    pub(crate) fn request_stop(&self, id: &str, expected: Option<&str>) -> Result<RunStopReceipt> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, String)> = tx.query_row(
+            "SELECT status,plan_json,COALESCE(json_extract(draft_json,'$.phase'),'') FROM execution_runs WHERE id=?",
+            [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+        let Some((mut status, plan, phase)) = row else {
+            return Ok(RunStopReceipt { execution_id: None, status: "missing".into(), accepted: false, settled: true });
+        };
+        let plan: RunPlan = serde_json::from_str(&plan)?;
+        let ticket = lease::ticket(&plan)?.filter(|ticket| ticket.owner_id == id);
+        let execution_id = ticket.as_ref().map(lease::LeaseTicket::execution_id);
+        let mut settled = !matches!(status.as_str(), "running" | "committing");
+        let matching = expected.map_or(true, |expected| execution_id.as_deref() == Some(expected));
+        let mut accepted = false;
+        if let Some(ticket) = ticket.filter(|_| matching) {
+            if !settled {
+                tx.execute("UPDATE execution_runs SET plan_json=json_set(plan_json,'$.meta.stopRequested',?) WHERE id=?",
+                    params![ticket.execution_id(), id])?;
+                accepted = true;
+                if !lease::alive(&tx, &plan, lease::now_ms())? {
+                    Self::interrupt_tx(&tx, &plan, id, &phase)?;
+                    status = "cancelled".into();
+                    settled = true;
+                }
+            } else {
+                accepted = Self::stop_requested(&tx, &ticket)?;
+            }
+        }
+        tx.commit()?;
+        Ok(RunStopReceipt { execution_id, status, accepted, settled })
+    }
+    pub(crate) fn stop_requested(db: &Connection, ticket: &lease::LeaseTicket) -> Result<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM execution_runs WHERE id=? AND json_extract(plan_json,'$.meta.stopRequested')=?)",
+            params![ticket.owner_id, ticket.execution_id()], |r| r.get(0),
+        )?)
+    }
+    pub(crate) fn guard_run(db: &Connection, plan: &RunPlan) -> Result<()> {
+        crate::maintenance::guard(db)?;
+        if let Some(ticket) = lease::ticket(plan)? {
+            lease::guard(db, &ticket, lease::now_ms())?;
+            if Self::stop_requested(db, &ticket)? {
+                return Err(Error::Cancelled);
+            }
+        }
+        Ok(())
     }
     fn acquire_plan_tx(
         tx: &Transaction<'_>,
@@ -151,6 +237,9 @@ impl Store {
             let ticket = lease::ticket(&parent)?.ok_or(Error::Stale)?;
             if ticket.owner_instance != lease::process_instance() {
                 return Err(Error::Stale);
+            }
+            if Self::stop_requested(tx, &ticket)? {
+                return Err(Error::Cancelled);
             }
             lease::heartbeat_tx(tx, &ticket, now, lease::DEFAULT_TTL_MS)?;
             Ok(ticket)
@@ -166,22 +255,18 @@ impl Store {
         }
     }
     pub(crate) fn activate_lease(&self, id: &str) -> Result<RunPlan> {
-        let mut db = self.lock()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let text:String=tx.query_row("SELECT plan_json FROM execution_runs WHERE id=? AND status IN ('running','committing')",[id],|r|r.get(0))?;
-        let mut plan: RunPlan = serde_json::from_str(&text)?;
-        let ticket = Self::acquire_plan_tx(&tx, &plan, lease::now_ms())?;
-        plan.meta["executionLease"] = serde_json::to_value(ticket)?;
-        tx.execute(
-            "UPDATE execution_runs SET plan_json=? WHERE id=?",
-            params![serde_json::to_string(&plan)?, id],
-        )?;
-        tx.commit()?;
+        let db = self.lock()?;
+        let text:String=db.query_row("SELECT plan_json FROM execution_runs WHERE id=? AND status IN ('running','committing')",[id],|r|r.get(0))?;
+        let plan: RunPlan = serde_json::from_str(&text)?;
+        lease::guard_plan(&db, &plan)?;
         Ok(plan)
     }
     pub(crate) fn heartbeat_lease(&self, ticket: &lease::LeaseTicket) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if Self::stop_requested(&tx, ticket)? {
+            return Err(Error::Cancelled);
+        }
         lease::heartbeat_tx(&tx, ticket, lease::now_ms(), lease::DEFAULT_TTL_MS)?;
         tx.commit()?;
         Ok(())
@@ -194,10 +279,7 @@ impl Store {
         Ok(())
     }
     pub fn guard(tx: &Transaction<'_>, plan: &RunPlan) -> Result<()> {
-        crate::maintenance::guard(tx)?;
-        if lease::ticket(plan)?.is_some() {
-            lease::guard_plan(tx, plan)?;
-        }
+        Self::guard_run(tx, plan)?;
         // An answer stays useful after the story moves on (D170); tidying
         // checks the story itself before applying anything (D168).
         if lease::own_lease(plan) {
@@ -211,12 +293,15 @@ impl Store {
             return Err(Error::Stale);
         }
         let live: Value = serde_json::from_str(&settings)?;
-        // Compare only keys supplied by the facade: defaults are absent in legacy settings.
-        if let Some(expected) = plan.meta.get("settingsGuard").and_then(Value::as_object) {
-            for (key, value) in expected {
-                if live.get(key).unwrap_or(&Value::Null) != value {
-                    return Err(Error::Stale);
-                }
+        if let Some(expected) = plan.meta.get("settingsGuard").filter(|value| value.is_object()) {
+            // Current starts capture raw settings. Older plans may compare a subset.
+            let matches = if plan.meta["generationSnapshot"] == true {
+                &live == expected
+            } else {
+                expected.as_object().into_iter().flatten().all(|(key, value)| live.get(key).unwrap_or(&Value::Null) == value)
+            };
+            if !matches {
+                return Err(Error::Stale);
             }
         }
         let state: String = tx.query_row(
@@ -276,31 +361,60 @@ impl Store {
     pub fn event(&self, id: &str, event: Value) -> Result<RunEvent> {
         let mut db = self.lock()?;
         let tx = db.transaction()?;
+        let saved = Self::append_event(&tx, id, event)?;
+        tx.commit()?;
+        Ok(saved)
+    }
+    fn append_event(tx: &Transaction<'_>, id: &str, event: Value) -> Result<RunEvent> {
         let seq: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(seq),0)+1 FROM execution_events WHERE run_id=?",
+            "SELECT MAX(
+                COALESCE((SELECT MAX(seq) FROM execution_events WHERE run_id=?1),0),
+                COALESCE((SELECT seq FROM execution_progress WHERE run_id=?1),0)
+             )+1",
             [id],
             |r| r.get(0),
         )?;
+        let statement = if event["type"] == "text" {
+            "INSERT INTO execution_progress(run_id,seq,event_json) VALUES(?,?,?)
+             ON CONFLICT(run_id) DO UPDATE SET seq=excluded.seq,event_json=excluded.event_json"
+        } else {
+            "INSERT INTO execution_events(run_id,seq,event_json) VALUES(?,?,?)"
+        };
         tx.execute(
-            "INSERT INTO execution_events(run_id,seq,event_json) VALUES(?,?,?)",
+            statement,
             params![id, seq, event.to_string()],
         )?;
-        tx.commit()?;
         Ok(RunEvent {
             seq: seq as u64,
             event,
         })
     }
+    pub(crate) fn owned<T>(&self, plan: &RunPlan, write: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut db = self.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        lease::guard_plan(&tx, plan)?;
+        let result = write(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
     pub fn run_event(&self, plan: &RunPlan, event: Value) -> Result<RunEvent> {
-        let saved = self.event(&plan.id, event.clone())?;
-        if let Some(parent) = plan.meta["parentRun"].as_str() {
-            self.event(parent, event)?;
-        }
-        Ok(saved)
+        self.owned(plan, |tx| {
+            if let Some(parent) = plan.meta["parentRun"].as_str() {
+                Self::append_event(tx, parent, event.clone())?;
+            }
+            Self::append_event(tx, &plan.id, event)
+        })
     }
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {
         let db = self.lock()?;
         let row = db.query_row("SELECT world_id,status,budget_json,draft_json,result_json,error,error_kind,failure_json FROM execution_runs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,Option<String>>(5)?, r.get::<_,Option<String>>(6)?, r.get::<_,Option<String>>(7)?)))?;
+        let ticket: Option<String> = db.query_row(
+            "SELECT json_extract(plan_json,'$.meta.executionLease') FROM execution_runs WHERE id=?",
+            [id], |r| r.get(0),
+        )?;
+        let ticket: Option<lease::LeaseTicket> = ticket.as_deref().map(serde_json::from_str).transpose()?;
+        let execution_id = ticket.as_ref().map(lease::LeaseTicket::execution_id);
+        let stop_requested = ticket.as_ref().map(|ticket| Self::stop_requested(&db, ticket)).transpose()?.unwrap_or(false);
         let mut failures = vec![];
         if !matches!(row.1.as_str(), "running" | "committing" | "committed" | "previewed") {
             let mut stmt = db.prepare("SELECT failure_json FROM execution_failures WHERE run_id=? ORDER BY seq")?;
@@ -309,7 +423,8 @@ impl Store {
             }
         }
         let mut stmt = db.prepare(
-            "SELECT seq,event_json FROM execution_events WHERE run_id=? AND seq>? ORDER BY seq",
+            "SELECT seq,event_json FROM execution_events WHERE run_id=?1 AND seq>?2
+             UNION ALL SELECT seq,event_json FROM execution_progress WHERE run_id=?1 AND seq>?2 ORDER BY seq",
         )?;
         let rows = stmt.query_map(params![id, after.min(i64::MAX as u64) as i64], |r| {
             Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?))
@@ -326,6 +441,8 @@ impl Store {
             id: id.into(),
             world_id: row.0,
             status: row.1,
+            execution_id,
+            stop_requested,
             budget: serde_json::from_str(&row.2)?,
             draft: serde_json::from_str(&row.3)?,
             result: row.4.map(|s| serde_json::from_str(&s)).transpose()?,
@@ -362,6 +479,7 @@ impl Store {
     pub fn resume(&self, id: &str) -> Result<()> {
         let mut db = self.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::maintenance::guard(&tx)?;
         let (status, text, failure, kind): (String, String, Option<String>, Option<String>) = tx.query_row(
             "SELECT status,plan_json,failure_json,error_kind FROM execution_runs WHERE id=?",
             [id],
@@ -387,10 +505,13 @@ impl Store {
         }
         let ticket = Self::acquire_plan_tx(&tx, &plan, lease::now_ms())?;
         plan.meta["executionLease"] = serde_json::to_value(ticket)?;
+        plan.meta.as_object_mut().map(|meta| meta.remove("stopRequested"));
         // Resume owns the new lease in this transaction, including for a sequence's child.
         if status == "failed" {
             let failure: Option<Value> = failure.as_deref().map(serde_json::from_str).transpose()?;
-            if let Some(stage) = crate::failure::retry_from(failure.as_ref(), kind.as_deref()) {
+            if let Some(step) = failure.as_ref().and_then(|failure| failure["replyStep"].as_str()) {
+                tx.execute("UPDATE execution_steps SET status='stale' WHERE run_id=? AND step_key=? AND status='done'", params![id, step])?;
+            } else if let Some(stage) = crate::failure::retry_from(failure.as_ref(), kind.as_deref()) {
                 let mut stmt = tx.prepare("SELECT step_key,kind FROM execution_steps WHERE run_id=? AND status='done' AND step_key LIKE 'model:%'")?;
                 let steps = stmt.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;

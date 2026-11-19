@@ -59,6 +59,16 @@ describe("parseChunk", () => {
 describe("streamChat", () => {
   const request = { slot: "main", url: "https://x/v1/chat/completions", model: "m", messages: [] };
 
+  it("rejects an in-band service error after partial text even when HTTP status is 200", async () => {
+    const handle = streamChat(fakePlatform([
+      { type: "open", status: 200 },
+      data({ choices: [{ delta: { content: "没写完的正文" } }] }),
+      data({ error: { message: "上游连接中断" } }),
+      { type: "done" },
+    ]), request);
+    await expect(handle.result).rejects.toMatchObject({ kind: "invalid_stream", partial: "没写完的正文" });
+  });
+
   it("combines separately reported token counts without inventing missing usage", async () => {
     const result = await streamChat(fakePlatform([
       data({ choices: [{ delta: { content: "正文" } }], usage: { prompt_tokens: 100 } }),

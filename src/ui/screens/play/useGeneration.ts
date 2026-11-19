@@ -68,6 +68,7 @@ export interface GenerationDeps {
   toast: AppValue["toast"];
   push: AppValue["push"];
   profileId?: string;
+  resumeRunId?: string;
 }
 
 export function useGeneration(d: GenerationDeps) {
@@ -80,6 +81,7 @@ export function useGeneration(d: GenerationDeps) {
   const [slow, setSlow] = useState(false);
   /** Seconds since this passage started, for the waiting line (R28). */
   const [waited, setWaited] = useState(0);
+  const [executionStatus, setExecutionStatus] = useState("");
   const handle = useRef<TurnHandle | null>(null);
   const autoHandle = useRef<AutoplayHandle | null>(null);
   const resumedAutoplay = useRef(false);
@@ -113,7 +115,9 @@ export function useGeneration(d: GenerationDeps) {
 
   /** The shared beginning of every passage: clear the notice, reset the timers, reserve space. */
   const begin = (g: Omit<Gen, "minHeight" | "phase">) => {
+    recoveryNoticeVersion.current++;
     setNotice(null);
+    setExecutionStatus("");
     deps.current.follow.current = deps.current.autoScroll;
     lastWords.current = Date.now();
     setSlow(false);
@@ -129,12 +133,17 @@ export function useGeneration(d: GenerationDeps) {
     if (!screenActive.current) return;
     const { game, refresh, showSaved } = deps.current;
     if (e.type === "step") { resumedAutoplay.current = true; stepStarted(e.index, e.total); }
-    else if (e.type === "finished") { resumedAutoplay.current = false; setAuto(null); setGen(null); handle.current = null; void refresh(); }
+    else if (e.type === "finished") { resumedAutoplay.current = false; setAuto(null); setGen(null); setExecutionStatus(""); handle.current = null; void refresh(); }
+    else if (e.type === "execution-status") setExecutionStatus({
+      reconnecting: "正在重新读取生成进度…", connected: "", "stop-requested": "已收到停止请求，正在收尾…",
+      "stop-unconfirmed": "还没确认停止，正在重试连接…",
+    }[e.state]);
     else if (e.type === "thinking") setGen((g) => g && { ...g, phase: "thinking" });
     else if (e.type === "text") { lastWords.current = Date.now(); setSlow(false); setGen((g) => g && { ...g, phase: "writing", text: e.full }); }
     else if (e.type === "organizing") setGen((g) => g && { ...g, phase: "organizing" });
     else if (e.type === "done") {
       showSaved(e.node);
+      setExecutionStatus("");
       setGen(null);
       if (!resumedAutoplay.current) handle.current = null;
       failures.current = 0;
@@ -147,6 +156,7 @@ export function useGeneration(d: GenerationDeps) {
       handle.current = null;
       setGen(null);
       // A paused or stopped run still holds the action; giving it back would invite sending it twice.
+      setExecutionStatus("");
       if (restore && !e.runId) deps.current.restoreDraft(restore);
       if (e.reason !== "cancelled" && e.reason !== "limit") { failures.current++; buzz(game.platform); }
       setNotice(failureNotice({ reason: e.reason, status: e.status, detail: e.detail, runId: e.runId, failure: e.failure, failures: e.failures }));
@@ -162,7 +172,14 @@ export function useGeneration(d: GenerationDeps) {
     if (plan.main === "settings") actions.push({ label: plan.label, run: () => push({ name: f.reason === "unsupported" ? "settings" : "setup", profileId }) });
     else if (plan.main === "wait") {
       const until = f.failure?.untilMs ?? 0;
-      if (again) actions.push({ label: plan.label, run: () => { const delay = Math.min(Math.max(until - Date.now(), 0), 45_000); setNotice({ text: "等这个故事空出来就写…", actions: [] }); setTimeout(() => { if (screenActive.current && !handle.current) again(); }, delay + 300); } });
+      if (again) actions.push({ label: plan.label, run: () => {
+        const version = ++recoveryNoticeVersion.current;
+        const delay = Math.min(Math.max(until - Date.now(), 0), 45_000);
+        setNotice({ text: "等这个故事空出来就写…", actions: [] });
+        setTimeout(() => {
+          if (screenActive.current && recoveryNoticeVersion.current === version && !handle.current && !autoHandle.current && !deps.current.isBusy()) again();
+        }, delay + 300);
+      } });
     } else if ((plan.main === "continue" || plan.main === "redo") && f.runId) {
       const id = f.runId;
       actions.push({ label: plan.label, run: () => retryExecution(id) });
@@ -207,6 +224,7 @@ export function useGeneration(d: GenerationDeps) {
     screenActive.current = true;
     void (async () => {
       await deps.current.refresh();
+      if (deps.current.resumeRunId) return;
       const run = await deps.current.game.currentExecution(deps.current.worldId);
       if (disposed || !run || handle.current || deps.current.isBusy()) return;
       // A passage still being written is followed; an interrupted one costs a
@@ -227,6 +245,21 @@ export function useGeneration(d: GenerationDeps) {
       autoHandle.current = null;
     };
   }, [d.game, d.worldId, d.refresh]);
+
+  useEffect(() => {
+    if (!d.resumeRunId) return;
+    let disposed = false;
+    const version = recoveryNoticeVersion.current;
+    void d.game.currentExecution(d.worldId, d.resumeRunId).then((run) => {
+      if (disposed || recoveryNoticeVersion.current !== version || handle.current || autoHandle.current || deps.current.isBusy()) return;
+      if (!run) { setNotice({ text: "这条没写完的提醒已过期。", actions: [] }); return; }
+      if (["running", "committing"].includes(run.status)) resumeExecution(run.id);
+      else showSavedExecution(run);
+    }).catch(() => {
+      if (!disposed && recoveryNoticeVersion.current === version) setNotice({ text: "暂时没能读取这条提醒的进度。", actions: [] });
+    });
+    return () => { disposed = true; };
+  }, [d.game, d.worldId, d.resumeRunId]);
 
   /**
    * 连播 (旁观): ordinary “继续” passages one after another. Each step streams
@@ -264,7 +297,7 @@ export function useGeneration(d: GenerationDeps) {
   };
 
   return {
-    gen, setGen, auto, notice, setNotice, slow, waited,
+    gen, setGen, auto, notice, setNotice, slow, waited, executionStatus,
     start, startAutoplay, resumeExecution, retryExecution, stop,
     /** True while a request of this page is in flight (a ref, so it is current inside callbacks). */
     inFlight: () => !!handle.current || !!autoHandle.current,

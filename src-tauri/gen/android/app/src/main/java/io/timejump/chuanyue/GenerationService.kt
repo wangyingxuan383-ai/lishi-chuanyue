@@ -194,6 +194,7 @@ class GenerationService : Service() {
         private const val REQUEST_STOP = 7
         const val EXTRA_WORLD = "io.timejump.chuanyue.WORLD"
         const val EXTRA_ACTION = "io.timejump.chuanyue.ACTION"
+        const val EXTRA_RUN = "io.timejump.chuanyue.RUN"
         private const val PREFS = "notify"
         const val PREF_PROGRESS = "progress"
         const val PREF_EXCERPT = "excerpt"
@@ -205,6 +206,9 @@ class GenerationService : Service() {
         private var executionId = ""
         private var chars = 0
         private var startedAt = 0L
+        private data class Progress(val run: String, val execution: String, val phase: String, val title: String, val chars: Int)
+        private val progress = LinkedHashMap<String, Progress>()
+        private val finished = LinkedHashSet<String>()
         /** Notification ids of "写好了" and "没写完", cleared when the player comes back. */
         private val shown = LinkedHashSet<Int>()
 
@@ -245,24 +249,43 @@ class GenerationService : Service() {
         @JvmStatic
         fun update(context: Context, run: String, execution: String, newPhase: String, title: String, written: Int) {
             synchronized(lock) {
-                runId = run
-                executionId = execution
-                phase = newPhase
-                if (title.isNotBlank()) storyTitle = title
-                chars = written
-                val service = current ?: return
-                if (!prefs(context).getBoolean(PREF_PROGRESS, true)) return
-                try {
-                    service.getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, service.notification())
-                } catch (error: Exception) {
-                    warn("progress update", error)
+                if (execution.isBlank() || finished.contains(execution)) return
+                progress.remove(run)
+                progress[run] = Progress(run, execution, newPhase, title, written)
+                refreshProgress(context)
+            }
+        }
+
+        @JvmStatic
+        fun finishProgress(context: Context, run: String, execution: String) {
+            synchronized(lock) {
+                if (finished.add(execution) && finished.size > 256) finished.remove(finished.first())
+                if (progress[run]?.execution == execution) {
+                    progress.remove(run)
+                    refreshProgress(context)
                 }
+            }
+        }
+
+        private fun refreshProgress(context: Context) {
+            val target = progress.values.lastOrNull()
+            runId = target?.run.orEmpty()
+            executionId = target?.execution.orEmpty()
+            phase = target?.phase ?: "thinking"
+            storyTitle = target?.title.orEmpty()
+            chars = target?.chars ?: 0
+            val service = current ?: return
+            if (!prefs(context).getBoolean(PREF_PROGRESS, true)) return
+            try {
+                service.getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, service.notification())
+            } catch (error: Exception) {
+                warn("progress update", error)
             }
         }
 
         /** A run stopped without a passage. Shown only while the player is away, never for their own 停止. */
         @JvmStatic
-        fun storyIssue(context: Context, worldId: String, title: String, status: String, line: String) {
+        fun storyIssue(context: Context, worldId: String, title: String, status: String, line: String, run: String) {
             if (status == "cancelled" || !inBackground()) return
             val app = context.applicationContext
             try {
@@ -276,7 +299,7 @@ class GenerationService : Service() {
                     )
                 }
                 val id = storyNotificationId(worldId, 1)
-                val resume = storyIntent(app, worldId, "resume", id)
+                val resume = storyIntent(app, worldId, "resume", id, run)
                 val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(app, ISSUE_CHANNEL_ID) else Notification.Builder(app)
                 builder.setSmallIcon(R.drawable.ic_stat_seal)
                     .setContentTitle(if (title.isNotBlank()) "《$title》没写完" else "这一段没写完")
@@ -306,13 +329,14 @@ class GenerationService : Service() {
             if (worldId.isBlank()) DONE_NOTIFICATION_ID + kind else 2000 + ((worldId.hashCode() and 0x3fffffff) % 100000) * 2 + kind
 
         /** Opens the app on that story; `action` "resume" asks it to finish the passage. */
-        private fun storyIntent(context: Context, worldId: String, action: String, request: Int): PendingIntent =
+        private fun storyIntent(context: Context, worldId: String, action: String, request: Int, run: String = ""): PendingIntent =
             PendingIntent.getActivity(
                 context, request,
                 Intent(context, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     .putExtra(EXTRA_WORLD, worldId)
-                    .putExtra(EXTRA_ACTION, action),
+                    .putExtra(EXTRA_ACTION, action)
+                    .putExtra(EXTRA_RUN, run),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 

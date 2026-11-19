@@ -1,7 +1,7 @@
 // Optional writing tools. No story turn is generated and nothing is saved until adoption.
 import { remapContinuity, validateContinuity } from "../continuity";
 import type { Game } from "../game";
-import { ChatError, DEFAULT_TIMEOUTS, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
+import { ChatError, DEFAULT_TIMEOUTS, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, outputWasTruncated, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
 import { isRefusal } from "../llm/refusal";
 import * as tree from "../tree";
 import type { ActionMode, FactCitation, World, WorldState, WorldSettings } from "../types";
@@ -186,7 +186,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
           outcome = "refused";
           throw new WritingError("AI 这次没有给出改稿，可以调整要求再试。");
         }
-        if (result.finishReason === "length") throw new WritingError("这次改稿没有写完，请缩短所选文字或再试一次。");
+        if (outputWasTruncated(result.finishReason)) throw new WritingError("这次改稿没有写完，请缩短所选文字或再试一次。");
         await assertWritingAnchor(game, request.anchor);
         outcome = "ok";
         return text;

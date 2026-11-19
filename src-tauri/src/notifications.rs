@@ -196,6 +196,7 @@ async fn set_notify_prefs<R: Runtime>(app: tauri::AppHandle<R>, progress: bool, 
 struct LaunchTarget {
     world_id: Option<String>,
     action: Option<String>,
+    run_id: Option<String>,
 }
 
 #[tauri::command]

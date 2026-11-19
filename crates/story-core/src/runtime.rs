@@ -2,7 +2,7 @@ use crate::{
     chat::{self, BoxFuture, Completion, Model, TextSink},
     execution_lease,
     mcp::BuiltinMcp,
-    rules, Error, Result, RunBudget, RunPlan, RunSnapshot, Store,
+    rules, Error, Result, RunBudget, RunPlan, RunSnapshot, RunStopReceipt, Store,
 };
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -28,6 +28,8 @@ pub enum RunSignal {
     Phase { run_id: String, execution_id: String, world_id: String, title: String, phase: &'static str, chars: usize },
     /// `status`: paused, failed or cancelled; `reason` is player-facing.
     Ended { run_id: String, world_id: String, title: String, status: &'static str, reason: String },
+    /// Retires the live notification target for this launch, including success.
+    Finished { run_id: String, execution_id: String },
 }
 pub type RunObserver = Arc<dyn Fn(RunSignal) + Send + Sync>;
 /// The phase a request stands for, for the progress notification.
@@ -47,12 +49,9 @@ pub struct Engine {
     observer: Mutex<Option<RunObserver>>,
 }
 struct ActiveRun { execution_id: String, cancel: CancellationToken, system: Arc<std::sync::OnceLock<String>> }
-fn notification_execution_id(ticket:&execution_lease::LeaseTicket)->String {
-    format!("{}:{}:{}:{}",ticket.world_id,ticket.owner_id,ticket.owner_instance,ticket.fence)
-}
 fn notification_target(plan:&RunPlan)->(String,String) {
     match execution_lease::ticket(plan) {
-        Ok(Some(ticket))=>(ticket.owner_id.clone(),notification_execution_id(&ticket)),
+        Ok(Some(ticket))=>(ticket.owner_id.clone(),ticket.execution_id()),
         _=>(plan.id.clone(),String::new()),
     }
 }
@@ -65,6 +64,7 @@ pub(crate) struct Context {
     pub(crate) cancel: CancellationToken,
     /// Where in the passage this launch is, for the failure record (D166).
     pub(crate) stage: crate::failure::Stage,
+    last_reply_step: Option<String>,
     /// Model requests counted before this launch, so a failure can say how
     /// many this attempt sent (zero means it replayed or was refused locally).
     pub(crate) requests_before: u32,
@@ -73,10 +73,16 @@ impl Context {
     pub(crate) fn new(plan: RunPlan, budget: RunBudget, draft: Value, cancel: CancellationToken) -> Context {
         let active_before = budget.active_ms;
         let requests_before = budget.model_requests;
-        Context { plan, budget, draft, started: Instant::now(), active_before, cancel, stage: crate::failure::Stage::Prepare, requests_before }
+        Context { plan, budget, draft, started: Instant::now(), active_before, cancel, stage: crate::failure::Stage::Prepare, requests_before, last_reply_step: None }
     }
     pub(crate) fn failure(&self, error: &Error) -> Value {
-        crate::failure::record(error, self.stage, self.budget.model_requests.saturating_sub(self.requests_before))
+        let mut failure = crate::failure::record(error, self.stage, self.budget.model_requests.saturating_sub(self.requests_before));
+        if crate::failure::kind_of(error).after_reply() && self.stage != crate::failure::Stage::Settle {
+            if let Some(key) = &self.last_reply_step {
+                failure["replyStep"] = key.clone().into();
+            }
+        }
+        failure
     }
     pub(crate) fn budget(&mut self) -> RunBudget {
         self.budget.active_ms = self.active_before + self.started.elapsed().as_millis() as u64;
@@ -90,7 +96,7 @@ impl Context {
         let resume=&self.plan.meta["resumeBudgetBase"];
         let passage=self.plan.meta["autoplayBudgetVersion"]=="per-passage-1"&&self.plan.meta["parentRun"].is_string();
         let step=&self.plan.meta["stepBudgetBase"];
-        let later=|a:&Value,b:&Value| a["modelRequests"].as_u64().unwrap_or(0)>=b["modelRequests"].as_u64().unwrap_or(0);
+        let later=|a:&Value,b:&Value| (a["modelRequests"].as_u64(),a["activeMs"].as_u64()) >= (b["modelRequests"].as_u64(),b["activeMs"].as_u64());
         let chosen=match (resume.is_object(),passage&&step.is_object()) {(true,true)=>Some(if later(resume,step){resume}else{step}),(true,false)=>Some(resume),(false,true)=>Some(step),(false,false)=>None};
         if let Some(base)=chosen.cloned(){
             let base=&base;
@@ -135,6 +141,7 @@ impl Engine {
         self.store.lock().ok().and_then(|db| db.query_row("SELECT title FROM worlds WHERE id=?", [&plan.world_id], |r| r.get::<_, String>(0)).optional().ok().flatten()).unwrap_or_default()
     }
     fn signal_phase(&self, plan: &RunPlan, phase: &'static str, chars: usize) {
+        if plan.kind == "maintain" { return; }
         if let Some(observer) = self.observer() {
             let (run_id,execution_id)=notification_target(plan);
             observer(RunSignal::Phase { run_id, execution_id, world_id: plan.world_id.clone(), title: self.signal_title(plan), phase, chars });
@@ -143,13 +150,7 @@ impl Engine {
     /// Only called once by a fresh native process, before accepting requests.
     pub fn recover_on_start(&self) -> Result<()> {
         self.store.initialize()?;
-        let mut db = self.store.lock()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Starting a UI process must not interrupt work owned by :agent, or
-        // any other live process. Only expired/unowned stories are recovered.
-        tx.execute("UPDATE execution_runs SET status='interrupted',error='进程曾中断，已保留完成步骤，可恢复' WHERE status IN ('running','committing') AND NOT EXISTS(SELECT 1 FROM world_execution_leases l WHERE l.world_id=COALESCE(json_extract(plan_json,'$.meta.executionLease.worldId'),execution_runs.world_id) AND l.owner_id<>'' AND l.expires_at_ms>? AND (json_extract(plan_json,'$.meta.executionLease') IS NULL OR (l.owner_id=json_extract(plan_json,'$.meta.executionLease.ownerId') AND l.owner_instance=json_extract(plan_json,'$.meta.executionLease.ownerInstance') AND l.fence=json_extract(plan_json,'$.meta.executionLease.fence'))))",[execution_lease::now_ms()])?;
-        tx.commit()?;
-        Ok(())
+        self.store.recover_orphans()
     }
     pub fn start(self: &Arc<Self>, plan: RunPlan) -> Result<String> {
         self.store.initialize()?;
@@ -179,18 +180,24 @@ impl Engine {
         }
         Ok(snapshot)
     }
-    pub fn stop(&self, id: &str) -> Result<()> {
-        if let Some(run) = self.active.lock().map_err(|_| Error::Cancelled)?.get(id) {
-            run.cancel.cancel();
-        }
-        Ok(())
+    pub fn stop(&self, id: &str) -> Result<RunStopReceipt> {
+        let attempt = self.active.lock().map_err(|_| Error::Cancelled)?.get(id).map(|run| run.execution_id.clone());
+        self.request_stop(id, attempt.as_deref())
     }
     /// Drawer actions are tied to one launch, including when a run is resumed.
-    pub fn stop_execution(&self, id: &str, execution_id: &str) -> Result<()> {
-        if let Some(run)=self.active.lock().map_err(|_|Error::Cancelled)?.get(id) {
-            if !execution_id.is_empty() && run.execution_id==execution_id {run.cancel.cancel();}
+    pub fn stop_execution(&self, id: &str, execution_id: &str) -> Result<RunStopReceipt> {
+        self.request_stop(id, Some(execution_id))
+    }
+    fn request_stop(&self, id: &str, expected: Option<&str>) -> Result<RunStopReceipt> {
+        let receipt = self.store.request_stop(id, expected)?;
+        if receipt.accepted && !receipt.settled {
+            if let Some(run) = self.active.lock().map_err(|_| Error::Cancelled)?.get(id) {
+                if receipt.execution_id.as_deref() == Some(run.execution_id.as_str()) {
+                    run.cancel.cancel();
+                }
+            }
         }
-        Ok(())
+        Ok(receipt)
     }
     pub fn stop_all(&self) {
         if let Ok(active) = self.active.lock() {
@@ -228,15 +235,18 @@ impl Engine {
         .await;
     }
     pub fn resume(self: &Arc<Self>, id: &str) -> Result<()> {
+        let snapshot = self.snapshot(id, u64::MAX)?;
         if self
             .active
             .lock()
             .map_err(|_| Error::Cancelled)?
             .contains_key(id)
         {
-            return Ok(());
+            if matches!(snapshot.status.as_str(), "running" | "committing") {
+                return Ok(());
+            }
+            return Err(Error::Busy { holder: "turn".into(), until_ms: 0 });
         }
-        let snapshot = self.store.snapshot(id, 0)?;
         if matches!(snapshot.status.as_str(), "committed" | "previewed") {
             return Ok(());
         }
@@ -244,7 +254,7 @@ impl Engine {
         // A run paused at its allowance continues with the same allowance again;
         // the totals already used stay recorded (D159). A retry after a failure
         // is a fresh attempt and gets the same allowance (R30).
-        if matches!(snapshot.status.as_str(), "paused" | "failed") {
+        if matches!(snapshot.status.as_str(), "paused" | "failed" | "interrupted" | "cancelled") {
             plan.meta["resumeBudgetBase"] = serde_json::to_value(&snapshot.budget)?;
         }
         // Store::resume acquires ownership before changing a running flag.
@@ -265,7 +275,7 @@ impl Engine {
         // The stored plan does not carry the pause point; keep the one resume() set (D159).
         if resume_base.is_object() { plan.meta["resumeBudgetBase"] = resume_base; }
         let execution_ticket = execution_lease::ticket(&plan)?.ok_or(Error::Stale)?;
-        let execution_id=notification_execution_id(&execution_ticket);
+        let execution_id=execution_ticket.execution_id();
         let token = CancellationToken::new();
         let id = plan.id.clone();
         let mut active = self.active.lock().map_err(|_| Error::Cancelled)?;
@@ -355,7 +365,7 @@ impl Engine {
                         .is_ok()
                 }) {
                     let _ = engine.flush_usage(&id, status);
-                    let _ = engine.store.event(&id, json!({"type":"failed","reason":crate::failure_kind(&error),"detail":error.to_string(),"failure":failure}));
+                    let _ = engine.store.run_event(&plan, json!({"type":"failed","reason":crate::failure_kind(&error),"detail":error.to_string(),"failure":failure}));
                     // Tidying that did not finish is asked for again by the next passage.
                     if let Some(observer) = engine.observer().filter(|_| plan.kind != "maintain") {
                         observer(RunSignal::Ended { run_id: plan.id.clone(), world_id: plan.world_id.clone(), title: engine.signal_title(&plan), status, reason: crate::failure::player_line(crate::failure::kind_of(&error)).into() });
@@ -366,6 +376,9 @@ impl Engine {
             heartbeat_done.cancel();
             let _ = heartbeat.await;
             if execution_ticket.owner_id == id {
+                if let Some(observer) = engine.observer() {
+                    observer(RunSignal::Finished { run_id: id.clone(), execution_id: execution_ticket.execution_id() });
+                }
                 let _ = engine.store.release_lease(&execution_ticket);
             }
             if let Ok(mut active) = engine.active.lock() {
@@ -417,10 +430,9 @@ impl Engine {
         if c.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        execution_lease::guard_plan(&*self.store.lock()?, &c.plan)?;
-        let budget = c.budget();
+        Store::guard_run(&*self.store.lock()?, &c.plan)?;
         if c.plan.kind=="autoplay"&&c.plan.meta["autoplayBudgetVersion"]=="per-passage-1" {
-            if budget.active_ms>=crate::types::RUN_TIME_LIMIT_MS*c.plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100){Err(Error::Limit("连播已达到各段合计的时间保护上限"))}else{Ok(())}
+            if c.step_budget().active_ms>=crate::types::RUN_TIME_LIMIT_MS*c.plan.meta["autoplayCount"].as_u64().unwrap_or(1).clamp(1,100){Err(Error::Limit("连播已达到各段合计的时间保护上限"))}else{Ok(())}
         } else {
             c.step_budget().time()
         }
@@ -450,20 +462,26 @@ impl Engine {
         let plan = {
             let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
             c.stage = crate::failure::Stage::of_purpose(purpose);
+            c.last_reply_step = None;
             c.plan.clone()
         };
         // Cache identity includes the actual task inputs, model and source scope.
         // A resumed, reassembled stage must never consume another request's result.
         let fingerprint=format!("{:x}",Sha256::digest(json!({"purpose":purpose,"model":plan.model,"messages":messages,"tools":tools,"state":plan.state,"base":plan.base_id,"source":plan.reference,"finalOnly":final_only.then_some(true)}).to_string()));
-        let cached: Option<(String,String)> = self.store.lock()?.query_row("SELECT input_json,output_json FROM execution_steps WHERE run_id=? AND kind=? AND status='done' ORDER BY rowid DESC LIMIT 1", params![plan.id,purpose], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((input,cached))=cached {
+        let cached: Option<(String,String,String)> = self.store.lock()?.query_row("SELECT step_key,input_json,output_json FROM execution_steps WHERE run_id=? AND kind=? AND status='done' ORDER BY rowid DESC LIMIT 1", params![plan.id,purpose], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some((key,input,cached))=cached {
             let input:Value=serde_json::from_str(&input)?;
             let same=input["fingerprint"]==fingerprint || (input.get("fingerprint").is_none() && {
                 let mut old=input["request"]["messages"].as_array().cloned().unwrap_or_default();
                 old.retain(|m|!m["content"].as_str().unwrap_or("").starts_with("【本次执行剩余额度】"));
                 old==messages && input["request"]["tools"].as_array().map(Vec::as_slice).unwrap_or(&[])==tools.as_slice()
             });
-            if same {self.note_reading(shared,input["request"]["messages"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;return Ok(serde_json::from_str(&cached)?);}
+            if same {
+                let result = serde_json::from_str(&cached)?;
+                self.accept_response(shared, &plan, &key, purpose, &result, !tools.is_empty() && !final_only)?;
+                self.note_reading(shared,input["request"]["messages"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;
+                return Ok(result);
+            }
         }
         let mut allowance: Option<String> = None;
         let request_limit = plan.meta["modelRequestLimit"]
@@ -490,32 +508,40 @@ impl Engine {
                 }
             }
         }
-        let before=crate::stage_context::report(&plan,purpose,&messages,&tools);
-        let bounded = crate::context::fit_writing_context(&plan, messages, &tools);
-        let mut report=match &bounded {Ok(messages)=>crate::stage_context::report(&plan,purpose,messages,&tools),Err(_)=>before.clone()};
-        report["beforeChars"] = before["chars"].clone();
-        let target = plan.meta["budgetChars"].as_u64().unwrap_or(12000);
-        report["status"] = if bounded.is_err() { "invalid" }
-            else if report["chars"].as_u64().unwrap_or(0) > target { "above-target" }
-            else { "ready" }.into();
-        {
-            let mut c=shared.lock().map_err(|_|Error::Cancelled)?;
-            if !c.draft["contextReports"].is_object(){c.draft["contextReports"]=json!({});}
-            c.draft["contextReports"][purpose]=report.clone();c.draft["phase"]=purpose.into();
-        }
-        self.checkpoint(shared)?;self.store.run_event(&plan,json!({"type":"request-context","report":report}))?;
-        let mut messages=bounded.map_err(|e|Error::fail(crate::failure::FailKind::Context,format!("{}：{}",crate::stage_context::label(purpose),e)))?;
+        let mut messages = messages;
         if final_only {
             messages.push(json!({"role":"system","content":"【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本次的完整结果，不要再调用工具；资料不足之处按已知写，不编造原著细节。"}));
         }
         if let Some(note) = allowance {
             messages.push(json!({"role":"system","content":note}));
         }
+        let before=crate::stage_context::report(&plan,purpose,&messages,&tools);
+        let bounded = crate::context::fit_writing_context(&plan, messages, &tools);
+        let target = plan.meta["budgetChars"].as_u64().unwrap_or(12000);
+        let mut messages = match bounded {
+            Ok(messages) => messages,
+            Err(error) => {
+                let mut report = before.clone();
+                report["beforeChars"] = before["chars"].clone();
+                report["status"] = "invalid".into();
+                self.record_context_report(shared, &plan, purpose, report)?;
+                return Err(Error::fail(crate::failure::FailKind::Context,
+                    format!("{}：{}", crate::stage_context::label(purpose), error)));
+            }
+        };
         let mut tools = tools;
         let mut retried = false;
+        let mut context_recovered = false;
         loop {
             self.check(shared)?;
             let body = chat::request_with(&plan.model, &messages, &tools, aux, final_only);
+            let mut report = crate::stage_context::report(&plan, purpose, &messages, &tools);
+            report["beforeChars"] = before["chars"].clone();
+            report["requestChars"] = crate::stage_context::units(&body.to_string()).into();
+            report["outputTokens"] = body["max_tokens"].clone();
+            report["status"] = if context_recovered { "context-retry" }
+                else if report["chars"].as_u64().unwrap_or(0) > target { "above-target" } else { "ready" }.into();
+            self.record_context_report(shared, &plan, purpose, report)?;
             let (key, token, remaining) = {
                 let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
                 c.budget();
@@ -534,12 +560,15 @@ impl Engine {
                 )
             };
             self.checkpoint(shared)?;
-            self.store.lock()?.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
+            self.store.owned(&plan, |tx| {
+                Store::guard_run(tx, &plan)?;
+                tx.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
+                Ok(())
+            })?;
             self.store.run_event(&plan, json!({"type":"thinking"}))?;
             self.signal_phase(&plan, signal_phase(purpose), 0);
             let store = self.store.clone();
-            let id = plan.id.clone();
-            let parent_run = plan.meta["parentRun"].as_str().map(str::to_owned);
+            let progress_plan = plan.clone();
             let original = if plan.kind == "continue" {
                 plan.original.clone()
             } else {
@@ -585,10 +614,7 @@ impl Engine {
                     return;
                 }
                 if let Ok(mut held) = held_in.lock() { *held = None; }
-                let _ = store.event(&id, event.clone());
-                if let Some(parent) = &parent_run {
-                    let _ = store.event(parent, event);
-                }
+                let _ = store.run_event(&progress_plan, event);
             });
             let future = self
                 .model
@@ -606,25 +632,28 @@ impl Engine {
             self.checkpoint(shared)?;
             match result {
                 Ok(result) => {
-                    self.store.lock()?.execute("UPDATE execution_steps SET status='done',output_json=? WHERE run_id=? AND step_key=?", params![serde_json::to_string(&result)?, plan.id,key])?;
+                    self.store.owned(&plan, |tx| {
+                        tx.execute("UPDATE execution_steps SET status='done',output_json=? WHERE run_id=? AND step_key=?", params![serde_json::to_string(&result)?, plan.id,key])?;
+                        Ok(())
+                    })?;
+                    self.accept_response(shared, &plan, &key, purpose, &result, !tools.is_empty() && !final_only)?;
                     self.note_reading(shared, &messages)?;
                     return Ok(result);
                 }
                 Err(error) => {
-                    self.store.lock()?.execute("UPDATE execution_steps SET status='failed',output_json=? WHERE run_id=? AND step_key=?", params![json!({"error":error.to_string()}).to_string(),plan.id,key])?;
+                    let status = if crate::failure::kind_of(&error) == crate::failure::FailKind::Setup { "unsent" } else { "failed" };
+                    self.store.owned(&plan, |tx| {
+                        tx.execute("UPDATE execution_steps SET status=?,output_json=? WHERE run_id=? AND step_key=?", params![status,json!({"error":error.to_string()}).to_string(),plan.id,key])?;
+                        Ok(())
+                    })?;
                     let can_retry = !retried
                         && shared.lock().map_err(|_| Error::Cancelled)?.step_budget().model_requests < request_limit;
                     if can_retry && matches!(error, Error::ContextWindow) {
                         if let Some((smaller, definitions)) = crate::context::recover_writing_request(&plan, &messages, &tools)? {
                             retried = true;
+                            context_recovered = true;
                             messages = smaller;
                             tools = definitions;
-                            let mut report = crate::stage_context::report(&plan, purpose, &messages, &tools);
-                            report["status"] = "context-retry".into();
-                            report["beforeChars"] = before["chars"].clone();
-                            shared.lock().map_err(|_| Error::Cancelled)?.draft["contextReports"][purpose] = report.clone();
-                            self.checkpoint(shared)?;
-                            self.store.run_event(&plan, json!({"type":"request-context","report":report}))?;
                             continue;
                         }
                     }
@@ -646,6 +675,48 @@ impl Engine {
                 }
             }
         }
+    }
+
+    fn record_context_report(&self, shared: &Shared, plan: &RunPlan, purpose: &str, report: Value) -> Result<()> {
+        {
+            let mut context = shared.lock().map_err(|_| Error::Cancelled)?;
+            if !context.draft["contextReports"].is_object() {
+                context.draft["contextReports"] = json!({});
+            }
+            context.draft["contextReports"][purpose] = report.clone();
+            context.draft["phase"] = purpose.into();
+        }
+        self.checkpoint(shared)?;
+        self.store.run_event(plan, json!({"type":"request-context","report":report}))?;
+        Ok(())
+    }
+
+    fn accept_response(
+        &self, shared: &Shared, plan: &RunPlan, key: &str, purpose: &str,
+        result: &Completion, allow_tool_calls: bool,
+    ) -> Result<()> {
+        shared.lock().map_err(|_| Error::Cancelled)?.last_reply_step = Some(key.to_owned());
+        let error = if stopped_by_service(result) {
+            Some(Error::Refused(format!("AI 服务拒绝了本次{}，原路线未改动", crate::stage_context::label(purpose))))
+        } else if output_cut_short(result) && !complete_prose_before_record(plan, purpose, result) {
+            let label = crate::stage_context::label(purpose);
+            if purpose.starts_with("writing:") && is_story_plan(plan) {
+                let visible = narrative_part(&result.text);
+                if !visible.is_empty() {
+                    let prefix = if plan.kind == "continue" { plan.original.as_str() } else { "" };
+                    shared.lock().map_err(|_| Error::Cancelled)?.draft["partialNarrative"] = format!("{prefix}{visible}").into();
+                }
+            }
+            Some(Error::fail(crate::failure::FailKind::Format, format!("{label}受到模型输出长度限制，已保留进度")))
+        } else if result.text.trim().is_empty() && !(allow_tool_calls && !result.tool_calls.is_empty()) {
+            Some(Error::fail(crate::failure::FailKind::Empty, format!("AI 没有返回可用的{}", crate::stage_context::label(purpose))))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(())
     }
 
     // A tool returning evidence is not yet a model reading it. Only record
@@ -735,7 +806,7 @@ impl Engine {
         }))
         .await?;
         let all_tools = mcp.tools().await?;
-        let has_book = plan.state.get("source").is_some_and(Value::is_object);
+        let has_book = plan.reading_source().is_object();
         let tools: Vec<Value> = all_tools
             .into_iter()
             .filter(|t| is_read_tool(t["function"]["name"].as_str().unwrap_or("")))
@@ -760,7 +831,7 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"));
+        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"));
         let support = if tier == Tier::Fast {
             false
         } else if modern {
@@ -838,17 +909,20 @@ impl Engine {
         };
         self.check(&shared)?;
         if plan.kind == "ask" {
+            if refused(&result, &result.text, false) {
+                return Err(Error::Refused("AI 服务拒绝了这次查阅".into()));
+            }
             self.finish_preview(&shared, json!({"text":result.text}))?;
             return Ok(());
         }
         if plan.kind == "correction" {
-            let response = rules::record::lenient_json(&result.text)
-                .ok_or_else(|| if refused(&result,&result.text,false){Error::Refused("AI服务拒绝了本次原著改稿，原路线未改动".into())}else{Error::Invalid("原著改稿预览没有返回完整格式，可恢复重试".into())})?;
-            let response = crate::writing_context::local_correction(&plan,&response)?;
+            let response = rules::record::complete_json(&result.text)
+                .ok_or_else(|| if refused(&result,&result.text,false){Error::Refused("AI服务拒绝了本次原著改稿，原路线未改动".into())}else{Error::fail(crate::failure::FailKind::Review,"原著改稿预览没有返回完整格式，可恢复重试")})?;
+            let response = crate::writing_context::local_correction(&plan,&response).map_err(check_reply_error)?;
             let c = shared.lock().map_err(|_| Error::Cancelled)?;
             if c.draft["originalRead"] != true || c.draft["canonSkillRead"] != true {
-                return Err(Error::Invalid(
-                    "没有实际读取遵循原著技能和原文，不能把这次改稿标为已查证".into(),
+                return Err(Error::fail(crate::failure::FailKind::Review,
+                    "没有实际读取遵循原著技能和原文，不能把这次改稿标为已查证",
                 ));
             }
             let mut reference = plan
@@ -864,18 +938,18 @@ impl Engine {
                 .as_array()
                 .filter(|a| !a.is_empty())
                 .cloned()
-                .ok_or_else(|| Error::Invalid("尚未查出带原文依据的更正，原路线未改动".into()))?;
+                .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"尚未查出带原文依据的更正，原路线未改动"))?;
             let (source_changes, preserved_player_facts) =
-                separate_correction_sources(corrections, &plan.state)?;
+                separate_correction_sources(corrections, &plan.state).map_err(check_reply_error)?;
             corrections = source_changes;
             for change in &mut corrections {
                 let citations = change["citations"]
                     .as_array_mut()
                     .filter(|a| !a.is_empty())
-                    .ok_or_else(|| Error::Invalid("每项更正都需要原著引文".into()))?;
+                    .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"每项更正都需要原著引文"))?;
                 for cite in citations {
                     if cite["bookId"] != plan.state["source"]["bookId"] {
-                        return Err(Error::Invalid("改稿出处书籍不符".into()));
+                        return Err(Error::fail(crate::failure::FailKind::Review,"改稿出处书籍不符"));
                     }
                     let passage = passages
                         .iter()
@@ -889,7 +963,7 @@ impl Engine {
                                             .is_some_and(|text| text.contains(quote))
                                 })
                         })
-                        .ok_or_else(|| Error::Invalid("改稿出处没有对应到实际读过的原句".into()))?;
+                        .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"改稿出处没有对应到实际读过的原句"))?;
                     cite["title"] = passage["title"].clone();
                     if passage["page"].is_number() {
                         cite["page"] = passage["page"].clone();
@@ -911,7 +985,7 @@ impl Engine {
             }
             let mut issues = vec![];
             let record = rules::record::normalize_record(&response["record"], &mut issues)
-                .ok_or_else(|| Error::Invalid("改稿尚未完成事实整理".into()))?;
+                .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"改稿尚未完成事实整理"))?;
             let preview = json!({"anchor":plan.meta["anchor"],"sourceGuard":plan.meta["sourceGuard"].to_string(),"narrative":response["narrative"],"replacement":response["replacement"],"range":response["range"],"unresolved":response["unresolved"],"related":response["related"],"writingVersion":plan.meta["writingVersion"],"record":record,"correctionPatch":response["correctionPatch"],"corrections":corrections,"preservedPlayerFacts":preserved_player_facts,"reference":reference,"baseline":plan.meta["baseline"]});
             drop(c);
             self.finish_preview(&shared, preview)?;
@@ -931,7 +1005,14 @@ impl Engine {
                 narrative_part(&raw)
             )
         };
-        let parsed = rules::parse_record(&raw).map_err(|e| Error::fail(crate::failure::FailKind::Format, e))?;
+        let parsed = if output_cut_short(&result) {
+            json!({"record":null})
+        } else if plan.meta["playerNarrative"].is_string() {
+            rules::record::parse_complete_record(&raw)
+        } else {
+            let record_start = raw.to_ascii_lowercase().find("<record>");
+            rules::record::parse_complete_record(record_start.map(|start| &raw[start..]).unwrap_or(""))
+        };
         if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
         let mut record = parsed["record"].clone();
         if narrative.trim().is_empty() {
@@ -966,35 +1047,41 @@ impl Engine {
                 return Err(Error::fail(crate::failure::FailKind::Review, "没有可核实的原文依据，资料不足，未提交本次正文"));
             }
         }
-        if record.is_null()
-            || (plan.settings["choiceCount"].as_u64().unwrap_or(0) > 0
-                && record["choices"].as_array().is_none_or(Vec::is_empty))
-        {
+        let needs_time = plan.kind != "opening" && !valid_turn_time(&record);
+        let needs_choices = requires_choices(&plan, &record) && !valid_turn_choices(&record);
+        if record.is_null() || needs_time || needs_choices {
             self.store.run_event(&plan, json!({"type":"organizing"}))?;
             let extraction=crate::stage_context::extraction(&plan,&narrative);
             let extracted = self
                 .complete(&shared, "extract", extraction, vec![], true)
                 .await?;
-            let parsed = rules::parse_record(&format!("<record>{}", extracted.text))
-                .map_err(|e| Error::fail(crate::failure::FailKind::Format, e))?;
+            let parsed = rules::record::parse_complete_record(&extracted.text);
             if plan.kind=="opening"&&parsed["openingTitle"].is_string(){shared.lock().map_err(|_|Error::Cancelled)?.draft["openingTitle"]=parsed["openingTitle"].clone();}
             if record.is_null() {
                 record = parsed["record"].clone();
-            } else if let Some(choices) = parsed["record"].get("choices") {
-                record["choices"] = choices.clone();
+            } else {
+                if needs_time && valid_turn_time(&parsed["record"]) {
+                    record["time"] = parsed["record"]["time"].clone();
+                }
+                if needs_choices && valid_turn_choices(&parsed["record"]) {
+                    record["choices"] = parsed["record"]["choices"].clone();
+                }
             }
         }
-        if record.is_null() {
-            return Err(Error::fail(crate::failure::FailKind::Format, "正文已保存为草稿，整理结果不完整，可恢复重试"));
+        if let Some(problem) = turn_record_problem(&plan, &record) {
+            return Err(Error::fail(crate::failure::FailKind::Format, format!("正文已保留，{problem}，可以接着整理")));
         }
         if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2")) && !plan.meta["playerNarrative"].is_string() {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
-        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2")) && !plan.meta["playerNarrative"].is_string() {
+        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3")) && !plan.meta["playerNarrative"].is_string() {
             let (revised,revised_record,report)=self.review_reference_lite(&shared,&plan,&narrative,&record).await?;
             narrative=revised; record=revised_record;
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report;
+        }
+        if let Some(problem) = turn_record_problem(&plan, &record) {
+            return Err(Error::fail(crate::failure::FailKind::Review, format!("核对后的记录不完整：{problem}")));
         }
         let mut options = plan.options.clone();
         options["advanceTime"] = true.into();
@@ -1239,9 +1326,10 @@ impl Engine {
         if let Some(result) = existing {
             return Ok(serde_json::from_str(&result)?);
         }
-        execution_lease::guard_plan(&tx, plan)?;
+        Store::guard_run(&tx, plan)?;
         let time = Utc::now().to_rfc3339();
         if let Some(world) = &plan.new_world {
+            Store::guard_opening_book(&tx, plan)?;
             tx.execute("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES(?,?,?,?,?,?,?,?)",params![plan.world_id,if plan.meta["titlePolicy"]=="auto" {c.draft["openingTitle"].as_str().unwrap_or("未命名故事")}else{world["title"].as_str().unwrap_or("未命名故事")},world["eraId"].as_str().unwrap_or(""),plan.line_id,plan.settings.to_string(),time,time,time])?;
         } else {
             Store::guard(&tx, plan)?;
@@ -1257,7 +1345,7 @@ impl Engine {
         let mut meta = plan.meta.clone();
         // A saved passage keeps what describes it, not the prompts that built
         // it: those were copied into every node and only grew the save (R30).
-        for key in ["settingsGuard", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "chapterMessages", "codexMessages",
+        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "chapterMessages", "codexMessages",
             "autoplayTurnSystem", "autoplayExtractSystem", "autoplayUpkeepSystem", "autoplayChapterSystem", "resumeBudgetBase", "stepBudgetBase"] {
             if let Some(object) = meta.as_object_mut() {
                 object.remove(key);
@@ -1509,7 +1597,7 @@ impl Engine {
                 crate::skills::read_writing_resource(id,args["path"].as_str().unwrap_or(""),version,args["offset"].as_u64().unwrap_or(0).min(usize::MAX as u64) as usize,args["limit"].as_u64().unwrap_or(2000).min(6000) as usize)
             }
             "read_world" => {
-                Ok(json!({"summary":crate::writing_context::project_state(&plan.state,&json!({"currency":plan.options["currency"],"clock":plan.options["clock"]}),plan.action["text"].as_str().unwrap_or("")),"settings":plan.settings,"referenceBinding":plan.state["source"],"partial":true,"available":{"people":plan.state["people"].as_array().map(Vec::len).unwrap_or(0),"places":plan.state["places"].as_array().map(Vec::len).unwrap_or(0),"cards":plan.state["cards"].as_array().map(Vec::len).unwrap_or(0)},"next":"人物按read_characters(query,offset,limit)读取，历史按read_history(query)搜索；完整状态保留本机，不代表其他资料为空。"}))
+                Ok(json!({"summary":crate::writing_context::project_state(&plan.state,&json!({"currency":plan.options["currency"],"clock":plan.options["clock"]}),plan.action["text"].as_str().unwrap_or("")),"settings":plan.settings,"referenceBinding":plan.reading_source(),"partial":true,"available":{"people":plan.state["people"].as_array().map(Vec::len).unwrap_or(0),"places":plan.state["places"].as_array().map(Vec::len).unwrap_or(0),"cards":plan.state["cards"].as_array().map(Vec::len).unwrap_or(0)},"next":"人物按read_characters(query,offset,limit)读取，历史按read_history(query)搜索；完整状态保留本机，不代表其他资料为空。"}))
             }
             "read_story_resources" | "read_continuity" => crate::ordinary_resources::read(&*self.store.lock()?, &plan, &name, &args),
             "read_characters" => {
@@ -1539,12 +1627,15 @@ impl Engine {
                 let db = self.store.lock()?;
                 let query = args["query"].as_str().unwrap_or("").trim();
                 let limit = args["limit"].as_i64().unwrap_or(6).clamp(1, 40);
-                let path = "WITH RECURSIVE up(id,parent_id,narrative,record_json,seq) AS (SELECT id,parent_id,narrative,record_json,seq FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.narrative,n.record_json,n.seq FROM nodes n JOIN up ON n.id=up.parent_id) ";
+                let at = if matches!(plan.kind.as_str(), "variant" | "continue") {
+                    plan.base_id.as_deref().unwrap_or(&plan.head_id)
+                } else { &plan.head_id };
+                let path = "WITH RECURSIVE up(id,parent_id,narrative,record_json,seq) AS (SELECT id,parent_id,narrative,record_json,seq FROM nodes WHERE id=? UNION SELECT n.id,n.parent_id,n.narrative,n.record_json,n.seq FROM nodes n JOIN up ON n.id=up.parent_id) ";
                 let mut stmt=db.prepare(&format!("{path} SELECT id,narrative,record_json FROM up WHERE narrative<>'' AND (?='' OR instr(narrative,?)>0 OR instr(COALESCE(record_json,''),?)>0) ORDER BY seq DESC LIMIT ?"))?;
-                let rows=stmt.query_map(params![plan.head_id,query,query,query,limit],|r|Ok(json!({"id":r.get::<_,String>(0)?,"narrative":r.get::<_,String>(1)?,"record":r.get::<_,Option<String>>(2)?})))?;
+                let rows=stmt.query_map(params![at,query,query,query,limit],|r|Ok(json!({"id":r.get::<_,String>(0)?,"narrative":r.get::<_,String>(1)?,"record":r.get::<_,Option<String>>(2)?})))?;
                 let turns = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-                let mut stmt = db.prepare(&format!("{path} SELECT c.id,c.title,c.summary FROM chapters c WHERE c.world_id=? AND c.last_node_id IN (SELECT id FROM up) AND (?='' OR instr(c.summary,?)>0 OR instr(c.title,?)>0) ORDER BY c.created_at DESC LIMIT ?"))?;
-                let rows=stmt.query_map(params![plan.head_id,plan.world_id,query,query,query,limit], |r| Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"summary":r.get::<_,String>(2)?})))?;
+                let mut stmt = db.prepare(&format!("{path} SELECT c.id,c.title,c.summary FROM chapters c WHERE c.world_id=? AND c.first_node_id IN (SELECT id FROM up) AND c.last_node_id IN (SELECT id FROM up) AND (?='' OR instr(c.summary,?)>0 OR instr(c.title,?)>0) ORDER BY c.created_at DESC LIMIT ?"))?;
+                let rows=stmt.query_map(params![at,plan.world_id,query,query,query,limit], |r| Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"summary":r.get::<_,String>(2)?})))?;
                 let chapters = rows.collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(history_excerpts(&plan, turns, chapters, query))
             }
@@ -1722,41 +1813,81 @@ fn transient_retry_delay(error: &Error) -> Option<std::time::Duration> {
     }
 }
 
+fn stopped_by_service(result: &Completion) -> bool {
+    matches!(
+        result.finish_reason.as_deref().unwrap_or("").to_ascii_lowercase().as_str(),
+        "content_filter" | "safety" | "prohibited_content" | "recitation" | "refusal"
+    )
+}
+
+fn output_cut_short(result: &Completion) -> bool {
+    matches!(
+        result.finish_reason.as_deref().unwrap_or("").to_ascii_lowercase().as_str(),
+        "length" | "max_tokens" | "max_output_tokens"
+    )
+}
+
+fn is_story_plan(plan: &RunPlan) -> bool {
+    matches!(plan.kind.as_str(), "turn" | "variant" | "continue" | "opening")
+}
+
+fn complete_prose_before_record(plan: &RunPlan, purpose: &str, result: &Completion) -> bool {
+    is_story_plan(plan)
+        && !plan.meta["playerNarrative"].is_string()
+        && purpose.starts_with("writing:")
+        && result.tool_calls.is_empty()
+        && result.text.to_ascii_lowercase().contains("<record>")
+        && !narrative_part(&result.text).is_empty()
+}
+
+fn valid_turn_time(record: &Value) -> bool {
+    rules::calendar::parse_duration_minutes(&record["time"]).is_some()
+}
+
+fn valid_turn_choices(record: &Value) -> bool {
+    record["choices"].as_array().is_some_and(|choices| {
+        choices.iter().any(|choice| choice.as_str().is_some_and(|text| !text.trim().is_empty()))
+    })
+}
+
+fn requires_choices(plan: &RunPlan, record: &Value) -> bool {
+    plan.settings["choiceCount"].as_u64().unwrap_or(0) > 0
+        && record["died"] != true
+        && !matches!(record["challenge"]["result"].as_str(), Some("won" | "lost"))
+}
+
+fn turn_record_problem(plan: &RunPlan, record: &Value) -> Option<&'static str> {
+    if !record.is_object() {
+        Some("回合记录未整理完")
+    } else if plan.kind != "opening" && !valid_turn_time(record) {
+        Some("回合记录里没有有效的经过时间")
+    } else if requires_choices(plan, record) && !valid_turn_choices(record) {
+        Some("回合记录里缺少行动建议")
+    } else {
+        None
+    }
+}
+
+fn check_reply_error(error: Error) -> Error {
+    match error {
+        Error::Invalid(message) => Error::fail(crate::failure::FailKind::Review, message),
+        other => other,
+    }
+}
+
 fn refused(result: &Completion, text: &str, has_record: bool) -> bool {
-    if matches!(
-        result
-            .finish_reason
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase()
-            .as_str(),
-        "content_filter" | "safety" | "prohibited_content" | "recitation"
-    ) {
+    if stopped_by_service(result) {
         return true;
     }
-    let chinese = text
-        .chars()
-        .filter(|c| ('\u{3400}'..='\u{9fff}').contains(c))
-        .count();
-    let latin = text.chars().filter(char::is_ascii_alphabetic).count();
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    !has_record
-        && ((chinese < 20 && latin >= 20 && latin > chinese * 3)
-            || (compact.encode_utf16().count() < 80
-                && [
-                    "抱歉，我无法",
-                    "抱歉，我不能",
-                    "我无法继续",
-                    "我不能继续",
-                    "作为AI",
-                    "作为一个AI",
-                    "作为人工智能",
-                    "Ican't",
-                    "Icannot",
-                    "I'msorry",
-                ]
-                .iter()
-                .any(|s| compact.contains(s))))
+    if has_record {
+        return false;
+    }
+    let text = text.trim().to_ascii_lowercase();
+    text.starts_with("the prompt could not be submitted")
+        || text.starts_with("the prompt contains sensitive words")
+        || (text.chars().count() < 80
+            && ["抱歉，我无法提供", "抱歉，我无法生成", "抱歉，我不能提供", "抱歉，我不能生成",
+                "i can't assist with", "i cannot assist with", "i'm sorry, but i can't assist"].iter().any(|phrase| text.starts_with(phrase)))
 }
 pub fn narrative_part(text: &str) -> String {
     let end = text
@@ -1837,13 +1968,19 @@ pub(crate) fn write_usage(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
     for (key, input, output, status) in steps {
+        if status == "unsent" { continue; }
         let input: Value = serde_json::from_str(&input)?;
         let output: Value = output
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         let prompt = output["usage"]["prompt_tokens"].as_i64();
         let completion = output["usage"]["completion_tokens"].as_i64();
-        tx.execute("INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET node_id=COALESCE(excluded.node_id,usage.node_id),outcome=CASE WHEN excluded.outcome='ok' THEN 'ok' ELSE usage.outcome END",params![format!("{run}:{key}"),world,node,input["purpose"].as_str().unwrap_or("turn"),input["model"].as_str().unwrap_or(""),prompt,completion,prompt.is_none()||completion.is_none(),output["firstTokenMs"].as_i64(),output["totalMs"].as_i64(),if status=="done"||status=="stale" {outcome} else {"failed"},Utc::now().to_rfc3339()])?;
+        let request_outcome = match status.as_str() {
+            "done" => outcome,
+            "stale" => "no_record",
+            _ => "failed",
+        };
+        tx.execute("INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET node_id=COALESCE(excluded.node_id,usage.node_id),outcome=CASE WHEN excluded.outcome IN ('ok','no_record') THEN excluded.outcome ELSE usage.outcome END",params![format!("{run}:{key}"),world,node,input["purpose"].as_str().unwrap_or("turn"),input["model"].as_str().unwrap_or(""),prompt,completion,prompt.is_none()||completion.is_none(),output["firstTokenMs"].as_i64(),output["totalMs"].as_i64(),request_outcome,Utc::now().to_rfc3339()])?;
     }
     Ok(())
 }

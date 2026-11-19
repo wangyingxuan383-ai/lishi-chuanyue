@@ -68,7 +68,7 @@ describe("external books", () => {
   });
 
   it("pauses/reuses completed analysis parts, stores branch bindings and round-trips immutable books with rebuilt indexes", async () => {
-    const llm = fakeLlm([{ text: "人物：阿青守信。[第一章 灯·片段1]" }, { text: "剧情：阿青交出钥匙。[第二章 信·片段2]" }]);
+    const llm = fakeLlm([{ text: '{"summary":"阿青守信","facts":[]}' }, { text: '{"summary":"阿青交出钥匙","facts":[]}' }]);
     const game = await Game.open(await createMemoryPlatform(llm), llmConfig);
     const book = shortBook(); await saveBook(game.repo, book);
     let binding = { ...newBinding(book.id, true), method: "analysis" as const, through: 1 };
@@ -96,6 +96,27 @@ describe("external books", () => {
     expect((await analysisJobs(game.repo, copied.id))[0].completed).toBe(2);
     expect((await game.repo.getState(bound.head.id)).source).toEqual(binding);
     expect(JSON.stringify(llm.calls)).not.toContain("终章秘密");
+  });
+
+  it("does not advance the analysis cursor on a truncated reply, and only retries that chunk", async () => {
+    const llm = fakeLlm([
+      { text: '{"summary":"已经整理好的第一章","facts":[]}' },
+      { text: '{"summary":"第二章缺尾部","facts":[]}', finish: "length" },
+      { text: '{"summary":"重新整理的第二章","facts":[]}' },
+    ]);
+    const game = await Game.open(await createMemoryPlatform(llm), llmConfig);
+    const book = shortBook();
+    await saveBook(game.repo, book);
+    const binding = { ...newBinding(book.id, true), method: "analysis" as const, through: 1 };
+    const failed = await game.analyzeSource(binding, () => {});
+    expect(failed.status).toBe("failed");
+    expect(failed.completed).toBe(1);
+    expect(failed.error).toContain("写到一半");
+    const resumed = await game.analyzeSource({ ...binding, analysisId: failed.id }, () => {});
+    expect(resumed.status).toBe("done");
+    expect(resumed.completed).toBe(2);
+    expect(llm.calls).toHaveLength(3);
+    expect(llm.calls[1].body.messages).toEqual(llm.calls[2].body.messages);
   });
 
 });

@@ -106,7 +106,7 @@ fn query_keys(plan: &RunPlan, args: &Value) -> Keys {
     // unique terms, never an arbitrary leading slice of a long instruction.
     add(
         &mut keys,
-        &text(&plan.state["source"]["instructions"]),
+        &text(&plan.reading_source()["instructions"]),
         2,
         80,
     );
@@ -314,7 +314,7 @@ fn window(text: &str, keys: &Keys, cap: usize) -> (String, usize, usize) {
 /// Canon notes (D162): the player's AI digests of the bound book. They guide
 /// writing but never enter `excerpts`, so reading one is not reading the original.
 pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value> {
-    let Some(book) = plan.state["source"]["bookId"].as_str() else {
+    let Some(book) = plan.reading_source()["bookId"].as_str() else {
         return Ok(json!({"notes":[],"reason":"未绑定参考书籍"}));
     };
     let mut statement = db.prepare("SELECT id,kind,title,scope_json,content,refs_json FROM canon_notes WHERE book_id=? AND active=1 AND status='done' AND content<>'' AND (world_id IS NULL OR world_id=?) ORDER BY updated_at DESC")?;
@@ -323,7 +323,7 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let query = query.trim();
     let words: Vec<&str> = query.split(|c: char| c.is_whitespace() || "，、,；;。".contains(c)).filter(|w| !w.is_empty()).collect();
-    let through = plan.state["source"]["through"].as_u64();
+    let through = plan.reading_source()["through"].as_u64();
     let rows: Vec<_> = rows.into_iter().filter(|(_,kind,_,scope,_,refs)| note_within_scope(kind,scope,refs,through)).collect();
     let total = rows.len();
     let mut remaining = budget(plan);
@@ -423,13 +423,13 @@ pub fn read(store: &Store, plan: &RunPlan, name: &str, args: &Value) -> Result<V
     // Only immutable, explicitly versioned reads are reusable. The result is still
     // returned through the ordinary tool message and normal evidence-delivery gate.
     if name=="read_original" && args["ref"]["bookVersion"].is_string() {
-        let book=plan.state["source"]["bookId"].as_str().unwrap_or("");
+        let book=plan.reading_source()["bookId"].as_str().unwrap_or("");
         let has_index=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='reference_index_versions'",[],|r|r.get::<_,i64>(0))?>0;
         let revision=if has_index{db.query_row("SELECT revision FROM reference_index_versions WHERE book_id=?",[book],|r|r.get::<_,i64>(0)).optional()?.unwrap_or(1)}else{1};
         let version=format!("{book}:{revision}");
         let has_run=db.query_row("SELECT EXISTS(SELECT 1 FROM execution_runs WHERE id=?)",[&plan.id],|r|r.get::<_,bool>(0))?;
         if has_run && db.query_row("SELECT EXISTS(SELECT 1 FROM source_books WHERE id=?)",[book],|r|r.get::<_,bool>(0))? && args["ref"]["bookId"]==book && args["ref"]["bookVersion"]==version {
-            let key=format!("source-read:{}",crate::pi_store::arguments_hash(&json!([plan.state["source"],version,plan.meta["budgetChars"],args])));
+            let key=format!("source-read:{}",crate::pi_store::arguments_hash(&json!([plan.reading_source(),version,plan.meta["budgetChars"],args])));
             let cached:Option<String>=db.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done'",params![plan.id,key],|r|r.get(0)).optional()?;
             if let Some(raw)=cached{let mut value:Value=serde_json::from_str(&raw)?;value["cacheHit"]=true.into();return Ok(value);}
             let value=read_db(&db,plan,name,args)?;
@@ -447,7 +447,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     if name=="preview_turn_record" { return crate::reference_lookup::preview_record(plan,args); }
     let mut resolved=args.clone();
     if name=="read_original" && args["ref"].is_object() {
-        let r=&args["ref"];if !r["section"].is_u64() || !r["chunk"].is_u64() {return Err(Error::Invalid("原文定位需要section和chunk，请重新检索".into()));}let book=plan.state["source"]["bookId"].as_str().unwrap_or("");
+        let r=&args["ref"];if !r["section"].is_u64() || !r["chunk"].is_u64() {return Err(Error::Invalid("原文定位需要section和chunk，请重新检索".into()));}let book=plan.reading_source()["bookId"].as_str().unwrap_or("");
         if r["bookId"]!=book{return Err(Error::Invalid("原文定位不属于本局绑定书籍".into()));}
         if let Some(version)=r["bookVersion"].as_str(){
             let exists=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='reference_index_versions'",[],|r|r.get::<_,i64>(0))?>0;
@@ -460,7 +460,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     if !["search_original", "read_original", "read_canon_facts"].contains(&name) {
         return Err(Error::Invalid("没有这个原著工具".into()));
     }
-    let binding = &plan.state["source"];
+    let binding = plan.reading_source();
     let Some(book) = binding["bookId"].as_str() else {
         return Ok(json!({"status":"insufficient","reason":"未绑定参考书籍","excerpts":[]}));
     };
@@ -739,6 +739,29 @@ mod tests {
         plan.state["source"]["through"]=0.into();assert_ne!(read(&store,&plan,"read_original",&args).unwrap()["cacheHit"],true);
         store.lock().unwrap().execute_batch("CREATE TABLE IF NOT EXISTS reference_index_versions(book_id TEXT PRIMARY KEY,revision INTEGER);INSERT OR REPLACE INTO reference_index_versions(book_id,revision) VALUES('book',2)").unwrap();
         assert!(read(&store,&plan,"read_original",&args).is_err());
+    }
+
+    #[test]
+    fn rewriting_reads_the_current_reference_scope_instead_of_the_old_base_scope() {
+        let (store, mut plan) = setup(&["青玉佩藏在竹匣。".into(), "后日青玉佩交给掌门。".into()]);
+        plan.kind = "variant".into();
+        plan.meta["generationSnapshot"] = true.into();
+        plan.meta["sourceGuard"] = plan.state["source"].clone();
+        plan.meta["sourceGuard"]["through"] = 0.into();
+        let later = json!({"section":1,"chunk":1});
+        assert!(read(&store, &plan, "read_original", &later).is_err());
+        let early = json!({"section":0,"chunk":0});
+        assert!(read(&store, &plan, "read_original", &early).is_ok());
+        let location = read(&store, &plan, "locate_original_event", &json!({"query":"青玉佩"})).unwrap();
+        assert_eq!(location["through"], 0);
+
+        plan.meta["sourceGuard"] = Value::Null;
+        let unbound = read(&store, &plan, "read_original", &early).unwrap();
+        assert_eq!(unbound["status"], "insufficient");
+        assert_eq!(unbound["excerpts"], json!([]));
+        let location = read(&store, &plan, "locate_original_event", &json!({"query":"青玉佩"})).unwrap();
+        assert_eq!(location["status"], "insufficient");
+        assert_eq!(location["items"], json!([]));
     }
 
     #[test]

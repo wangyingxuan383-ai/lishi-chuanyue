@@ -18,6 +18,13 @@ pub struct LeaseTicket {
     pub fence: i64,
 }
 
+impl LeaseTicket {
+    /// Stable for one launch. A replacement owner always receives a new fence.
+    pub fn execution_id(&self) -> String {
+        format!("{}:{}:{}:{}", self.world_id, self.owner_id, self.owner_instance, self.fence)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseState {
@@ -170,8 +177,12 @@ pub fn key(plan: &RunPlan) -> String {
 /// Whether a run still has a live owner: its lease (or its sequence's) is held
 /// by it and has not expired.
 pub fn alive(db: &Connection, plan: &RunPlan, now: i64) -> Result<bool> {
-    let owner = plan.meta["parentRun"].as_str().unwrap_or(&plan.id).to_owned();
-    Ok(current(db, &key(plan))?.is_some_and(|l| l.expires_at_ms > now && l.ticket.owner_id == owner))
+    let owner = plan.meta["parentRun"].as_str().unwrap_or(&plan.id);
+    let expected = ticket(plan)?;
+    Ok(current(db, &key(plan))?.is_some_and(|l| {
+        l.expires_at_ms > now && !l.ticket.owner_id.is_empty()
+            && expected.as_ref().is_none_or(|expected| l.ticket.owner_id == owner && *expected == l.ticket)
+    }))
 }
 
 pub fn ticket(plan: &RunPlan) -> Result<Option<LeaseTicket>> {

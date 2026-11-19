@@ -83,7 +83,11 @@ impl Host {
                     params["after"].as_u64().unwrap_or(0),
                 )
                 .and_then(|s| serde_json::to_value(s).map_err(Into::into))
-                .map_err(core_error),
+                .map_err(|error| match error {
+                    story_core::Error::Sql(rusqlite::Error::QueryReturnedNoRows) =>
+                        json!({"code":"execution_missing","message":"找不到这次运行"}),
+                    other => core_error(other),
+                }),
             "list" => {
                 self.engine.store.initialize().map_err(core_error)?;
                 self.engine
@@ -92,11 +96,13 @@ impl Host {
                     .and_then(|rows| serde_json::to_value(rows).map_err(Into::into))
                     .map_err(core_error)
             }
-            "stop" => self
-                .engine
-                .stop(required(&params, "id")?)
-                .map(|_| Value::Null)
-                .map_err(core_error),
+            "stop" => {
+                let id = required(&params, "id")?;
+                match params["executionId"].as_str() {
+                    Some(execution_id) => self.engine.stop_execution(id, execution_id),
+                    None => self.engine.stop(id),
+                }.and_then(|receipt| serde_json::to_value(receipt).map_err(Into::into)).map_err(core_error)
+            }
             "resume" => self
                 .engine
                 .resume(required(&params, "id")?)

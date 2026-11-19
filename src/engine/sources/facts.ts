@@ -1,6 +1,6 @@
 import { newId, type Repo } from "../db/repo";
 import type { SqlStatement } from "../../platform";
-import { lenientJson } from "../record/parse";
+import { completeJson, lenientJson } from "../record/parse";
 import type { SourceChunk } from "./library";
 import type { AnalysisJob, SourceBinding, SourceBook, SourceFact, SourceFactData, SourceFactKind, StructuredSourceAnalysis } from "./types";
 
@@ -31,12 +31,15 @@ function assertChunk(book: SourceBook, chunk: SourceChunk, job: AnalysisJob) {
 }
 
 /** Host-authored provenance is never taken from fields supplied by the model. */
-export function sourceAnalysisResult(raw: string, book: SourceBook, chunk: SourceChunk, job: AnalysisJob): { text: string; statements: SqlStatement[] } {
+export function sourceAnalysisResult(raw: string, book: SourceBook, chunk: SourceChunk, job: AnalysisJob, requireComplete = false): { text: string; statements: SqlStatement[] } {
   assertChunk(book, chunk, job);
-  const value = lenientJson(raw) as Partial<StructuredSourceAnalysis> | null;
+  const value = (requireComplete ? completeJson(raw) : lenientJson(raw)) as Partial<StructuredSourceAnalysis> | null;
   const reset: SqlStatement = { sql: "DELETE FROM canon_facts WHERE job_id=? AND book_id=? AND chunk=?", params: [job.id, book.id, chunk.ordinal] };
   // Legacy, already paid-for notes are retained. They do not manufacture verified facts.
-  if (!value || typeof value.summary !== "string" || !Array.isArray(value.facts)) return { text: raw.trim().slice(0, 20000), statements: [reset] };
+  if (!value || typeof value.summary !== "string" || !value.summary.trim() || !Array.isArray(value.facts)) {
+    if (requireComplete) throw new Error("模型没有交回完整整理，已整理的片段保留");
+    return { text: raw.trim().slice(0, 20000), statements: [reset] };
+  }
   const facts: SourceFactData[] = [], seen = new Set<string>();
   for (const item of value.facts.slice(0, 32)) {
     if (!item || !KINDS.includes(item.kind)) continue;

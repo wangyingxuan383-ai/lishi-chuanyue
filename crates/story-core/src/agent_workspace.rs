@@ -37,14 +37,27 @@ pub(crate) fn rows(
     sql: &str,
     args: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<Value>> {
+    let mut values = Vec::new();
+    visit_rows::<Error>(db, sql, args, |value| {
+        values.push(value);
+        Ok(())
+    })?;
+    Ok(values)
+}
+
+pub(crate) fn visit_rows<E: From<rusqlite::Error>>(
+    db: &Connection,
+    sql: &str,
+    args: &[&dyn rusqlite::ToSql],
+    mut visit: impl FnMut(Value) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
     let mut statement = db.prepare(sql)?;
     let columns: Vec<String> = statement
         .column_names()
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let values = statement
-        .query_map(args, |row| {
+    let mapped = statement.query_map(args, |row| {
             let mut object = Map::new();
             for (i, name) in columns.iter().enumerate() {
                 use rusqlite::types::ValueRef;
@@ -58,9 +71,11 @@ pub(crate) fn rows(
                 object.insert(name.clone(), value);
             }
             Ok(Value::Object(object))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(values)
+        })?;
+    for value in mapped {
+        visit(value?)?;
+    }
+    Ok(())
 }
 fn raw(db: &Connection, table: &str, key: &str, value: &str) -> Result<Value> {
     rows(

@@ -77,15 +77,17 @@ impl Model for DevModel {
     ) -> BoxFuture<Result<Completion>> {
         let file = self.secrets.clone();
         Box::pin(async move {
+            let missing = || Error::Provider { kind: "no_secret".into(), status: None, message: "尚未配置 AI 服务".into(), partial: false };
             let secrets: Value = serde_json::from_slice(
                 &tokio::fs::read(file)
                     .await
-                    .map_err(|_| Error::Invalid("尚未配置 AI 服务".into()))?,
-            )?;
+                    .map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { missing() }
+                        else { Error::fail(story_core::failure::FailKind::Setup, "无法读取开发台的 AI 服务配置") })?,
+            ).map_err(|_| Error::fail(story_core::failure::FailKind::Setup, "开发台的 AI 服务配置无法解析"))?;
             let entry = &secrets[&config.slot];
             let key = entry["value"]
                 .as_str()
-                .ok_or_else(|| Error::Invalid("尚未配置 AI 服务".into()))?;
+                .ok_or_else(missing)?;
             let bound = entry["boundBaseUrl"].as_str().unwrap_or("");
             if bound.is_empty()
                 || !config.url.starts_with(bound)
@@ -94,7 +96,7 @@ impl Model for DevModel {
                     None | Some(b'/') | Some(b'?')
                 )
             {
-                return Err(Error::Invalid("请求地址与密钥绑定地址不符".into()));
+                return Err(Error::Provider { kind: "url_not_bound".into(), status: None, message: "请求地址与密钥绑定地址不符".into(), partial: false });
             }
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -102,7 +104,7 @@ impl Model for DevModel {
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_millis(story_core::chat::REQUEST_BACKSTOP_MS))
                 .build()
-                .map_err(|_| Error::Invalid("无法初始化模型连接".into()))?;
+                .map_err(|_| Error::fail(story_core::failure::FailKind::Network, "无法初始化模型连接"))?;
             agent_model::complete(client, config, body, key.to_owned(), cancel, text).await
         })
     }

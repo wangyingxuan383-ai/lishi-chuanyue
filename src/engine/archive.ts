@@ -51,6 +51,12 @@ function validArchivedNote(note: any, book: SourceBook, worldId: Json): note is 
     || typeof note.title!=="string" || typeof note.content!=="string" || typeof note.model!=="string" || typeof note.active!=="boolean"
     || typeof note.createdAt!=="string" || typeof note.updatedAt!=="string" || !Array.isArray(note.refs) || !note.refs.every(section)) return false;
   const scope=note.scope, progress=note.progress;
+  if (!progress || !Array.isArray(progress.parts)) return false;
+  const gaps: unknown = progress.gaps ?? [];
+  if (!Array.isArray(gaps) || gaps.some(gap => !gap || !Number.isSafeInteger(gap.batch) || gap.batch < 0
+    || progress.parts[gap.batch] !== "" || !Array.isArray(gap.sections) || !gap.sections.length || !gap.sections.every(section))
+    || new Set(gaps.map(gap => gap.batch)).size !== gaps.length || (gaps.length && note.status === "done")
+    || progress.parts.some((part: unknown, batch: number) => part === "" && !gaps.some(gap => gap.batch === batch))) return false;
   return !!scope && typeof scope==="object" && !Array.isArray(scope)
     && ["from","to"].every(k=>scope[k]===undefined || section(scope[k])) && !(scope.from!==undefined && scope.to!==undefined && scope.from>scope.to)
     && ["subject","question"].every(k=>scope[k]===undefined || typeof scope[k]==="string")
@@ -59,6 +65,8 @@ function validArchivedNote(note: any, book: SourceBook, worldId: Json): note is 
     && Number.isSafeInteger(progress.total) && progress.total>=0 && (progress.error===undefined || typeof progress.error==="string")
     && (progress.batchSizes === undefined || Array.isArray(progress.batchSizes)
       && progress.batchSizes.every((size: number) => Number.isSafeInteger(size) && size > 0))
+    && (progress.materialKeys === undefined || Array.isArray(progress.materialKeys)
+      && progress.materialKeys.every((key: unknown) => typeof key === "string" && /^\d+:\d+$/.test(key)))
     && (progress.merges === undefined || Array.isArray(progress.merges)
       && progress.merges.every((level: unknown) => Array.isArray(level) && level.every((part: unknown) => typeof part === "string")));
 }
@@ -90,6 +98,16 @@ const WORLD_FIELDS = ["id", "title", "era_id", "current_line_id", "settings_json
 const LINE_FIELDS = ["id", "world_id", "name", "node_id", "kind", "auto_named", "archived", "created_at", "deleted_at"];
 const PIN_FIELDS = ["id", "world_id", "origin_node_id", "text", "created_at"];
 const CHAPTER_FIELDS = ["id", "world_id", "first_node_id", "last_node_id", "summary", "model", "prompt_version", "edited", "created_at", "title", "gist"];
+const NODE_JSON_FIELDS = ["meta_json", "record_json", "choices_json"] as const;
+
+const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+const validId = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+const validRows = (rows: unknown[], key = "id") =>
+  rows.every((row) => isObject(row) && validId(row[key])) &&
+  new Set(rows.map((row) => (row as Row)[key])).size === rows.length;
+const isJsonObject = (value: unknown) => {
+  try { return typeof value === "string" && isObject(JSON.parse(value)); } catch { return false; }
+};
 
 const parseJson = (value: unknown): Record<string, any> => {
   try { const parsed = typeof value === "string" ? JSON.parse(value) : value; return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; }
@@ -126,7 +144,7 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
   if (!world) throw new Error("world not found");
   const states = await q("SELECT s.node_id, s.state_json FROM states s JOIN nodes n ON n.id = s.node_id WHERE n.world_id = ?");
   const nodes = await q("SELECT * FROM nodes WHERE world_id = ? ORDER BY seq");
-  const bookIds = new Set(states.map((s) => JSON.parse(String(s.state_json)).source?.bookId).filter(Boolean) as string[]);
+  const bookIds = new Set<string>();
   const findBooks = (value: unknown) => {
     if (!value || typeof value !== "object") return;
     if (!Array.isArray(value) && typeof (value as any).bookId === "string") bookIds.add((value as any).bookId);
@@ -134,7 +152,7 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
   };
   // A correction or opening seed can cite an earlier book after the current binding changes.
   for (const row of states) findBooks(JSON.parse(String(row.state_json)));
-  for (const row of nodes) findBooks(JSON.parse(String(row.meta_json)));
+  for (const row of nodes) for (const field of NODE_JSON_FIELDS) findBooks(JSON.parse(String(row[field])));
   const factSources=await q("SELECT * FROM story_fact_sources WHERE world_id=?");
   const factCorrections=await q("SELECT * FROM fact_corrections WHERE world_id=?");
   const pi:PiReadableArchive={engine:"pi",version:1,readOnly:true,sessions:[],tasks:[]};
@@ -166,6 +184,61 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
   };
 }
 
+/** A world can have sibling opening revisions. Each later root must name
+ * an earlier opening, and every ordinary parent/redo edge must point in the
+ * corresponding direction. Sequence order also makes cyclic parents invalid.
+ */
+function routeProblems(a: Pick<WorldArchive, "nodes" | "chapters">, nodeRows: Map<string, Row>, problems: string[]) {
+  const roots: string[] = [], children = new Map<string, string[]>();
+  for (const node of a.nodes) {
+    const id = node.id as string;
+    if (!Number.isSafeInteger(node.seq) || Number(node.seq) < 1) problems.push("有的回合顺序无效");
+    if (node.parent_id == null) {
+      roots.push(id);
+      if (node.kind !== "opening") problems.push("回合路线的起点不是开场");
+    } else {
+      const parent = nodeRows.get(node.parent_id as string);
+      if (!parent) problems.push("有的回合找不到上一回合");
+      else if (Number(parent.seq) >= Number(node.seq) || node.kind === "opening") problems.push("回合顺序有环或前后颠倒");
+      const siblings = children.get(node.parent_id as string) ?? [];
+      siblings.push(id);
+      children.set(node.parent_id as string, siblings);
+    }
+    if (node.last_child_id != null && nodeRows.get(node.last_child_id as string)?.parent_id !== id) {
+      problems.push("重做的下一回合不属于这条分支");
+    }
+  }
+  const originals = roots.filter(id => {
+    const node = nodeRows.get(id)!;
+    const revision = parseJson(node.meta_json).revision;
+    if (!revision) return true;
+    const prior = nodeRows.get(revision.nodeId);
+    return !prior || prior.parent_id != null || prior.kind !== "opening" || Number(prior.seq) >= Number(node.seq);
+  });
+  if (originals.length !== 1) problems.push("找不到唯一的原始开场");
+  if (problems.length) return null;
+
+  // Index ancestor checks once for chapters and knowledge citations.
+  const bounds = new Map<string, { first: number; last: number }>();
+  let next = 0;
+  for (const root of roots) {
+    const stack = [{ id: root, leaving: false }];
+    while (stack.length) {
+      const { id, leaving } = stack.pop()!;
+      if (leaving) { bounds.get(id)!.last = next; continue; }
+      bounds.set(id, { first: next++, last: 0 });
+      stack.push({ id, leaving: true });
+      for (const child of children.get(id) ?? []) stack.push({ id: child, leaving: false });
+    }
+  }
+  const ancestor = (first: unknown, last: unknown) => {
+    const start = bounds.get(first as string), end = bounds.get(last as string);
+    return !!start && !!end && start.first <= end.first && end.first < start.last;
+  };
+  if (a.chapters.some(c => !ancestor(c.first_node_id, c.last_node_id))) problems.push("有的章节首尾不在同一条路线");
+  return ancestor;
+}
+
 /** What is wrong with a file, in the player's words; empty when it can be imported. */
 export function archiveProblems(raw: unknown): string[] {
   const a = raw as Partial<WorldArchive> | null;
@@ -173,31 +246,36 @@ export function archiveProblems(raw: unknown): string[] {
   if (typeof a.version !== "number" || a.version > ARCHIVE_VERSION) return ["这个文件来自更新的版本，请先更新游戏"];
   if (!Number.isInteger(a.version) || a.version < 1) return ["存档格式版本无效"];
   if (!a.world || !Array.isArray(a.nodes) || !Array.isArray(a.states) || !Array.isArray(a.lines) || !Array.isArray(a.pins) || !Array.isArray(a.chapters)) return ["文件不完整"];
+  if (!isObject(a.world) || !validId(a.world.id)
+    || !validRows(a.nodes) || !validRows(a.states, "node_id") || !validRows(a.lines)
+    || !validRows(a.pins) || !validRows(a.chapters)) return ["故事、回合或路线记录无效或重复"];
   const problems: string[] = [];
-  const nodes = new Set(a.nodes.map((n) => n.id as string));
+  const nodeRows = new Map(a.nodes.map(node => [node.id as string, node]));
+  const nodes = new Set(nodeRows.keys());
   if (!a.nodes.length) problems.push("文件里没有任何回合");
   if (a.nodes.some((n) => n.world_id !== a.world!.id)) problems.push("回合属于别的世界");
-  if (a.nodes.some((n) => n.parent_id != null && !nodes.has(n.parent_id as string))) problems.push("有的回合找不到上一回合");
   const states = new Set(a.states.map((s) => s.node_id as string));
   if (a.nodes.some((n) => !states.has(n.id as string))) problems.push("有的回合缺少状态");
-  if (a.states.some((s) => { try { JSON.parse(s.state_json as string); return false; } catch { return true; } })) problems.push("有的状态损坏了");
+  if (a.states.some(s => !nodes.has(s.node_id as string) || !isJsonObject(s.state_json))) problems.push("有的状态损坏了或不属于这个故事");
+  if ([...a.lines, ...a.pins, ...a.chapters].some(row => row.world_id !== a.world!.id)) problems.push("有的路线、要点或章节属于别的世界");
+  if (a.nodes.some(n => !isJsonObject(n.meta_json) || (n.record_json != null && n.record_json !== "null" && !isJsonObject(n.record_json)))) problems.push("有的回合附加信息损坏");
   if (a.lines.some((l) => !nodes.has(l.node_id as string))) problems.push("有的世界线指向不存在的回合");
-  if (!a.lines.some((l) => l.id === a.world!.current_line_id)) problems.push("找不到当前世界线");
+  if (!a.lines.some((l) => l.id === a.world!.current_line_id && l.deleted_at == null)) problems.push("找不到当前世界线");
   if (a.pins.some((p) => p.origin_node_id != null && !nodes.has(p.origin_node_id as string))) problems.push("有的要点指向不存在的回合");
-  const nodeRows = new Map(a.nodes.map(node => [String(node.id), node]));
+  const ancestor = routeProblems({ nodes: a.nodes, chapters: a.chapters }, nodeRows, problems);
+  if (!ancestor || problems.length) return [...new Set(problems)];
+  const chunksByBook = new Map<string, ReturnType<typeof chunksOf>>();
   for (const row of a.nodes) {
     const record = parseJson(row.record_json);
     if (record.continuity === undefined) continue;
     const issues: string[] = [], clean = normalizeContinuity(record.continuity, issues);
     if (issues.length) { problems.push("有的知情或线索记录损坏"); continue; }
-    const allowed = new Set<string>(); let cursor: any = row;
-    while (cursor && !allowed.has(String(cursor.id))) { allowed.add(String(cursor.id)); cursor = nodeRows.get(String(cursor.parent_id)); }
     for (const item of [...clean.knowledge ?? [], ...clean.threads ?? []]) {
       const sourceNode = item.source.nodeId ? nodeRows.get(item.source.nodeId) : row;
       const body = item.source.from === "narrative" ? sourceNode?.narrative : `${sourceNode?.action_text ?? ""}\n${sourceNode?.director_note ?? ""}`;
       // An existing passage can be hand-rewritten after annotation. Preserve
       // its old quote for review; projection will exclude it until rechecked.
-      if (!sourceNode || !allowed.has(String(sourceNode.id)) || typeof body !== "string") problems.push("有的知情或线索出处不属于当时路线");
+      if (!sourceNode || !ancestor(sourceNode.id, row.id) || typeof body !== "string") problems.push("有的知情或线索出处不属于当时路线");
     }
   }
   if (a.version >= 3) {
@@ -224,6 +302,7 @@ export function archiveProblems(raw: unknown): string[] {
         const jobs = new Set(bundle.jobs.map((j) => j.id));
         if (jobs.size !== bundle.jobs.length || bundle.jobs.some((j) => j.bookId !== b.id || typeof j.instructions !== "string" || typeof j.model !== "string" || typeof j.promptVersion !== "string" || !["running", "paused", "done", "failed"].includes(j.status) || !Number.isInteger(j.completed) || !Number.isInteger(j.total) || j.completed < 0 || j.total < j.completed || !(j.through === null || Number.isInteger(j.through) && j.through >= 0 && j.through < b.sections.length))) problems.push("书籍整理任务损坏");
         const chunks = chunksOf(b), completed = new Set<string>();
+        chunksByBook.set(b.id, chunks);
         for (const part of bundle.analysis) {
           if (!part) { problems.push("书籍整理片段损坏"); continue; }
           const key = `${part.jobId}:${part.ordinal}`;
@@ -256,7 +335,7 @@ export function archiveProblems(raw: unknown): string[] {
     const bundles = new Map((a.books ?? []).map((b) => [b.book.id, b]));
     const lines = new Set(a.lines.map((l) => l.id));
     const citationValid = (c: any) => {
-      const bundle = bundles.get(c?.bookId), chunk = bundle && chunksOf(bundle.book)[c?.chunk];
+      const chunk = chunksByBook.get(c?.bookId)?.[c?.chunk];
       return !!chunk && Number.isInteger(c.section) && c.section === chunk.section && typeof c.title === "string"
         && typeof c.quote === "string" && !!c.quote.trim() && chunk.text.includes(c.quote)
         && (c.start === undefined && c.end === undefined || Number.isInteger(c.start) && Number.isInteger(c.end) && c.start >= 0 && c.end > c.start && chunk.text.slice(c.start, c.end) === c.quote);

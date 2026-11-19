@@ -6,7 +6,7 @@
 // deep tier still checks the original text.
 import type { Repo } from "../db/repo";
 import { newId } from "../db/repo";
-import { ChatError, isContextWindowError, type ChatMessage, type ChatResult } from "../llm/chat";
+import { ChatError, isContextWindowError, outputWasTruncated, type ChatMessage, type ChatResult } from "../llm/chat";
 import { explainFailure } from "../llm/providers";
 import { refusedFinish } from "../llm/refusal";
 import { sourceAnalysisText } from "./facts";
@@ -33,9 +33,16 @@ export interface NoteProgress {
   batchSizes?: number[];
   /** Completed merges by level, in group order. Single parts are carried forward. */
   merges?: string[][];
+  /** Ordered immutable source chunks. Analysis digests are interchangeable views of those chunks. */
+  materialKeys?: string[];
+  /** A deferred batch occupies an empty slot in parts. It is never merged or used in writing. */
+  gaps?: NoteGap[];
+  failure?: { kind: string; phase: "batch" | "merge"; batch?: number; sections?: number[]; configuration?: string };
   error?: string;
   detail?: string;
 }
+export interface NoteGap { batch: number; sections: number[] }
+export type NoteResume = { kind: "defer"; batch: number } | { kind: "fill"; batch: number; text: string };
 export interface CanonNote {
   id: string; bookId: string; worldId: string | null; kind: NoteKind; title: string; scope: NoteScope;
   content: string; refs: number[]; model: string; status: "paused" | "running" | "done" | "failed";
@@ -103,7 +110,7 @@ export function suggestTitle(kind: NoteKind, scope: NoteScope): string {
 }
 
 /** Material for a note, in book order. Ranges read every chunk; subjects and questions the best matches. */
-export async function noteMaterials(repo: Repo, note: Pick<CanonNote, "bookId" | "kind" | "scope">): Promise<NoteMaterial[]> {
+export async function noteMaterials(repo: Repo, note: Pick<CanonNote, "bookId" | "kind" | "scope">): Promise<(NoteMaterial & { ordinal: number })[]> {
   const sections = new Map((await repo.platform.sql.query("SELECT section,title FROM source_sections WHERE book_id=?", [note.bookId])).map((r) => [Number(r.section), String(r.title)]));
   if (!sections.size) return [];
   const last = Math.max(...sections.keys());
@@ -146,7 +153,7 @@ export async function noteMaterials(repo: Repo, note: Pick<CanonNote, "bookId" |
   }
   return rows.filter((r) => String(r.text).trim()).map((r) => {
     const digest = ranged ? digests.get(Number(r.ordinal)) : undefined;
-    return { section: Number(r.section), title: sections.get(Number(r.section)) ?? "", text: digest ?? String(r.text), digest: !!digest };
+    return { ordinal: Number(r.ordinal), section: Number(r.section), title: sections.get(Number(r.section)) ?? "", text: digest ?? String(r.text), digest: !!digest };
   });
 }
 
@@ -174,7 +181,18 @@ function mergeRequests(parts: number): number {
 }
 
 export function noteStepsDone(progress: NoteProgress): number {
-  return (progress.parts?.length ?? 0) + (progress.merges?.reduce((count, level) => count + level.length, 0) ?? 0);
+  return (progress.parts?.filter(Boolean).length ?? 0) + (progress.merges?.reduce((count, level) => count + level.length, 0) ?? 0);
+}
+
+export function refusedNoteBatch(progress: NoteProgress): number | undefined {
+  const failure = progress.failure;
+  if (failure?.phase === "batch" && (failure.kind === "refused" || failure.kind === "suspected_refusal")) return failure.batch;
+  // 0.16.1 saved only the display strings. Its batch plan can still identify the next slot.
+  if (!failure && progress.error?.startsWith("AI 服务拒绝了这段资料。") && progress.detail?.startsWith("正在整理第 ")) return progress.parts?.length ?? 0;
+}
+
+export function noteChapterRange(sections: number[]): string {
+  return sections.length === 1 ? `第 ${sections[0] + 1} 章` : `第 ${sections[0] + 1}～${sections.at(-1)! + 1} 章`;
 }
 
 export interface NoteEstimate { requests: number; chars: number; pieces: number; digests: number }
@@ -215,10 +233,11 @@ export function noteMergeMessages(bookTitle: string, note: Pick<CanonNote, "kind
 export interface NoteRunner {
   call(messages: ChatMessage[], signal: AbortSignal): Promise<string>;
   model: string;
+  configuration?: string;
 }
 
 class NoteReplyError extends Error {
-  constructor(readonly kind: "empty" | "length" | "refused" | "context", message: string) {
+  constructor(readonly kind: "empty" | "length" | "refused" | "suspected_refusal" | "context", message: string) {
     super(message);
   }
 }
@@ -226,11 +245,15 @@ class NoteReplyError extends Error {
 export function noteReplyProblem(result: Pick<ChatResult, "text" | "finishReason">): NoteReplyError | null {
   const finish = result.finishReason?.toLowerCase();
   const content = result.text.trim();
-  if (refusedFinish(finish ?? null) || /^(?:the prompt (?:could not|cannot) be submitted|the prompt contains sensitive words|抱歉[，,！!\s]*(?:我)?(?:无法|不能)(?:提供|处理|整理|回答|生成))/i.test(content)) {
+  if (refusedFinish(finish ?? null)) {
     return new NoteReplyError("refused", "AI 服务拒绝了这段资料。可以换个整理模型后接着做。");
   }
-  if (finish === "length" || finish === "max_tokens") return new NoteReplyError("length", "模型写到一半达到了输出上限。");
+  if (outputWasTruncated(finish ?? null)) return new NoteReplyError("length", "模型写到一半达到了输出上限。");
   if (!content) return new NoteReplyError("empty", "模型没有写出札记正文。");
+  const hasCitedNotes = /[（(]第\s*\d+\s*章[）)]/.test(content);
+  if (!hasCitedNotes && /^(?:the prompt (?:could not|cannot) be submitted|the prompt contains sensitive words|抱歉[，,！!\s]*(?:我)?(?:无法|不能)(?:提供|处理|整理|回答|生成))/i.test(content)) {
+    return new NoteReplyError("suspected_refusal", "收到的回复像拒答，无法确认这段札记。");
+  }
   return null;
 }
 
@@ -242,7 +265,7 @@ function replyError(error: unknown): unknown {
   return error;
 }
 
-const retryableReply = (error: unknown) => error instanceof NoteReplyError && error.kind !== "refused";
+const retryableReply = (error: unknown) => error instanceof NoteReplyError && ["empty", "length", "context"].includes(error.kind);
 
 /** A failed note in the player's words (R30): one sentence, the cause kept apart. */
 export function noteFailure(error: unknown): { error: string; detail?: string } {
@@ -259,22 +282,35 @@ export function noteFailure(error: unknown): { error: string; detail?: string } 
  * Write (or resume) a note: each batch is digested once and saved, so a pause
  * or a failure keeps the finished parts; then the parts are merged.
  */
-export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, runner: NoteRunner, signal: AbortSignal, onProgress: (note: CanonNote) => void): Promise<CanonNote> {
+export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, runner: NoteRunner, signal: AbortSignal, onProgress: (note: CanonNote) => void, resume?: NoteResume): Promise<CanonNote> {
   const materials = await noteMaterials(repo, note);
   if (!materials.length) throw new Error(note.kind === "plot" || note.kind === "timeline" ? "这段章节里没有正文" : "原著里没有找到相关内容，换个名字或别名试试");
+  const materialKeys = materials.map(({ ordinal, section }) => `${ordinal}:${section}`);
   const parts = [...(note.progress.parts ?? [])];
   const batchSizes = [...(note.progress.batchSizes ?? noteBatches(materials).map((batch) => batch.length))];
+  const gaps = [...(note.progress.gaps ?? [])];
   if (batchSizes.some((size) => !Number.isInteger(size) || size < 1)
       || batchSizes.reduce((sum, size) => sum + size, 0) !== materials.length
-      || parts.length > batchSizes.length) {
+      || parts.length > batchSizes.length
+      || (note.progress.materialKeys && (note.progress.materialKeys.length !== materialKeys.length
+        || note.progress.materialKeys.some((key, i) => key !== materialKeys[i])))
+      || gaps.some(({ batch }) => !Number.isInteger(batch) || batch < 0 || batch >= parts.length || parts[batch] !== "")
+      || new Set(gaps.map(({ batch }) => batch)).size !== gaps.length
+      || parts.some((part, index) => !part.trim() && !gaps.some(({ batch }) => batch === index))) {
     throw new Error("原著资料已变化，无法对应旧进度。旧札记仍保留，可以按当前资料新建一份。");
   }
+  const refusedBatch = refusedNoteBatch(note.progress);
+  if (resume && ((resume.batch !== refusedBatch && (resume.kind !== "fill" || !gaps.some(({ batch }) => batch === resume.batch)))
+      || resume.batch > parts.length || resume.batch >= batchSizes.length
+      || resume.kind === "fill" && !resume.text.trim())) throw new Error("这批札记的进度已变，请重新打开后再试");
   const refs = [...new Set(materials.map((m) => m.section))];
   const merges = (note.progress.merges ?? []).map((level) => [...level]);
   const progress = (): NoteProgress => ({
     parts: [...parts],
     batchSizes: [...batchSizes],
     merges: merges.map((level) => [...level]),
+    materialKeys,
+    ...(gaps.length ? { gaps: [...gaps] } : {}),
     total: batchSizes.length + mergeRequests(batchSizes.length),
   });
   let current: CanonNote = { ...note, model: runner.model, refs, status: "running", progress: progress(), updatedAt: new Date().toISOString() };
@@ -295,18 +331,46 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     } catch (error) { throw replyError(error); }
   };
   let step = "";
+  let phase: "batch" | "merge" = "batch";
+  let pending: NoteGap | undefined;
+  const batchAt = (index: number, offset: number) => {
+    const batch = materials.slice(offset, offset + batchSizes[index]);
+    pending = { batch: index, sections: [...new Set(batch.map(({ section }) => section))] };
+    step = `正在整理${noteChapterRange(pending.sections)}。`;
+    return batch;
+  };
   try {
+    signal.throwIfAborted();
+    if (resume) {
+      const index = resume.batch;
+      const offset = batchSizes.slice(0, index).reduce((sum, size) => sum + size, 0);
+      batchAt(index, offset);
+      const gapIndex = gaps.findIndex(({ batch }) => batch === index);
+      if (resume.kind === "fill") {
+        parts[index] = resume.text.trim().slice(0, NOTE_MAX);
+        if (gapIndex >= 0) gaps.splice(gapIndex, 1);
+      } else if (gapIndex < 0) {
+        parts[index] = "";
+        gaps.push(pending!);
+      }
+    }
     await save({});
     let offset = batchSizes.slice(0, parts.length).reduce((sum, size) => sum + size, 0);
     // Older failures had no reason beyond “no usable note”. Try a shorter reply
     // on the first unfinished step instead of repeating the same request.
     let compact = note.status === "failed";
+    // Once later batches exist, a gap can be filled without repainting or resending them.
+    if (!resume && parts.length === batchSizes.length && gaps.length) {
+      const { batch: index } = gaps[0];
+      const pieces = batchAt(index, batchSizes.slice(0, index).reduce((sum, size) => sum + size, 0));
+      parts[index] = await call(noteBatchMessages(bookTitle, note, pieces, batchSizes.length === 1, true));
+      gaps.shift();
+      await save({ progress: progress() });
+    }
     while (parts.length < batchSizes.length) {
       const index = parts.length;
       const size = batchSizes[index];
-      const batch = materials.slice(offset, offset + size);
-      const first = batch[0].section + 1, last = batch.at(-1)!.section + 1;
-      step = first === last ? `正在整理第 ${first} 章。` : `正在整理第 ${first}～${last} 章。`;
+      const batch = batchAt(index, offset);
       const messages = (short: boolean) => noteBatchMessages(bookTitle, note, batch, batchSizes.length === 1, short);
       let content: string;
       try { content = await call(messages(compact)); }
@@ -327,6 +391,11 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
       compact = false;
       await save({ progress: progress() });
     }
+    if (gaps.length) {
+      await save({ status: "paused", progress: progress() });
+      return current;
+    }
+    phase = "merge";
     let mergeCompact = note.status === "failed" && parts.length === (note.progress.parts ?? []).length;
     let level = parts;
     for (let depth = 0; level.length > 1; depth++) {
@@ -359,7 +428,11 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   } catch (error) {
     const failure = noteFailure(error);
     const detail = [step, failure.detail].filter(Boolean).join(" ");
-    await save(signal.aborted ? { status: "paused" } : { status: "failed", progress: { ...current.progress, ...failure, ...(detail ? { detail } : {}) } });
+    const kind = error instanceof NoteReplyError || error instanceof ChatError ? error.kind : "storage_or_unknown";
+    await save(signal.aborted ? { status: "paused" } : {
+      status: "failed", progress: { ...current.progress, ...failure, ...(detail ? { detail } : {}),
+        failure: { kind, phase, ...(phase === "batch" ? pending : undefined), configuration: runner.configuration } },
+    });
   } finally { signal.removeEventListener("abort", abort); }
   return current;
 }

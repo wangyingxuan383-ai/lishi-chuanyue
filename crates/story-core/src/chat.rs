@@ -55,11 +55,19 @@ pub struct Accumulator {
     /// What the service said when it broke off mid-stream (R29, D164), for the player.
     stream_error: Option<String>,
     malformed_call: bool,
+    saw_delta: bool,
+    saw_whole_message: bool,
 }
 impl Accumulator {
     /// Reasoning/usage alone do not count as body or tool output.
     pub fn has_content(&self) -> bool {
         !self.result.text.is_empty() || !self.calls.is_empty()
+    }
+
+    /// A clean HTTP close alone does not complete a sequence of streamed deltas.
+    /// Relays that return a whole message may omit the streamed termination markers.
+    pub fn expects_terminal_marker(&self) -> bool {
+        self.saw_delta && !self.saw_whole_message && self.result.finish_reason.is_none() && !self.invalid
     }
 
     /// Some compatible services emit an empty argument string for a complete
@@ -83,7 +91,7 @@ impl Accumulator {
                 return None;
             }
         };
-        if let Some(error) = value.get("error") {
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             self.invalid = true;
             // Relays report an upstream failure as an error event inside the stream.
             let said = error["message"].as_str().or(error.as_str()).unwrap_or("").trim();
@@ -94,6 +102,8 @@ impl Accumulator {
             return None;
         }
         let choice = &value["choices"][0];
+        self.saw_delta |= choice["delta"].is_object();
+        self.saw_whole_message |= choice["message"].is_object();
         if choice["native_finish_reason"]
             .as_str()
             .is_some_and(|s| s.eq_ignore_ascii_case("malformed_function_call"))
@@ -123,8 +133,13 @@ impl Accumulator {
                 }
             }
         }
-        if let Some(reason) = choice["finish_reason"].as_str() {
-            self.result.finish_reason = Some(reason.into());
+        if let Some(reason) = choice["finish_reason"].as_str().filter(|reason| !reason.trim().is_empty()) {
+            if self.result.finish_reason.as_deref() != Some("refusal") {
+                self.result.finish_reason = Some(reason.into());
+            }
+        }
+        if delta["refusal"].as_str().is_some_and(|reason| !reason.trim().is_empty()) {
+            self.result.finish_reason = Some("refusal".into());
         }
         if value["usage"].is_object() {
             self.result.usage = Some(value["usage"].clone());
@@ -170,11 +185,21 @@ impl Accumulator {
                 partial: !self.result.text.is_empty(),
             });
         }
+        let reason = self.result.finish_reason.as_deref().unwrap_or_default().to_ascii_lowercase();
+        if matches!(reason.as_str(), "content_filter" | "safety" | "prohibited_content" | "recitation" | "refusal") {
+            self.result.text.clear();
+            self.result.tool_calls.clear();
+            self.result.continuation.clear();
+            return Ok(self.result);
+        }
         if self.malformed_call {
             return Err(crate::Error::Invalid("模型服务报告工具调用格式错误，本次没有执行工具；已保留进度，可继续或更换支持工具调用的模型".into()));
         }
         if self.result.text.is_empty() && self.result.tool_calls.is_empty() {
-            return Err(crate::Error::Invalid("模型没有返回正文或工具调用".into()));
+            if matches!(reason.as_str(), "length" | "max_tokens" | "max_output_tokens") {
+                return Ok(self.result);
+            }
+            return Err(crate::Error::fail(crate::failure::FailKind::Empty, "模型没有返回正文或工具调用"));
         }
         for call in &self.result.tool_calls {
             if call["id"].as_str().unwrap_or("").is_empty()
@@ -375,6 +400,20 @@ mod tests {
         let mut tool = Accumulator::default();
         tool.push(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"read","function":{"name":"read_original","arguments":"{"}}]}}]}"#);
         assert!(tool.has_content());
+    }
+
+    #[test]
+    fn explicit_stop_accepts_no_body_and_refusal_field_survives_later_stop() {
+        let mut blocked = Accumulator::default();
+        blocked.push(r#"{"choices":[{"delta":{"refusal":"拒绝","content":"不采用的文字"}}]}"#);
+        blocked.push(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
+        let refusal = blocked.finish().unwrap();
+        assert_eq!(refusal.finish_reason.as_deref(), Some("refusal"));
+        assert!(refusal.text.is_empty());
+        assert!(refusal.tool_calls.is_empty());
+        let mut length = Accumulator::default();
+        length.push(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#);
+        assert_eq!(length.finish().unwrap().finish_reason.as_deref(), Some("length"));
     }
 
     #[test]

@@ -62,15 +62,41 @@ export async function getBook(repo: Repo, id: string): Promise<SourceBook | null
   const [row] = await repo.platform.sql.query("SELECT json FROM source_books WHERE id=?", [id]);
   return row ? JSON.parse(String(row.json)) : null;
 }
+// Match archive inputs, including old snapshots, revision citations and the
+// source data retained with readable assistant tasks. Tasks still executing
+// can also own references until their prepared changes are adopted.
+const STORED_BOOK_USES = `
+  WITH documents(world_id, body) AS (
+    SELECT n.world_id, s.state_json FROM states s JOIN nodes n ON n.id=s.node_id
+    UNION ALL SELECT world_id, meta_json FROM nodes
+    UNION ALL SELECT world_id, record_json FROM nodes
+    UNION ALL SELECT world_id, choices_json FROM nodes
+    UNION ALL SELECT world_id, source_json FROM story_fact_sources
+    UNION ALL SELECT world_id, json FROM fact_corrections
+    UNION ALL SELECT world_id, result_json FROM pi_tasks
+    UNION ALL SELECT world_id, workspace_json FROM pi_tasks WHERE status IN ('running', 'committing', 'previewed')
+    UNION ALL SELECT t.world_id, c.output_json FROM pi_calls c JOIN pi_tasks t ON t.id=c.task_id
+    UNION ALL SELECT world_id, plan_json FROM execution_runs WHERE status IN ('running', 'committing')
+  )
+  SELECT DISTINCT w.id, w.title
+  FROM documents d JOIN worlds w ON w.id=d.world_id
+  JOIN json_tree(CASE WHEN json_valid(d.body) THEN d.body ELSE '{}' END) reference
+    ON reference.key='bookId' AND reference.type='text' AND reference.atom=?
+`;
+
 /** All snapshots count, including branches and worlds in the trash. */
 export async function bookUses(repo: Repo, id: string): Promise<{ id: string; title: string }[]> {
-  const rows = await repo.platform.sql.query("SELECT n.world_id,w.title,s.state_json FROM states s JOIN nodes n ON n.id=s.node_id JOIN worlds w ON w.id=n.world_id WHERE s.state_json LIKE ?", [`%${id}%`]);
-  return [...new Map(rows.filter((r) => JSON.parse(String(r.state_json)).source?.bookId === id).map((r) => [r.world_id, { id: String(r.world_id), title: String(r.title) }])).values()];
+  return (await repo.platform.sql.query(STORED_BOOK_USES, [id])).map(row => ({ id: String(row.id), title: String(row.title) }));
 }
 export async function deleteBook(repo: Repo, id: string) {
+  // Read references inside the write transaction, so a new reference cannot
+  // arrive after the check and before the cascading delete.
+  await repo.platform.sql.batch([{ sql: `DELETE FROM source_books WHERE id=? AND NOT EXISTS (${STORED_BOOK_USES})`, params: [id, id] }]);
+  if (!(await repo.platform.sql.query("SELECT 1 FROM source_books WHERE id=?", [id])).length) return;
   const uses = await bookUses(repo, id);
-  if (uses.length) throw new Error(`仍被这些世界的当前或历史路线引用：${uses.map((w) => w.title).join("、")}。解除当前绑定不会删除历史引用；请先导出并删除相关世界后再删除书籍。`);
-  await repo.platform.sql.batch([{ sql: "DELETE FROM source_books WHERE id=?", params: [id] }]);
+  throw new Error(uses.length
+    ? `仍被这些世界的当前或历史路线引用：${uses.map((w) => w.title).join("、")}。解除当前绑定不会删除历史引用；请先导出并删除相关世界后再删除书籍。`
+    : "参考书籍的引用刚发生变化，请重新检查后再试。");
 }
 
 function queryTerms(query: string | ReferenceQuery, instructions: string): Map<string, number> {

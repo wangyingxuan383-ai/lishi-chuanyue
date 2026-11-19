@@ -321,23 +321,24 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
 
 fn usage(raw: &Value, p: Protocol) -> Option<Value> {
     let mut result = raw.as_object()?.clone();
-    let number = |key: &str| raw[key].as_u64().unwrap_or(0);
+    let number = |key: &str| raw[key].as_u64();
+    let add_if_present = |base: &str, others: &[&str]| {
+        number(base).map(|n| others.iter().filter_map(|key| number(key)).fold(n, u64::saturating_add))
+    };
     let (input, output) = match p {
         Protocol::Responses => (number("input_tokens"), number("output_tokens")),
         Protocol::Anthropic => (
-            number("input_tokens")
-                + number("cache_creation_input_tokens")
-                + number("cache_read_input_tokens"),
+            add_if_present("input_tokens", &["cache_creation_input_tokens", "cache_read_input_tokens"]),
             number("output_tokens"),
         ),
         Protocol::Gemini => (
             number("promptTokenCount"),
-            number("candidatesTokenCount") + number("thoughtsTokenCount"),
+            add_if_present("candidatesTokenCount", &["thoughtsTokenCount"]),
         ),
         Protocol::Chat => return Some(raw.clone()),
     };
-    result.insert("prompt_tokens".into(), input.into());
-    result.insert("completion_tokens".into(), output.into());
+    if let Some(input) = input { result.insert("prompt_tokens".into(), input.into()); }
+    if let Some(output) = output { result.insert("completion_tokens".into(), output.into()); }
     Some(result.into())
 }
 fn canonical_call(
@@ -354,14 +355,27 @@ fn canonical_call(
         json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()},"providerData":{"protocol":protocol_name(p),"id":provider_id}}),
     )
 }
+
+fn gemini_prompt_blocked(raw: &Value) -> bool {
+    raw["promptFeedback"]["blockReason"].as_str().is_some_and(|reason| {
+        !matches!(reason, "" | "BLOCK_REASON_UNSPECIFIED" | "BLOCKED_REASON_UNSPECIFIED")
+    })
+}
+
 fn completed(raw: &Value, p: Protocol) -> Result<Completion> {
     let mut result = Completion::default();
     let (blocks, reason, key) = match p {
         Protocol::Responses => {
-            if raw["status"] != "completed" {
-                return Err(invalid("模型响应未完整结束，未执行工具"));
-            }
-            (items(&raw["output"]), "stop", "items")
+            let reason = match text(&raw["status"]) {
+                "completed" => "stop",
+                "incomplete" => match text(&raw["incomplete_details"]["reason"]) {
+                    "max_output_tokens" | "max_messages" => "length",
+                    "content_filter" => "content_filter",
+                    _ => return Err(invalid("模型响应未完整结束，未执行工具")),
+                },
+                _ => return Err(invalid("模型响应未完整结束，未执行工具")),
+            };
+            (items(&raw["output"]), reason, "items")
         }
         Protocol::Anthropic => (items(&raw["content"]), text(&raw["stop_reason"]), "content"),
         Protocol::Gemini => (
@@ -371,6 +385,58 @@ fn completed(raw: &Value, p: Protocol) -> Result<Completion> {
         ),
         Protocol::Chat => return Err(invalid("模型协议内部状态无效")),
     };
+    let stopped = match p {
+        Protocol::Responses => {
+            if reason == "content_filter" || blocks.iter().any(|block| {
+                block["type"] == "message" && items(&block["content"]).iter().any(|part| part["type"] == "refusal")
+            }) {
+                Some("content_filter")
+            } else if reason == "length" {
+                Some("length")
+            } else {
+                None
+            }
+        }
+        Protocol::Anthropic => match reason {
+            "refusal" => Some("refusal"),
+            "max_tokens" | "model_context_window_exceeded" => Some("length"),
+            _ => None,
+        },
+        Protocol::Gemini if gemini_prompt_blocked(raw) => Some("content_filter"),
+        Protocol::Gemini => match reason {
+            "MAX_TOKENS" => Some("length"),
+            "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
+            | "IMAGE_SAFETY" | "IMAGE_PROHIBITED_CONTENT" | "IMAGE_RECITATION" => Some("content_filter"),
+            _ => None,
+        },
+        Protocol::Chat => unreachable!(),
+    };
+    result.usage = usage(
+        if p == Protocol::Gemini { &raw["usageMetadata"] } else { &raw["usage"] },
+        p,
+    );
+    if stopped.is_none_or(|reason| reason == "length") {
+        for block in blocks {
+            match p {
+                Protocol::Responses if block["type"] == "message" => {
+                    for part in items(&block["content"]) {
+                        if part["type"] == "output_text" {
+                            result.text.push_str(text(&part["text"]));
+                        }
+                    }
+                }
+                Protocol::Anthropic if block["type"] == "text" => result.text.push_str(text(&block["text"])),
+                Protocol::Gemini if block["thought"] != true => result.text.push_str(text(&block["text"])),
+                _ => {}
+            }
+        }
+    }
+    if let Some(reason) = stopped {
+        // Keep partial prose on length limits. Never execute tools from
+        // a response the service stopped, even if their JSON parses.
+        result.finish_reason = Some(reason.into());
+        return Ok(result);
+    }
     for block in blocks {
         match p {
             Protocol::Responses => {
@@ -387,18 +453,10 @@ fn completed(raw: &Value, p: Protocol) -> Result<Completion> {
                         p,
                         block["call_id"].clone(),
                     )?);
-                } else if block["type"] == "message" {
-                    for part in items(&block["content"]) {
-                        if part["type"] == "output_text" {
-                            result.text.push_str(text(&part["text"]));
-                        }
-                    }
                 }
             }
             Protocol::Anthropic => {
-                if block["type"] == "text" {
-                    result.text.push_str(text(&block["text"]));
-                } else if block["type"] == "tool_use" {
+                if block["type"] == "tool_use" {
                     result.tool_calls.push(canonical_call(
                         text(&block["id"]),
                         text(&block["name"]),
@@ -427,19 +485,17 @@ fn completed(raw: &Value, p: Protocol) -> Result<Completion> {
                         p,
                         call["id"].clone(),
                     )?);
-                } else if block["thought"] != true {
-                    result.text.push_str(text(&block["text"]));
                 }
             }
             Protocol::Chat => {}
         }
     }
     if reason.is_empty()
-        || p == Protocol::Gemini && !matches!(reason, "STOP" | "MAX_TOKENS")
+        || p == Protocol::Gemini && reason != "STOP"
         || p == Protocol::Anthropic
             && !matches!(
                 reason,
-                "end_turn" | "tool_use" | "stop_sequence" | "max_tokens"
+                "end_turn" | "tool_use" | "stop_sequence"
             )
     {
         return Err(invalid("模型响应未正常结束，未执行工具"));
@@ -453,32 +509,9 @@ fn completed(raw: &Value, p: Protocol) -> Result<Completion> {
         if ids.len() != result.tool_calls.len() {
             return Err(invalid("模型返回了重复工具标识，未执行工具"));
         }
-        if matches!(reason, "max_tokens" | "MAX_TOKENS") {
-            return Err(invalid("工具调用被输出上限截断，未执行工具"));
-        }
         result.tool_calls[0]["providerData"][key] = Value::Array(blocks.to_vec());
     }
-    if result.text.is_empty() && result.tool_calls.is_empty() {
-        return Err(invalid("模型没有返回正文或工具调用"));
-    }
-    result.finish_reason = Some(
-        if !result.tool_calls.is_empty() {
-            "tool_calls"
-        } else if matches!(reason, "max_tokens" | "MAX_TOKENS") {
-            "length"
-        } else {
-            "stop"
-        }
-        .into(),
-    );
-    result.usage = usage(
-        if p == Protocol::Gemini {
-            &raw["usageMetadata"]
-        } else {
-            &raw["usage"]
-        },
-        p,
-    );
+    result.finish_reason = Some(if result.tool_calls.is_empty() { "stop" } else { "tool_calls" }.into());
     Ok(result)
 }
 
@@ -495,6 +528,7 @@ struct Parser {
     final_value: Option<Value>,
     blocks: BTreeMap<u64, Block>,
     parts: Vec<Value>,
+    prompt_blocked: bool,
     ended: bool,
 }
 impl Parser {
@@ -506,6 +540,7 @@ impl Parser {
             final_value: None,
             blocks: BTreeMap::new(),
             parts: vec![],
+            prompt_blocked: false,
             ended: false,
         }
     }
@@ -525,18 +560,18 @@ impl Parser {
         self.value(&value)
     }
     fn value(&mut self, value: &Value) -> Result<bool> {
-        if value.get("error").is_some() || value["type"] == "error" {
-            return Err(invalid("模型服务返回错误，未执行工具"));
+        if !value["error"].is_null() || value["type"] == "error" {
+            return Err(provider("stream", None, "模型服务中途返回错误，未执行工具", !self.current_text().is_empty()));
         }
         match self.protocol {
             Protocol::Responses => match text(&value["type"]) {
                 "response.output_text.delta" => self.result.text.push_str(text(&value["delta"])),
-                "response.completed" => {
+                "response.completed" | "response.incomplete" => {
                     self.final_value = Some(value["response"].clone());
                     self.ended = true;
                 }
-                "response.failed" | "response.incomplete" => {
-                    return Err(invalid("模型响应未完整结束，未执行工具"))
+                "response.failed" => {
+                    return Err(provider("stream", None, "模型服务报告响应失败，未执行工具", !self.current_text().is_empty()));
                 }
                 _ if value["object"] == "response" || value.get("output").is_some() => {
                     self.final_value = Some(value.clone());
@@ -610,10 +645,6 @@ impl Parser {
                         .get_mut(&value["index"].as_u64().unwrap_or(u64::MAX))
                         .filter(|b| !b.closed)
                         .ok_or_else(|| invalid("模型内容结束没有配对开头"))?;
-                    if !block.args.is_empty() {
-                        block.value["input"] = serde_json::from_str(&block.args)
-                            .map_err(|_| invalid("模型工具参数未完整结束"))?;
-                    }
                     block.closed = true;
                 }
                 "message_delta" => {
@@ -643,6 +674,10 @@ impl Parser {
                     return Ok(false);
                 }
                 let candidate = &value["candidates"][0];
+                if gemini_prompt_blocked(value) {
+                    self.prompt_blocked = true;
+                    self.ended = true;
+                }
                 for part in items(&candidate["content"]["parts"]) {
                     if part["thought"] != true {
                         self.result.text.push_str(text(&part["text"]));
@@ -674,30 +709,50 @@ impl Parser {
             return self.chat.finish();
         }
         if sse && !self.ended {
-            return Err(invalid("模型连接提前结束，未执行工具"));
+            return Err(provider("stream", None, "模型连接提前结束，未执行工具", !self.current_text().is_empty()));
         }
         if let Some(value) = self.final_value {
-            return completed(&value, self.protocol);
+            let mut result = completed(&value, self.protocol)?;
+            if result.finish_reason.as_deref() == Some("length") && result.text.is_empty() {
+                result.text = self.result.text;
+            }
+            return Ok(result);
         }
         match self.protocol {
             Protocol::Anthropic => {
                 if self.blocks.values().any(|b| !b.closed) {
-                    return Err(invalid("模型内容尚未完整结束"));
+                    return Err(provider("stream", None, "模型内容尚未完整结束", !self.current_text().is_empty()));
+                }
+                let reason = self.result.finish_reason.as_deref().unwrap_or_default();
+                let stopped = matches!(reason, "max_tokens" | "model_context_window_exceeded" | "refusal");
+                let mut content = Vec::new();
+                for mut block in self.blocks.into_values() {
+                    if !stopped && !block.args.is_empty() {
+                        block.value["input"] = serde_json::from_str(&block.args)
+                            .map_err(|_| invalid("模型工具参数未完整结束"))?;
+                    }
+                    content.push(block.value);
                 }
                 completed(
-                    &json!({"content":self.blocks.into_values().map(|b|b.value).collect::<Vec<_>>(),"stop_reason":self.result.finish_reason,"usage":self.result.usage}),
+                    &json!({"content":content,"stop_reason":reason,"usage":self.result.usage}),
                     self.protocol,
                 )
             }
             Protocol::Gemini => completed(
-                &json!({"candidates":[{"content":{"parts":self.parts},"finishReason":self.result.finish_reason}],"usageMetadata":self.result.usage}),
+                &json!({"candidates":[{"content":{"parts":self.parts},"finishReason":self.result.finish_reason}],"usageMetadata":self.result.usage,
+                    "promptFeedback":{"blockReason":if self.prompt_blocked { "SAFETY" } else { "" }}}),
                 self.protocol,
             ),
             _ => Err(invalid("模型未返回完整响应")),
         }
     }
     fn finish_with_tools(self,sse:bool,tools:&[Value])->Result<Completion>{
-        if self.protocol==Protocol::Chat {return self.chat.finish_with_tools(tools);}
+        if self.protocol==Protocol::Chat {
+            if sse && !self.ended && self.chat.expects_terminal_marker() {
+                return Err(provider("stream", None, "模型连接提前结束，未执行工具", self.chat.has_content()));
+            }
+            return self.chat.finish_with_tools(tools);
+        }
         self.finish(sse)
     }
 }
@@ -750,9 +805,8 @@ pub async fn complete(
         request = request.header("anthropic-version", "2023-06-01");
     }
     let started = Instant::now();
-    // TCP connection still has the client's 30s connect timeout. A service
-    // can accept it and then spend longer prefilling/reasoning before headers
-    // or the next content chunk; keep the overall request deadline at 180s.
+    // The client's connect timeout, first byte, idle time and request backstop
+    // cover different stages of a slowly starting response.
     let mut response = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(story_core::chat::FIRST_BYTE_MS),request.send())=>r.map_err(|_|provider("timeout_first",None,"等待模型响应超时",false))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),false))?};
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -767,12 +821,13 @@ pub async fn complete(
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.contains("text/event-stream"));
+        .is_some_and(|s| s.split(';').next().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("text/event-stream")));
     let mut parser = Parser::new(p);
     let mut buffer = vec![];
     let mut data = String::new();
     let mut total = 0;
     let mut first = None;
+    let mut streamed_text_len = 0;
     'read: loop {
         let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(if first.is_none() {story_core::chat::FIRST_BYTE_MS} else {story_core::chat::IDLE_MS}),response.chunk())=>r.map_err(|_|provider(if first.is_none() {"timeout_first"} else {"timeout_idle"},None,"等待模型内容超时",first.is_some()))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),first.is_some()))?};
         let Some(chunk) = chunk else {
@@ -800,7 +855,8 @@ pub async fn complete(
                     return Err(invalid("模型意外返回认证信息，已停止并隐藏"));
                 }
                 let done = parser.push(payload)?;
-                if !parser.current_text().is_empty() {
+                if parser.current_text().len() > streamed_text_len {
+                    streamed_text_len = parser.current_text().len();
                     first.get_or_insert(started.elapsed().as_millis() as u64);
                     sink(parser.current_text().into());
                 }
@@ -1067,13 +1123,55 @@ mod tests {
         raw = response_fixture();
         raw["output"][1]["arguments"] = "{\"broken\":".into();
         assert!(completed(&raw, Protocol::Responses).is_err());
-        assert!(completed(&json!({"content":[{"type":"tool_use","id":"c","name":"read_clock","input":{}}],"stop_reason":"max_tokens"}),Protocol::Anthropic).is_err());
-        assert!(completed(&json!({"candidates":[{"content":{"parts":[{"functionCall":{"id":"c","name":"read_clock","args":{}}}]},"finishReason":"MAX_TOKENS"}]}),Protocol::Gemini).is_err());
+        let anthropic = completed(&json!({"content":[{"type":"tool_use","id":"c","name":"read_clock","input":{}}],"stop_reason":"max_tokens"}),Protocol::Anthropic).unwrap();
+        assert_eq!(anthropic.finish_reason.as_deref(), Some("length"));
+        assert!(anthropic.tool_calls.is_empty());
+        let gemini = completed(&json!({"candidates":[{"content":{"parts":[{"functionCall":{"id":"c","name":"read_clock","args":{}}}]},"finishReason":"MAX_TOKENS"}]}),Protocol::Gemini).unwrap();
+        assert_eq!(gemini.finish_reason.as_deref(), Some("length"));
+        assert!(gemini.tool_calls.is_empty());
         let mut parser = Parser::new(Protocol::Anthropic);
         parser.push(&json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"read_clock","input":{}}}).to_string()).unwrap();
         parser.push("{\"type\":\"message_stop\"}").unwrap();
         assert!(parser.finish(true).is_err());
         assert!(Parser::new(Protocol::Responses).finish(true).is_err());
+    }
+    #[test]
+    fn native_adapters_distinguish_service_refusal_and_truncated_prose() {
+        let mut parser = Parser::new(Protocol::Responses);
+        parser.push(r#"{"type":"response.output_text.delta","delta":"半截正文"}"#).unwrap();
+        parser.push(r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":4,"output_tokens":8}}}"#).unwrap();
+        let reply = parser.finish(true).unwrap();
+        assert_eq!(reply.finish_reason.as_deref(), Some("length"));
+        assert_eq!(reply.text, "半截正文");
+        assert_eq!(reply.usage.unwrap()["completion_tokens"], 8);
+
+        let mut parser = Parser::new(Protocol::Responses);
+        parser.push(r#"{"object":"response","status":"completed","error":null,"output":[{"type":"message","content":[{"type":"refusal","refusal":"拒绝"}]}]}"#).unwrap();
+        assert_eq!(parser.finish(false).unwrap().finish_reason.as_deref(), Some("content_filter"));
+
+        let mut parser = Parser::new(Protocol::Gemini);
+        parser.push(r#"{"promptFeedback":{"blockReason":"BLOCKLIST"},"usageMetadata":{"promptTokenCount":12}}"#).unwrap();
+        let reply = parser.finish(true).unwrap();
+        assert_eq!(reply.finish_reason.as_deref(), Some("content_filter"));
+        let usage = reply.usage.unwrap();
+        assert_eq!(usage["prompt_tokens"], 12);
+        assert!(usage.get("completion_tokens").is_none());
+
+        let reply = completed(
+            &json!({"content":[{"type":"text","text":"已有文字"}],"stop_reason":"model_context_window_exceeded"}),
+            Protocol::Anthropic,
+        ).unwrap();
+        assert_eq!(reply.finish_reason.as_deref(), Some("length"));
+        assert_eq!(reply.text, "已有文字");
+    }
+    #[test]
+    fn chat_sse_needs_a_terminal_marker_but_whole_message_does_not() {
+        let mut partial = Parser::new(Protocol::Chat);
+        partial.push(r#"{"choices":[{"delta":{"content":"半截"}}]}"#).unwrap();
+        assert!(matches!(partial.finish_with_tools(true, &[]), Err(Error::Provider { partial: true, .. })));
+        let mut whole = Parser::new(Protocol::Chat);
+        whole.push(r#"{"choices":[{"message":{"content":"全文"}}]}"#).unwrap();
+        assert_eq!(whole.finish_with_tools(false, &[]).unwrap().text, "全文");
     }
     #[test]
     fn plain_json_and_json_chunk_arrays_use_the_same_canonical_boundary() {

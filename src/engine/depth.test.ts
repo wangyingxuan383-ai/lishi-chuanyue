@@ -3,6 +3,7 @@ import { createMemoryPlatform } from "../platform/memory";
 import type { ExecutionSnapshot, Json } from "../platform";
 import { depthBudget, depthOf, referenceReview } from "./depth";
 import { Game } from "./game";
+import { saveBook } from "./sources/library";
 import type { SourceBinding } from "./sources/types";
 import { sampleState } from "./testing/fixtures";
 
@@ -18,7 +19,7 @@ describe("generation tiers (D161)", () => {
   });
   it("checks the original fully at 深度, lightly for 同人 at 标准, never at 快速", () => {
     expect(referenceReview("deep", book)).toBe("reference-review-2");
-    expect(referenceReview("standard", book)).toBe("reference-review-lite-2");
+    expect(referenceReview("standard", book)).toBe("reference-review-lite-3");
     expect(referenceReview("standard", { ...book, fanfic: false })).toBeUndefined();
     expect(referenceReview("fast", book)).toBeUndefined();
     expect(referenceReview("deep", null)).toBeUndefined();
@@ -27,11 +28,12 @@ describe("generation tiers (D161)", () => {
     const platform = await createMemoryPlatform();
     const plans: Record<string, Json>[] = [];
     platform.execution = {
-      agent: async () => null, settle: async () => null, list: async () => [], stop: async () => {}, resume: async () => {},
+      agent: async () => null, settle: async () => null, list: async () => [], stop: async () => ({executionId:null,status:"cancelled",accepted:true,settled:true}), resume: async () => {},
       start: async (plan) => { plans.push(plan as Record<string, Json>); return "run"; },
       snapshot: async (id): Promise<ExecutionSnapshot> => ({ id, worldId: "", status: "failed", budget: { modelRequests: 0, toolCalls: 0, corrections: 0, activeMs: 0 }, draft: null, result: null, error: "测试结束", events: [] }),
     };
     const game = await Game.open(platform, { slot: "main", url: "https://x/v1/chat/completions", model: "m", includeUsage: true, contextTokens: 10_000 });
+    await saveBook(game.repo, { id: book.bookId, title: "试读", format: "txt", createdAt: new Date().toISOString(), sections: [{ title: "开篇", text: "旅人走出城门。" }] });
     const { world } = await game.repo.createWorld({
       title: "试", eraId: "free", settings: { premise: "一座城。", depth: "fast" },
       opening: { parentId: null, kind: "opening", narrative: "你醒来。", state: { ...sampleState(), source: book } as never, meta: {} },
