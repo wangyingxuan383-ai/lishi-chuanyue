@@ -178,3 +178,36 @@ describe("canon correction revisions", () => {
     expect(archiveProblems(await exportWorld(s.game.repo, copy))).toEqual([]);
   });
 });
+
+describe("按原著纠错的请求 (D182)", () => {
+  it("shows the chosen paragraph's original text and the notes up front, and they count as read", async () => {
+    const platform = await createMemoryPlatform();
+    const plans: Record<string, unknown>[] = [];
+    platform.execution = {
+      agent: async () => null, settle: async () => null, list: async () => [], stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }), resume: async () => {},
+      start: async (plan) => { plans.push(plan as Record<string, unknown>); return "run"; },
+      snapshot: async (id) => ({ id, worldId: "", status: "paused", budget: { modelRequests: 0, toolCalls: 0, corrections: 0, activeMs: 0 }, draft: null, result: null, error: "本次生成查阅资料的次数较多，已先停下，进度已保存", events: [] }),
+    };
+    const game = await Game.open(platform, { slot: "main", url: "https://x/v1/chat/completions", model: "m", includeUsage: true, contextTokens: 12_000 });
+    const sections = Array.from({ length: 20 }, (_, i) => ({ title: `第${i + 1}章`, text: i === 13 ? "院长宣布入门比试分为实战与理论两项。" : `第${i + 1}日，众人核对账目。` }));
+    const book: SourceBook = { id: crypto.randomUUID(), title: "长篇", format: "txt", createdAt: new Date().toISOString(), sections };
+    await saveBook(game.repo, book);
+    const source = newBinding(book.id, true);
+    const { world } = await game.repo.createWorld({ title: "纠错请求", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "开场。", state: { ...sampleState(), source }, meta: { openingSeed: { ...sampleState(), source } } } });
+    let cursor = await tree.cursor(game.repo, world.id);
+    // A long passage: the paragraph about the exam sits in the middle.
+    const narrative = `${"清晨的日光照进教室。".repeat(40)}\n讲台上的老师说起入门比试的安排。\n${"你望着窗外出神。".repeat(40)}`;
+    cursor = await tree.append(game.repo, cursor, { kind: "turn", actionMode: "do", actionText: "听课", narrative, state: { ...sampleState(), source } });
+    const start = narrative.indexOf("讲台上");
+    const work = game.runCanonCorrection({ anchor: { worldId: world.id, lineId: cursor.line.id, headId: cursor.head.id, nodeId: cursor.head.id, original: narrative }, range: { start, end: narrative.indexOf("\n", start) }, hint: "核对比试是什么" }, () => {});
+    const error = await work.done.catch((e: Error & { runId?: string }) => e);
+    // Paused at its allowance: told as such, and it can go on.
+    expect((error as Error).message).toContain("可以接着查");
+    expect((error as { runId?: string }).runId).toBe("run");
+    const plan = plans[0] as { messages: { content: string }[]; reference: { passages: { text: string; section: number }[] } };
+    const user = plan.messages[1].content;
+    expect(user).toContain("院长宣布入门比试分为实战与理论两项");
+    expect(user).toContain("【这是一个问题】");
+    expect(plan.reference.passages.some((p) => p.section === 13 && user.includes(p.text))).toBe(true);
+  });
+});

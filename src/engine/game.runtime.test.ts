@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
 import type { ExecutionSnapshot, Platform, StreamEvent } from "../platform";
 import { monthSpend } from "../ui/components/budgetMath";
-import { Game } from "./game";
+import { fallbackEligible, Game } from "./game";
 import { startRun, type RunPlan } from "./execution";
-import type { ChatResult } from "./llm/chat";
+import { ChatError, type ChatResult } from "./llm/chat";
 import { fakeLlm, type Script } from "./testing/fakeLlm";
 import { sampleState } from "./testing/fixtures";
 import * as tree from "./tree";
@@ -66,6 +66,33 @@ it("reconnects to an existing generation and stops only its observed attempt", a
     expect(resume).not.toHaveBeenCalled();
     await expect(run.done).resolves.toMatchObject({ status: "cancelled" });
   } finally { vi.useRealTimers(); }
+});
+
+describe("备用服务接替的条件", () => {
+  it("takes a reply cut off midway like the native core does, never a refusal of the key", () => {
+    expect(fallbackEligible(new ChatError("stream", undefined, "写到一半"))).toBe(true);
+    expect(fallbackEligible(new ChatError("network"))).toBe(true);
+    expect(fallbackEligible(new ChatError("http", 503))).toBe(true);
+    expect(fallbackEligible(new ChatError("http", 401))).toBe(false);
+    expect(fallbackEligible(new ChatError("empty"))).toBe(false);
+  });
+
+  it("logs a helper's usage under the backup model when the backup answered", async () => {
+    const platform = await createMemoryPlatform();
+    platform.llm.stream = async (request, onEvent) => {
+      if (request.url.startsWith("https://main.invalid")) { onEvent({ type: "error", kind: "network", message: "断网" } as StreamEvent); return "s"; }
+      onEvent({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: JSON.stringify({ text: "改好的设定" }) }, finish_reason: "stop" }] }) });
+      onEvent({ type: "done" });
+      return "s";
+    };
+    const game = await Game.open(platform, { slot: "main", url: "https://main.invalid/v1/chat/completions", model: "main-model", auxModel: "main-aux", includeUsage: true });
+    game.fallbackLlm = { slot: "b", url: "https://backup.invalid/v1/chat/completions", model: "backup-model", includeUsage: true };
+    const { world } = await game.repo.createWorld({ title: "试", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "开场。", state: sampleState() } });
+    await game.reviseEntry(world.id, { label: "设定卡", name: "渡口", aliases: [], text: "一个渡口" }, "写具体些");
+    const rows = await platform.sql.query("SELECT model, outcome FROM usage ORDER BY rowid");
+    expect(rows.filter((r) => r.outcome === "ok").map((r) => r.model)).toEqual(["backup-model"]);
+    expect(rows.filter((r) => r.outcome === "failed").every((r) => r.model === "main-aux")).toBe(true);
+  });
 });
 
 describe("auxiliary request accounting", () => {

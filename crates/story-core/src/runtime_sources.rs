@@ -69,20 +69,55 @@ fn add(keys: &mut Keys, text: &str, weight: u32, limit: usize) {
     }
 }
 
+/// Words of asking, not of the story: “核对比试是什么” is about 比试 (R30 step 3).
+/// Mirrored in TS `REQUEST_WORDS` (src/engine/sources/library.ts).
+pub(crate) const REQUEST_WORDS: [&str; 18] = ["核对一下", "核对", "检查", "一下", "是什么", "为什么", "什么", "怎么", "是否", "有没有", "原著", "原文", "修改", "改成", "确认", "请问", "看看", "查查"];
+
+/// A player's request with the asking words taken out.
+pub(crate) fn without_request_words(text: &str) -> String {
+    REQUEST_WORDS.iter().fold(text.to_owned(), |acc, word| acc.replace(word, " "))
+}
+
+/// 资料范围 (D184): the chapters one request chose, 0-based and inclusive. It
+/// lives only in the request (`meta.sourceScope`), never in the story.
+pub(crate) fn scope_range(plan: &RunPlan) -> Option<(i64, i64)> {
+    let scope = &plan.meta["sourceScope"];
+    match (scope["from"].as_i64(), scope["to"].as_i64()) {
+        (Some(from), Some(to)) if matches!(scope["mode"].as_str(), Some("chapters" | "notes")) => Some((from.max(0), to.max(from.max(0)))),
+        _ => None,
+    }
+}
+/// Only the chosen notes: the original is not looked up at all (a correction keeps
+/// its lookups within what the notes cover, `lookups`).
+pub(crate) fn notes_only(plan: &RunPlan) -> bool {
+    let scope = &plan.meta["sourceScope"];
+    scope["mode"] == "notes" && scope["lookups"] != true
+}
+fn chosen_notes(plan: &RunPlan) -> Option<HashSet<String>> {
+    let scope = &plan.meta["sourceScope"];
+    (scope["mode"] == "notes").then(|| strings(&scope["noteIds"]).into_iter().map(str::to_owned).collect())
+}
+fn scope_words(range: Option<(i64, i64)>) -> String {
+    range.map(|(from, to)| if from == to { format!("第 {} 章", from + 1) } else { format!("第 {}～{} 章", from + 1, to + 1) }).unwrap_or_default()
+}
+
 fn query_keys(plan: &RunPlan, args: &Value) -> Keys {
     let mut keys = vec![];
     let text = |v: &Value| v.as_str().unwrap_or("").to_owned();
-    add(&mut keys, &text(&args["query"]), 6, 80);
-    add(&mut keys, &text(&plan.action["text"]), 4, 60);
+    let query = text(&args["query"]);
+    add(&mut keys, &query, 6, 80);
+    // The model's own query leads; the turn's other words only help break ties.
+    let extra = |w: u32| if query.trim().is_empty() { w } else { 1 };
+    add(&mut keys, &text(&plan.action["text"]), extra(4), 60);
     for hint in [
         &plan.meta["rewriteHint"],
         &plan.action["rewriteHint"],
         &plan.meta["setup"]["hint"],
     ] {
-        add(&mut keys, &text(hint), 5, 60);
+        add(&mut keys, &without_request_words(&text(hint)), extra(5), 60);
     }
     for hint in [&plan.action["directorNote"], &plan.meta["directorNote"]] {
-        add(&mut keys, &text(hint), 4, 40);
+        add(&mut keys, &text(hint), extra(4), 40);
     }
     let mut names = vec![text(&plan.state["protagonist"]["name"])];
     names.extend(
@@ -96,10 +131,10 @@ fn query_keys(plan: &RunPlan, args: &Value) -> Keys {
             names.extend(strings(&p["aliases"]).into_iter().map(str::to_owned));
         }
     }
-    add(&mut keys, &names.join("\n"), 3, 60);
+    add(&mut keys, &names.join("\n"), extra(3), 60);
     if let Some(places) = plan.state["places"].as_array() {
         if let Some(place) = places.iter().find(|p| p["id"] == plan.state["placeId"]) {
-            add(&mut keys, &text(&place["name"]), 3, 20);
+            add(&mut keys, &text(&place["name"]), extra(3), 20);
         }
     }
     // Parse the complete saved use, including its last line. Selection is over
@@ -107,7 +142,7 @@ fn query_keys(plan: &RunPlan, args: &Value) -> Keys {
     add(
         &mut keys,
         &text(&plan.reading_source()["instructions"]),
-        2,
+        extra(2),
         80,
     );
     keys.sort_by(|a, b| b.1.cmp(&a.1));
@@ -160,10 +195,12 @@ impl Fact {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn facts(
     db: &Connection,
     book: &str,
     binding: &Value,
+    from: i64,
     through: i64,
     position: i64,
     keys: &Keys,
@@ -199,6 +236,7 @@ fn facts(
     for row in rows {
         let (fact, original) = row?;
         if !["person", "relation", "event", "rule"].contains(&fact.kind.as_str())
+            || fact.section < from
             || fact.quote.trim().is_empty()
             || !original.contains(&fact.quote)
             || fact.from.is_some_and(|n| n < 0 || n > fact.section)
@@ -326,7 +364,13 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
     let mut keys = Vec::new();
     add(&mut keys, query, 1, 12);
     let through = plan.reading_source()["through"].as_u64();
-    let rows: Vec<_> = rows.into_iter().filter(|(_,kind,_,scope,_,refs)| note_within_scope(kind,scope,refs,through)).collect();
+    let range = scope_range(plan);
+    let chosen = chosen_notes(plan);
+    let rows: Vec<_> = rows.into_iter().filter(|(id,kind,_,scope,_,refs)| match &chosen {
+        // 资料范围 (D184): only the notes the player picked, whatever they cover.
+        Some(chosen) => chosen.contains(id),
+        None => note_within_scope(kind,scope,refs,through) && range.is_none_or(|(from, to)| note_within_range(kind,scope,refs,from,to)),
+    }).collect();
     let total = rows.len();
     let mut remaining = budget(plan);
     let mut notes = vec![];
@@ -351,6 +395,19 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         notes.push(value);
     }
     Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记是整理或录入的原著梗概，可能有误。查证时请阅读原文。"}))
+}
+
+/// A note about the chosen chapters only (D184).
+fn note_within_range(kind: &str, scope: &str, refs: &str, from: i64, to: i64) -> bool {
+    let refs: Value = serde_json::from_str(refs).unwrap_or(Value::Null);
+    let Some(refs) = refs.as_array() else { return false; };
+    if refs.is_empty() || refs.iter().any(|s| s.as_i64().is_none_or(|s| s < from || s > to)) { return false; }
+    if matches!(kind, "plot" | "timeline") {
+        let scope: Value = serde_json::from_str(scope).unwrap_or(Value::Null);
+        scope["from"].as_i64().unwrap_or(0) >= from && scope["to"].as_i64().is_some_and(|t| t <= to)
+    } else {
+        true
+    }
 }
 
 fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>) -> bool {
@@ -433,7 +490,7 @@ pub fn read(store: &Store, plan: &RunPlan, name: &str, args: &Value) -> Result<V
         let version=format!("{book}:{revision}");
         let has_run=db.query_row("SELECT EXISTS(SELECT 1 FROM execution_runs WHERE id=?)",[&plan.id],|r|r.get::<_,bool>(0))?;
         if has_run && db.query_row("SELECT EXISTS(SELECT 1 FROM source_books WHERE id=?)",[book],|r|r.get::<_,bool>(0))? && args["ref"]["bookId"]==book && args["ref"]["bookVersion"]==version {
-            let key=format!("source-read:{}",crate::pi_store::arguments_hash(&json!([plan.reading_source(),version,plan.meta["budgetChars"],args])));
+            let key=format!("source-read:{}",crate::pi_store::arguments_hash(&json!([plan.reading_source(),version,plan.meta["budgetChars"],plan.meta["sourceScope"],args])));
             let cached:Option<String>=db.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done'",params![plan.id,key],|r|r.get(0)).optional()?;
             if let Some(raw)=cached{let mut value:Value=serde_json::from_str(&raw)?;value["cacheHit"]=true.into();return Ok(value);}
             let value=read_db(&db,plan,name,args)?;
@@ -447,6 +504,14 @@ pub fn read(store: &Store, plan: &RunPlan, name: &str, args: &Value) -> Result<V
 /// Shared source reader for native callers already holding a guarded story
 /// transaction. It uses the same ranking, citation and chapter limits.
 pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value) -> Result<Value> {
+    // 资料范围 (D184): a request limited to chosen notes does not read the original;
+    // the turn-level reference tools work on the whole allowed range, so they are off too.
+    if notes_only(plan) && ["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&name) {
+        return Err(Error::Invalid("这次只用你选的札记，不查原文；请依据札记作答，札记里没有的写明资料不足".into()));
+    }
+    if scope_range(plan).is_some() && ["locate_original_event","prepare_reference_check"].contains(&name) {
+        return Err(Error::Invalid(format!("这次只查{}，请用 search_original 在这几章里检索", scope_words(scope_range(plan)))));
+    }
     if ["locate_original_event","prepare_reference_check"].contains(&name) { return crate::reference_lookup::read(db,plan,name,args); }
     if name=="preview_turn_record" { return crate::reference_lookup::preview_record(plan,args); }
     let mut resolved=args.clone();
@@ -474,16 +539,20 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             json!({"status":"insufficient","reason":"参考书籍不存在或没有正文","excerpts":[]}),
         );
     };
-    let through = binding["through"].as_i64().unwrap_or(last).min(last);
-    if through < 0 {
+    let range = scope_range(plan);
+    let allowed = binding["through"].as_i64().unwrap_or(last).min(last);
+    let through = range.map_or(allowed, |(_, to)| to.min(allowed));
+    let from = range.map_or(0, |(from, _)| from);
+    if through < 0 || from > through {
         return Err(Error::Invalid("原著参考范围无效".into()));
     }
-    let position = binding["position"].as_i64().unwrap_or(0).clamp(0, through);
+    let position = binding["position"].as_i64().unwrap_or(0).clamp(from, through);
     let mut keys = query_keys(plan, args);
     let notes = facts(
         &db,
         book,
         binding,
+        from,
         through,
         position,
         &keys,
@@ -516,19 +585,29 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         }
     }
     let mut statement =
-        db.prepare("SELECT ordinal,section FROM source_chunks WHERE book_id=? AND section<=?")?;
+        db.prepare("SELECT ordinal,section FROM source_chunks WHERE book_id=? AND section>=? AND section<=?")?;
     let scope = statement
-        .query_map(params![book, through], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![book, from, through], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<HashMap<i64, i64>, _>>()?;
     let mut scores = HashMap::<i64, f64>::new();
+    // The model's query words, to tell a match only past the reading limit (R30 step 3).
+    let query_terms: HashSet<String> = terms(args["query"].as_str().unwrap_or("")).into_iter().collect();
+    let (mut inside, mut outside) = (HashMap::<i64, usize>::new(), HashMap::<i64, usize>::new());
+    // A word in a large share of the allowed text says little about where to look.
+    let common = (scope.len() * 15 / 100).max(8);
     if name == "search_original" {
         if !keys.is_empty(){
             let placeholders=vec!["?";keys.len()].join(",");
             let mut values=vec![book.to_owned()];values.extend(keys.iter().map(|(term,_)|term.clone()));
             let mut stmt=db.prepare(&format!("SELECT term,postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"))?;
             let rows=stmt.query_map(rusqlite::params_from_iter(values.iter()),|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?;
-            for row in rows{let (term,raw)=row?;let weight=keys.iter().find(|(key,_)|key==&term).map(|(_,w)|*w).unwrap_or(1);
-                let allowed=serde_json::from_str::<Vec<i64>>(&raw).unwrap_or_default().into_iter().filter(|n|scope.contains_key(n)).collect::<Vec<_>>();
+            for row in rows{let (term,raw)=row?;let mut weight=keys.iter().find(|(key,_)|key==&term).map(|(_,w)|*w).unwrap_or(1);
+                let postings=serde_json::from_str::<Vec<i64>>(&raw).unwrap_or_default();
+                if query_terms.contains(&term) {
+                    for id in &postings { *(if scope.contains_key(id) { &mut inside } else { &mut outside }).entry(*id).or_default() += 1; }
+                }
+                let allowed=postings.into_iter().filter(|n|scope.contains_key(n)).collect::<Vec<_>>();
+                if allowed.len() > common { weight = weight.min(1); }
                 let score=weight as f64/(allowed.len().max(1) as f64).sqrt();for id in allowed{*scores.entry(id).or_default()+=score;}
             }
         }
@@ -537,15 +616,15 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
                 *scores.entry(note.chunk).or_default() += 2.0;
             }
         }
-        let mut stmt=db.prepare("SELECT section,title FROM source_sections WHERE book_id=? AND section<=?")?;
-        let titles=stmt.query_map(params![book,through],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let mut stmt=db.prepare("SELECT section,title FROM source_sections WHERE book_id=? AND section>=? AND section<=?")?;
+        let titles=stmt.query_map(params![book,from,through],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
         for (section,title) in titles {let score: f64=keys.iter().filter(|(key,_)|title.contains(key)).map(|(_,w)|*w as f64*2.0).sum();if score>0.0{for (&id,&s) in &scope{if s==section{*scores.entry(id).or_default()+=score;}}}}
     } else {
         let section = args["section"]
             .as_i64()
             .ok_or_else(|| Error::Invalid("请指定要读的章节 section（从 0 开始）".into()))?;
-        if section < 0 || section > through {
-            return Err(Error::Invalid("这段原文超出了本局允许的参考章节".into()));
+        if section < 0 || section > through || section < from {
+            return Err(Error::Invalid(if range.is_some() { format!("这次只查{}，这段原文不在范围里", scope_words(range)) } else { "这段原文超出了本局允许的参考章节".into() }));
         }
         if let Some(value) = args.get("chunk") {
             let chunk = value
@@ -589,6 +668,9 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             .then_with(|| a.cmp(b))
     });
     let mut ids: Vec<i64> = ranked.into_iter().take(48).map(|(id, _)| id).collect();
+    // Nothing matched: the passage at the current position, marked as such, so it
+    // is not mistaken for a hit (R30 step 3).
+    let mut nearby_only = false;
     if name == "search_original" {
         if let Some(nearby) = scope
             .iter()
@@ -599,9 +681,14 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             if ids.is_empty() {
                 ids.retain(|id| *id != nearby);
                 ids.insert(1.min(ids.len()), nearby);
+                nearby_only = true;
             }
         }
     }
+    let best = |counts: &HashMap<i64, usize>| counts.values().copied().max().unwrap_or(0);
+    let wanted = query_terms.len();
+    let beyond_scope = name == "search_original" && wanted > 0
+        && best(&outside) >= 2.max((wanted * 6).div_ceil(10)) && best(&outside) > best(&inside);
     let mut remaining = budget(plan);
     let mut excerpts = vec![];
     let mut analysis = vec![];
@@ -609,6 +696,9 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     for id in ids.into_iter().take(5) {
         let (section,text,label,page):(i64,String,String,Option<i64>)=db.query_row("SELECT c.section,c.text,s.title,s.page FROM source_chunks c JOIN source_sections s ON s.book_id=c.book_id AND s.section=c.section WHERE c.book_id=? AND c.ordinal=? AND c.section<=?",params![book,id,through],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         let mut excerpt = json!({"kind":"original","bookId":book,"title":label,"section":section,"chunk":id,"start":0,"end":0,"text":""});
+        if nearby_only {
+            excerpt["match"] = "nearby".into();
+        }
         if let Some(page) = page {
             excerpt["page"] = page.into();
         }
@@ -656,11 +746,24 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         }
     }
     let ready = !excerpts.is_empty();
-    Ok(
+    let mut output =
         json!({"bookId":book,"title":title,"through":through,"position":position,"status":if ready {"ready"} else {"insufficient"},"excerpts":excerpts,"notes":analysis,
         "reason":if ready {Value::Null} else if budget_limited {json!("budget")} else {json!("no_match")},
-        "note":"这些是实际原著正文，不是本局已经发生的事实。原文优先于整理和模型记忆；按出处及当前原著位置判断身份变化，较早身份须复核，角色只能知道本局获知的事。玩家明确改写与合理后果保留，AI自行写错不算玩家改写。"}),
-    )
+        "note":"这些是实际原著正文，不是本局已经发生的事实。原文优先于整理和模型记忆；按出处及当前原著位置判断身份变化，较早身份须复核，角色只能知道本局获知的事。玩家明确改写与合理后果保留，AI自行写错不算玩家改写。"});
+    if nearby_only {
+        output["match"] = "nearby".into();
+        output["note"] = "没有找到和查询词对应的原文；下面只是当前原著位置附近的一段，不能当作查到的依据。".into();
+    }
+    if beyond_scope {
+        // Where it is, not what it says: the text past the limit stays out (R30 step 3).
+        output["beyondScope"] = true.into();
+        output["scopeNote"] = if range.is_some() {
+            format!("查询词在{}以外的原文里更集中，超出了这次选的资料范围。", scope_words(Some((from, through))))
+        } else {
+            format!("查询词在第 {} 章之后的原文里更集中，超出了本局允许的参考范围。", through + 1)
+        }.into();
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -943,6 +1046,7 @@ mod tests {
             &store.lock().unwrap(),
             "book",
             &plan.state["source"],
+            0,
             2,
             1,
             &keys,
@@ -1009,6 +1113,118 @@ mod tests {
         assert_eq!(follow_position(&db, &binding(3, "canon"), "他走在路上看见风雪。").unwrap(), None, "nothing distinctive");
         let limited = json!({"bookId":"book","fanfic":true,"plot":"canon","position":3,"through":5});
         assert_eq!(follow_position(&db, &limited, &passage(7)).unwrap(), None, "past the reading limit");
+    }
+
+    /// Thirty chapters; every one mentions 核对 (the request word), one mentions 比试.
+    fn ranged_book() -> (Store, RunPlan) {
+        let sections: Vec<String> = (0..12).map(|i| format!("第{i}章：青铜钥匙在第{i}章出现，众人议论钥匙的来历。")).collect();
+        setup(&sections)
+    }
+
+    #[test]
+    fn a_chosen_range_of_chapters_limits_search_reading_and_facts() {
+        let (store, mut plan) = ranged_book();
+        plan.meta["sourceScope"] = json!({"mode":"chapters","from":4,"to":6});
+        add_fact(&store, 2, 2, "铜匠", "老铜", "第2章：青铜钥匙", 2, None);
+        add_fact(&store, 5, 5, "锁匠", "老锁", "第5章：青铜钥匙", 5, None);
+        let db = store.lock().unwrap();
+        let found = read_db(&db, &plan, "search_original", &json!({"query":"青铜钥匙"})).unwrap();
+        let sections: Vec<i64> = found["excerpts"].as_array().unwrap().iter().map(|e| e["section"].as_i64().unwrap()).collect();
+        assert!(!sections.is_empty() && sections.iter().all(|s| (4..=6).contains(s)), "{found}");
+        assert_eq!(found["through"], 6);
+        let outside = read_db(&db, &plan, "read_original", &json!({"section":2})).unwrap_err().to_string();
+        assert!(outside.contains("第 5～7 章"), "{outside}");
+        assert!(read_db(&db, &plan, "read_original", &json!({"section":5})).is_ok());
+        let facts = read_db(&db, &plan, "read_canon_facts", &json!({"query":""})).unwrap();
+        let subjects: Vec<&str> = facts["facts"].as_array().unwrap().iter().map(|f| f["subject"].as_str().unwrap()).collect();
+        assert!(!subjects.contains(&"铜匠"), "{facts}");
+        // The whole-book reference tools are not for a chosen range.
+        assert!(read_db(&db, &plan, "locate_original_event", &json!({"query":"钥匙"})).is_err());
+        // A range past the story's own reading limit is cut to it.
+        plan.state["source"]["through"] = 5.into();
+        assert_eq!(read_db(&db, &plan, "search_original", &json!({"query":"青铜钥匙"})).unwrap()["through"], 5);
+    }
+
+    #[test]
+    fn only_the_chosen_notes_are_read_and_the_original_is_not_unless_a_correction_needs_it() {
+        let (store, mut plan) = ranged_book();
+        {
+            let db = store.lock().unwrap();
+            for (id, refs) in [("a", "[1]"), ("b", "[5]"), ("c", "[9]")] {
+                db.execute("INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES(?,'book',NULL,'person',?,'{}',?,?,'','done',1,'{}','t','t')",
+                    params![id, format!("人物{id}"), format!("札记{id}：青铜钥匙"), refs]).unwrap();
+            }
+        }
+        let db = store.lock().unwrap();
+        plan.meta["sourceScope"] = json!({"mode":"notes","noteIds":["a","c"]});
+        let notes = read_notes(&db, &plan, "青铜钥匙").unwrap();
+        let ids: Vec<&str> = notes["notes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"a") && ids.contains(&"c"));
+        let refused = read_db(&db, &plan, "search_original", &json!({"query":"青铜钥匙"})).unwrap_err().to_string();
+        assert!(refused.contains("只用你选的札记"), "{refused}");
+        // A correction reads the original within what its notes cover.
+        plan.meta["sourceScope"] = json!({"mode":"notes","noteIds":["b"],"lookups":true,"from":5,"to":5});
+        let found = read_db(&db, &plan, "search_original", &json!({"query":"青铜钥匙"})).unwrap();
+        assert!(found["excerpts"].as_array().unwrap().iter().all(|e| e["section"] == 5), "{found}");
+        // A range of chapters reads only the notes about those chapters.
+        plan.meta["sourceScope"] = json!({"mode":"chapters","from":4,"to":6});
+        let ids: Vec<String> = read_notes(&db, &plan, "青铜钥匙").unwrap()["notes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(ids, ["b"]);
+    }
+
+    #[test]
+    fn a_cached_read_is_not_reused_under_another_scope() {
+        let (store, mut plan) = ranged_book();
+        store.lock().unwrap().execute("INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,created_at,updated_at) VALUES(?,'world','line','head','running','{}','{}','{}','test','test')",[&plan.id]).unwrap();
+        let revision: i64 = store.lock().unwrap().query_row("SELECT revision FROM reference_index_versions WHERE book_id='book'", [], |r| r.get(0)).unwrap_or(1);
+        let args = json!({"ref":{"bookId":"book","bookVersion":format!("book:{revision}"),"section":5,"chunk":5}});
+        assert_ne!(read(&store, &plan, "read_original", &args).unwrap()["cacheHit"], true);
+        assert_eq!(read(&store, &plan, "read_original", &args).unwrap()["cacheHit"], true);
+        plan.meta["sourceScope"] = json!({"mode":"chapters","from":4,"to":6});
+        assert_ne!(read(&store, &plan, "read_original", &args).unwrap()["cacheHit"], true);
+        plan.meta["sourceScope"] = json!({"mode":"chapters","from":0,"to":2});
+        assert!(read(&store, &plan, "read_original", &args).is_err());
+    }
+
+    fn exam_book() -> (Store, RunPlan) {
+        let sections: Vec<String> = (0..30).map(|i| if i == 17 { "院长宣布入门比试分为实战与理论两项，核对名单后入场。".to_owned() } else { format!("第{i}日，众人核对账目，又核对了一遍货物。") }).collect();
+        setup(&sections)
+    }
+
+    #[test]
+    fn the_models_query_outweighs_the_players_request_words_and_common_terms() {
+        let (store, mut plan) = exam_book();
+        plan.meta["rewriteHint"] = "核对比试是什么".into();
+        plan.state["source"]["position"] = 2.into();
+        let db = store.lock().unwrap();
+        let result = read_db(&db, &plan, "search_original", &json!({"query":"入门比试"})).unwrap();
+        assert_eq!(result["excerpts"][0]["section"], 17, "{result}");
+        assert!(result.get("match").is_none());
+        // The request words alone no longer drive the search either.
+        assert!(!without_request_words("核对比试是什么").contains("核对"));
+        assert!(without_request_words("核对比试是什么").contains("比试"));
+    }
+
+    #[test]
+    fn a_search_with_no_match_says_it_only_returned_the_nearby_passage() {
+        let (store, plan) = exam_book();
+        let db = store.lock().unwrap();
+        let result = read_db(&db, &plan, "search_original", &json!({"query":"紫色魂环"})).unwrap();
+        assert_eq!(result["match"], "nearby", "{result}");
+        assert_eq!(result["excerpts"][0]["match"], "nearby");
+        assert!(result["note"].as_str().unwrap().contains("不能当作查到的依据"));
+    }
+
+    #[test]
+    fn a_match_only_past_the_reading_limit_is_flagged_without_its_text() {
+        let (store, mut plan) = exam_book();
+        plan.state["source"]["through"] = 10.into();
+        let db = store.lock().unwrap();
+        let result = read_db(&db, &plan, "search_original", &json!({"query":"入门比试实战理论"})).unwrap();
+        assert_eq!(result["beyondScope"], true, "{result}");
+        assert!(result["scopeNote"].as_str().unwrap().contains("第 11 章之后"));
+        assert!(!result.to_string().contains("院长宣布"));
     }
 
 }

@@ -29,7 +29,7 @@ fn chapters_on_route(db: &Connection, world_id: &str, head_id: &str) -> Result<V
             SELECT n.parent_id FROM nodes n JOIN route r ON n.id=r.id
             WHERE n.world_id=?1 AND n.parent_id IS NOT NULL
          )
-         SELECT c.first_node_id, c.last_node_id, c.title, c.gist
+         SELECT c.first_node_id, c.last_node_id, c.title, c.gist, COALESCE(c.stale,0)
          FROM chapters c
          JOIN route start ON start.id=c.first_node_id
          JOIN route finish ON finish.id=c.last_node_id
@@ -44,6 +44,7 @@ fn chapters_on_route(db: &Connection, world_id: &str, head_id: &str) -> Result<V
             "lastNodeId":row.get::<_, String>(1)?,
             "title":row.get::<_, String>(2)?,
             "gist":row.get::<_, String>(3)?,
+            "stale":row.get::<_, i64>(4)? != 0,
         }))
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -223,7 +224,7 @@ impl Engine {
             |r| r.get(0),
         )?;
         let state: Value = serde_json::from_str(&state)?;
-        let mut statement = tx.prepare("WITH RECURSIVE path AS (SELECT id,parent_id,seq,kind,action_text,narrative,meta_json,action_mode FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.seq,n.kind,n.action_text,n.narrative,n.meta_json,n.action_mode FROM nodes n JOIN path p ON n.id=p.parent_id) SELECT id,kind,action_text,narrative,meta_json,action_mode FROM path ORDER BY seq DESC LIMIT 200")?;
+        let mut statement = tx.prepare("WITH RECURSIVE path AS (SELECT id,parent_id,seq,kind,action_text,narrative,meta_json,action_mode,rewritten FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.seq,n.kind,n.action_text,n.narrative,n.meta_json,n.action_mode,n.rewritten FROM nodes n JOIN path p ON n.id=p.parent_id) SELECT id,kind,action_text,narrative,meta_json,action_mode,rewritten FROM path ORDER BY seq DESC LIMIT 200")?;
         let rows = statement.query_map([&plan.head_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -232,12 +233,13 @@ impl Engine {
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
             ))
         })?;
         let mut history = vec![];
         for row in rows {
-            let (id, kind, action, narrative, meta, action_mode) = row?;
-            history.push(json!({"id":id,"kind":kind,"actionText":action,"actionMode":action_mode,"narrative":narrative,"meta":serde_json::from_str::<Value>(&meta)?}));
+            let (id, kind, action, narrative, meta, action_mode, rewritten) = row?;
+            history.push(json!({"id":id,"kind":kind,"actionText":action,"actionMode":action_mode,"narrative":narrative,"meta":serde_json::from_str::<Value>(&meta)?,"rewritten":rewritten}));
         }
         drop(statement);
         history.reverse();
@@ -484,14 +486,14 @@ mod tests {
         db.execute_batch(
             "CREATE TABLE nodes(id TEXT PRIMARY KEY, parent_id TEXT, world_id TEXT, seq INT);
              CREATE TABLE chapters(id TEXT PRIMARY KEY, first_node_id TEXT, last_node_id TEXT,
-                world_id TEXT, title TEXT, gist TEXT, created_at TEXT);
+                world_id TEXT, title TEXT, gist TEXT, created_at TEXT, stale INTEGER);
              WITH RECURSIVE sequence(seq) AS (
                 VALUES (0) UNION ALL SELECT seq+1 FROM sequence WHERE seq<300
              )
              INSERT INTO nodes
                 SELECT 'n'||seq, CASE WHEN seq>0 THEN 'n'||(seq-1) END, 'w', seq FROM sequence;
              INSERT INTO nodes VALUES ('side', 'n5', 'w', 301), ('other', NULL, 'z', 0);
-             INSERT INTO chapters VALUES
+             INSERT INTO chapters(id, first_node_id, last_node_id, world_id, title, gist, created_at) VALUES
                 ('early', 'n6', 'n12', 'w', '早期', '找到青铜密匣', 'later-edit'),
                 ('near', 'n272', 'n288', 'w', '近期', '回到古庙', 'earlier-create'),
                 ('side', 'n5', 'side', 'w', '另一条路线', '不应带进正文', 'middle'),

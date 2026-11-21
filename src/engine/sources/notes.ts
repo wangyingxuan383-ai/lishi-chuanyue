@@ -10,7 +10,7 @@ import { ChatError, isContextWindowError, outputWasTruncated, type ChatMessage, 
 import { explainFailure } from "../llm/providers";
 import { refusedFinish } from "../llm/refusal";
 import { sourceAnalysisText } from "./facts";
-import { terms } from "./library";
+import { terms, withoutRequestWords } from "./library";
 import type { SourceBinding } from "./types";
 import type { StoryNode } from "../types";
 import * as tree from "../tree";
@@ -36,7 +36,12 @@ export const NOTE_KIND_LABEL = Object.fromEntries(NOTE_KINDS.map(([k, l]) => [k,
 
 /** `auto`: the story's own 主线梗概, kept up with each new chapter summary (D174). */
 /** `toNode` (本局札记): the passage the note covers up to, so a note made on another route is known as such. */
-export interface NoteScope { from?: number; to?: number; subject?: string; aliases?: string[]; question?: string; auto?: boolean; toNode?: string }
+/** `staleFrom` (本局札记): the earliest turn whose text was edited after the note was made (D183). */
+export interface NoteScope {
+  from?: number; to?: number; subject?: string; aliases?: string[]; question?: string; auto?: boolean; toNode?: string; staleFrom?: number;
+  /** How far 上一版 (previousContent) reached, so 恢复上一版 brings back its reach too. */
+  previous?: { to?: number; toNode?: string; refs?: number[] };
+}
 /** `error`: one sentence for the player; `detail`: what actually went wrong, for 查看原因 (R30). */
 export interface NoteProgress {
   parts: string[];
@@ -203,7 +208,7 @@ export async function carryNotes(repo: Repo, ids: string[], toWorldId: string, f
     const note = await getNote(repo, id);
     if (!note || note.status !== "done" || !note.content.trim()) continue;
     const now = new Date().toISOString();
-    const base = { ...note, id: newId(), worldId: toWorldId, progress: { parts: [], total: 0 }, previousContent: null, createdAt: now, updatedAt: now, status: "done" as const };
+    const base = { ...note, id: newId(), worldId: toWorldId, progress: { parts: [], total: 0 }, previousContent: null, scope: { ...note.scope, previous: undefined }, createdAt: now, updatedAt: now, status: "done" as const };
     await saveNote(repo, isStory(note)
       ? { ...base, originWorldId: note.originWorldId ?? from.worldId, originTitle: note.originTitle ?? from.title }
       : base);
@@ -216,7 +221,11 @@ export async function carryNotes(repo: Repo, ids: string[], toWorldId: string, f
 export async function restorePrevious(repo: Repo, id: string): Promise<CanonNote | null> {
   const note = await getNote(repo, id);
   if (!note?.previousContent) return null;
-  const restored = { ...note, content: note.previousContent, previousContent: note.content, updatedAt: new Date().toISOString() };
+  // The reach goes back with the words: otherwise 更新到现在 would start after the newer
+  // reach and skip what only the undone version had covered (Windows review, 0.17.0).
+  const back = note.scope.previous;
+  const restored = { ...note, content: note.previousContent, previousContent: note.content, updatedAt: new Date().toISOString(),
+    ...(back ? { scope: { ...note.scope, to: back.to, toNode: back.toNode, previous: { to: note.scope.to, toNode: note.scope.toNode, refs: note.refs } }, refs: back.refs ?? note.refs } : {}) };
   await saveNote(repo, restored, true);
   return restored;
 }
@@ -339,8 +348,22 @@ export async function routeIds(repo: Repo, worldId: string): Promise<Set<string>
 }
 /** 按现在的路线重新整理: the note starts over on the current route; the old text stays as 上一版. */
 export function restartOnRoute(note: CanonNote, lastTurn: number): CanonNote {
-  return { ...note, content: "", previousContent: note.content || note.previousContent, status: "paused", scope: { ...note.scope, from: 0, to: lastTurn, toNode: undefined },
+  return { ...note, content: "", previousContent: note.content || note.previousContent, status: "paused", scope: { ...note.scope, from: 0, to: lastTurn, toNode: undefined, staleFrom: undefined,
+    previous: note.content ? { to: note.scope.to, toNode: note.scope.toNode, refs: note.refs } : note.scope.previous },
     progress: { parts: [], total: 0 }, updatedAt: new Date().toISOString() };
+}
+
+/** 本局札记 that read turn `turn`, now edited: marked so writing and the notes page know (D183). */
+export async function markNotesStale(repo: Repo, worldId: string, turn: number): Promise<number> {
+  let marked = 0;
+  for (const note of await listStoryNotes(repo, worldId)) {
+    if (note.originWorldId || note.status !== "done" || (note.scope.from ?? 0) > turn || (note.scope.to ?? Infinity) < turn) continue;
+    const staleFrom = Math.min(note.scope.staleFrom ?? Infinity, turn);
+    if (staleFrom === note.scope.staleFrom) continue;
+    await saveNote(repo, { ...note, scope: { ...note.scope, staleFrom } }, true);
+    marked++;
+  }
+  return marked;
 }
 
 /** A story's turns, 0 being the opening, in the label notes use for them. */
@@ -617,7 +640,9 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   const path = isStory(note) && note.worldId ? await storyPath(repo, note.worldId) : undefined;
   const coveredTo = path ? Math.min(path.length - 1, note.progress.update?.to ?? note.scope.to ?? path.length - 1) : undefined;
   const routeNode = coveredTo === undefined ? undefined : path?.[coveredTo]?.id;
-  if (path && ((note.progress.routeNode && note.progress.routeNode !== routeNode)
+  // Another route only when the passage it had reached is no longer on this one: a person,
+  // place or question note reads to the end, and the story may have grown since it paused.
+  if (path && ((note.progress.routeNode && !path.some((node) => node.id === note.progress.routeNode))
       || (note.scope.toNode && !note.originWorldId && !path.some((node) => node.id === note.scope.toNode)))) {
     throw new Error("札记整理用的是之前的路线。切回那条路线接着整理，或按现在的路线重新整理。");
   }
@@ -663,7 +688,7 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     total: batchSizes.length + mergeRequests(batchSizes.length) + (update ? 1 : 0),
   });
   const unit = noteUnit(note);
-  let current: CanonNote = { ...note, model: runner.model, refs: isStory(note) ? [] : refs, status: "running", progress: progress(), updatedAt: new Date().toISOString() };
+  let current: CanonNote = { ...note, model: runner.model, refs: isStory(note) ? [] : update ? note.refs : refs, status: "running", progress: progress(), updatedAt: new Date().toISOString() };
   const save = async (patch: Partial<CanonNote>) => { current = { ...current, ...patch, updatedAt: new Date().toISOString() }; await saveNote(repo, current, true); onProgress({ ...current }); };
   // 暂停 always frees the note, even when a request never answers (a phone
   // that slept mid-request): before 0.16.0 that left it "整理中" and 接着整理 refused.
@@ -873,11 +898,16 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
       const missing = gapRanges(gaps).map(({ sections }) => noteChapterRange(sections, unit)).join("、");
       content = `${content}\n\n（${missing}有部分内容未能整理：服务没有处理这段${isStory(note) ? "正文" : "原文"}。）`;
     }
-    const scope = coveredTo !== undefined ? { ...note.scope, to: coveredTo, toNode: routeNode }
+    const reached = coveredTo !== undefined ? { ...note.scope, to: coveredTo, toNode: routeNode }
       : update ? { ...note.scope, to: update.to } : note.scope;
+    // A retried gap finishes the same update again: its reach was already moved on, and
+    // 上一版 is still the one recorded the first time.
+    const applied = !!update && !!note.scope.previous && (note.scope.to ?? -1) >= update.from;
+    const scope = update ? { ...reached, previous: applied ? note.scope.previous : { to: note.scope.to, toNode: note.scope.toNode, refs: note.refs } } : reached;
     // With gaps the parts stay, so a later retry of a gap merges again (and re-applies an update).
     const settled: NoteProgress = gaps.length ? progress() : { parts: [], total: current.progress.total };
-    await save({ content, status: "done", scope, ...(update ? { previousContent: update.base } : {}), progress: settled });
+    const updatedRefs = update && !isStory(note) ? [...new Set([...note.refs, ...refs])].sort((a, b) => a - b) : current.refs;
+    await save({ content, status: "done", scope, refs: updatedRefs, ...(update ? { previousContent: update.base } : {}), progress: settled });
   } catch (error) {
     const failure = noteFailure(error);
     const detail = [step, failure.detail].filter(Boolean).join(" ");
@@ -933,9 +963,23 @@ export interface NoteBrief { title: string; kind: NoteKind; content: string; sou
  * the book's plot around the reading position, then people, places and
  * factions named in play from either, and notes carried over from an earlier story.
  */
+/**
+ * A saved question (查一查 存为札记, 问一个问题) about what is being written: at
+ * least two of its two-character pieces, request words left out, are in the text.
+ */
+export function askedAbout(question: string, recent: string): boolean {
+  const pieces = new Set<string>();
+  for (const run of withoutRequestWords(question).split(/[^\p{L}\p{N}]+/u)) for (let i = 0; i + 2 <= run.length; i++) pieces.add(run.slice(i, i + 2));
+  let found = 0;
+  for (const piece of pieces) if (recent.includes(piece) && ++found >= 2) return true;
+  return false;
+}
+
 export async function notesForTurn(repo: Repo, binding: SourceBinding | null | undefined, worldId: string, recent: string): Promise<NoteBrief[]> {
   const ranked: [number, CanonNote, string][] = [];
   const named = (n: CanonNote) => [n.scope.subject, ...(n.scope.aliases ?? [])].map((s) => s?.trim()).filter((s): s is string => !!s).some((name) => recent.includes(name));
+  // Answers kept from 查一查 go in when the passage is about them (the toast promises it).
+  const asked = (n: CanonNote) => n.kind === "question" && askedAbout(n.scope.question ?? n.title, recent);
   if (worldId) {
     const own = (await listStoryNotes(repo, worldId).catch(() => [])).filter((n) => n.active && n.status === "done" && n.content.trim());
     // A note from another route would tell the writer about events that did not happen here.
@@ -945,20 +989,29 @@ export async function notesForTurn(repo: Repo, binding: SourceBinding | null | u
       const carried = !!n.originWorldId;
       if (n.kind === "plot" && !carried) ranked.push([0, n, noteExcerpt(n.content, Infinity, recent, true)]);
       else if ((n.kind === "person" || n.kind === "setting") && named(n)) ranked.push([carried ? 4 : 2, n, noteExcerpt(n.content, Infinity, recent, true)]);
+      else if (asked(n)) ranked.push([carried ? 4 : 2, n, noteExcerpt(n.content, Infinity, recent, true)]);
       else if (carried && (n.kind === "plot" || n.kind === "timeline")) ranked.push([5, n, noteExcerpt(n.content, Infinity, recent, true)]);
     }
   }
   if (binding) {
-    const notes = (await listNotes(repo, binding.bookId, worldId)).filter((n) => n.active && n.status === "done" && n.content.trim() && noteWithinScope(n, binding.through));
+    // An answer this story saved was asked within its own reading limit, though it cites no chapter.
+    const notes = (await listNotes(repo, binding.bookId, worldId)).filter((n) => n.active && n.status === "done" && n.content.trim()
+      && (noteWithinScope(n, binding.through) || (n.kind === "question" && !!worldId && n.worldId === worldId)));
     const at = binding.position;
     const ranges = notes.filter((n) => n.kind === "plot" || n.kind === "timeline");
     const covering = ranges.filter((n) => (n.scope.from ?? 0) <= at && at <= (n.scope.to ?? Infinity));
     const before = ranges.filter((n) => (n.scope.to ?? Infinity) < at).sort((a, b) => (b.scope.to ?? 0) - (a.scope.to ?? 0));
     for (const n of covering) ranked.push([1, n, noteExcerpt(n.content, at, recent)]);
     if (!covering.length && before[0]) ranked.push([1, before[0], noteExcerpt(before[0].content, at, recent)]);
-    for (const n of notes) if ((n.kind === "person" || n.kind === "setting") && named(n)) ranked.push([3, n, noteExcerpt(n.content, at, recent)]);
+    for (const n of notes) if (((n.kind === "person" || n.kind === "setting") && named(n)) || asked(n)) ranked.push([3, n, noteExcerpt(n.content, at, recent)]);
   }
   return ranked.sort((a, b) => a[0] - b[0]).map(([, n, content]) => ({
-    title: n.originTitle ? `${n.title}（前作《${n.originTitle}》）` : n.title, kind: n.kind, content, source: isStory(n) ? "story" as const : "book" as const,
+    title: noteBriefTitle(n), kind: n.kind, content, source: isStory(n) ? "story" as const : "book" as const,
   }));
+}
+
+export function noteBriefTitle(note: Pick<CanonNote, "title" | "originTitle" | "scope">): string {
+  if (note.originTitle) return `${note.title}（前作《${note.originTitle}》）`;
+  if (note.scope.staleFrom !== undefined) return `${note.title}（${turnLabel(note.scope.staleFrom)}之后的正文改过，以正文为准）`;
+  return note.title;
 }

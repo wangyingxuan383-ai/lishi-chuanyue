@@ -134,6 +134,8 @@ export interface Chapter {
   promptVersion: string | null;
   /** The player changed it; it is not rewritten automatically. */
   edited: boolean;
+  /** A passage in it was edited after it was summarized (D183): waits to be summarized again. */
+  stale?: boolean;
   createdAt: string;
 }
 

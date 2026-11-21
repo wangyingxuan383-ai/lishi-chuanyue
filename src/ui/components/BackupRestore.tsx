@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useApp } from "../app/context";
 import type { BackupInfo } from "../../platform";
 
 /** What each backup label means to the player (names end in `-<label>.sqlite`). */
 function kind(name: string): string {
+  name = name.replace(/\.zip$/, "");
   if (name.endsWith("-before-restore.sqlite")) return "恢复前自动保存";
   if (name.endsWith("-before-import.sqlite")) return "导入前自动保存";
   if (/-before-v\d+\.sqlite$/.test(name)) return "更新前自动保存";
@@ -12,9 +13,11 @@ function kind(name: string): string {
   return "备份";
 }
 
-function size(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+export function backupSize(bytes: number): string {
+  if (bytes === 0) return "0 MB";
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes < 1e6) return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+  return `${(bytes / 1e6).toFixed(1)} MB`;
 }
 
 const when = (iso: string) =>
@@ -23,18 +26,15 @@ const when = (iso: string) =>
 /**
  * B2: the device's backups, newest first, each restorable after the app's own
  * confirmation. The current data is saved as a backup first, then the app
- * reloads on the restored data. `refresh` changes when the parent makes a new backup.
+ * reloads on the restored data.
  */
-export function BackupRestore({ refresh = "" }: { refresh?: string | number }) {
+export function BackupRestore({ backups, deleting, onDelete }: {
+  backups: BackupInfo[];
+  deleting: boolean;
+  onDelete: (items: BackupInfo[]) => Promise<void>;
+}) {
   const { platform, game, ask, toast } = useApp();
-  const [backups, setBackups] = useState<BackupInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    void platform.sql.listBackups()
-      .then((b) => setBackups([...b].sort((x, y) => (x.name < y.name ? 1 : -1))))
-      .catch(() => setBackups([]));
-  }, [platform, refresh]);
 
   const restore = async (b: BackupInfo) => {
     const ok = await ask({
@@ -63,19 +63,23 @@ export function BackupRestore({ refresh = "" }: { refresh?: string | number }) {
     }
   };
 
-  if (backups === null) return null;
-  if (backups.length === 0) return <p className="settings-note">还没有备份。</p>;
   return (
     <div className="stack gap-0">
       {backups.map((b) => (
         <div key={b.name} className="item-row center">
           <div>
             <span>{when(b.at)}</span>
-            <small>{kind(b.name)} · {size(b.size)}</small>
+            <small>{kind(b.name)} · {backupSize(b.size)}</small>
           </div>
-          <button disabled={busy} onClick={() => void restore(b)}>恢复</button>
+          <div className="row wrap">
+            <button disabled={busy || deleting} onClick={() => void restore(b)}>恢复</button>
+            <button disabled={busy || deleting} onClick={() => void onDelete([b])}>删除</button>
+          </div>
         </div>
       ))}
+      <div className="row">
+        <button className="danger" disabled={busy || deleting} onClick={() => void onDelete(backups)}>删除全部备份</button>
+      </div>
     </div>
   );
 }

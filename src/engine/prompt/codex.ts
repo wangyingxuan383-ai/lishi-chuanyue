@@ -9,8 +9,8 @@ import { matchName } from "../state/names";
 import { abilityCardName } from "../memory/cards";
 import type { CardKind, WorldState } from "../types";
 
-export const CODEX_PROMPT_VERSION = "codex-6";
-export const CODEX_FREE_PROMPT_VERSION = "codex-4";
+export const CODEX_PROMPT_VERSION = "codex-7";
+export const CODEX_FREE_PROMPT_VERSION = "codex-5";
 /** Most great events and "不要出现" entries taken from one organizing pass. */
 const TIMELINE_MAX = 8;
 const TABOO_MAX = 8;
@@ -37,7 +37,7 @@ export function codexMessages(input: CodexInput): ChatMessage[] {
 - 世界卡自由组织，记清设定中已有的世界背景、日常生活、货币和称呼；没有写明的细节可以留白，不强加风格或规则。不超过 800 字。
 - 货币与换算沿用世界设定；不默认使用铜钱或任何特定币制。
 - 关键卡片只写设定中出现或明显会出现的势力、地点、规矩、物品，每张不超过 80 字。人物由剧情产生，不预告剧情。
-- 故事设定里写了主角自己的本事（武魂、功法、境界、等级、法宝、血脉等）时，另写一张名为“${abilityCardName(p.name)}”的设定卡，分项写清具体名称和数字，不超过 300 字；没写就不建。
+- 故事设定里写了主角自己的本事（修为或等级、境界、功法招式、法宝、血脉、特殊能力等）时，另写一张名为“${abilityCardName(p.name)}”的设定卡，分项写清具体名称和数字，不超过 300 字；没写就不建。
 - 不生成年表或未来事件，不输出 timeline、deviation，不添加禁词清单。
 只输出一个 JSON 对象（era 存放世界卡）：
 {"era":{"name":"世界卡名称","content":"世界资料"},"cards":[{"kind":"势力/地点/设定/物品","name":"名称","keys":["别名"],"content":"一两句话"}]}` : `你帮玩家整理一部历史互动小说的“设定集”。玩家写好了故事设定，你据此整理出一张时代卡和至多 5 张关键卡片，供写作时参考。
@@ -72,7 +72,7 @@ const text = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slic
  * a description, and their era card unless `replaceOwnEra`. Null when nothing
  * usable came back.
  */
-export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "places" | "dismissed"> & Partial<Pick<WorldState, "era">>, opts: { replaceOwnEra?: boolean } = {}): TurnRecord | null {
+export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "places" | "dismissed"> & Partial<Pick<WorldState, "era" | "protagonist">>, opts: { replaceOwnEra?: boolean } = {}): TurnRecord | null {
   const free = state.era?.mode === "free";
   const value = lenientJson(raw) as { era?: { name?: unknown; content?: unknown }; cards?: unknown; timeline?: unknown } | null;
   if (!value || typeof value !== "object") return null;
@@ -87,12 +87,14 @@ export function codexPatch(raw: string, state: Pick<WorldState, "cards" | "place
   if (eraContent && (eraOwn?.source !== "玩家" || opts.replaceOwnEra)) cards.push({ op: "add", kind: "时代", name: eraName || (free ? "世界" : "时代"), content: eraContent, source: "AI" });
   // Five cards, plus the protagonist's abilities (“某某的本事”) when the premise gives them.
   const listed: unknown[] = Array.isArray(value.cards) ? value.cards : [];
-  const isAbility = (item: unknown) => text((item as Record<string, unknown> | null)?.name, 20).endsWith("的本事");
+  // Only the protagonist's own card: another person's “王掌柜的本事” is an ordinary card.
+  const abilityName = (name: string) => name === abilityCardName(state.protagonist?.name ?? "") || name === "主角的本事";
+  const isAbility = (item: unknown) => abilityName(text((item as Record<string, unknown> | null)?.name, 20));
   for (const item of [...listed.filter((c) => !isAbility(c)).slice(0, 5), ...listed.filter(isAbility).slice(0, 1)]) {
     if (!item || typeof item !== "object") continue;
     const c = item as Record<string, unknown>;
     const name = text(c.name, 20);
-    const content = text(c.content, name.endsWith("的本事") ? 400 : 200);
+    const content = text(c.content, abilityName(name) ? 400 : 200);
     const keys = Array.isArray(c.keys) ? c.keys.map((k) => text(k, 20)).filter(Boolean).slice(0, 4) : [];
     if (!name || !content) continue;
     if (c.kind === "地点") {

@@ -99,7 +99,14 @@ export async function deleteBook(repo: Repo, id: string) {
     : "参考书籍的引用刚发生变化，请重新检查后再试。");
 }
 
-function queryTerms(query: string | ReferenceQuery, instructions: string): Map<string, number> {
+/**
+ * Words of asking, not of the story: “核对比试是什么” is about 比试 (R30 step 3).
+ * Mirrored in Rust `REQUEST_WORDS` (crates/story-core/src/runtime_sources.rs).
+ */
+export const REQUEST_WORDS = ["核对一下", "核对", "检查", "一下", "是什么", "为什么", "什么", "怎么", "是否", "有没有", "原著", "原文", "修改", "改成", "确认", "请问", "看看", "查查"];
+export const withoutRequestWords = (text: string) => REQUEST_WORDS.reduce((acc, word) => acc.split(word).join(" "), text);
+
+export function queryTerms(query: string | ReferenceQuery, instructions: string): Map<string, number> {
   const weights = new Map<string, number>();
   const add = (text: string | null | undefined, weight: number, limit: number) => {
     const found = terms(text ?? "");
@@ -109,7 +116,7 @@ function queryTerms(query: string | ReferenceQuery, instructions: string): Map<s
   };
   if (typeof query === "string") add(query, 3, 120);
   else {
-    add(query.text, 4, 60); add(query.rewriteHint, 5, 60); add(query.directorNote, 4, 40);
+    add(query.text, 4, 60); add(query.rewriteHint && withoutRequestWords(query.rewriteHint), 5, 60); add(query.directorNote, 4, 40);
     add(query.entities?.flatMap((e) => [e.name, ...e.aliases ?? []]).join("\n"), 3, 60);
     add(query.place, 3, 20); add(query.recent?.slice(-4000), 1, 80);
   }
@@ -118,7 +125,7 @@ function queryTerms(query: string | ReferenceQuery, instructions: string): Map<s
 }
 
 /** Center excerpts on the query, rather than throwing away the last third of every chunk. */
-function matchWindow(text: string, keys: Map<string, number>, limit = 1600): { text: string; start: number; end: number; focus?: number } {
+export function matchWindow(text: string, keys: Map<string, number>, limit = 1600): { text: string; start: number; end: number; focus?: number } {
   const lower = text.toLowerCase();
   const starts = new Set([0]);
   for (const key of keys.keys()) {
@@ -143,23 +150,28 @@ function matchWindow(text: string, keys: Map<string, number>, limit = 1600): { t
 
 const passageLabel = (p: ReferencePassage) => `\n[原著·${p.title}${p.page ? `·第${p.page}页` : ""}·${p.kind === "analysis" ? "AI整理" : "原文"}·片段${p.chunk + 1}${p.start !== undefined ? `·字${p.start + 1}起` : ""}]\n`;
 
-export async function referenceContext(repo: Repo, binding: SourceBinding | null | undefined, query: string | ReferenceQuery, budget: number): Promise<ReferenceContext | undefined> {
+/**
+ * The passages about `query` within what the story may read. `range` (资料范围,
+ * D184) narrows it to the chapters one request chose; it never widens it.
+ */
+export async function referenceContext(repo: Repo, binding: SourceBinding | null | undefined, query: string | ReferenceQuery, budget: number, range?: { from: number; to: number } | null): Promise<ReferenceContext | undefined> {
   if (!binding) return;
   const [meta] = await repo.platform.sql.query("SELECT b.id,b.title,MAX(s.section) AS last FROM source_books b JOIN source_sections s ON s.book_id=b.id WHERE b.id=? GROUP BY b.id", [binding.bookId]);
   if (!meta) return;
   const book = { id: String(meta.id), title: String(meta.title) };
   if (budget < 80) return { bookId: book.id, title: book.title, binding: { ...binding }, passages: [], status: "insufficient", reason: "budget" };
-  const through = Math.min(binding.through ?? Number(meta.last), Number(meta.last));
-  const position = Math.min(binding.position, through);
+  const through = Math.min(binding.through ?? Number(meta.last), Number(meta.last), range?.to ?? Infinity);
+  const from = Math.max(0, Math.min(range?.from ?? 0, through));
+  const position = Math.max(from, Math.min(binding.position, through));
   const keys = queryTerms(query, binding.instructions);
-  const facts = await relevantSourceFacts(repo, binding, keys, through, position);
+  const facts = (await relevantSourceFacts(repo, binding, keys, through, position)).filter((f) => f.section >= from);
   for (const fact of facts) for (const term of terms([fact.subject, ...fact.aliases].join("\n"))) {
     if (keys.has(term) || keys.size < 480) keys.set(term, Math.max(keys.get(term) ?? 0, 3));
   }
   const fields = "c.ordinal,c.section,c.text,s.title,s.page";
   const join = "FROM source_chunks c JOIN source_sections s ON s.book_id=c.book_id AND s.section=c.section";
   // Filter before ranking and compute rarity only within the allowed range.
-  const allowed = await repo.platform.sql.query(`SELECT c.ordinal,c.section ${join} WHERE c.book_id=? AND c.section<=?`, [book.id, through]);
+  const allowed = await repo.platform.sql.query(`SELECT c.ordinal,c.section ${join} WHERE c.book_id=? AND c.section>=? AND c.section<=?`, [book.id, from, through]);
   const allowedIds = new Set(allowed.map((r) => Number(r.ordinal)));
   const scores = new Map<number, number>();
   if (keys.size) for (const row of await repo.platform.sql.query(`SELECT term,postings FROM source_terms WHERE book_id=? AND term IN (${[...keys].map(() => "?").join(",")})`, [book.id, ...keys.keys()])) {
@@ -167,13 +179,13 @@ export async function referenceContext(repo: Repo, binding: SourceBinding | null
     for (const ordinal of postings) scores.set(ordinal, (scores.get(ordinal) ?? 0) + (keys.get(String(row.term)) ?? 1) / Math.sqrt(postings.length));
   }
   for (const fact of facts) if (allowedIds.has(fact.chunk)) scores.set(fact.chunk, (scores.get(fact.chunk) ?? 0) + 2);
-  const titles = await repo.platform.sql.query("SELECT section,title FROM source_sections WHERE book_id=? AND section<=?", [book.id, through]);
+  const titles = await repo.platform.sql.query("SELECT section,title FROM source_sections WHERE book_id=? AND section>=? AND section<=?", [book.id, from, through]);
   const titleScores = new Map(titles.map(row => [Number(row.section), [...keys].reduce((n, [key, weight]) => n + (String(row.title).includes(key) ? weight * 2 : 0), 0)]));
   for (const row of allowed) { const extra = titleScores.get(Number(row.section)) ?? 0; if (extra) scores.set(Number(row.ordinal), (scores.get(Number(row.ordinal)) ?? 0) + extra); }
   const sectionOf = new Map(allowed.map((r) => [Number(r.ordinal), Number(r.section)]));
   const rank = (a: number, b: number) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0) || Math.abs((sectionOf.get(a) ?? 0) - position) - Math.abs((sectionOf.get(b) ?? 0) - position) || a - b;
   const ids = [...scores.keys()].sort(rank).slice(0, 48);
-  const candidates = ids.length ? await repo.platform.sql.query(`SELECT ${fields} ${join} WHERE c.book_id=? AND c.section<=? AND c.ordinal IN (${ids.map(() => "?").join(",")})`, [book.id, through, ...ids]) : [];
+  const candidates = ids.length ? await repo.platform.sql.query(`SELECT ${fields} ${join} WHERE c.book_id=? AND c.section>=? AND c.section<=? AND c.ordinal IN (${ids.map(() => "?").join(",")})`, [book.id, from, through, ...ids]) : [];
   candidates.sort((a, b) => rank(Number(a.ordinal), Number(b.ordinal)));
   const nearby = await repo.platform.sql.query(`SELECT ${fields} ${join} WHERE c.book_id=? AND c.section=? ORDER BY c.ordinal LIMIT 1`, [book.id, position]);
   const selected = [...new Map([...candidates, ...(candidates.length ? [] : nearby)].map((r) => [r.ordinal, r])).values()].slice(0, Math.min(48, Math.ceil(budget / 800) + 1));

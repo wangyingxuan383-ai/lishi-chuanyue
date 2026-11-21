@@ -28,12 +28,12 @@ describe("cards in context", () => {
 
   it("always brings in the protagonist's abilities, named or not, ahead of the rest", () => {
     const s = world();
-    s.protagonist.name = "唐舞";
-    s.cards.push({ id: "ab", kind: "设定", name: abilityCardName("唐舞"), keys: [], content: "武魂蓝银草；魂环两紫", source: "AI" });
-    expect(activeCardLines(s, "风很大")).toEqual(["【设定】唐舞的本事：武魂蓝银草；魂环两紫"]);
-    expect(activeCardLines(s, "他拿出玉玺。")[0]).toBe("【设定】唐舞的本事：武魂蓝银草；魂环两紫");
-    expect(isAbilityCard("主角的本事", "唐舞")).toBe(true);
-    expect(isAbilityCard("王掌柜的本事", "唐舞")).toBe(false);
+    s.protagonist.name = "林舟";
+    s.cards.push({ id: "ab", kind: "设定", name: abilityCardName("林舟"), keys: [], content: "兵器短剑；剑法第三式", source: "AI" });
+    expect(activeCardLines(s, "风很大")).toEqual(["【设定】林舟的本事：兵器短剑；剑法第三式"]);
+    expect(activeCardLines(s, "他拿出玉玺。")[0]).toBe("【设定】林舟的本事：兵器短剑；剑法第三式");
+    expect(isAbilityCard("主角的本事", "林舟")).toBe(true);
+    expect(isAbilityCard("王掌柜的本事", "林舟")).toBe(false);
   });
 
   it("brings in cards whose name or alias was mentioned, newest first", () => {

@@ -1235,7 +1235,8 @@ fn apply_cards(s: &mut Value, record: &Value, log: &mut Vec<String>) {
         if text(&raw["op"]) == "remove" {
             if let Some(i) = found {
                 let card = cards.remove(i);
-                if text(&card["kind"]) != "时代" {
+                // 玩家删掉的，不要再建: only what the player removed, not the AI's own tidy-up.
+                if text(&card["kind"]) != "时代" && raw["by"] != "AI" {
                     dismiss(s, text(&card["name"]));
                 }
             } else {
@@ -1295,7 +1296,9 @@ fn apply_places(s: &mut Value, record: &Value, log: &mut Vec<String>) {
                     ));
                 } else {
                     let place = places.remove(i);
-                    dismiss(s, text(&place["name"]));
+                    if raw["by"] != "AI" {
+                        dismiss(s, text(&place["name"]));
+                    }
                 }
             } else {
                 log.push(format!(

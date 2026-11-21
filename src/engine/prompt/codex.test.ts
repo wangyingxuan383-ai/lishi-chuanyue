@@ -85,10 +85,13 @@ describe("organizing the 设定集", () => {
   });
 
   it("keeps five ordinary cards and adds the protagonist's 本事 card on top, with room for its details", () => {
-    const cards = [...Array.from({ length: 6 }, (_, i) => ({ kind: "设定", name: `卡${i}`, content: "内容" })), { kind: "设定", name: "唐舞的本事", content: "魂环：".padEnd(300, "紫") }];
-    const patch = codexPatch(JSON.stringify({ era: { name: "世界", content: "规则" }, cards }), { cards: [], places: [], era: { mode: "free" } as never })!;
+    // Another person's 本事 card is an ordinary card: it counts among the five and gets no extra room.
+    const cards = [{ kind: "设定", name: "王掌柜的本事", content: "算盘".padEnd(300, "算") }, ...Array.from({ length: 6 }, (_, i) => ({ kind: "设定", name: `卡${i}`, content: "内容" })), { kind: "设定", name: "林舟的本事", content: "剑法：".padEnd(300, "剑") }];
+    const me = { ...sampleState().protagonist, name: "林舟" };
+    const patch = codexPatch(JSON.stringify({ era: { name: "世界", content: "规则" }, cards }), { cards: [], places: [], era: { mode: "free" } as never, protagonist: me })!;
     const names = patch.cards!.filter((c) => c.kind !== "时代").map((c) => c.name);
-    expect(names).toEqual(["卡0", "卡1", "卡2", "卡3", "卡4", "唐舞的本事"]);
-    expect(patch.cards!.find((c) => c.name === "唐舞的本事")!.content!.length).toBe(300);
+    expect(names).toEqual(["王掌柜的本事", "卡0", "卡1", "卡2", "卡3", "林舟的本事"]);
+    expect(patch.cards!.find((c) => c.name === "林舟的本事")!.content!.length).toBe(300);
+    expect(patch.cards!.find((c) => c.name === "王掌柜的本事")!.content!.length).toBe(200);
   });
 });

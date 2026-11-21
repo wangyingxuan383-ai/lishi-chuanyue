@@ -1,10 +1,9 @@
 //! One versioned SQL source for the browser and every native database owner.
 use crate::{Error, Result};
-use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
-use std::{fs, path::Path};
+use std::path::Path;
 
-pub const LATEST_VERSION: i64 = 16;
+pub const LATEST_VERSION: i64 = 17;
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("migrations/001.sql")),
     (2, include_str!("migrations/002.sql")),
@@ -22,6 +21,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (14, include_str!("migrations/014.sql")),
     (15, include_str!("migrations/015.sql")),
     (16, include_str!("migrations/016.sql")),
+    (17, include_str!("migrations/017.sql")),
 ];
 
 pub fn version(connection: &Connection) -> Result<i64> {
@@ -62,21 +62,8 @@ pub fn migrate(connection: &mut Connection, backup_directory: Option<&Path>) -> 
                 .as_deref()
                 .filter(|p| !p.is_empty() && *p != ":memory:")
                 .ok_or_else(|| Error::Invalid("无法为升级建立一致性备份".into()))?;
-            fs::create_dir_all(directory)
-                .map_err(|_| Error::Invalid("无法建立升级备份目录".into()))?;
-            let destination = directory.join(format!(
-                "{}-before-v{}.sqlite",
-                Utc::now().format("%Y%m%dT%H%M%S%.9fZ"),
-                current + 1
-            ));
             let reader = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            reader.backup(rusqlite::MAIN_DB, &destination, None)?;
-            let backup =
-                Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let check: String = backup.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-            if check != "ok" || version(&backup)? != current {
-                return Err(Error::Invalid("升级备份校验未通过，尚未修改存档".into()));
-            }
+            crate::db_backup::save(&reader, directory, &format!("before-v{}", current + 1), current)?;
         }
     }
     tx.execute_batch("CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)")?;
@@ -117,6 +104,10 @@ mod tests {
     fn native_upgrade_preserves_legacy_and_backups_committed_wal_state() {
         let directory = tempfile::tempdir().unwrap();
         let old = legacy_file(directory.path());
+        let files = directory.path().join("backups");
+        std::fs::create_dir(&files).unwrap();
+        let obsolete = files.join("20261120T000000Z-auto.sqlite");
+        old.backup(rusqlite::MAIN_DB, &obsolete, None).unwrap();
         // Keep an independent connection alive: migration must snapshot WAL,
         // not copy the main file while committed pages are still in its log.
         let store = SqlStore::open(directory.path().into()).unwrap();
@@ -141,9 +132,11 @@ mod tests {
         );
         let backups = store.list_backups().unwrap();
         assert_eq!(backups.len(), 1);
-        assert!(backups[0].name.ends_with("before-v8.sqlite"));
-        let backup =
-            Connection::open(directory.path().join("backups").join(&backups[0].name)).unwrap();
+        assert!(backups[0].name.ends_with("before-v8.sqlite.zip"));
+        assert!(!obsolete.exists());
+        let stage = tempfile::tempdir().unwrap();
+        let path = crate::db_backup::materialize(&files, &backups[0].name, stage.path()).unwrap();
+        let backup = Connection::open(path).unwrap();
         assert_eq!(version(&backup).unwrap(), 7);
         assert_eq!(
             backup
@@ -166,7 +159,12 @@ mod tests {
         let old = legacy_file(directory.path());
         old.execute_batch("CREATE TABLE pi_sessions(id TEXT)")
             .unwrap();
+        let files = directory.path().join("backups");
+        std::fs::create_dir(&files).unwrap();
+        let obsolete = files.join("20261120T000000Z-auto.sqlite");
+        old.backup(rusqlite::MAIN_DB, &obsolete, None).unwrap();
         assert!(SqlStore::open(directory.path().into()).is_err());
+        assert!(obsolete.is_file());
         assert_eq!(version(&old).unwrap(), 7);
         assert_eq!(
             old.query_row("SELECT title FROM worlds", [], |r| r.get::<_, String>(0))

@@ -152,15 +152,23 @@ export default function App() {
   // A message belongs to the screen it was shown on (AUDIT_V4 1.10): moving on clears it.
   // The direction picks the screen entry animation (base.css, :root[data-nav]).
   // At 华丽 a page change runs as a View Transition; opening a book grows its cover into the story (D160).
+  // A new screen starts at its top; going back returns to where the screen under it was
+  // (the window scrolls, so a pushed page otherwise opened halfway down: R30 step 3 walkthrough).
+  const scrolls = useRef<number[]>([]);
   const push = useCallback((r: Route) => {
     clearToast(); markNavigation("push");
     if (r.name === "play") nameForTransition(document.querySelector(`[data-world-id="${r.worldId}"] .book-art`), "story-card");
-    withViewTransition("push", () => flushSync(() => setStack((s) => [...s, r])), () => {
+    scrolls.current.push(window.scrollY);
+    withViewTransition("push", () => { flushSync(() => setStack((s) => [...s, r])); window.scrollTo?.(0, 0); }, () => {
       if (r.name === "play") nameForTransition(document.querySelector(".preserved-play:not([data-inactive]) > *"), "story-card");
     });
   }, [clearToast]);
-  const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); withViewTransition("push", () => flushSync(() => setStack((s) => [...s.slice(0, -1), r]))); }, [clearToast]);
-  const pop = useCallback(() => { clearToast(); markNavigation("pop"); withViewTransition("pop", () => flushSync(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)))); }, [clearToast]);
+  const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); withViewTransition("push", () => { flushSync(() => setStack((s) => [...s.slice(0, -1), r])); window.scrollTo?.(0, 0); }); }, [clearToast]);
+  const pop = useCallback(() => {
+    clearToast(); markNavigation("pop");
+    const back = scrolls.current.pop() ?? 0;
+    withViewTransition("pop", () => { flushSync(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s))); window.scrollTo?.(0, back); });
+  }, [clearToast]);
   useEffect(() => installRipples(), []);
   // R29-T006: a tapped "写好了" or "没写完" opens that story, at start and when the app comes back.
   useEffect(() => {

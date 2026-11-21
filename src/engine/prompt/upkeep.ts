@@ -13,8 +13,8 @@ import type { ChatMessage } from "../llm/chat";
 import type { StoryNode, WorldState } from "../types";
 import { abilityCardName, isAbilityCard } from "../memory/cards";
 
-export const UPKEEP_PROMPT_VERSION = "upkeep-6";
-export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-free-6";
+export const UPKEEP_PROMPT_VERSION = "upkeep-7";
+export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-free-7";
 /** Turns between two passes. */
 export const UPKEEP_EVERY = 6;
 const STORY_CHARS = 5000;
@@ -60,7 +60,7 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
       content: `你是一部${free ? "" : "历史"}互动小说的资料员，替作者维护“设定集”：读最近几回合的剧情，把以后写作用得着的资料记下来。
 要求：
 - 设定集是写作时备查的资料，不是剧情梗概（梗概已经有章节摘要）：只记以后写作还会用到、容易写错的具体东西——名称、等级、年限、颜色、数量、能力和招式、物品的样子与下落、规矩、约定和代价。写具体的数字和名称，不要概括成“实力提升”“获得机缘”。
-- 主角自己的本事和成长（按这个世界的说法：武魂、魂环的年限和颜色、魂技、魂力等级、境界、功法、法宝、血脉、契约等）只记在一张名为“${ability}”的设定卡里，分项写清：没有就在 cards 里新建；剧情让它变了（新得魂环、升级、学会新招），就在 updates 里写出更新后的全文。这张卡可以写到 300 字。
+- 主角自己的本事和成长（用这个世界自己的说法写：修为或等级、境界、功法和招式、法宝或装备、血脉、契约、特殊能力等，名称、数字、年限都写具体）只记在一张名为“${ability}”的设定卡里，分项写清：没有就在 cards 里新建；剧情让它变了（升级、突破、学会新招、得到或失去法宝），就在 updates 里写出更新后的全文。这张卡可以写到 300 字。
 - 新卡只记剧情里有名字、以后很可能再出现的东西，一张卡只写一样东西。${free ? "记下反复出现的组织、关键物品和设定。" : "先记反复出现的势力（官署、军队、帮会、商号、家族、党派），再记关键物件（信物、证据）和设定（规矩、案子、暗号）。"}一次最多 3 张，宁缺毋滥；已有的卡片和地点不要重复建。
 - 主角就是【主角】里写的那个人，剧情里的“你”就是主角。主角做的事、拿到的东西记在主角名下（卡片里写“主角”或主角的名字），不要记到别人头上，也不要给主角另起名字。
 - 人物表里没有、却在剧情里反复出现、有名字或固定称呼的人，写进 people（身份、对主角的态度、一句备注），一次最多 3 个；人物表里已有的不写，人物不建卡。人物表里的人，剧情写明已经死了的，写进 deaths。

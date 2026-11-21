@@ -80,12 +80,24 @@ export function sqlJsSql(
       hooks.persist?.();
     },
     async backup(label) {
-      const name = hooks.backup ? await hooks.backup(label) : `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite`;
+      const name = hooks.backup ? await hooks.backup(label) : `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}.sqlite.zip`;
       backups.unshift({ name, at: new Date().toISOString(), size: exportDatabase(db).length });
+      backups.splice(5);
       return name;
     },
     async listBackups() {
       return hooks.listBackups ? hooks.listBackups() : [...backups];
+    },
+    async backupInventory() {
+      const items = await this.listBackups();
+      return { items, totalBytes: items.reduce((total, item) => total + item.size, 0) };
+    },
+    async deleteBackups(names) {
+      if (hooks.listBackups) throw new PlatformError("sql_backup_unsupported", "这里无法删除备份");
+      for (let index = backups.length - 1; index >= 0; index--) {
+        if (names.includes(backups[index].name)) backups.splice(index, 1);
+      }
+      return { inventory: await this.backupInventory(), failed: 0 };
     },
     async restore(name) {
       if (!hooks.restore) throw new PlatformError("sql_restore_unsupported", "这里不支持从备份恢复");

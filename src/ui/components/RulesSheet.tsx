@@ -1,4 +1,6 @@
 // Display calibration and currency are ordinary reversible player edits.
+import { SourceScopeRow } from "./SourceScope";
+import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
 import { useState } from "react";
 import { LUNAR_MONTHS, monthDays } from "../../engine/calendar/date";
 import { nowOf } from "../../engine/calendar/clock";
@@ -47,13 +49,14 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
   // 让 AI 改 (R29-T005): the answer fills this form; the preview below shows it before 保存.
   const { game, toast } = useApp();
   const [instruction, setInstruction] = useState(""), [useSource, setUseSource] = useState(!!state.source), [revising, setRevising] = useState(false), [aiNote, setAiNote] = useState("");
+  const [scope, setScope] = useState<SourceScope>(AUTO_SCOPE);
   const revise = async () => {
     if (!worldId || !instruction.trim() || revising) return;
     setRevising(true);
     try {
       const current: ReviseRules = { clockStyle: form.style, timeStyle: form.timeStyle, lunar: form.lunar, eraName: form.eraName, year: form.year ? Number(form.year) : null, month: form.month, day: Number(form.day) || 1,
         displayDay: Number(form.displayDay) || 1, hour: Number(form.hour) || 0, minute: Number(form.minute) || 0, currency: units.map((u) => ({ name: u.name.trim(), value: Number(u.value) })) };
-      const r = await game.reviseRules(worldId, current, instruction, { useSource: useSource && !!state.source });
+      const r = await game.reviseRules(worldId, current, instruction, { useSource: useSource && !!state.source, scope });
       const two = (n: number) => String(n).padStart(2, "0");
       setForm((v) => ({ ...v, ...(r.clockStyle ? { style: r.clockStyle } : {}), ...(r.timeStyle ? { timeStyle: r.timeStyle } : {}), ...(r.lunar !== undefined ? { lunar: r.lunar } : {}),
         ...(r.eraName ? { eraName: r.eraName } : {}), ...(r.year ? { year: String(r.year) } : {}), ...(r.month ? { month: r.month } : {}), ...(r.day ? { day: String(r.day) } : {}),
@@ -115,8 +118,9 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
       {worldId && <details className="ai-revise">
         <summary>让 AI 改</summary>
         <div className="stack gap-2">
-          <textarea rows={2} maxLength={500} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="如：改用斗罗历，货币换成金魂币、银魂币、铜魂币，一金魂币等于一百银魂币" />
+          <textarea rows={2} maxLength={500} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="如：改用玄元历，货币换成金灵币、银灵币、铜灵币，一金灵币等于一百银灵币" />
           {state.source && <Switch label="参考原著" note={useSource ? "带上原著札记和相关原文片段" : "只按你的要求改"} checked={useSource} onChange={setUseSource} />}
+          {state.source && useSource && <SourceScopeRow worldId={worldId} binding={state.source} value={scope} purpose="revise" disabled={revising} onChange={setScope} />}
           <div className="row"><span className="grow" /><button disabled={!instruction.trim() || revising || saving} onClick={() => void revise()}>{revising ? "AI 正在改…" : "让 AI 改"}</button></div>
           {aiNote && <p className="field-hint m-0">{aiNote}</p>}
         </div>
@@ -130,7 +134,7 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
         <span className="muted">历法</span>
         <div className="segmented"><button aria-pressed={form.lunar} onClick={() => set("lunar", true)}>农历（简化）</button><button aria-pressed={!form.lunar} onClick={() => set("lunar", false)}>阳历式</button></div>
         <p className="field-hint m-0">沿用十二个月，不含闰月或闰日；纪年名可自定。</p>
-        <label>当前纪年<input aria-label="纪年名称" maxLength={12} value={form.eraName} onChange={e => set("eraName", e.target.value)} placeholder="如：斗罗历、天宝、公元" /></label>
+        <label>当前纪年<input aria-label="纪年名称" maxLength={12} value={form.eraName} onChange={e => set("eraName", e.target.value)} placeholder="如：玄元历、天宝、公元" /></label>
         <div className="row wrap">
           <input aria-label="当前年" className="date-y" inputMode="numeric" value={form.year} onChange={e => set("year", e.target.value.replace(/\D/g, ""))} placeholder="年" />
           <select aria-label="当前月" className="date-m" value={form.month} onChange={e => set("month", Number(e.target.value))}>{Array.from({ length: 12 }, (_, i) => <option key={i} value={i + 1}>{form.lunar ? LUNAR_MONTHS[i] : `${i + 1}月`}</option>)}</select>

@@ -84,6 +84,31 @@ describe("本局札记 (D174)", () => {
     const restored = await restorePrevious(repo, note.id);
     expect(restored?.content).toBe("本局主线：进城、认舅、出城。");
     expect((await getNote(repo, note.id))?.previousContent).toBe("合并后的主线：进城、认舅、出城、上山。");
+    // The reach goes back too, so the next 更新到现在 reads the fourth passage again.
+    expect(restored?.scope.to).toBe(first.scope.to);
+    expect(() => startNoteUpdate(restored!, last)).not.toThrow();
+    // And forward again with 恢复上一版 once more.
+    const again = await restorePrevious(repo, note.id);
+    expect(again?.content).toBe("合并后的主线：进城、认舅、出城、上山。");
+    expect(again?.scope.to).toBe(last);
+  });
+
+  it("an update that left a gap, retried later, still restores to the reach before the update", async () => {
+    const { game, repo, worldId, add, refuse } = await story();
+    const note = newStoryNote(worldId, "plot", {}, "主线梗概");
+    await saveNote(repo, note);
+    const first = await game.runCanonNote(note.id, () => {});
+    await add("第四段：上山拜师。");
+    const last = await storyLastTurn(repo, worldId);
+    await saveNote(repo, startNoteUpdate(first, last), true);
+    refuse.when = (_url, text) => text.includes("上山拜师") && !text.includes("已有札记");
+    const gapped = await game.runCanonNote(note.id, () => {});
+    expect(gapped.progress.gaps?.length).toBeGreaterThan(0);
+    refuse.when = () => false;
+    const retried = await game.runCanonNote(note.id, () => {});
+    expect(retried.progress.gaps ?? []).toEqual([]);
+    const restored = await restorePrevious(repo, note.id);
+    expect(restored?.scope.to).toBe(first.scope.to);
   });
 
   it("goes into writing: the main plot always, people when named, ahead of book notes", async () => {
@@ -112,6 +137,17 @@ describe("本局札记 (D174)", () => {
 });
 
 describe("本局札记与路线", () => {
+  it("a person note paused before the story grew goes on after a new passage", async () => {
+    const { game, repo, worldId, add } = await story();
+    const head = (await tree.cursor(repo, worldId)).head;
+    const note = { ...newStoryNote(worldId, "person", { subject: "王掌柜", aliases: ["舅舅"] }, "人物：王掌柜"), status: "paused" as const, progress: { parts: [], total: 0, routeNode: head.id } };
+    await saveNote(repo, note);
+    await add("第四段：王掌柜送来一封信。");
+    const done = await game.runCanonNote(note.id, () => {});
+    expect(done.status).toBe("done");
+  });
+
+
   it("anchors a reply to the passages read before the player switched routes", async () => {
     const { game, repo, worldId, platform } = await story();
     const original = await tree.cursor(repo, worldId);

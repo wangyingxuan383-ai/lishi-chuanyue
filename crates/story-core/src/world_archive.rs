@@ -214,7 +214,7 @@ impl Serialize for Book<'_> {
         for (name, query, kind, args) in [
             ("jobs", "SELECT json FROM source_jobs WHERE book_id=? ORDER BY id", RowKind::Job, book_only),
             ("analysis", "SELECT job_id AS jobId,ordinal,section,text FROM source_analysis WHERE book_id=? ORDER BY job_id,ordinal", RowKind::Plain, book_only),
-            ("notes", "SELECT id,book_id AS bookId,world_id AS worldId,kind,title,scope_json AS scope,content,refs_json AS refs,model,status,active,progress_json AS progress,created_at AS createdAt,updated_at AS updatedAt FROM canon_notes WHERE book_id=? AND (world_id IS NULL OR world_id=?) ORDER BY created_at,id", RowKind::Note, book_and_world),
+            ("notes", "SELECT id,book_id AS bookId,world_id AS worldId,kind,title,scope_json AS scope,content,previous_content AS previousContent,refs_json AS refs,model,status,active,progress_json AS progress,created_at AS createdAt,updated_at AS updatedAt FROM canon_notes WHERE book_id=? AND (world_id IS NULL OR world_id=?) ORDER BY created_at,id", RowKind::Note, book_and_world),
         ] {
             map.serialize_entry(name, &Rows { db: self.db, query, args, kind, errors: self.errors })?;
         }
@@ -296,8 +296,8 @@ mod tests {
             UPDATE worlds SET current_line_id='l' WHERE id='w';
             INSERT INTO source_books VALUES('b','样书','txt','t','{\"id\":\"b\",\"sections\":[]}');
             INSERT INTO states(node_id,state_json) VALUES('n','{\"source\":{\"bookId\":\"b\"}}');
-            INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,status,progress_json,created_at,updated_at)
-            VALUES('note','b','w','question','疑问','{}','已保存部分','[0]','running','{\"parts\":[\"摘要\"],\"total\":2}','t','t');
+            INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,previous_content,refs_json,status,progress_json,created_at,updated_at)
+            VALUES('note','b','w','question','疑问','{}','已保存部分','原著札记旧版','[0]','running','{\"parts\":[\"摘要\"],\"total\":2}','t','t');
             INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,origin_title,created_at,updated_at)
             VALUES('sn','w','plot','主线梗概','{\"to\":3}','第一回合起','旧版','[]','m','done',1,'{\"parts\":[],\"total\":0}','前作','t','t');",
         )
@@ -327,6 +327,7 @@ mod tests {
         assert_eq!(native["books"][0]["book"]["id"], "b");
         let note = &native["books"][0]["notes"][0];
         assert_eq!(note["status"], "paused");
+        assert_eq!(note["previousContent"], "原著札记旧版");
         assert_eq!(note["refs"], json!([0]));
         assert_eq!(note["progress"]["parts"], json!(["摘要"]));
     }

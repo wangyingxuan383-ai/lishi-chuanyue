@@ -221,17 +221,10 @@ fn bound_sources(plan: &RunPlan, messages: &mut [Value], allowance: usize) -> us
             source_paths(value, "", &mut paths[index]);
         }
     }
-    let actual_tool_original = messages.iter().enumerate().any(|(index, message)| {
-        message["role"] == "tool"
-            && decoded[index].as_ref().is_some_and(|value| {
-                paths[index].iter().any(|path| {
-                    value
-                        .pointer(path)
-                        .and_then(Value::as_array)
-                        .is_some_and(|a| a.iter().any(|p| p["kind"] == "original"))
-                })
-            })
-    });
+    // Original text a kept tool result already shows (section, chunk, text): an
+    // inline passage is a duplicate only when one of these contains it. A lookup
+    // of some other passage leaves the evidence given up front in place (R30 step 3).
+    let mut tool_reads: Vec<(Value, Value, String)> = vec![];
     let reference = plan.reference.as_ref().unwrap_or(&Value::Null);
     let passages = reference["passages"]
         .as_array()
@@ -265,6 +258,11 @@ fn bound_sources(plan: &RunPlan, messages: &mut [Value], allowance: usize) -> us
                     if cost <= allowance.saturating_sub(used) && !seen.contains(&key) {
                         used += cost;
                         seen.insert(key);
+                        if messages[index]["role"] == "tool" && passage["kind"] == "original" {
+                            if let Some(text) = passage["text"].as_str() {
+                                tool_reads.push((passage["section"].clone(), passage["chunk"].clone(), text.to_owned()));
+                            }
+                        }
                         keep.push(passage);
                     } else {
                         omitted += 1;
@@ -296,7 +294,10 @@ fn bound_sources(plan: &RunPlan, messages: &mut [Value], allowance: usize) -> us
             let mut replacements = vec![];
             for (range, passage) in ranges {
                 let cost = units(&passage.to_string());
-                let duplicate = actual_tool_original && passage["kind"] == "original";
+                let duplicate = passage["kind"] == "original"
+                    && passage["text"].as_str().is_some_and(|text| tool_reads.iter().any(|(section, chunk, read)| {
+                        *section == passage["section"] && *chunk == passage["chunk"] && read.contains(text)
+                    }));
                 let key = identity(&passage, &reference["bookId"]);
                 if !duplicate && cost <= allowance.saturating_sub(used) && !seen.contains(&key) {
                     used += cost;
@@ -467,6 +468,41 @@ mod tests {
     }
 
     #[test]
+    fn inline_evidence_survives_a_lookup_of_a_different_passage() {
+        let given = "入门比试分为实战与理论两项。".repeat(4);
+        let other = "沈家的暗器以飞针为最。".repeat(4);
+        let passage = json!({"kind":"original","text":given,"section":3,"chunk":7});
+        let mut p = plan(8000);
+        p.reference = Some(json!({"bookId":"book","binding":{"instructions":""},"passages":[passage]}));
+        let messages = vec![
+            message("system", "规则"),
+            message("user", format!("[原著·第四章·原文·片段1]\n{given}\n【玩家要求】核对比试")),
+            request(vec![call("search", "search_original")]),
+            response("search", json!({"bookId":"book","status":"ready","excerpts":[{"kind":"original","text":other,"section":9,"chunk":20}]})),
+        ];
+        let outgoing = bound_context(&p, messages, &[]).unwrap();
+        let user = outgoing[1]["content"].as_str().unwrap();
+        assert!(user.contains(&given), "{user}");
+        assert!(!user.contains("重复原文已省略"));
+    }
+
+    #[test]
+    fn inline_evidence_a_lookup_returned_again_is_left_to_the_tool_result() {
+        let given = "入门比试分为实战与理论两项。".repeat(4);
+        let passage = json!({"kind":"original","text":given,"section":3,"chunk":7});
+        let mut p = plan(8000);
+        p.reference = Some(json!({"bookId":"book","binding":{"instructions":""},"passages":[passage.clone()]}));
+        let messages = vec![
+            message("system", "规则"),
+            message("user", format!("[原著·第四章·原文·片段1]\n{given}\n【玩家要求】核对比试")),
+            request(vec![call("read", "read_original")]),
+            response("read", json!({"bookId":"book","status":"ready","excerpts":[{"kind":"original","text":format!("前文。{given}后文。"),"section":3,"chunk":7}]})),
+        ];
+        let outgoing = bound_context(&p, messages, &[]).unwrap();
+        assert!(outgoing[1]["content"].as_str().unwrap().contains("重复原文已省略"));
+    }
+
+    #[test]
     fn removing_an_old_tool_group_restores_its_inline_original_copy() {
         let original = "姐姐仍是守桥人，钥匙在竹匣。".repeat(8);
         let passage = json!({"kind":"original","text":original,"section":0,"chunk":0});
@@ -620,10 +656,12 @@ mod tests {
             serde_json::from_str(outgoing[3]["content"].as_str().unwrap()).unwrap();
         assert_eq!(previous["status"], "omitted");
         assert_eq!(previous["reason"], "budget");
+        // Its tool copy was dropped for the budget too, so the inline one is
+        // omitted for the budget, not called a duplicate of a result not shown.
         assert!(outgoing[1]["content"]
             .as_str()
             .unwrap()
-            .contains("重复原文已省略"));
+            .contains("此段原著资料因输入预算已省略"));
         assert!(trace[1]["content"]
             .as_str()
             .unwrap()

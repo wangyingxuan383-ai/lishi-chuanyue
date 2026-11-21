@@ -92,12 +92,16 @@ pub fn codex_patch(raw: &str, state: &Value, options: &Value) -> Option<Value> {
     }
     // The first five supplied items count, including unusable entries.
     // Five cards, plus the protagonist's abilities (“某某的本事”) when the premise gives them.
-    let ability = |c: &&Value| text(&c["name"], 20).ends_with("的本事");
+    // Only the protagonist's own card: another person's “王掌柜的本事” is an ordinary card.
+    let me = text(&state["protagonist"]["name"], 20);
+    let own = format!("{}的本事", if me.is_empty() { "主角" } else { me.as_str() });
+    let is_ability = |name: &str| name == own || name == "主角的本事";
+    let ability = |c: &&Value| is_ability(&text(&c["name"], 20));
     let listed = values(&value["cards"]);
     let chosen: Vec<&Value> = listed.iter().filter(|c| !ability(c)).take(5).chain(listed.iter().filter(|c| ability(c)).take(1)).collect();
     for c in chosen {
         let name = text(&c["name"], 20);
-        let content = text(&c["content"], if name.ends_with("的本事") { 400 } else { 200 });
+        let content = text(&c["content"], if is_ability(&name) { 400 } else { 200 });
         if name.is_empty() || content.is_empty() {
             continue;
         }
@@ -270,6 +274,7 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
     }
     // One thing under two names (upkeep-5): AI-written duplicates become one card
     // or place, the dropped name kept as an alias so it still brings it in.
+    // Removals here are the AI's (`by`), never remembered as the player's deletions.
     let mut merged = 0;
     for item in values(&value["merges"]) {
         if merged >= MAX_EACH {
@@ -293,7 +298,7 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
                 let content = text(&item["content"], 200);
                 let content = if content.is_empty() { k["content"].clone() } else { json!(content) };
                 cards.push(json!({"op":"update", "id":k["id"], "name":k["name"], "keys":keys, "content":content, "source":"AI"}));
-                cards.push(json!({"op":"remove", "id":d["id"], "name":d["name"]}));
+                cards.push(json!({"op":"remove", "id":d["id"], "name":d["name"], "by":"AI"}));
                 merged += 1;
             }
             continue;
@@ -315,7 +320,7 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
             let given = text(&item["content"], 200);
             let description = if !given.is_empty() { given } else if text(&kp["description"], usize::MAX).is_empty() { text(&dp["description"], 200) } else { text(&kp["description"], 200) };
             places.push(json!({"op":"update", "id":kp["id"], "name":kp["name"], "aliases":aliases, "description":description, "source":"AI"}));
-            places.push(json!({"op":"remove", "id":dp["id"], "name":dp["name"]}));
+            places.push(json!({"op":"remove", "id":dp["id"], "name":dp["name"], "by":"AI"}));
             merged += 1;
         }
     }
@@ -330,7 +335,7 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
         if card["source"] != "AI" || is_ability(text(&card["name"], 20).as_str()) || cards.iter().any(|c| c.get("id") == card.get("id")) {
             continue;
         }
-        cards.push(json!({"op":"remove", "id":card["id"], "name":card["name"]}));
+        cards.push(json!({"op":"remove", "id":card["id"], "name":card["name"], "by":"AI"}));
         dropped += 1;
     }
     let mut status = Vec::<Value>::new();
@@ -430,25 +435,37 @@ mod tests {
         assert_eq!(
             upkeep_patch(&raw, &state),
             Some(json!({
-                "cards":[{"op":"update","id":"letter","name":"密信","keys":["那封信","信"],"content":"藏在袖中，写着地址","source":"AI"},{"op":"remove","id":"that","name":"那封信"}],
-                "places":[{"op":"update","id":"hall","name":"县衙大堂","aliases":["县衙"],"description":"升堂之处","source":"AI"},{"op":"remove","id":"yamen","name":"县衙"}]
+                "cards":[{"op":"update","id":"letter","name":"密信","keys":["那封信","信"],"content":"藏在袖中，写着地址","source":"AI"},{"op":"remove","id":"that","name":"那封信","by":"AI"}],
+                "places":[{"op":"update","id":"hall","name":"县衙大堂","aliases":["县衙"],"description":"升堂之处","source":"AI"},{"op":"remove","id":"yamen","name":"县衙","by":"AI"}]
             }))
         );
     }
 
     #[test]
+    fn only_the_protagonists_own_ability_card_gets_the_extra_room() {
+        let state = json!({"era":{"mode":"free"},"protagonist":{"name":"林舟"},"cards":[],"places":[]});
+        let raw = json!({"cards":[
+            {"kind":"设定","name":"王掌柜的本事","content":"算".repeat(300)},
+            {"kind":"设定","name":"林舟的本事","content":"剑".repeat(300)}]}).to_string();
+        let patch = codex_patch(&raw, &state, &json!({})).unwrap();
+        let card = |name: &str| patch["cards"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap()["content"].as_str().unwrap().chars().count();
+        assert_eq!(card("林舟的本事"), 300);
+        assert_eq!(card("王掌柜的本事"), 200);
+    }
+
+    #[test]
     fn upkeep_keeps_a_long_ability_card_and_drops_only_its_own_one_offs() {
-        let state = json!({"protagonist":{"name":"唐舞","statuses":[]},"people":[],"places":[],"cards":[
-            {"id":"ab","name":"唐舞的本事","kind":"设定","keys":[],"content":"一环","source":"AI"},
+        let state = json!({"protagonist":{"name":"林舟","statuses":[]},"people":[],"places":[],"cards":[
+            {"id":"ab","name":"林舟的本事","kind":"设定","keys":[],"content":"一环","source":"AI"},
             {"id":"scene","name":"雨夜茶摊","kind":"设定","keys":[],"content":"一次性","source":"AI"},
             {"id":"own","name":"玩家的规矩","kind":"设定","keys":[],"content":"玩家写","source":"玩家"}]});
-        let long = "魂环：".to_owned() + &"千年紫环；".repeat(60);
-        let raw = json!({"updates":[{"name":"唐舞的本事","content":long}],"drop":["雨夜茶摊","玩家的规矩","唐舞的本事","不存在"]}).to_string();
+        let long = "剑法：".to_owned() + &"第三式已成；".repeat(60);
+        let raw = json!({"updates":[{"name":"林舟的本事","content":long}],"drop":["雨夜茶摊","玩家的规矩","林舟的本事","不存在"]}).to_string();
         let patch = upkeep_patch(&raw, &state).unwrap();
         let cards = patch["cards"].as_array().unwrap();
         assert_eq!(cards[0]["id"], "ab");
         assert!(cards[0]["content"].as_str().unwrap().encode_utf16().count() > 200);
-        assert_eq!(cards[1], json!({"op":"remove","id":"scene","name":"雨夜茶摊"}));
+        assert_eq!(cards[1], json!({"op":"remove","id":"scene","name":"雨夜茶摊","by":"AI"}));
         assert_eq!(cards.len(), 2);
     }
 

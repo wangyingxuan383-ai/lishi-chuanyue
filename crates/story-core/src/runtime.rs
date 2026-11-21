@@ -15,6 +15,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod correction;
 mod maintain;
 mod review;
 
@@ -510,7 +511,8 @@ impl Engine {
         }
         let mut messages = messages;
         if final_only {
-            messages.push(json!({"role":"system","content":"【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本次的完整结果，不要再调用工具；资料不足之处按已知写，不编造原著细节。"}));
+            let last = if plan.kind == "correction" { correction::CORRECTION_FINAL } else { "【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本次的完整结果，不要再调用工具；资料不足之处按已知写，不编造原著细节。" };
+            messages.push(json!({"role":"system","content":last}));
         }
         if let Some(note) = allowance {
             messages.push(json!({"role":"system","content":note}));
@@ -669,7 +671,10 @@ impl Engine {
                     }
                     // 备用服务 (D179): the main service failed this step again for a
                     // passing reason; the backup answers it, and the rest of this run.
-                    let backup = plan.fallback_model.clone().filter(|backup| !backup.same_service(&plan.model) && crate::failure::fallback_eligible(&error));
+                    // A request that offers tools never goes to a backup already known not to take them:
+                    // it could only fail there too (R30 step 3).
+                    let backup_without_tools = |backup: &crate::types::ModelConfig| !tools.is_empty() && self.store.lock().ok().and_then(|db| db.query_row("SELECT value FROM settings WHERE key=?", [format!("toolCapability:{}:{}:{}", backup.slot, backup.url, backup.model)], |r| r.get::<_, String>(0)).optional().ok().flatten()).and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).is_some_and(|v| v["supported"] == false);
+                    let backup = plan.fallback_model.clone().filter(|backup| !backup.same_service(&plan.model) && crate::failure::fallback_eligible(&error) && !backup_without_tools(backup));
                     if let Some(backup) = backup {
                         if shared.lock().map_err(|_| Error::Cancelled)?.step_budget().model_requests < request_limit {
                             let from = plan.model.model.clone();
@@ -838,6 +843,17 @@ impl Engine {
         let tier = Tier::of(&plan);
         let rules = if ordinary { match tier { Tier::Fast => ORDINARY_RULES_FAST.to_owned(), Tier::Standard => ORDINARY_RULES_STANDARD.to_owned(), Tier::Deep => format!("{}\n{}", crate::skills::catalog_brief(), ORDINARY_RULES) } } else { format!("{}\n{}", crate::skills::catalog_text(), CLASSIC_RULES) };
         messages.insert(0,json!({"role":"system","content":rules}));
+        // 按原著纠错 (D182): the canon-reference skill's writing part comes with the
+        // task instead of costing one of its few lookup rounds.
+        if plan.kind == "correction" {
+            if let Ok(skill) = crate::skills::read_writing("canon-reference") {
+                let version = skill["metadata"]["version"].clone();
+                messages.insert(1, json!({"role":"system","content":format!("【遵循原著技能 canon-reference {}，已随本次任务提供，不必再读】\n{}", version.as_str().unwrap_or(""), skill["body"].as_str().unwrap_or(""))}));
+                let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+                c.draft["canonSkillRead"] = true.into();
+                c.draft["skillVersions"]["canon-reference"] = version;
+            }
+        }
         if let Some(saved) = shared
             .lock()
             .map_err(|_| Error::Cancelled)?
@@ -862,6 +878,10 @@ impl Engine {
             return Err(Error::fail(crate::failure::FailKind::Unsupported,"这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用"));
         }
         let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t["function"]["name"].as_str().unwrap_or(""))).filter(|t|tier!=Tier::Standard||STANDARD_TOOLS.contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
+        // 资料范围 (D184): only the chosen notes → no tool that reads the original; a
+        // range of chapters → no whole-book reference tools.
+        let scoped_out: &[&str] = if crate::runtime_sources::notes_only(&plan) { &["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"] } else if crate::runtime_sources::scope_range(&plan).is_some() { &["locate_original_event","prepare_reference_check"] } else { &[] };
+        active_tools.retain(|t| !scoped_out.contains(&t["function"]["name"].as_str().unwrap_or("")));
         // Lookup rounds before the model must write; questions and checks keep
         // the open loop, bounded only by the run allowance.
         // A correction or a question gets a handful of lookup rounds, then must
@@ -878,7 +898,9 @@ impl Engine {
         let result = loop {
             self.check(&shared)?;
             let final_only = !active_tools.is_empty() && tool_rounds.is_some_and(|n| round >= n);
-            let attempt=self.complete_with(&shared,&format!("writing:{round}"),messages.clone(),active_tools.clone(),false,final_only).await;
+            // A correction keeps what it has read in view, so its quotes can come from the page, not memory.
+            let outgoing = if plan.kind == "correction" { correction::with_read_ledger(&shared, messages.clone(), plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize)? } else { messages.clone() };
+            let attempt=self.complete_with(&shared,&format!("writing:{round}"),outgoing,active_tools.clone(),false,final_only).await;
             let response=match attempt {
                 Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{self.save_tool_support(&plan,false)?;active_tools.clear();continue;},
                 other=>other?,
@@ -913,6 +935,9 @@ impl Engine {
                         mcp.call(name, &args).await?
                     };
                     self.store.lock()?.execute("INSERT OR REPLACE INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES(?,?,?,'done',?,?)", params![plan.id,key,name,args.to_string(),output.to_string()])?;
+                    if matches!(plan.kind.as_str(), "correction" | "ask") {
+                        self.note_lookup(&shared, name, &args, &output)?;
+                    }
                     output
                 };
                 messages.push(
@@ -936,80 +961,7 @@ impl Engine {
             return Ok(());
         }
         if plan.kind == "correction" {
-            let response = rules::record::complete_json(&result.text)
-                .ok_or_else(|| if refused(&result,&result.text,false){Error::Refused("AI服务拒绝了本次原著改稿，原路线未改动".into())}else{Error::fail(crate::failure::FailKind::Review,"原著改稿预览没有返回完整格式，可恢复重试")})?;
-            let response = crate::writing_context::local_correction(&plan,&response).map_err(check_reply_error)?;
-            let c = shared.lock().map_err(|_| Error::Cancelled)?;
-            if c.draft["originalRead"] != true || c.draft["canonSkillRead"] != true {
-                return Err(Error::fail(crate::failure::FailKind::Review,
-                    "没有实际读取遵循原著技能和原文，不能把这次改稿标为已查证",
-                ));
-            }
-            let mut reference = plan
-                .reference
-                .clone()
-                .ok_or_else(|| Error::Invalid("未绑定原著资料".into()))?;
-            let passages = c.draft["originalPassages"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            reference["passages"] = Value::Array(passages.clone());
-            let mut corrections = response["corrections"]
-                .as_array()
-                .filter(|a| !a.is_empty())
-                .cloned()
-                .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"尚未查出带原文依据的更正，原路线未改动"))?;
-            let (source_changes, preserved_player_facts) =
-                separate_correction_sources(corrections, &plan.state).map_err(check_reply_error)?;
-            corrections = source_changes;
-            for change in &mut corrections {
-                let citations = change["citations"]
-                    .as_array_mut()
-                    .filter(|a| !a.is_empty())
-                    .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"每项更正都需要原著引文"))?;
-                for cite in citations {
-                    if cite["bookId"] != plan.state["source"]["bookId"] {
-                        return Err(Error::fail(crate::failure::FailKind::Review,"改稿出处书籍不符"));
-                    }
-                    let passage = passages
-                        .iter()
-                        .find(|p| {
-                            p["chunk"] == cite["chunk"]
-                                && p["section"] == cite["section"]
-                                && cite["quote"].as_str().is_some_and(|quote| {
-                                    !quote.is_empty()
-                                        && p["text"]
-                                            .as_str()
-                                            .is_some_and(|text| text.contains(quote))
-                                })
-                        })
-                        .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"改稿出处没有对应到实际读过的原句"))?;
-                    cite["title"] = passage["title"].clone();
-                    if passage["page"].is_number() {
-                        cite["page"] = passage["page"].clone();
-                    }
-                    // Offsets come from the immutable excerpt, never a guessed model number.
-                    let prefix = passage["text"]
-                        .as_str()
-                        .unwrap_or("")
-                        .split(cite["quote"].as_str().unwrap_or(""))
-                        .next()
-                        .unwrap_or("");
-                    let start = passage["start"].as_u64().unwrap_or(0)
-                        + prefix.encode_utf16().count() as u64;
-                    cite["start"] = start.into();
-                    cite["end"] = (start
-                        + cite["quote"].as_str().unwrap_or("").encode_utf16().count() as u64)
-                        .into();
-                }
-            }
-            let mut issues = vec![];
-            let record = rules::record::normalize_record(&response["record"], &mut issues)
-                .ok_or_else(|| Error::fail(crate::failure::FailKind::Review,"改稿尚未完成事实整理"))?;
-            let preview = json!({"anchor":plan.meta["anchor"],"sourceGuard":plan.meta["sourceGuard"].to_string(),"narrative":response["narrative"],"replacement":response["replacement"],"range":response["range"],"unresolved":response["unresolved"],"related":response["related"],"writingVersion":plan.meta["writingVersion"],"record":record,"correctionPatch":response["correctionPatch"],"corrections":corrections,"preservedPlayerFacts":preserved_player_facts,"reference":reference,"baseline":plan.meta["baseline"]});
-            drop(c);
-            self.finish_preview(&shared, preview)?;
-            return Ok(());
+            return self.finish_correction(&shared, &plan, &result);
         }
         let raw = result.text.clone();
         let mut narrative = if let Some(player) = plan.meta["playerNarrative"].as_str() {
@@ -1365,7 +1317,7 @@ impl Engine {
         let mut meta = plan.meta.clone();
         // A saved passage keeps what describes it, not the prompts that built
         // it: those were copied into every node and only grew the save (R30).
-        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "chapterMessages", "codexMessages",
+        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "chapterMessages", "chapterRefresh", "sourceScope", "textGuard", "textGuardAt", "codexMessages",
             "autoplayTurnSystem", "autoplayExtractSystem", "autoplayUpkeepSystem", "autoplayChapterSystem", "resumeBudgetBase", "stepBudgetBase"] {
             if let Some(object) = meta.as_object_mut() {
                 object.remove(key);
@@ -1890,16 +1842,12 @@ fn requires_choices(plan: &RunPlan, record: &Value) -> bool {
         && !matches!(record["challenge"]["result"].as_str(), Some("won" | "lost"))
 }
 
-fn turn_record_problem(plan: &RunPlan, record: &Value) -> Option<&'static str> {
-    if !record.is_object() {
-        Some("回合记录未整理完")
-    } else if plan.kind != "opening" && !valid_turn_time(record) {
-        Some("回合记录里没有有效的经过时间")
-    } else if requires_choices(plan, record) && !valid_turn_choices(record) {
-        Some("回合记录里缺少行动建议")
-    } else {
-        None
-    }
+/// Only a missing record stops a written passage. An elapsed time the rules cannot
+/// read falls back to the action's usual length (the passage's changes say so), and
+/// missing suggestions leave the player to type: neither is worth a failed passage
+/// and another paid try once the 补记 pass could not mend it (R30 step 3).
+fn turn_record_problem(_plan: &RunPlan, record: &Value) -> Option<&'static str> {
+    (!record.is_object()).then_some("回合记录未整理完")
 }
 
 fn check_reply_error(error: Error) -> Error {

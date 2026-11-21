@@ -17,8 +17,8 @@ describe("Pi Agent facade and projections", () => {
     const stale = task(), other = task({ id: "other", runId: "other" });
     const detail: AgentSessionDetail = { session: { id: "session", worldId: "world", lineId: "line", title: "助手", createdAt: "", updatedAt: "" }, tasks: [stale, other], messages: [message("user", "核对时间", "user"), message("reply", "旧片段"), { ...message("other-reply", "另一项答复"), taskId: "other" }] };
     const current = task({ status: "committed", updatedAt: "2026-10-30T10:01:00+08:00" });
-    const projected = agentSessionProjection(detail, { task: snapshot(current, { messages: [message("user", "核对时间", "user"), message("explanation", "先核对时间锚点"), message("reply", "已改为斗罗历10015年")] }) });
-    expect(projected.messages.map(item => item.content)).toEqual(["核对时间", "先核对时间锚点", "已改为斗罗历10015年", "另一项答复"]);
+    const projected = agentSessionProjection(detail, { task: snapshot(current, { messages: [message("user", "核对时间", "user"), message("explanation", "先核对时间锚点"), message("reply", "已改为玄元历10015年")] }) });
+    expect(projected.messages.map(item => item.content)).toEqual(["核对时间", "先核对时间锚点", "已改为玄元历10015年", "另一项答复"]);
     expect(agentConversationTurns(projected.messages, projected.tasks).map(turn => [turn.task?.id, turn.messages.length])).toEqual([["task", 3], ["other", 1]]);
     expect(projected.tasks[0].status).toBe("committed");
     const undone = { ...detail, tasks: [task({ status: "undone" }), other] };

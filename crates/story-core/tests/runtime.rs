@@ -740,30 +740,108 @@ async fn canon_correction_delivers_required_text_and_evidence_above_the_history_
     assert_eq!(fixture.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed'"), 1);
 }
 
-#[tokio::test]
-async fn a_correction_that_finds_no_basis_must_answer_after_six_lookup_rounds() {
-    // The model keeps searching for something the book does not have (a fanfic
-    // protagonist's own setting); after six rounds it is told to answer.
-    let mut steps: Vec<Step> = ["s0", "s1", "s2", "s3", "s4", "s5"].into_iter().map(|id| Step::Reply(calls(vec![(id, "search_original", json!({"query":"紫色魂环"}))]))).collect();
-    steps.push(Step::Reply(prose(&json!({"replacement":"四文纸。","recordPatch":{},"unresolved":["原著没有写到主角的魂环"],"corrections":[]}).to_string())));
+/// A correction on a one-chapter book, with `given` passages shown up front.
+fn correction_fixture(steps: Vec<Step>, id: &str, given: &[Value], hint: &str) -> (Fixture, RunPlan) {
     let fixture = Fixture::new(steps);
     let binding = json!({"bookId":"book","position":0,"through":0,"instructions":"保留玩家设定"});
-    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','短篇','txt','test','{}'); INSERT INTO source_sections VALUES('book',0,'第一章',NULL); INSERT INTO source_chunks VALUES('book',0,0,'纸铺一张纸售价两文。');").unwrap();
-    let mut plan = fixture.plan("correction-rounds");
+    fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','短篇','txt','test','{}'); INSERT INTO source_sections VALUES('book',0,'第一章',NULL); INSERT INTO source_chunks VALUES('book',0,0,'纸铺一张纸售价两文。入门比试分为实战与理论两项。');").unwrap();
+    let mut plan = fixture.plan(id);
     plan.kind = "correction".into();
     plan.state["source"] = binding.clone();
-    plan.reference = Some(json!({"bookId":"book","binding":binding,"passages":[]}));
-    plan.messages = vec![json!({"role":"system","content":"依据已读原文改稿。"}), json!({"role":"user","content":"【玩家要求】魂环是紫紫"})];
-    plan.meta = json!({"budgetChars":14545,"anchor":{"original":"前文。四文纸。后文。"},"correctionRange":{"start":3,"end":7},"originalRecord":{"time":5}});
-    fixture.engine.start(plan).unwrap();
-    let snapshot = fixture.settled("correction-rounds").await;
-    // No basis was found: it ends with a reason, not by running out of lookups.
-    assert_eq!(snapshot.status, "failed");
-    assert_ne!(snapshot.error_kind.as_deref(), Some("limit"), "{:?}", snapshot.error);
-    let requests = fixture.model.requests.lock().unwrap();
+    plan.reference = Some(json!({"bookId":"book","binding":binding,"passages":given}));
+    let shown: String = given.iter().map(|p| format!("[原著·第一章·原文·片段1]\n{}\n", p["text"].as_str().unwrap())).collect();
+    plan.messages = vec![json!({"role":"system","content":"依据已读原文改稿。"}), json!({"role":"user","content":format!("{shown}【选中范围】四文纸。\n【玩家要求】{hint}")})];
+    plan.meta = json!({"budgetChars":14545,"anchor":{"original":"前文。四文纸。后文。"},"correctionRange":{"start":3,"end":7},"originalRecord":{"time":5,"money":-2}});
+    (fixture, plan)
+}
+
+fn up_front() -> Value {
+    json!({"kind":"original","bookId":"book","title":"第一章","section":0,"chunk":0,"start":0,"text":"纸铺一张纸售价两文。入门比试分为实战与理论两项。"})
+}
+
+#[tokio::test]
+async fn a_correction_with_evidence_up_front_answers_in_one_request_and_the_skill_comes_with_it() {
+    // The quote has other punctuation and no book, chapter or chunk: it is still found.
+    let reply = json!({"outcome":"changed","replacement":"两文纸。","recordPatch":{},"corrections":[{"detail":"纸价两文","citations":[{"quote":"纸铺 一张纸售价两文"}]}]});
+    let (f, plan) = correction_fixture(vec![Step::Reply(prose(&reply.to_string()))], "up-front", &[up_front()], "核对纸价");
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("up-front").await;
+    assert_eq!(saved.status, "previewed", "{:?}", saved.error);
+    let result = saved.result.unwrap();
+    assert_eq!(result["outcome"], "changed");
+    assert_eq!(result["narrative"], "前文。两文纸。后文。");
+    let cite = &result["corrections"][0]["citations"][0];
+    assert_eq!(cite["quote"], "纸铺一张纸售价两文");
+    assert_eq!((cite["bookId"].clone(), cite["section"].clone(), cite["chunk"].clone(), cite["start"].clone()), (json!("book"), json!(0), json!(0), json!(0)));
+    assert_eq!(f.model.count(), 1);
+    let first = f.model.requests.lock().unwrap()[0].clone();
+    assert!(first["messages"][1]["content"].as_str().unwrap().contains("遵循原著技能"));
+    assert!(saved.draft["skillVersions"]["canon-reference"].is_string());
+}
+
+#[tokio::test]
+async fn a_passage_that_already_matches_the_book_is_verified_and_a_question_is_answered() {
+    for (outcome, hint) in [("verified", "核对比试"), ("answer", "比试是什么")] {
+        let reply = json!({"outcome":outcome,"answer":"入门比试分实战与理论两项。","findings":[{"detail":"比试分两项","citations":[{"quote":"入门比试分为实战与理论两项"}]}]});
+        let (f, plan) = correction_fixture(vec![Step::Reply(prose(&reply.to_string()))], "checked", &[up_front()], hint);
+        f.engine.start(plan).unwrap();
+        let saved = f.settled("checked").await;
+        assert_eq!(saved.status, "previewed", "{outcome}: {:?}", saved.error);
+        let result = saved.result.unwrap();
+        assert_eq!(result["outcome"], outcome);
+        assert_eq!(result["narrative"], "前文。四文纸。后文。");
+        assert_eq!(result["corrections"], json!([]));
+        assert_eq!(result["findings"][0]["citations"][0]["quote"], "入门比试分为实战与理论两项");
+    }
+}
+
+#[tokio::test]
+async fn a_correction_that_finds_no_basis_reports_what_it_searched_after_six_rounds() {
+    // Something the book does not have (a fanfic protagonist's own setting).
+    let mut steps: Vec<Step> = ["s0", "s1", "s2", "s3", "s4", "s5"].into_iter().map(|id| Step::Reply(calls(vec![(id, "search_original", json!({"query":"紫色魂环"}))]))).collect();
+    steps.push(Step::Reply(prose(&json!({"outcome":"not_found","unresolved":["原著没有写到主角的魂环"]}).to_string())));
+    let (f, plan) = correction_fixture(steps, "rounds", &[], "魂环是紫紫");
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("rounds").await;
+    assert_eq!(saved.status, "previewed", "{:?}", saved.error);
+    let result = saved.result.unwrap();
+    assert_eq!(result["outcome"], "not_found");
+    assert_eq!(result["reason"], "no_excerpt");
+    assert_eq!(result["searched"], json!([{"tool":"search_original","query":"紫色魂环","hits":0,"times":6}]));
+    assert_eq!(result["unresolved"], json!(["原著没有写到主角的魂环"]));
+    let requests = f.model.requests.lock().unwrap();
     assert_eq!(requests.len(), 7);
-    assert!(requests[6].to_string().contains("查阅到此为止"));
-    assert!(!requests[5].to_string().contains("查阅到此为止"));
+    assert!(requests[6].to_string().contains("不要再调用工具"));
+    assert!(!requests[5].to_string().contains("不要再调用工具"));
+}
+
+#[tokio::test]
+async fn a_quote_that_was_never_read_fails_as_a_mismatch_and_keeps_the_lists() {
+    let reply = json!({"outcome":"changed","replacement":"两文纸。","corrections":[{"detail":"纸价","citations":[{"quote":"纸铺一张纸售价三文钱整"}]}],"unresolved":["纸的种类"]});
+    let (f, plan) = correction_fixture(vec![Step::Reply(prose(&reply.to_string()))], "mismatch", &[up_front()], "核对纸价");
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("mismatch").await;
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.draft["correctionStop"]["code"], "quote_mismatch");
+    assert_eq!(saved.draft["correctionStop"]["quotes"], json!(["纸铺一张纸售价三文钱整"]));
+    assert_eq!(saved.draft["correctionStop"]["unresolved"], json!(["纸的种类"]));
+}
+
+#[tokio::test]
+async fn a_correction_paused_at_its_allowance_goes_on_from_what_it_read() {
+    let reply = json!({"outcome":"answer","answer":"两项","findings":[{"detail":"比试","citations":[{"quote":"入门比试分为实战与理论两项"}]}]});
+    let (f, mut plan) = correction_fixture(vec![
+        Step::Reply(calls(vec![("r0", "read_original", json!({"section":0}))])),
+        Step::Reply(prose(&reply.to_string())),
+    ], "paused", &[], "比试是什么");
+    plan.meta["modelRequestLimit"] = 1.into();
+    f.engine.start(plan).unwrap();
+    let paused = f.settled("paused").await;
+    assert_eq!(paused.status, "paused", "{:?}", paused.error);
+    f.engine.resume("paused").unwrap();
+    let saved = f.settled("paused").await;
+    assert_eq!(saved.status, "previewed", "{:?}", saved.error);
+    assert_eq!(saved.result.unwrap()["outcome"], "answer");
 }
 
 #[tokio::test]
@@ -1489,6 +1567,73 @@ async fn tidying_runs_after_the_passage_is_saved_and_never_holds_the_story() {
 }
 
 #[tokio::test]
+async fn an_edit_during_tidying_keeps_the_old_text_out_of_the_settings_and_marks_the_chapter() {
+    // D183: the player edits the passage while 设定集整理 and 章节摘要 are still being asked.
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let upkeep = prose(r#"{"cards":[{"kind":"物品","name":"铜鹰符","keys":[],"content":"改前的说法"}],"places":[]}"#);
+    let chapter = prose(r#"{"title":"买纸","gist":"买了纸","summary":"你付了两文买纸。"}"#);
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Wait { started: started.clone(), release: release.clone(), reply: upkeep }, Step::Reply(chapter)]);
+    let mut plan = f.plan("edited");
+    plan.meta = json!({"upkeepVersion":"upkeep-test","upkeepMessages":[{"role":"user","content":"{{NARRATIVE}}"}],
+        "chapterFirstId":"{{NODE_ID}}","chapterVersion":"chapter-test","chapterMessages":[{"role":"system","content":"章节"},{"role":"user","content":"【本章剧情】\n{{NARRATIVE}}"}]});
+    f.engine.start(plan).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    let node = f.text("SELECT node_id FROM lines WHERE id='line'");
+    f.store.lock().unwrap().execute("UPDATE nodes SET narrative='玩家改过的正文', rewritten=1 WHERE id=?", [&node]).unwrap();
+    release.notify_one();
+    assert_eq!(f.settled("edited~maintain").await.status, "committed");
+    // No 设定集 edit from the old text, and the passage still waits for one.
+    assert_eq!(f.text("SELECT node_id FROM lines WHERE id='line'"), node);
+    assert_eq!(f.scalar(&format!("SELECT COUNT(*) FROM nodes WHERE json_extract(meta_json,'$.upkeep') IS NOT NULL AND id='{node}'")), 0);
+    // The chapter of the old text is kept, marked as waiting to be summarized again.
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM chapters WHERE stale=1"), 1);
+}
+
+#[tokio::test]
+async fn a_route_that_shares_its_first_turn_with_another_still_gets_its_own_chapter() {
+    let chapter = prose(r#"{"title":"新路","gist":"走了新路","summary":"你走了另一条路。"}"#);
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Reply(chapter)]);
+    // Another route's chapter starts at n0 too, but ends on a passage not on this route.
+    {
+        let db = f.store.lock().unwrap();
+        db.execute("INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,created_at) VALUES('other','world','n0',9,'turn','别的路线','test')", []).unwrap();
+        db.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,created_at) VALUES('c-other','world','n0','other','旧路','旧','旧路线的章','test')", []).unwrap();
+    }
+    let mut plan = f.plan("own-chapter");
+    plan.meta = json!({"chapterFirstId":"n0","chapterVersion":"chapter-test","chapterMessages":[{"role":"system","content":"章节"},{"role":"user","content":"【本章剧情】\n{{NARRATIVE}}"}]});
+    f.engine.start(plan).unwrap();
+    assert_eq!(f.settled("own-chapter").await.status, "committed");
+    assert_eq!(f.settled("own-chapter~maintain").await.status, "committed");
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM chapters WHERE first_node_id='n0'"), 2);
+}
+
+#[tokio::test]
+async fn a_stale_chapter_is_summarized_again_unless_the_player_wrote_it_or_its_text_changed_again() {
+    let fresh = prose(r#"{"title":"新摘要","gist":"按改后正文","summary":"按改后的正文重写的摘要。"}"#);
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Reply(fresh.clone()), Step::Reply(fresh)]);
+    {
+        let db = f.store.lock().unwrap();
+        db.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,created_at,stale) VALUES('c1','world','n0','n0','旧','旧梗概','改前的摘要','test',1)", []).unwrap();
+        db.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,created_at,stale,edited) VALUES('c2','world','n0','n0','玩家写','玩家的梗概','玩家的摘要','test',1,1)", []).unwrap();
+    }
+    let refresh = |id: &str| json!({"id":id,"firstNodeId":"n0","lastNodeId":"n0","messages":[{"role":"system","content":"章节"},{"role":"user","content":"【本章剧情】\n原有正文"}]});
+    let mut plan = f.plan("refresh");
+    plan.meta = json!({"chapterRefresh":[refresh("c1"), refresh("c2")]});
+    f.engine.start(plan).unwrap();
+    assert_eq!(f.settled("refresh").await.status, "committed");
+    assert_eq!(f.settled("refresh~maintain").await.status, "committed");
+    assert_eq!(f.text("SELECT summary FROM chapters WHERE id='c1'"), "按改后的正文重写的摘要。");
+    assert_eq!(f.scalar("SELECT COALESCE(stale,0) FROM chapters WHERE id='c1'"), 0);
+    // The player's own summary is not replaced; it stays flagged for them.
+    assert_eq!(f.text("SELECT summary FROM chapters WHERE id='c2'"), "玩家的摘要");
+    assert_eq!(f.scalar("SELECT stale FROM chapters WHERE id='c2'"), 1);
+    // The saved passage keeps no copy of what was refreshed.
+    let node = f.text("SELECT node_id FROM lines WHERE id='line'");
+    assert_eq!(f.scalar(&format!("SELECT json_extract(meta_json,'$.chapterRefresh') IS NULL FROM nodes WHERE id='{node}'")), 1);
+}
+
+#[tokio::test]
 async fn old_run_records_are_trimmed_but_runs_in_progress_and_recent_ones_stay() {
     let f = Fixture::new(vec![Step::Reply(written())]);
     f.engine.start(f.plan("recent")).unwrap();
@@ -1565,4 +1710,33 @@ async fn deferred_upkeep_does_not_move_the_next_writers_base() {
     release.notify_one();
     assert_eq!(f.settled("tidy-busy~maintain").await.status, "committed");
     assert_eq!(f.text("SELECT node_id FROM lines WHERE id='line'"), head);
+}
+
+#[tokio::test]
+async fn a_request_with_tools_does_not_fall_back_to_a_backup_known_without_tools() {
+    let fail = || Step::Fail(provider("http", Some(503), false));
+    let (f, mut plan) = correction_fixture(vec![fail(), fail(), Step::Reply(written())], "backup-no-tools", &[up_front()], "核对纸价");
+    plan.fallback_model = Some(backup());
+    let b = backup();
+    f.store.lock().unwrap().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", rusqlite::params![format!("toolCapability:{}:{}:{}", b.slot, b.url, b.model), json!({"at":chrono::Utc::now().timestamp_millis(),"supported":false}).to_string()]).unwrap();
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("backup-no-tools").await;
+    assert_eq!(saved.status, "failed", "{:?}", saved.error);
+    assert!(f.model.services.lock().unwrap().iter().all(|s| s == "fake"), "{:?}", f.model.services.lock().unwrap());
+}
+
+#[tokio::test]
+async fn an_unreadable_time_or_missing_suggestions_do_not_fail_a_written_passage() {
+    let f = Fixture::new(vec![
+        Step::Reply(prose(r#"天亮了，你推门出去。<record>{"time":"次日清晨","log":"出门"}</record>"#)),
+        Step::Reply(prose(r#"{"time":"次日清晨"}"#)),
+    ]);
+    let mut plan = f.plan("unreadable-time");
+    plan.settings["choiceCount"] = 2.into();
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("unreadable-time").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    assert_eq!(f.text("SELECT narrative FROM nodes WHERE kind='turn'"), "天亮了，你推门出去。");
+    let meta: Value = serde_json::from_str(&f.text("SELECT meta_json FROM nodes WHERE kind='turn'")).unwrap();
+    assert!(meta["log"].to_string().contains("无法识别"), "{meta}");
 }

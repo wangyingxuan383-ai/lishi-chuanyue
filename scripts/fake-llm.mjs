@@ -69,13 +69,21 @@ ${JSON.stringify(r)}
   // 按我的要求改: the chosen part rewritten as asked, the turn's record and the 本事 card corrected.
   if (String(request.messages?.[0]?.content ?? "").includes("按玩家的要求修改互动小说里选中的这段正文")) {
     const name = String(request.messages?.[0]?.content ?? "").match(/“([^”]+的本事)”/)?.[1] ?? "主角的本事";
-    return JSON.stringify({ replacement: "（按要求改过的这段）你的两个紫色魂环亮起，你开始吸收第三魂环。", recordPatch: { log: "开始吸收第三魂环" },
-      correctionPatch: { cards: [{ name, kind: "设定", content: "魂环：两个千年紫环，正在吸收第三环。" }] }, note: "魂环改为两个紫环，正在吸收第三环" });
+    return JSON.stringify({ replacement: "（按要求改过的这段）你握紧短剑，迈进第三重门。", recordPatch: { log: "握着短剑进了第三重门" },
+      correctionPatch: { cards: [{ name, kind: "设定", content: "兵器：短剑一把（原记作匕首）。修为：第二重，正在冲第三重。" }] }, note: "匕首改为短剑，修为改为正冲第三重" });
+  }
+  // 改后同步: the player's edited text is final; the record and the 本事 card follow it.
+  if (String(request.messages?.[0]?.content ?? "").includes("玩家亲手改了互动小说里的一段正文")) {
+    const user = String(request.messages?.[1]?.content ?? "");
+    const after = user.split("【改后正文（玩家定稿，不要改写）】")[1]?.split("【本回合玩家行动】")[0] ?? "";
+    if (!after.includes("短剑")) return JSON.stringify({ unchanged: true });
+    const name = String(request.messages?.[0]?.content ?? "").match(/“([^”]+的本事)”/)?.[1] ?? "主角的本事";
+    return JSON.stringify({ unchanged: false, recordPatch: { log: "握着短剑往前走" }, correctionPatch: { cards: [{ name, kind: "设定", content: "兵器：短剑一把（原记作匕首）。" }] }, note: "匕首改为短剑" });
   }
   // R29: 原著札记, 让 AI 改设定 and the lite canon check.
   if (prompt.includes("整理“原著札记”") || prompt.includes("同一份原著札记分段整理")) return "主角在青石桥边的书铺落脚，结识阿青（第1章）。\n阿青把青铜钥匙交给阿白，二人约定救下阿兰（第2章）。\n雪夜里真相渐明，阿白身世不凡（第3章）。";
   if (prompt.includes("修改互动小说“设定集”里的一条")) return JSON.stringify({ name: "漕帮", aliases: ["帮里", "运河帮"], text: "运河上的帮会，把持南北漕运，帮主姓沈，规矩森严：不碰官粮，不欺老弱。" });
-  if (prompt.includes("调整互动小说的时间显示与货币")) return JSON.stringify({ clockStyle: "era", eraName: "斗罗历", year: 2800, month: 3, day: 5, currency: [{ name: "金魂币", value: 10000 }, { name: "银魂币", value: 100 }, { name: "铜魂币", value: 1 }], note: "改用斗罗历，货币换成魂币" });
+  if (prompt.includes("调整互动小说的时间显示与货币")) return JSON.stringify({ clockStyle: "era", eraName: "玄元历", year: 2800, month: 3, day: 5, currency: [{ name: "金灵币", value: 10000 }, { name: "银灵币", value: 100 }, { name: "铜灵币", value: 1 }], note: "改用玄元历，货币换成灵币" });
   if (prompt.includes("你是原著校对")) return JSON.stringify({ issues: [] });
   if (prompt.includes("拟剧本大纲")) return JSON.stringify({ line: "落第书生在长安闯出一条生路", beats: ["邸店掌柜催讨房钱", "西市货栈谋得差事", "账目里发现蹊跷", "夜探城隍庙", "真相大白，名动西市"], ending: "还清旧债，在长安站稳脚跟" });
   if (prompt.includes("出一个开局挑战")) return JSON.stringify({ goal: "三个月内凑够三百两", limit: "三个月", failIf: "被债主告到官府" });

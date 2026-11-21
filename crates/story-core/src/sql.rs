@@ -1,5 +1,4 @@
-use crate::error::{io_error, PlatformError, Result};
-use chrono::{DateTime, Utc};
+use crate::{db_backup, error::{io_error, PlatformError, Result}};
 use rusqlite::{params_from_iter, types::ValueRef, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -31,6 +30,23 @@ pub struct BackupInfo {
     pub name: String,
     pub at: String,
     pub size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInventory {
+    pub items: Vec<BackupInfo>,
+    pub total_bytes: u64,
+}
+
+#[derive(Serialize)]
+pub struct BackupDeletion {
+    pub inventory: BackupInventory,
+    pub failed: usize,
+}
+
+fn backup_error(_: crate::Error) -> PlatformError {
+    PlatformError::new("sql_backup_failed", "备份操作没完成，请检查可用空间后重试")
 }
 
 fn sql_error(_: rusqlite::Error) -> PlatformError {
@@ -92,12 +108,8 @@ impl SqlStore {
         if !empty_database(&connection)? {
             return Ok(false);
         }
-        let backups = self.directory.join("backups");
-        fs::create_dir_all(&backups).map_err(|_| io_error())?;
-        let path = backups.join(format!(
-            "{}-legacy-import.sqlite",
-            Utc::now().format("%Y%m%dT%H%M%S%.9fZ")
-        ));
+        let stage = tempfile::tempdir_in(&self.directory).map_err(|_| io_error())?;
+        let path = stage.path().join("game.sqlite");
         fs::write(&path, bytes).map_err(|_| io_error())?;
         let version = backup_schema_version(&path)?;
         if version > crate::migration::LATEST_VERSION {
@@ -106,6 +118,10 @@ impl SqlStore {
                 "旧开发台数据来自更新版本，请先更新",
             ));
         }
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_error)?;
+        let backups = self.directory.join("backups");
+        db_backup::save(&reader, &backups, "legacy-import", version).map_err(backup_error)?;
+        drop(reader);
         connection
             .restore(
                 rusqlite::MAIN_DB,
@@ -113,13 +129,23 @@ impl SqlStore {
                 None::<fn(rusqlite::backup::Progress)>,
             )
             .map_err(sql_error)?;
-        *connection = Self::connect(&self.directory)?;
+        *connection = Self::connect(&self.directory, false)?;
+        db_backup::prune(&backups).map_err(backup_error)?;
         Ok(true)
     }
 
     pub fn open(directory: PathBuf) -> Result<Self> {
         fs::create_dir_all(&directory).map_err(|_| io_error())?;
-        let connection = Self::connect(&directory)?;
+        let connection = Self::connect(&directory, true)?;
+        let backups = directory.join("backups");
+        // A failed cleanup is retried on the next open. Remaining files stay visible.
+        if connection.execute_batch("BEGIN IMMEDIATE").is_ok() {
+            if crate::maintenance::guard(&connection).is_ok() {
+                let _ = db_backup::clean_legacy(&connection, &backups);
+                let _ = db_backup::prune(&backups);
+            }
+            connection.execute_batch("ROLLBACK").map_err(sql_error)?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             directory,
@@ -127,7 +153,7 @@ impl SqlStore {
         })
     }
 
-    fn connect(directory: &Path) -> Result<Connection> {
+    fn connect(directory: &Path, protect_migration: bool) -> Result<Connection> {
         let mut connection = Connection::open(directory.join("game.sqlite")).map_err(sql_error)?;
         connection
             .busy_timeout(Duration::from_millis(5000))
@@ -135,7 +161,8 @@ impl SqlStore {
         connection
             .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(sql_error)?;
-        crate::migration::migrate(&mut connection, Some(&directory.join("backups")))
+        let backups = directory.join("backups");
+        crate::migration::migrate(&mut connection, protect_migration.then_some(backups.as_path()))
             .map_err(|_| PlatformError::new("sql_migration_failed", "存档升级未完成，原有数据与升级备份已保留"))?;
         Ok(connection)
     }
@@ -240,7 +267,10 @@ impl SqlStore {
 
     pub fn backup(&self, label: &str) -> Result<String> {
         let connection = crate::store::lock_connection(&self.connection);
-        self.backup_locked(&connection, label, None)
+        crate::maintenance::guard(&connection).map_err(|_| PlatformError::new("sql_maintenance", "正在恢复存档，请等待完成"))?;
+        let name = self.backup_locked(&connection, label)?;
+        db_backup::prune(&self.directory.join("backups")).map_err(backup_error)?;
+        Ok(name)
     }
 
     /// Replaces the live database with the backup `name` (B2); returns the
@@ -255,15 +285,14 @@ impl SqlStore {
     pub fn restore_managed(&self,name:&str,ticket:&crate::maintenance::Ticket)->Result<String> {self.restore_inner(name,Some(ticket))}
     fn restore_inner(&self, name: &str,ticket:Option<&crate::maintenance::Ticket>) -> Result<String> {
         let missing = || PlatformError::new("sql_restore_missing", "没有这份备份");
-        if !valid_backup_name(name) {
+        if !db_backup::valid_name(name) {
             return Err(missing());
         }
-        let path = self.directory.join("backups").join(name);
-        if !path.is_file() {
-            return Err(missing());
-        }
-        let version = backup_schema_version(&path)?;
         let mut connection = crate::store::lock_connection(&self.connection);
+        let backups = self.directory.join("backups");
+        if !fs::symlink_metadata(backups.join(name)).is_ok_and(|meta| meta.is_file()) {
+            return Err(missing());
+        }
         if let Some(ticket)=ticket {crate::maintenance::verify(&connection,ticket).map_err(|_|PlatformError::new("sql_maintenance","存档维护批次失效，尚未恢复"))?;}else{crate::maintenance::guard(&connection).map_err(|_|PlatformError::new("sql_maintenance","正在恢复存档，请等待完成"))?;}
 
         let has_runs: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_runs')", [], |r| r.get(0)).map_err(sql_error)?;
@@ -274,6 +303,11 @@ impl SqlStore {
         if has_pi && connection.query_row("SELECT EXISTS(SELECT 1 FROM pi_tasks WHERE status IN ('running','committing'))", [], |r| r.get::<_,bool>(0)).map_err(sql_error)? {
             return Err(PlatformError::new("sql_restore_busy", "请先停止助手任务，再恢复备份"));
         }
+        let stage = tempfile::tempdir_in(&self.directory).map_err(|_| io_error())?;
+        let path = db_backup::materialize(&backups, name, stage.path()).map_err(|_| {
+            PlatformError::new("sql_restore_invalid", "无法解压或校验备份，请检查可用空间或选择另一份")
+        })?;
+        let version = backup_schema_version(&path)?;
         if let Ok(Some(live)) = schema_version(&connection) {
             if version > live {
                 return Err(PlatformError::new(
@@ -283,47 +317,42 @@ impl SqlStore {
             }
         }
         // Fully migrate and check a private copy before changing live pages.
-        let prepared_dir=self.directory.join(format!("restore-{}",uuid::Uuid::new_v4()));
-        fs::create_dir_all(&prepared_dir).map_err(|_|io_error())?;
-        let prepared_path=prepared_dir.join("game.sqlite");
+        let prepared_dir = tempfile::tempdir_in(&self.directory).map_err(|_| io_error())?;
+        let prepared_path=prepared_dir.path().join("game.sqlite");
         fs::copy(&path,&prepared_path).map_err(|_|io_error())?;
         let prepared=(|| {
-            let db=Self::connect(&prepared_dir)?;
-            crate::pi_backup::prepare(&db,&self.directory,&path).map_err(|_|PlatformError::new("sql_restore_context","助手备份校验未完成，原存档未改变"))?;
+            let db=Self::connect(prepared_dir.path(), false)?;
             if let Some(ticket)=ticket {
                 crate::maintenance::install(&db,ticket).map_err(|_|io_error())?;
                 db.execute_batch("UPDATE pi_tasks SET status=CASE WHEN status IN ('running','committing') THEN 'interrupted' ELSE status END,metadata_json=json_set(metadata_json,'$._nativeHostActive',json('false')) WHERE status IN ('running','committing') OR json_extract(metadata_json,'$._nativeHostActive')=1; UPDATE pi_model_requests SET status='unknown' WHERE status IN ('running','awaiting_usage'); UPDATE execution_runs SET status='interrupted',error='从备份恢复后保留进度，未自动执行' WHERE status IN ('running','committing'); UPDATE world_execution_leases SET owner_id='',owner_instance='',expires_at_ms=0,fence=fence+1;").map_err(sql_error)?;
             }
             let check:String=db.query_row("PRAGMA quick_check",[],|r|r.get(0)).map_err(sql_error)?;
             if check!="ok" {return Err(PlatformError::new("sql_restore_invalid","备份校验失败，原存档未改变"));}
+            crate::pi_backup::prepare(&db,&self.directory,&path).map_err(|_|PlatformError::new("sql_restore_context","助手备份校验未完成，原存档未改变"))?;
             db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").map_err(sql_error)?;
             Ok(())
         })();
-        if let Err(error)=prepared {let _=fs::remove_dir_all(&prepared_dir);return Err(error);}
-        let saved = self.backup_locked(&connection, "before-restore", Some(name))?;
+        prepared?;
+        let saved = self.backup_locked(&connection, "before-restore")?;
         self.fence_writes();
         let applied=(|| {
             connection.restore(rusqlite::MAIN_DB,&prepared_path,None::<fn(rusqlite::backup::Progress)>).map_err(sql_error)?;
-            *connection=Self::connect(&self.directory)?;
+            *connection=Self::connect(&self.directory, false)?;
             Ok(())
         })();
         if applied.is_err() {
-            connection.restore(rusqlite::MAIN_DB,self.directory.join("backups").join(&saved),None::<fn(rusqlite::backup::Progress)>).map_err(sql_error)?;
-            *connection=Self::connect(&self.directory)?;
+            let rollback = tempfile::tempdir_in(&self.directory).map_err(|_| io_error())?;
+            let database = db_backup::materialize(&backups, &saved, rollback.path()).map_err(backup_error)?;
+            connection.restore(rusqlite::MAIN_DB,database,None::<fn(rusqlite::backup::Progress)>).map_err(sql_error)?;
+            *connection=Self::connect(&self.directory, false)?;
         }
-        let _=fs::remove_dir_all(&prepared_dir);
+        // The selected backup is no longer needed by this restore.
+        let _ = db_backup::prune(&backups);
         applied?;
         Ok(saved)
     }
 
-    /// Snapshots `connection` into backups/ and keeps the newest 20, never
-    /// pruning `keep` (the file a restore is about to read).
-    fn backup_locked(
-        &self,
-        connection: &Connection,
-        label: &str,
-        keep: Option<&str>,
-    ) -> Result<String> {
+    fn backup_locked(&self, connection: &Connection, label: &str) -> Result<String> {
         if !(1..=40).contains(&label.len())
             || !label
                 .bytes()
@@ -331,60 +360,39 @@ impl SqlStore {
         {
             return Err(PlatformError::new("sql_backup_label", "备份标签格式不正确"));
         }
-        let directory = self.directory.join("backups");
-        fs::create_dir_all(&directory).map_err(|_| io_error())?;
-        let name = format!("{}-{label}.sqlite", Utc::now().format("%Y%m%dT%H%M%S%.9fZ"));
-        let path = directory.join(&name);
         connection.execute_batch("BEGIN IMMEDIATE").map_err(sql_error)?;
-        let snapshot=(|| {
-            let reader=Connection::open_with_flags(self.directory.join("game.sqlite"),OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_error)?;
-            reader.backup(rusqlite::MAIN_DB,&path,None).map_err(sql_error)?;
-            let saved=Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_error)?;
-            crate::pi_backup::snapshot(&saved,&self.directory,&path).map_err(|_|PlatformError::new("sql_backup_context","未能建立匹配的助手会话备份"))?;
-            Ok(())
+        let snapshot = (|| {
+            let reader = Connection::open_with_flags(self.directory.join("game.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_error)?;
+            let version = crate::migration::version(&reader).map_err(backup_error)?;
+            db_backup::save(&reader, &self.directory.join("backups"), label, version).map_err(backup_error)
         })();
-        let ended=connection.execute_batch(if snapshot.is_ok(){"COMMIT"}else{"ROLLBACK"}).map_err(sql_error);
-        if let Err(error)=snapshot {let _=fs::remove_file(&path);let _=fs::remove_dir_all(path.with_extension("pi"));return Err(error);}
+        let ended = connection.execute_batch("ROLLBACK").map_err(sql_error);
+        let name = snapshot?;
         ended?;
-        for old in self
-            .list_backups()?
-            .into_iter()
-            .skip(20)
-            .filter(|old| Some(old.name.as_str()) != keep)
-        {
-            let old_path=directory.join(old.name);
-            fs::remove_file(&old_path).map_err(|_| io_error())?;
-            let _=fs::remove_dir_all(old_path.with_extension("pi"));
-        }
         Ok(name)
     }
 
     pub fn list_backups(&self) -> Result<Vec<BackupInfo>> {
-        let entries = match fs::read_dir(self.directory.join("backups")) {
-            Ok(v) => v,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(_) => return Err(io_error()),
-        };
-        let mut backups = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|_| io_error())?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".sqlite") {
-                continue;
-            }
-            let meta = entry.metadata().map_err(|_| io_error())?;
-            if !meta.is_file() {
-                continue;
-            }
-            let at: DateTime<Utc> = meta.modified().map_err(|_| io_error())?.into();
-            backups.push(BackupInfo {
-                name,
-                at: at.to_rfc3339(),
-                size: meta.len(),
-            });
-        }
-        backups.sort_by(|a, b| b.name.cmp(&a.name));
-        Ok(backups)
+        Ok(self.backup_inventory()?.items)
+    }
+
+    pub fn backup_inventory(&self) -> Result<BackupInventory> {
+        let _connection = crate::store::lock_connection(&self.connection);
+        self.backup_inventory_locked()
+    }
+
+    fn backup_inventory_locked(&self) -> Result<BackupInventory> {
+        let items = db_backup::list(&self.directory.join("backups")).map_err(backup_error)?;
+        let total_bytes = items.iter().map(|item| item.size).sum();
+        Ok(BackupInventory { items, total_bytes })
+    }
+
+    pub fn delete_backups(&self, names: &[String]) -> Result<BackupDeletion> {
+        let connection = crate::store::lock_connection(&self.connection);
+        crate::maintenance::guard(&connection).map_err(|_| PlatformError::new("sql_maintenance", "正在恢复存档，请等待完成"))?;
+        let directory = self.directory.join("backups");
+        let failed = names.iter().filter(|name| db_backup::delete(&directory, name).is_err()).count();
+        Ok(BackupDeletion { inventory: self.backup_inventory_locked()?, failed })
     }
 }
 
@@ -422,16 +430,6 @@ fn empty_database(connection: &Connection) -> Result<bool> {
         }
     }
     Ok(true)
-}
-
-fn valid_backup_name(name: &str) -> bool {
-    (8..=120).contains(&name.len())
-        && name.ends_with(".sqlite")
-        && !name.starts_with('.')
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
 }
 
 fn schema_version(connection: &Connection) -> rusqlite::Result<Option<i64>> {

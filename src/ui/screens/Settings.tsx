@@ -10,7 +10,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../engine/llm/providers";
 import type { Intensity, Perspective } from "../../engine/types";
 import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
-import type { Row } from "../../platform";
+import type { BackupInfo, BackupInventory, Row } from "../../platform";
 import { useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { REPO_URL, openLink, newer, plainNotes } from "../app/update";
@@ -20,7 +20,7 @@ import { purposeLabel } from "../../engine/usage";
 import { Seal } from "../components/Seal";
 import { recentDiagnosis } from "../components/FailureSheet";
 import { applyFallback } from "../app/llmConfig";
-import { BackupRestore } from "../components/BackupRestore";
+import { backupSize, BackupRestore } from "../components/BackupRestore";
 import { Icon, type IconName } from "../components/Icon";
 import { MonthlyBudgetSettings, budgetState } from "../components/MonthlyBudget";
 import { SpeedCheck } from "../components/SpeedCheck";
@@ -451,17 +451,60 @@ function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled
 }
 
 function DataPage() {
-  const { game, toast } = useApp();
+  const { game, ask, toast } = useApp();
   const [sources, setSources] = useState(false);
-  const [backups, setBackups] = useState<{ name: string; at: string; bytes?: number }[]>([]);
+  const [inventory, setInventory] = useState<BackupInventory | null>(null);
+  const [backupReadFailed, setBackupReadFailed] = useState(false);
+  const [dailyBackup, setDailyBackup] = useState<boolean | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
   const [worldCount, setWorldCount] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const exportBusy = useRef(false);
-  const load = () => {
-    void game.platform.sql.listBackups().then((b) => setBackups([...b].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)))).catch(() => setBackups([]));
-    void game.platform.sql.query("SELECT COUNT(*) AS worlds FROM worlds WHERE archived < 2").then((r) => setWorldCount(Number(r[0].worlds)));
+  const loadBackups = async () => {
+    try {
+      setInventory(await game.platform.sql.backupInventory());
+      setBackupReadFailed(false);
+    } catch {
+      setBackupReadFailed(true);
+    }
   };
-  useEffect(load, []);
+  useEffect(() => {
+    void loadBackups();
+    void game.repo.getSetting<boolean>("dailyBackup", false).then((enabled) => setDailyBackup(enabled === true)).catch(() => toast("没能读取每日备份设置"));
+    void game.platform.sql.query("SELECT COUNT(*) AS worlds FROM worlds WHERE archived < 2").then((r) => setWorldCount(Number(r[0].worlds)));
+  }, []);
+  const changeDailyBackup = async (enabled: boolean) => {
+    try {
+      await game.repo.setSetting("dailyBackup", enabled);
+      setDailyBackup(enabled);
+    } catch { toast("没能保存每日备份设置"); }
+  };
+  const createBackup = async () => {
+    setBackupBusy(true);
+    try {
+      await game.platform.sql.backup("manual");
+      toast("已备份");
+    } catch { toast("备份操作没完成，请检查可用空间后重试"); }
+    finally { await loadBackups(); setBackupBusy(false); }
+  };
+  const removeBackups = async (items: BackupInfo[]) => {
+    setBackupBusy(true);
+    try {
+      const ok = await ask({
+        title: items.length === 1 ? "删除这份备份？" : `删除这 ${items.length} 份备份？`,
+        message: "删除后将无法使用这些恢复点。当前存档和另外导出的文件会保留。",
+        confirm: "删除", danger: true,
+      });
+      if (!ok) return;
+      const result = await game.platform.sql.deleteBackups(items.map((item) => item.name));
+      setInventory(result.inventory);
+      setBackupReadFailed(false);
+      toast(result.failed ? `有备份未删除，剩余 ${result.inventory.items.length} 份，可以重试` : "已删除备份");
+    } catch {
+      toast("备份没能全部删除，请重试");
+      await loadBackups();
+    } finally { setBackupBusy(false); }
+  };
   const exportAll = async () => {
     if (exportBusy.current) return;
     exportBusy.current = true; setExporting(true);
@@ -476,19 +519,22 @@ function DataPage() {
     } catch (error) { toast(error instanceof Error ? error.message : "准备完整存档失败"); }
     finally { exportBusy.current = false; setExporting(false); }
   };
-  const fmt = (iso: string) => new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).replaceAll("/", "-");
+  const backups = inventory?.items ?? [];
   return (
     <>
+      {dailyBackup !== null && <Choice label="每日自动备份" note="开启后，启动应用时会检查是否需要备份。" value={dailyBackup}
+        options={[[false, "关"], [true, "开"]]} onChange={(enabled) => void changeDailyBackup(enabled)} />}
       <div className="status-card ok">
-        <b>{backups[0] ? `上次备份：${fmt(backups[0].at)}` : "还没有备份"}</b>
-        <small>每天第一次打开时自动备份整个存档，保留最近 20 份，存在这台设备上的应用目录里。卸载应用会一起删掉，重要的世界请另外导出。</small>
+        <b>{backupReadFailed ? "没能读取备份" : inventory ? `备份 ${backups.length} 份 · ${backupSize(inventory.totalBytes)}` : "正在读取备份…"}</b>
+        <small>保留最近 5 份。备份存在这台设备的应用目录，卸载时会一起删除。重要的世界可以另外导出。</small>
         <div className="row">
-          <button onClick={async () => { const done = await game.platform.sql.backup("manual").catch(() => null); toast(done ? "已备份" : "备份没成功"); load(); }}>现在备份</button>
+          <button disabled={backupBusy} onClick={() => void createBackup()}>现在备份</button>
+          {backupReadFailed && <button disabled={backupBusy} onClick={() => void loadBackups()}>重新读取</button>}
         </div>
       </div>
       {backups.length > 0 && <details>
         <summary className="muted">从备份恢复（{backups.length} 份）</summary>
-        <BackupRestore refresh={backups[0]?.name ?? ""} />
+        <BackupRestore backups={backups} deleting={backupBusy} onDelete={removeBackups} />
       </details>}
       <button onClick={() => setSources(true)}>参考书籍</button>
       {sources && <SourceLibrary onClose={() => setSources(false)} />}

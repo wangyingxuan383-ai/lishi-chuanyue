@@ -1,7 +1,7 @@
 //! Shared, bounded ordinary-writing projection. Full state remains in the run.
 use crate::{rules, Error, Result};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 fn text(v: &Value) -> &str {
     v.as_str().unwrap_or("")
@@ -345,7 +345,7 @@ pub fn build(input: &Value) -> Result<Value> {
     let notes_room = (cap / 5).min(cap.saturating_sub(fixed + overhead + 400));
     let mut notes = String::new();
     // 本局札记 (D174) and 原著札记 share the room, each under its own heading.
-    let mut opened = std::collections::HashSet::new();
+    let mut opened = HashSet::new();
     for n in list(&input["canonNotes"]) {
         let story = n["source"] == "story";
         let header = if opened.contains(&story) { "" } else if story {
@@ -453,9 +453,13 @@ pub fn build(input: &Value) -> Result<Value> {
         }
     }
     let mut facts = String::new();
+    // What the AI noted about a passage the player has since edited may say the
+    // opposite of the text now (D183): those notes stay out.
+    let edited: HashSet<String> = history.iter().filter(|n| n["rewritten"] == true).filter_map(|n| n["id"].as_str().map(str::to_owned)).collect();
     for f in list(&state["facts"])
         .iter()
         .rev()
+        .filter(|f| !(f["origin"] == "ai" && f["nodeId"].as_str().is_some_and(|id| edited.contains(id))))
         .filter(|f| {
             text(&f["detail"])
                 .chars()
@@ -505,19 +509,9 @@ pub fn build(input: &Value) -> Result<Value> {
     } else {
         String::new()
     };
-    let recap = chapters
-        .iter()
-        .rev()
-        .take(3)
-        .map(|c| format!("{}：{}", text(&c["title"]), text(&c["gist"])))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    let recap = head(&recap, recap_budget - size(&older)) + &older;
-    room -= size(&recap);
-    layers.push(json!({"key":"recap","label":"前情提要","chars":size(&recap),"content":recap,"note":"原文窗口以外的章节梗概"}));
+    // The recap's room is set aside; which chapters it shows is decided once the
+    // prose window is known, so a chapter still there in full is not told twice (D183).
+    room = room.saturating_sub(recap_budget);
     let mut pairs = vec![];
     let mut kept = BTreeSet::new();
     for n in history.iter().rev().filter(|n| n["kind"] != "edit") {
@@ -548,6 +542,23 @@ pub fn build(input: &Value) -> Result<Value> {
         kept.insert(n["id"].clone().to_string());
     }
     pairs.reverse();
+    let recap = chapters
+        .iter()
+        .rev()
+        .filter(|c| !kept.contains(&c["firstNodeId"].clone().to_string()))
+        .take(3)
+        .map(|c| {
+            // A passage in it was edited after it was summarized (D183).
+            let note = if c["stale"] == true { "（正文改过，梗概待更新）" } else { "" };
+            format!("{}：{}{note}", text(&c["title"]), text(&c["gist"]))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let recap = head(&recap, recap_budget.saturating_sub(size(&older))) + &older;
+    layers.push(json!({"key":"recap","label":"前情提要","chars":size(&recap),"content":recap,"note":"原文窗口以外的章节梗概"}));
     {
         let offset = input["historyOffset"].as_u64().unwrap_or(0) as usize;
         let older: Vec<crate::recall::Older> = history
@@ -669,37 +680,67 @@ mod tests {
         assert!(recap["chars"].as_u64().unwrap() <= 900);
     }
     #[test]
+    fn the_recap_leaves_out_chapters_still_in_the_window_and_marks_edited_ones() {
+        let mut i = input();
+        i["history"] = json!([
+            {"id":"a","kind":"turn","actionText":"出门","narrative":"你出了门。"},
+            {"id":"b","kind":"turn","actionText":"买纸","narrative":"你买了纸。"}
+        ]);
+        i["chapters"] = json!([
+            {"firstNodeId":"old","title":"旧事","gist":"很早以前的事。","stale":true},
+            {"firstNodeId":"a","title":"出门","gist":"出门买纸。"}
+        ]);
+        let context = build(&i).unwrap();
+        let recap = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "recap").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(recap.contains("旧事：很早以前的事。（正文改过，梗概待更新）"), "{recap}");
+        assert!(!recap.contains("出门买纸"), "a chapter whose passages are all in the window is not told twice: {recap}");
+    }
+    #[test]
+    fn what_the_ai_noted_about_a_passage_the_player_edited_stays_out() {
+        let mut i = input();
+        i["history"] = json!([{"id":"n1","kind":"turn","actionText":"买纸","narrative":"你买了一张青纸。","rewritten":true},{"id":"n2","kind":"turn","actionText":"看纸","narrative":"你看着青纸。"}]);
+        i["state"]["facts"] = json!([
+            {"id":"f1","origin":"ai","nodeId":"n1","detail":"你买了一张黄纸青纸","citations":[]},
+            {"id":"f2","origin":"ai","nodeId":"n2","detail":"你看着青纸出神","citations":[]},
+            {"id":"f3","origin":"player","nodeId":"n1","detail":"你买的是一张青纸","citations":[]}
+        ]);
+        let context = build(&i).unwrap();
+        let cards = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "cards").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(!cards.contains("黄纸"), "{cards}");
+        assert!(cards.contains("你看着青纸出神") && cards.contains("你买的是一张青纸"), "{cards}");
+    }
+    #[test]
     fn canon_notes_join_the_fixed_part_within_a_fifth_of_the_budget() {
         let mut i = input();
         i["depth"] = "standard".into();
         i["reference"]["passages"] = json!([]);
         i["canonNotes"] = json!([
-            {"title":"第1～100章主线","content":"主角拜入学院，结识七怪。"},
+            {"title":"第1～100章主线","content":"主角拜入学院，结识五友。"},
             {"title":"很长的札记","content":"很长".repeat(4000)},
-            {"title":"人物：小舞","content":"柔骨兔化形。"}
+            {"title":"人物：阿柳","content":"白狐化形。"}
         ]);
         let context = build(&i).unwrap();
         let system = context["messages"][0]["content"].as_str().unwrap();
-        assert!(system.contains("【原著札记】") && system.contains("结识七怪") && system.contains("柔骨兔化形"), "{}", serde_json::to_string(&context["layers"].as_array().unwrap().iter().map(|l| (l["key"].clone(), l["chars"].clone())).collect::<Vec<_>>()).unwrap());
+        assert!(system.contains("【原著札记】") && system.contains("结识五友") && system.contains("白狐化形"), "{}", serde_json::to_string(&context["layers"].as_array().unwrap().iter().map(|l| (l["key"].clone(), l["chars"].clone())).collect::<Vec<_>>()).unwrap());
         assert!(!system.contains(&"很长".repeat(4000)));
         let layer = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "canonNotes").unwrap();
         assert!(layer["chars"].as_u64().unwrap() as usize <= 14545 / 5);
         let user = context["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
         assert!(user.contains("以上面的原著札记为准") && !user.contains("需要补查"));
-        assert!(context["reference"]["notes"].as_str().unwrap().contains("结识七怪"));
+        assert!(context["reference"]["notes"].as_str().unwrap().contains("结识五友"));
     }
     #[test]
     fn the_protagonists_abilities_card_comes_in_without_being_named() {
         let mut i = input();
-        i["state"]["protagonist"]["name"] = "唐舞".into();
+        i["state"]["protagonist"]["name"] = "林舟".into();
         i["state"]["cards"] = json!([
-            {"kind":"设定","name":"唐舞的本事","keys":[],"content":"武魂蓝银草；两个千年紫环"},
+            {"kind":"设定","name":"林舟的本事","keys":[],"content":"武魂蓝银草；两个千年紫环"},
             {"kind":"物品","name":"玉玺","keys":[],"content":"传国玉玺"}
         ]);
         let context = build(&i).unwrap();
         let layer = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "cards").unwrap();
         let cards = layer["content"].as_str().unwrap();
-        assert!(cards.contains("唐舞的本事：武魂蓝银草；两个千年紫环"), "{cards}");
+        assert!(cards.contains("林舟的本事：武魂蓝银草；两个千年紫环"), "{cards}");
         assert!(!cards.contains("传国玉玺"));
     }
     #[test]

@@ -22,6 +22,10 @@ function apply(name: string, record: TurnRecord | null, change?: (s: WorldState)
   fixtures.push({ name, kind: "apply", state, record, options: input, expected });
 }
 apply("action default", {});
+apply("AI tidy-up removals are not remembered as the player's", { cards: [{ op: "remove", name: "那封信", by: "AI" }, { op: "remove", name: "旧账本" }], places: [{ op: "remove", name: "县衙大堂", by: "AI" }] }, (s) => {
+  s.cards.push({ id: "letter", kind: "物品", name: "那封信", keys: [], content: "信", source: "AI" }, { id: "ledger", kind: "物品", name: "旧账本", keys: [], content: "账", source: "AI" });
+  s.places.push({ id: "hall", name: "县衙大堂", aliases: [], description: "", source: "AI" });
+}, { advanceTime: false });
 apply("missing record", null, undefined, { mode: "continue" });
 apply("invalid duration", { time: "太阳下山" });
 apply("short skip stops", { time: "十几息", hour: 7 }, undefined, { mode: "skip", asked: 43200 });

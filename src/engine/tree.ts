@@ -67,8 +67,8 @@ export async function addVariant(repo: Repo, c: Cursor, node: Omit<NewNode, "par
 }
 
 /** Explicit fact correction always preserves the complete original route, including short tails. */
-export async function forkRevision(repo: Repo, guard: RevisionGuard, node: NewNode, name?: string, asVersion = false): Promise<Cursor> {
-  const created = await repo.forkRevision(guard, node, name ?? (node.parentId ? "原著纠错后的路线" : "修订开场后的路线"), asVersion);
+export async function forkRevision(repo: Repo, guard: RevisionGuard, node: NewNode, name?: string, asVersion = false, carried: NewNode[] = []): Promise<Cursor> {
+  const created = await repo.forkRevision(guard, node, name ?? (node.parentId ? "原著纠错后的路线" : "修订开场后的路线"), asVersion, carried);
   return { worldId: guard.worldId, line: created.line, head: created.node };
 }
 

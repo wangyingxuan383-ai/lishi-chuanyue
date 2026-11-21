@@ -6,6 +6,8 @@ import { createContext, useEffect, useRef, useState } from "react";
 import { NOTE_KINDS, NOTE_KIND_LABEL, STORY_NOTE_KINDS, NOTE_TEXT_LIMIT, deleteNote, draftFromParts, estimateNote, gapRanges, listNotes, listStoryNotes, localNoteContent, newLocalNote, newNote, newStoryNote, nextNoteReach, noteBehind, noteChapterRange, noteNearEnd, noteOffRoute, restartOnRoute, routeIds, noteProgressDetail, noteProgressLabel, noteStepsDone, noteUnit, readNoteText, renameNote, restorePrevious, saveNote, startNoteUpdate, storyLastTurn, suggestTitle, turnLabel, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { RangeInputs } from "./RangeInputs";
+import { chapterLabel } from "../../engine/sources/scope";
 import { Switch } from "./Switch";
 
 type View = { name: "list" } | { name: "new"; draft?: CanonNote } | { name: "note"; id: string };
@@ -128,6 +130,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, onClose, start,
 /** 札记预备 (D178) and stale 本局札记: one quiet line on the row. */
 function NoteHint({ note, position, last, offRoute }: { note: CanonNote; position: number; last: number; offRoute: boolean }) {
   if (offRoute) return <small className="note-hint">整理的是另一条路线，写作暂不使用</small>;
+  if (note.scope.staleFrom !== undefined) return <small className="note-hint">{turnLabel(note.scope.staleFrom)}之后的正文改过，札记可能过时</small>;
   if (last < 0) return null;
   if (noteNearEnd(note, position, last)) return <small className="note-hint">剧情快到第 {(note.scope.to ?? 0) + 1} 章的末尾了，可以续整理</small>;
   const behind = noteBehind(note, last);
@@ -163,7 +166,6 @@ function NewNote({ bookId, worldId, story, sections, position, draft, start, onS
   const [picking, setPicking] = useState(false);
   useEffect(() => { setTo((t) => (story ? last : Math.min(last, t))); }, [last]);
   const ranged = kind === "plot" || kind === "timeline";
-  const shift = story ? 1 : 0;
   const scope: NoteScope = ranged ? { from: Math.min(from, to), to: Math.max(from, to) }
     : kind === "question" ? { question: question.trim() }
     : { subject: subject.trim(), aliases: aliases.split(/[、，,\s]+/).map((s) => s.trim()).filter(Boolean) };
@@ -178,7 +180,7 @@ function NewNote({ bookId, worldId, story, sections, position, draft, start, onS
     timer.current = setTimeout(() => void estimateNote(game.repo, { bookId, kind, scope, ...(story ? { source: "story" as const, worldId } : {}) }).then(setEstimate).catch(() => setEstimate(null)), 400);
     return () => clearTimeout(timer.current);
   }, [key, ready, generate, titleEdited]);
-  const chapter = (n: number) => (story ? turnLabel(n) : `第 ${n + 1} 章${sections[n] ? ` · ${sections[n].slice(0, 18)}` : ""}`);
+  const chapter = (n: number) => (story ? turnLabel(n) : chapterLabel(n, sections[n]));
   const importText = async () => {
     setPicking(true);
     try {
@@ -207,18 +209,12 @@ function NewNote({ bookId, worldId, story, sections, position, draft, start, onS
           <button key={k} role="radio" aria-checked={kind === k} className="note-kind" onClick={() => setKind(k)}><b>{label}</b><small>{hint}</small></button>
         ))}
       </div>
-      {ranged && <div className="stack gap-2">
-        {/* Chapters count from 1; turns from 0, the opening, so the number matches “第 N 回合”. */}
-        <label>从{story ? "第" : ""}<input type="number" inputMode="numeric" min={1 - shift} max={last + 1 - shift} value={from + 1 - shift} onChange={(e) => setFrom(Math.max(0, Math.min(last, Math.trunc(Number(e.target.value)) - 1 + shift || 0)))} />{story ? "回合" : ""}</label>
-        <small className="muted">{chapter(Math.min(from, to))}</small>
-        <label>到{story ? "第" : ""}<input type="number" inputMode="numeric" min={1 - shift} max={last + 1 - shift} value={to + 1 - shift} onChange={(e) => setTo(Math.max(0, Math.min(last, Math.trunc(Number(e.target.value)) - 1 + shift || 0)))} />{story ? "回合" : ""}</label>
-        <small className="muted">{chapter(Math.max(from, to))}（{story ? `本局到${turnLabel(last)}` : `全书共 ${sections.length} 章`}）</small>
-      </div>}
+      {ranged && <RangeInputs last={last} from={from} to={to} setFrom={setFrom} setTo={setTo} story={story} describe={chapter} total={story ? `本局到${turnLabel(last)}` : `全书共 ${sections.length} 章`} />}
       {(kind === "person" || kind === "setting") && <div className="stack gap-2">
-        <label>{kind === "person" ? "人物名字" : story ? "地点、势力或物件" : "设定名称"}<input value={subject} maxLength={40} onChange={(e) => setSubject(e.target.value)} placeholder={kind === "person" ? (story ? "如：主角的名字、王掌柜" : "如：唐舞麟") : story ? "如：西市货栈、漕帮" : "如：魂导器、史莱克学院"} /></label>
-        <label>别名（可不填，用顿号隔开）<input value={aliases} maxLength={120} onChange={(e) => setAliases(e.target.value)} placeholder="如：舞麟、小舞麟" /></label>
+        <label>{kind === "person" ? "人物名字" : story ? "地点、势力或物件" : "设定名称"}<input value={subject} maxLength={40} onChange={(e) => setSubject(e.target.value)} placeholder={kind === "person" ? (story ? "如：主角的名字、王掌柜" : "如：林舟") : story ? "如：西市货栈、漕帮" : "如：机关傀儡、青云书院"} /></label>
+        <label>别名（可不填，用顿号隔开）<input value={aliases} maxLength={120} onChange={(e) => setAliases(e.target.value)} placeholder="如：阿舟、林兄" /></label>
       </div>}
-      {kind === "question" && <label>问题<textarea rows={3} maxLength={300} value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="如：主角第一次见到古月娜是在什么场合？" /></label>}
+      {kind === "question" && <label>问题<textarea rows={3} maxLength={300} value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="如：主角第一次见到师父是在什么场合？" /></label>}
       <label>标题<input value={title} maxLength={40} onChange={(e) => { setTitle(e.target.value); setTitleEdited(true); }} /></label>
       {generate ? <p className="muted m-0 note-estimate" aria-live="polite">{!ready ? "填好上面的内容后，这里会估算要花多少。"
         : !estimate ? "正在估算…"
@@ -323,6 +319,10 @@ function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack
             setManual(null);
           }}>保存并合进札记</button>
         </div>
+      </div>}
+      {!offRoute && note.scope.staleFrom !== undefined && note.status === "done" && !running && <div className="stack gap-2">
+        <p className="muted m-0">{turnLabel(note.scope.staleFrom)}之后的正文改过，这份札记可能还写着改之前的事。写作时会提醒 AI 以正文为准。{note.scope.auto ? "自动的主线梗概会在章节摘要更新后自己重整。" : ""}</p>
+        <button onClick={() => void onRestart().catch((e) => toast(e instanceof Error ? e.message : "没能开始整理"))}>按现在的正文重新整理</button>
       </div>}
       {offRoute && !running && <div className="stack gap-2">
         <p className="muted m-0">这份札记整理的是另一条路线上的故事（你后来回到前面或换了路线），写作时暂不使用，免得把没发生的事当成前情。</p>

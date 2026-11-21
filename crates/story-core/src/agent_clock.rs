@@ -205,7 +205,7 @@ mod tests {
     use rusqlite::params;
 
     fn anchor(at: f64) -> Value {
-        json!({"atElapsedMinutes":at,"date":{"era":"斗罗","year":2631,"month":5,"day":8,"ceYear":null,"lunar":false},"minuteOfDay":1205})
+        json!({"atElapsedMinutes":at,"date":{"era":"玄元","year":2631,"month":5,"day":8,"ceYear":null,"lunar":false},"minuteOfDay":1205})
     }
     fn state(elapsed: i64, money: i64) -> Value {
         json!({"version":2,"time":{"start":"","elapsedMinutes":elapsed,"startHour":8},"placeId":null,"protagonist":{"name":"旅人","aliases":[],"age":20,"gender":"男","identity":"行旅","origin":"现代","cheat":"","stats":{"money":money,"debt":0,"health":100,"energy":100,"fame":0},"statuses":[],"items":[]},"people":[],"places":[],"cards":[],"goals":[],"facts":[],"era":{"packId":null,"mode":"free","clockStyle":"elapsed","calendar":{"lunar":false}},"deviations":[]})
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(calendar::now_of(&clock, elapsed-1440.0)["text"], "第 30 天 · 23:50");
         assert_eq!(calendar::new_years_between(&clock, elapsed, elapsed+525600.0), 1.0);
         clock["clockStyle"]="era".into();
-        assert_eq!(calendar::now_of(&clock, elapsed)["text"], "斗罗2631年 5月8日 · 20:05");
+        assert_eq!(calendar::now_of(&clock, elapsed)["text"], "玄元2631年 5月8日 · 20:05");
         assert_eq!(calendar::now_of(&clock, elapsed)["day"], 4055.0);
         clock["clockStyle"]="elapsed".into();
         clock["elapsedAnchor"]=json!({"atElapsedMinutes":elapsed,"day":0,"minuteOfDay":0});
@@ -300,7 +300,7 @@ mod tests {
         let mut clock = json!({"mode":"free","clockStyle":"era","timeStyle":"24h","hour":8,"date":null,"label":"","rules":{"lunar":false},"anchor":anchor(elapsed)});
         assert_eq!(
             calendar::now_of(&clock, elapsed)["text"],
-            "斗罗2631年 5月8日 · 20:05"
+            "玄元2631年 5月8日 · 20:05"
         );
         assert_eq!(calendar::now_of(&clock, elapsed)["day"], 4055.0);
         clock["clockStyle"] = "elapsed".into();
@@ -345,7 +345,7 @@ mod tests {
             true
         );
         let read = read_clock(&db, &plan, &json!({})).unwrap();
-        assert_eq!(read["now"]["text"], "斗罗2631年 5月8日 · 20:05");
+        assert_eq!(read["now"]["text"], "玄元2631年 5月8日 · 20:05");
         assert_eq!(read["elapsedMinutes"], 10);
         let tx = db.transaction().unwrap();
         ws::apply(&tx, &plan, "task", "校准纪年").unwrap();
@@ -410,11 +410,11 @@ mod tests {
     #[test]
     fn custom_era_above_ten_thousand_has_no_ce_alias_and_rejects_invalid_display() {
         let (db,plan)=fixture();
-        let result=stage_clock(&db,&plan,"task",&json!({"operation":"display","clockStyle":"era","timeStyle":"24h","calendar":{"lunar":false},"anchor":{"atElapsedMinutes":10,"minuteOfDay":1430,"date":{"era":"斗罗历","year":10015,"month":12,"day":31,"ceYear":null,"lunar":false}},"summary":"校准斗罗纪年"})).unwrap();
-        assert_eq!(result["afterDisplay"],"斗罗历10015年 12月31日 · 23:50");
+        let result=stage_clock(&db,&plan,"task",&json!({"operation":"display","clockStyle":"era","timeStyle":"24h","calendar":{"lunar":false},"anchor":{"atElapsedMinutes":10,"minuteOfDay":1430,"date":{"era":"玄元历","year":10015,"month":12,"day":31,"ceYear":null,"lunar":false}},"summary":"校准玄元纪年"})).unwrap();
+        assert_eq!(result["afterDisplay"],"玄元历10015年 12月31日 · 23:50");
         assert_eq!(result["elapsedMinutesPreserved"],true);
         let tomorrow=read_clock(&db,&plan,&json!({"atElapsedMinutes":30})).unwrap();
-        assert_eq!(tomorrow["now"]["text"],"斗罗历10016年 1月1日 · 00:10");
+        assert_eq!(tomorrow["now"]["text"],"玄元历10016年 1月1日 · 00:10");
         assert!(tomorrow["now"]["date"]["ceYear"].is_null());
         assert_eq!(tomorrow["elapsedMinutes"],10);
         let mut date=anchor(0.0);
@@ -428,24 +428,24 @@ mod tests {
     #[test]
     fn new_free_anchor_requires_explicit_unknown_ce_even_with_matching_era_table() {
         let (db,plan)=fixture();
-        let rules=json!({"lunar":false,"eras":[{"name":"斗罗历","startCe":1}]});
+        let rules=json!({"lunar":false,"eras":[{"name":"玄元历","startCe":1}]});
         for date in [
-            json!({"era":"斗罗历","year":10015,"month":1,"day":1,"lunar":false}),
-            json!({"era":"斗罗历","year":10015,"month":1,"day":1,"lunar":false,"ceYear":10015}),
+            json!({"era":"玄元历","year":10015,"month":1,"day":1,"lunar":false}),
+            json!({"era":"玄元历","year":10015,"month":1,"day":1,"lunar":false,"ceYear":10015}),
         ] {
             let error=stage_clock(&db,&plan,"task",&json!({"operation":"display","clockStyle":"era","calendar":rules,"anchor":{"atElapsedMinutes":10,"minuteOfDay":0,"date":date},"summary":"校准纪年"})).unwrap_err().to_string();
             assert!(error.contains("anchor.date.ceYear") && error.contains("null"),"{error}");
             assert_eq!(ws::workspace(&db,"task").unwrap(),json!({}));
         }
         let mut independent=anchor(10.0);
-        independent["date"]["era"]="斗罗历".into();
+        independent["date"]["era"]="玄元历".into();
         independent["date"]["year"]=10015.into();
         stage_clock(&db,&plan,"task",&json!({"operation":"display","clockStyle":"era","calendar":rules,"anchor":independent,"summary":"独立纪年"})).unwrap();
         assert!(read_clock(&db,&plan,&json!({})).unwrap()["now"]["date"]["ceYear"].is_null());
 
         // Existing calibration is not silently rewritten by unrelated work.
         let mut legacy=state(10,5);
-        legacy["time"]["anchor"]=json!({"atElapsedMinutes":10,"minuteOfDay":0,"date":{"era":"斗罗历","year":10015,"month":1,"day":1,"lunar":false,"ceYear":10015}});
+        legacy["time"]["anchor"]=json!({"atElapsedMinutes":10,"minuteOfDay":0,"date":{"era":"玄元历","year":10015,"month":1,"day":1,"lunar":false,"ceYear":10015}});
         legacy["era"]["calendar"]=rules;
         let mut unrelated=legacy.clone();
         unrelated["protagonist"]["stats"]["money"]=6.into();
@@ -483,27 +483,27 @@ mod tests {
     fn generic_free_base_date_cannot_introduce_a_ce_alias() {
         for ce in [None,Some(json!(10015))] {
             let (mut db,plan)=fixture();
-            let mut date=json!({"era":"斗罗历","year":10015,"month":1,"day":1,"lunar":false});
+            let mut date=json!({"era":"玄元历","year":10015,"month":1,"day":1,"lunar":false});
             if let Some(ce)=ce {date["ceYear"]=ce;}
-            ws::stage(&db,&plan,"task",&json!({"kind":"state","operation":"merge","value":{"era":{"clockStyle":"era","calendar":{"lunar":false,"eras":[{"name":"斗罗历","startCe":1}]}},"time":{"date":date}},"summary":"设置基准纪年"})).unwrap();
+            ws::stage(&db,&plan,"task",&json!({"kind":"state","operation":"merge","value":{"era":{"clockStyle":"era","calendar":{"lunar":false,"eras":[{"name":"玄元历","startCe":1}]}},"time":{"date":date}},"summary":"设置基准纪年"})).unwrap();
             let tx=db.transaction().unwrap();
             let error=ws::apply(&tx,&plan,"task","设置基准纪年").unwrap_err().to_string();
             assert!(error.contains("time.date.ceYear") && error.contains("null"),"{error}");
             tx.rollback().unwrap();
         }
         let (mut db,plan)=fixture();
-        ws::stage(&db,&plan,"task",&json!({"kind":"state","operation":"merge","value":{"era":{"clockStyle":"era","timeStyle":"24h","calendar":{"lunar":false,"eras":[{"name":"斗罗历","startCe":1}]}},"time":{"date":{"era":"斗罗历","year":10015,"month":12,"day":31,"ceYear":null,"lunar":false},"startHour":23.5}},"summary":"设置独立基准纪年"})).unwrap();
+        ws::stage(&db,&plan,"task",&json!({"kind":"state","operation":"merge","value":{"era":{"clockStyle":"era","timeStyle":"24h","calendar":{"lunar":false,"eras":[{"name":"玄元历","startCe":1}]}},"time":{"date":{"era":"玄元历","year":10015,"month":12,"day":31,"ceYear":null,"lunar":false},"startHour":23.5}},"summary":"设置独立基准纪年"})).unwrap();
         let tx=db.transaction().unwrap();
         ws::apply(&tx,&plan,"task","设置独立基准纪年").unwrap();
         tx.commit().unwrap();
         let mut formal=plan.clone();
         formal.meta["agent"]["taskId"]="".into();
         let current=read_clock(&db,&formal,&json!({})).unwrap();
-        assert_eq!(current["now"]["text"],"斗罗历10015年 12月31日 · 23:40");
+        assert_eq!(current["now"]["text"],"玄元历10015年 12月31日 · 23:40");
         assert!(current["now"]["date"]["ceYear"].is_null());
         assert_eq!(current["elapsedMinutes"],10);
         let tomorrow=read_clock(&db,&formal,&json!({"atElapsedMinutes":40})).unwrap();
-        assert_eq!(tomorrow["now"]["text"],"斗罗历10016年 1月1日 · 00:10");
+        assert_eq!(tomorrow["now"]["text"],"玄元历10016年 1月1日 · 00:10");
         let preserved=ws::resource(&db,&formal,"state","").unwrap();
         assert_eq!(preserved["protagonist"]["age"],20);
         assert_eq!(preserved["protagonist"]["stats"]["money"],5);

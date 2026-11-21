@@ -8,7 +8,7 @@ export const purposeBase = (purpose: string) => purpose.split(":")[0];
 const LABELS: Record<string, string> = {
   writing: "写作", turn: "写作", opening: "开场", continue: "续写", extract: "补记", "reference-review": "原著核对", "reference-review-lite": "原著快速校对",
   codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", capability: "检测工具支持", ask: "查一查", assist: "补全",
-  test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍", "canon-notes": "札记", tool: "写作", autoplay: "连播", revise: "改稿", "revise-passage": "按要求改写",
+  test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍", "canon-notes": "札记", tool: "写作", autoplay: "连播", revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步",
 };
 export const purposeLabel = (purpose: string) => LABELS[purposeBase(purpose)] ?? LABELS[purpose] ?? purpose;
 /** SQL for the base purpose, for GROUP BY. */

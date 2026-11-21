@@ -75,11 +75,25 @@ function toPin(r: Row): Pin {
   return { id: r.id as string, worldId: r.world_id as string, originNodeId: r.origin_node_id as string, text: r.text as string, createdAt: r.created_at as string };
 }
 
+/**
+ * Chapters whose span holds `nodeId` are marked out of date after its text changed
+ * (D183), on every route that shares the passage. One the player wrote is only flagged, never rewritten.
+ */
+export function staleChaptersStatement(worldId: string, nodeId: string, ifNarrative?: string): SqlStatement {
+  return {
+    sql: `WITH RECURSIVE down(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN down d ON n.parent_id=d.id),
+      up(id) AS (SELECT ? UNION ALL SELECT n.parent_id FROM nodes n JOIN up u ON n.id=u.id WHERE n.parent_id IS NOT NULL)
+      UPDATE chapters SET stale=1 WHERE world_id=? AND last_node_id IN (SELECT id FROM down) AND first_node_id IN (SELECT id FROM up)
+        ${ifNarrative === undefined ? "" : "AND EXISTS (SELECT 1 FROM nodes WHERE id=? AND narrative=?)"}`,
+    params: ifNarrative === undefined ? [nodeId, nodeId, worldId] : [nodeId, nodeId, worldId, nodeId, ifNarrative],
+  };
+}
+
 function toChapter(r: Row): Chapter {
   return {
     id: r.id as string, worldId: r.world_id as string, firstNodeId: r.first_node_id as string, lastNodeId: r.last_node_id as string,
     title: r.title as string, gist: r.gist as string, summary: r.summary as string, model: (r.model as string) ?? null,
-    promptVersion: (r.prompt_version as string) ?? null, edited: !!r.edited, createdAt: r.created_at as string,
+    promptVersion: (r.prompt_version as string) ?? null, edited: !!r.edited, ...(r.stale ? { stale: true } : {}), createdAt: r.created_at as string,
   };
 }
 
@@ -297,8 +311,12 @@ export class Repo {
     return (await this.getNode(nodeId))!;
   }
 
-  /** Adopt a preview atomically, either on a new route or as the latest passage's sibling. */
-  async forkRevision(guard: RevisionGuard, node: NewNode, name: string, asVersion = false): Promise<{ node: StoryNode; line: Line }> {
+  /**
+   * Adopt a preview atomically, either on a new route or as the latest passage's
+   * sibling. `carried` are edit nodes chained after it in the same write (the
+   * player's own edits made after the passage, D183); the route ends on the last.
+   */
+  async forkRevision(guard: RevisionGuard, node: NewNode, name: string, asVersion = false, carried: NewNode[] = []): Promise<{ node: StoryNode; line: Line }> {
     const t = now(), lineId = asVersion ? guard.lineId : newId();
     const unique = asVersion ? undefined : await this.uniqueLineName(guard.worldId, name);
     const [next] = await this.q("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM nodes WHERE world_id=?", [guard.worldId]);
@@ -322,6 +340,16 @@ export class Repo {
         ) SELECT id FROM path)
     )`;
     const exists = "EXISTS(SELECT 1 FROM nodes WHERE id=?)";
+    // Each carried edit is written only if the revision itself was.
+    const chain = carried.flatMap((edit, i) => {
+      const { statements: own, nodeId: editId } = this.nodeStatements(guard.worldId, Number(next.seq) + i + 1, edit, t);
+      return [
+        { sql: own[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${exists}`), params: [...own[0].params!, nodeId] },
+        this.nodeStateStatement(editId, edit.state, true),
+        ...(edit.parentId ? [{ sql: "UPDATE nodes SET last_child_id=? WHERE id=? AND " + exists, params: [editId, edit.parentId, editId] }] : []),
+      ];
+    });
+    const end = carried.at(-1)?.id ?? nodeId;
     await this.platform.sql.batch([
       { sql: statements[0].sql.replace(/VALUES\s*\(([\s\S]*)\)\s*$/, `SELECT $1 WHERE ${condition}`), params: [...statements[0].params!, guard.nodeId, guard.worldId, guard.lineId, guard.headId, guard.original, node.parentId, guard.sourceGuard, guard.recordGuard ?? null, guard.recordGuard ?? null,
         guard.settingsGuard ?? null, guard.settingsGuard ?? null, guard.targetStateGuard ?? null, guard.targetStateGuard ?? null,
@@ -330,11 +358,14 @@ export class Repo {
       this.nodeStateStatement(nodeId, node.state, true),
       ...(asVersion ? [
         { sql: "UPDATE nodes SET last_child_id=? WHERE id=? AND " + exists, params: [nodeId, node.parentId, nodeId] },
-        { sql: "UPDATE lines SET node_id=? WHERE id=? AND " + exists, params: [nodeId, lineId, nodeId] },
-      ] : [{ sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique!, nodeId, t, nodeId] }]),
+      ] : []),
+      ...chain,
+      ...(asVersion ? [
+        { sql: "UPDATE lines SET node_id=? WHERE id=? AND " + exists, params: [end, lineId, end] },
+      ] : [{ sql: "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) SELECT ?,?,?,?,'line',0,? WHERE " + exists, params: [lineId, guard.worldId, unique!, end, t, end] }]),
       { sql: "UPDATE worlds SET current_line_id=?,updated_at=?,played_at=? WHERE id=? AND " + exists, params: [lineId, t, t, guard.worldId, nodeId] },
     ]);
-    const created = await this.getNode(nodeId), line = await this.getLine(lineId);
+    const created = await this.getNode(end), line = await this.getLine(lineId);
     if (!created || !line) throw new Error("故事、原文或参考用法已经改变，请重新生成改稿。");
     return { node: created, line };
   }
@@ -388,7 +419,8 @@ export class Repo {
 
   /** A rewrite by the model (edited stays as it was) or by the player (edited = true). */
   async updateChapter(id: string, fields: Pick<Chapter, "title" | "gist" | "summary"> & Partial<Pick<Chapter, "model" | "promptVersion" | "edited">>, expected?: Pick<Chapter, "title" | "gist" | "summary" | "edited">): Promise<boolean> {
-    const sets = ["title = ?", "gist = ?", "summary = ?"];
+    // Any new summary, by the AI or the player, is of the text as it is now (D183).
+    const sets = ["title = ?", "gist = ?", "summary = ?", "stale = NULL"];
     const params: Json[] = [fields.title, fields.gist, fields.summary];
     if (fields.model !== undefined) { sets.push("model = ?"); params.push(fields.model); }
     if (fields.promptVersion !== undefined) { sets.push("prompt_version = ?"); params.push(fields.promptVersion); }
@@ -438,7 +470,7 @@ export class Repo {
         ) END AS prompt_pins,
         CASE WHEN n.id=? THEN (
           SELECT json_group_array(json(detail)) FROM (
-            SELECT ${rowJson("c", "id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,edited,created_at")} AS detail
+            SELECT ${rowJson("c", "id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,edited,stale,created_at")} AS detail
             FROM chapters c JOIN nodes last ON last.id=c.last_node_id
             WHERE c.world_id=? AND c.first_node_id IN route AND c.last_node_id IN route ORDER BY last.seq,c.created_at,c.id
           )
@@ -546,7 +578,10 @@ export class Repo {
     const node = await this.getNode(nodeId);
     if (!node) return;
     const original = typeof node.meta.original === "string" ? node.meta.original : node.narrative;
-    await this.q("UPDATE nodes SET narrative = ?, rewritten = 1, meta_json = ? WHERE id = ?", [narrative, JSON.stringify({ ...node.meta, original }), nodeId]);
+    await this.platform.sql.batch([
+      { sql: "UPDATE nodes SET narrative = ?, rewritten = 1, meta_json = ? WHERE id = ?", params: [narrative, JSON.stringify({ ...node.meta, original }), nodeId] },
+      staleChaptersStatement(node.worldId, nodeId),
+    ]);
   }
 
   /** Puts the AI's original text back after a rewrite. */
@@ -554,7 +589,10 @@ export class Repo {
     const node = await this.getNode(nodeId);
     if (!node || typeof node.meta.original !== "string") return false;
     const { original, ...meta } = node.meta;
-    await this.q("UPDATE nodes SET narrative = ?, rewritten = 0, meta_json = ? WHERE id = ?", [original as string, JSON.stringify(meta), nodeId]);
+    await this.platform.sql.batch([
+      { sql: "UPDATE nodes SET narrative = ?, rewritten = 0, meta_json = ? WHERE id = ?", params: [original as string, JSON.stringify(meta), nodeId] },
+      staleChaptersStatement(node.worldId, nodeId),
+    ]);
     return true;
   }
 

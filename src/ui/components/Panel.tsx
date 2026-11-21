@@ -1,4 +1,5 @@
 // Character & world panel (PLAN_V3 §4.5); the 设定 tab is the 设定集 (§4.14).
+import type { SourceScope } from "../../engine/sources/scope";
 import { KnowledgeRecords } from "./Continuity";
 import { useEffect, useRef, useState } from "react";
 import type { EraContext } from "../../engine/era";
@@ -234,7 +235,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
   state: WorldState; era: EraContext; onClose: () => void; onSave: Save;
-  onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean, useSource?: boolean) => Promise<boolean>; busy: boolean;
+  onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => Promise<boolean>; busy: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("我");
   const [draft, setDraft] = useState<WorldState | null>(null);

@@ -297,7 +297,7 @@ pnpm tauri build                       # 安装包和单个程序
 ## 数据放在哪里
 
 - **安卓**：应用的私有目录，卸载即删除。Key 用系统 Keystore 加密保存。
-- **Windows**：`%APPDATA%\io.timejump.chuanyue`，里面有数据库 `game.sqlite`、每日备份 `backups/`（保留最近 20 份）和 `window-state.json`。Key 用当前 Windows 用户的 DPAPI 加密保存，换一台电脑或换一个用户就读不出来。
+- **Windows**：`%APPDATA%\io.timejump.chuanyue`，里面有数据库 `game.sqlite`、压缩备份 `backups/`（最多 5 份）和 `window-state.json`。每日备份默认关闭。Key 用当前 Windows 用户的 DPAPI 加密保存，换一台电脑或换一个用户就读不出来。
 - **浏览器开发台**：存档在 `.cache/dev-host/` 的宿主数据库，开发用的 Key 默认在 `.cache/dev-secrets.json`；旧浏览器库保留作一次导入来源。
 
 不要把 Key、令牌或私人的服务地址写进代码、文档、日志和提交；`.cache/`、`.env.local`、`.private/` 都已经被 Git 忽略。

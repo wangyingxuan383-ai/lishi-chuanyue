@@ -372,6 +372,14 @@ describe("设定集 edits", () => {
     s = apply(s, { cards: [{ op: "remove", id: s.cards[0].id }], places: [{ op: "remove", id: s.places[0].id }] }).state;
     expect(s.dismissed).toEqual(["漕帮", "鬼市"]);
   });
+
+  it("does not remember what the AI's own tidy-up merged away or dropped as the player's deletion", () => {
+    let s = apply(sampleState(), { cards: [{ op: "add", kind: "物品", name: "那封信", content: "信", source: "AI" }], places: [{ op: "add", name: "县衙", description: "", source: "AI" }] }).state;
+    s = apply(s, { cards: [{ op: "remove", id: s.cards[0].id, by: "AI" }], places: [{ op: "remove", id: s.places[0].id, by: "AI" }] }).state;
+    expect(s.cards).toHaveLength(0);
+    expect(s.places).toHaveLength(0);
+    expect(s.dismissed ?? []).toEqual([]);
+  });
 });
 
 describe("people edits", () => {

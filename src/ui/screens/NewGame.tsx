@@ -16,6 +16,8 @@ import { explainFailure } from "../../engine/llm/providers";
 import type { Failure } from "../../platform";
 import { FailureSheet } from "../components/FailureSheet";
 import { CarryNotes } from "./CarryNotes";
+import { SourceScopeRow } from "../components/SourceScope";
+import { AUTO_SCOPE, isChosen, type SourceScope } from "../../engine/sources/scope";
 import type { Intensity, Perspective, WorldSettings } from "../../engine/types";
 import { newId } from "../../engine/db/repo";
 import { useApp, useBack } from "../app/context";
@@ -94,6 +96,8 @@ export default function NewGame() {
   const assistTicket = useRef(0);
   /** “AI 帮我拟大纲 / 出题” in flight. */
   const [drafting, setDrafting] = useState<"script" | "challenge" | null>(null);
+  /** 资料范围 (D184) for this opening only; not kept in the draft or 我的开局. */
+  const [openingScope, setOpeningScope] = useState<SourceScope>(AUTO_SCOPE);
   const draftTicket = useRef(0);
   const beatBox = useRef<HTMLTextAreaElement>(null);
   /** The part 开始 last pointed at: a mode's empty field is marked only after that, not as soon as the card is picked. */
@@ -345,7 +349,7 @@ export default function NewGame() {
       else if (e.type === "organizing") setPhase("organizing");
       else if (e.type === "failed") { setPhase("form"); setError(explainFailure(e.reason, e.status)); setFailure(e.reason === "cancelled" ? null : { failure: e.failure, failures: e.failures, detail: e.detail }); }
     };
-    const worldId = await game.createWorld(input, onEvent);
+    const worldId = await game.createWorld(d.source && isChosen(openingScope) ? { ...input, sourceScope: openingScope } : input, onEvent);
     // Left while it was written: stay where the player went.
     if (!alive.current) return;
     if (worldId) {
@@ -562,7 +566,8 @@ export default function NewGame() {
         </section>
         <details open={!!draft.carry}><summary>{draft.carry ? `带上《${draft.carry.fromTitle}》的 ${draft.carry.ids.length} 份札记` : "带上以前故事的札记（可选）"}</summary>
           <CarryNotes value={draft.carry ?? null} onChange={(carry) => setDraft((d) => ({ ...d, carry }))} /></details>
-        <details><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) }))} /></details>
+        <details><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) })); }} /></details>
+        {draft.source && <SourceScopeRow worldId={null} binding={draft.source} value={openingScope} purpose="opening" onChange={setOpeningScope} />}
 
         {filled && <div className="row form-tools"><button className="link" onClick={clearForm}>清空重填</button></div>}
         <label className="field">故事设定

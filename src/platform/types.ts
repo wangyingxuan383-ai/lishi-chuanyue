@@ -16,8 +16,20 @@ export interface BackupInfo {
   size: number;
 }
 
+export interface BackupInventory {
+  items: BackupInfo[];
+  totalBytes: number;
+}
+
+export interface BackupDeletion {
+  inventory: BackupInventory;
+  failed: number;
+}
+
 export type StreamErrorKind =
   | "network"
+  /** The connection closed before the reply ended (words had already come). */
+  | "stream"
   | "storage"
   | "timeout_first"
   | "timeout_idle"
@@ -175,6 +187,8 @@ export interface Platform {
     batch(statements: SqlStatement[]): Promise<void>;
     backup(label: string): Promise<string>;
     listBackups(): Promise<BackupInfo[]>;
+    backupInventory(): Promise<BackupInventory>;
+    deleteBackups(names: string[]): Promise<BackupDeletion>;
     /**
      * Replaces the whole database with the backup `name` after saving the
      * current data as a "before-restore" backup; resolves with that backup's

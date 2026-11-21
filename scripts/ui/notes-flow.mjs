@@ -114,7 +114,7 @@ try {
 
   // 3b. AI 改写 → 按我的要求改: three ways, the content changes, the 设定集 follows.
   step("AI 改写");
-  await play("开始吸收魂环");
+  await play("拔出兵器往前走");
   // A touch long press on the latest passage, as play-check does.
   const paragraph = page.locator(".turn[data-node-id]").last().locator(".story-text p").first();
   await paragraph.scrollIntoViewIfNeeded();
@@ -128,12 +128,12 @@ try {
   const modes = await sheet().locator(".segmented[aria-label=怎么改] button").allTextContents();
   check("AI 改写 offers 按我的要求改 first", modes[0] === "按我的要求改" && modes.includes("只润色文字"), modes.join("、"));
   check("按我的要求改 is chosen by default", (await sheet().getByRole("button", { name: "按我的要求改" }).getAttribute("aria-pressed")) === "true");
-  await sheet().getByLabel("希望怎么改").fill("魂环是紫紫，现在是二环，正在吸收第三环");
+  await sheet().getByLabel("希望怎么改").fill("把匕首换成短剑；修为是第二重，正在冲第三重");
   await shot("revise-sheet");
   await sheet().getByRole("button", { name: "生成改稿" }).click();
   await sheet().getByRole("button", { name: "采用改稿" }).waitFor({ timeout: timeout * 2 });
   const revised = await sheet().textContent();
-  check("the preview says what changed and that earlier settings follow", revised.includes("魂环改为两个紫环") && revised.includes("之前的设定一起改正"), revised.slice(0, 160));
+  check("the preview says what changed and that earlier settings follow", revised.includes("匕首改为短剑") && revised.includes("之前的设定一起改正"), revised.slice(0, 160));
   await shot("revise-preview");
   await sheet().getByRole("button", { name: "采用改稿" }).click();
   await page.locator(".toast", { hasText: "已按你的要求改好" }).waitFor({ timeout });
@@ -144,7 +144,7 @@ try {
   await page.getByRole("tab", { name: "设定" }).click();
   await page.waitForTimeout(400);
   const codex = await page.locator(".panel").textContent();
-  check("the 设定集 shows the protagonist's 本事 card from the revision", /的本事/.test(codex) && codex.includes("千年紫环"), codex.slice(0, 160));
+  check("the 设定集 shows the protagonist's 本事 card from the revision", /的本事/.test(codex) && codex.includes("短剑"), codex.slice(0, 160));
   await shot("ability-card");
   await page.goto(origin, { waitUntil: "domcontentloaded" });
   await openStory();

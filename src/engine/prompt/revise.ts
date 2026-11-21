@@ -4,7 +4,7 @@
 // edit. With 参考原著, the canon notes and a few original passages go along.
 import type { ChatMessage } from "../llm/chat";
 
-export const REVISE_PROMPT_VERSION = "revise-1";
+export const REVISE_PROMPT_VERSION = "revise-2";
 
 export interface ReviseEntry { label: string; name: string; aliases: string[]; text: string }
 export interface ReviseEntryResult { name: string; aliases: string[]; text: string }
@@ -30,7 +30,7 @@ export function reviseEntryMessages(entry: ReviseEntry, instruction: string, c: 
 export function reviseRulesMessages(current: ReviseRules, instruction: string, c: ReviseContext): ChatMessage[] {
   return [
     { role: "system", content: `你帮玩家调整互动小说的时间显示与货币。照玩家的要求改，没提到的保持原样。只改“显示”和货币单位，不改变剧情里已经过去多少时间。
-字段：clockStyle（"era" 纪年 / "elapsed" 日序）、timeStyle（"24h" / "shichen" 时辰）、lunar（是否农历，简化的十二个月）、eraName（纪年名，如“斗罗历”）、year（纪年的年，正整数）、month（1～12）、day（日）、displayDay（日序制下的第几天）、hour（0～23）、minute（0～59）、currency（从大到小的货币单位，最小单位 value 为 1，其余写等于多少个最小单位，如 [{"name":"金魂币","value":10000},{"name":"银魂币","value":100},{"name":"铜魂币","value":1}]）。
+字段：clockStyle（"era" 纪年 / "elapsed" 日序）、timeStyle（"24h" / "shichen" 时辰）、lunar（是否农历，简化的十二个月）、eraName（纪年名，如“玄元历”）、year（纪年的年，正整数）、month（1～12）、day（日）、displayDay（日序制下的第几天）、hour（0～23）、minute（0～59）、currency（从大到小的货币单位，最小单位 value 为 1，其余写等于多少个最小单位，如 [{"name":"金灵币","value":10000},{"name":"银灵币","value":100},{"name":"铜灵币","value":1}]）。
 只输出一个 JSON 对象，只包含需要改的字段，外加一句给玩家看的 "note"。` },
     { role: "user", content: `${contextBlock(c)}\n\n【现在的设置】${JSON.stringify(current)}\n\n【玩家的要求】${instruction.trim()}` },
   ];

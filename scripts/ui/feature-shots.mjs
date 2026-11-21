@@ -117,7 +117,7 @@ await closeSheets();
 await page.locator(".play:visible .topbar button.title").click(); await settle();
 await sheet().getByRole("button", { name: /修改.*货币/ }).click(); await settle();
 await sheet().locator("details.ai-revise > summary").click();
-await sheet().locator("details.ai-revise textarea").fill("改用斗罗历，货币换成魂币");
+await sheet().locator("details.ai-revise textarea").fill("改用玄元历，货币换成灵币");
 await sheet().getByRole("button", { name: "让 AI 改" }).click();
 await page.waitForFunction(() => document.querySelector(".ai-revise .field-hint"), null, { timeout: 60_000 }).catch(() => {});
 await settle(); await shot("revise-rules");

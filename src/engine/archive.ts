@@ -53,7 +53,6 @@ function validArchivedNote(note: any, book: SourceBook, worldId: Json): note is 
 function validStoryNote(note: any, worldId: Json): note is CanonNote {
   const turn=(n: unknown)=>Number.isSafeInteger(n)&&Number(n)>=0;
   return !!note && note.worldId===worldId && validNoteBody(note, turn)
-    && (note.previousContent==null || typeof note.previousContent==="string")
     && (note.progress.routeNode===undefined || typeof note.progress.routeNode==="string")
     && (note.originWorldId==null || typeof note.originWorldId==="string") && (note.originTitle==null || typeof note.originTitle==="string");
 }
@@ -61,6 +60,7 @@ function validNoteBody(note: any, section: (n: unknown) => boolean): boolean {
   if (typeof note.id!=="string"
     || !["plot","person","setting","timeline","question"].includes(note.kind) || !["paused","running","done","failed"].includes(note.status)
     || typeof note.title!=="string" || typeof note.content!=="string" || typeof note.model!=="string" || typeof note.active!=="boolean"
+    || (note.previousContent != null && typeof note.previousContent !== "string")
     || typeof note.createdAt!=="string" || typeof note.updatedAt!=="string" || !Array.isArray(note.refs) || !note.refs.every(section)) return false;
   const scope=note.scope, progress=note.progress;
   if (!progress || !Array.isArray(progress.parts)) return false;
@@ -111,7 +111,7 @@ const NODE_FIELDS = ["id", "world_id", "parent_id", "last_child_id", "seq", "kin
 const WORLD_FIELDS = ["id", "title", "era_id", "current_line_id", "settings_json", "created_at", "updated_at", "played_at", "archived"];
 const LINE_FIELDS = ["id", "world_id", "name", "node_id", "kind", "auto_named", "archived", "created_at", "deleted_at"];
 const PIN_FIELDS = ["id", "world_id", "origin_node_id", "text", "created_at"];
-const CHAPTER_FIELDS = ["id", "world_id", "first_node_id", "last_node_id", "summary", "model", "prompt_version", "edited", "created_at", "title", "gist"];
+const CHAPTER_FIELDS = ["id", "world_id", "first_node_id", "last_node_id", "summary", "model", "prompt_version", "edited", "created_at", "title", "gist", "stale"];
 const NODE_JSON_FIELDS = ["meta_json", "record_json", "choices_json"] as const;
 
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -374,7 +374,7 @@ export function archiveProblems(raw: unknown): string[] {
         else checkState(seed);
       }
       const revision = meta.revision;
-      if (revision !== undefined && (!revision || !["canonCorrection", "manualDuration", "playerRevision"].includes(revision.kind) || !nodes.has(revision.nodeId) || !lines.has(revision.lineId)
+      if (revision !== undefined && (!revision || !["canonCorrection", "manualDuration", "playerRevision", "factSync"].includes(revision.kind) || !nodes.has(revision.nodeId) || !lines.has(revision.lineId)
         || revision.kind === "canonCorrection" && (!Array.isArray(revision.corrections) || revision.corrections.some((c: any) => typeof c?.detail !== "string" || !Array.isArray(c.citations) || !c.citations.length || c.citations.some((v: any) => !citationValid(v))))
         || revision.kind === "manualDuration" && (![revision.before, revision.after].every(n => typeof n === "number" && Number.isSafeInteger(n) && n >= 0)))) problems.push("有的修订路线引用无效");
     }
@@ -431,7 +431,8 @@ function remap(a: WorldArchive): WorldArchive {
     chapters: a.chapters.map((c) => ({ ...c, id: id(c.id), world_id: worldId, first_node_id: id(c.first_node_id), last_node_id: id(c.last_node_id) })),
     ...(a.storyNotes ? { storyNotes: a.storyNotes.map((note) => ({
       ...note,
-      scope: note.scope.toNode ? { ...note.scope, toNode: id(note.scope.toNode)! } : note.scope,
+      scope: { ...note.scope, ...(note.scope.toNode ? { toNode: id(note.scope.toNode)! } : {}),
+        ...(note.scope.previous?.toNode ? { previous: { ...note.scope.previous, toNode: id(note.scope.previous.toNode)! } } : {}) },
       progress: note.progress.routeNode ? { ...note.progress, routeNode: id(note.progress.routeNode)! } : note.progress,
     })) } : {}),
     ...(a.pi ? {pi:{...a.pi,sessions:a.pi.sessions.map(item=>({...item,id:id(item.id)!,worldId:worldId!,lineId:id(item.lineId)!})),tasks:a.pi.tasks.map(item=>({...item,id:id(item.id)!,sessionId:id(item.sessionId)!,...(item.lineId ? {lineId:id(item.lineId)!} : {}),history:sourceIds(item.history)}))}} : {}),
@@ -560,8 +561,8 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
   for (const c of archive.chapters) statements.push(insert("chapters", CHAPTER_FIELDS, c));
   for (const bundle of archive.books ?? []) for (const note of bundle.notes ?? []) {
     // Content/progress are data only: importing never starts a note worker.
-    statements.push({sql:"INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      params:[newId(),bookIds.get(bundle.book.id)!,note.worldId===null?null:worldId,note.kind,note.title,JSON.stringify(note.scope),note.content,JSON.stringify(note.refs),note.model,note.status==="running"?"paused":note.status,note.active?1:0,JSON.stringify(note.progress),note.createdAt,note.updatedAt]});
+    statements.push({sql:"INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      params:[newId(),bookIds.get(bundle.book.id)!,note.worldId===null?null:worldId,note.kind,note.title,JSON.stringify(note.scope),note.content,note.previousContent??null,JSON.stringify(note.refs),note.model,note.status==="running"?"paused":note.status,note.active?1:0,JSON.stringify(note.progress),note.createdAt,note.updatedAt]});
   }
   if (archive.version >= 8) for (const note of archive.storyNotes ?? []) {
     statements.push({ sql: "INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,origin_world_id,origin_title,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

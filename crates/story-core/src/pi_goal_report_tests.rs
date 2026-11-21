@@ -381,10 +381,10 @@ fn validated_clock_change_can_commit_with_unresolved_readonly_canon_goal_as_part
     let f = Fixture::new();
     let task = f.start("partial-clock");
     let before = f.head_state();
-    f.call(&task,"clock","stage_clock",json!({"operation":"display","clockStyle":"era","timeStyle":"24h","calendar":{"lunar":false},"anchor":{"atElapsedMinutes":0,"minuteOfDay":480,"date":{"era":"斗罗历","year":10015,"month":1,"day":1,"ceYear":null,"lunar":false}},"summary":"只校准显示，不改实际经过时间"}));
+    f.call(&task,"clock","stage_clock",json!({"operation":"display","clockStyle":"era","timeStyle":"24h","calendar":{"lunar":false},"anchor":{"atElapsedMinutes":0,"minuteOfDay":480,"date":{"era":"玄元历","year":10015,"month":1,"day":1,"ceYear":null,"lunar":false}},"summary":"只校准显示，不改实际经过时间"}));
     let check = f.check(&task, "clock-check");
     assert!(!check["resourceGroups"].as_array().unwrap().is_empty());
-    let result=f.record(&task,"partial-report",json!({"worldVersion":task.version,"intentRevision":0,"goals":[{"id":"clock","summary":"把显示校准到斗罗历10015年","status":"completed","requiresCanon":false,"scope":"mechanical"},{"id":"canon","summary":"原著钥匙转交详情尚未查明","status":"blocked","requiresCanon":true,"scope":"canon"}],"findings":[{"id":"clock-display","goalId":"clock","topic":"日期显示","claim":"只按玩家指定校准显示，实际经过时间和年龄保持","basis":"local_consistency","resources":check["resourceGroups"],"references":[]},{"id":"canon-insufficient","goalId":"canon","topic":"原著转交详情","claim":"未阅读对应原文，不能声称查清转交事件","basis":"insufficient","resources":[],"references":[]}]}));
+    let result=f.record(&task,"partial-report",json!({"worldVersion":task.version,"intentRevision":0,"goals":[{"id":"clock","summary":"把显示校准到玄元历10015年","status":"completed","requiresCanon":false,"scope":"mechanical"},{"id":"canon","summary":"原著钥匙转交详情尚未查明","status":"blocked","requiresCanon":true,"scope":"canon"}],"findings":[{"id":"clock-display","goalId":"clock","topic":"日期显示","claim":"只按玩家指定校准显示，实际经过时间和年龄保持","basis":"local_consistency","resources":check["resourceGroups"],"references":[]},{"id":"canon-insufficient","goalId":"canon","topic":"原著转交详情","claim":"未阅读对应原文，不能声称查清转交事件","basis":"insufficient","resources":[],"references":[]}]}));
     assert_eq!(result["status"], "partial");
     assert!(result["unresolvedGroupIds"].as_array().unwrap().is_empty());
     let receipt = f.finish(&task, "finish-partial");

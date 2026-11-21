@@ -49,7 +49,7 @@ export function PassageMoreMenu({ menuMore, busy, devMode, game, setMenuMore, se
       onClose={() => setMenuMore(null)}
       items={[
         { icon: "pen", label: "自己改写这段文字", hidden: menuMore.kind === "edit" || busy, onSelect: () => setEditing({ node: menuMore, field: "narrative", text: menuMore.narrative }) },
-        { icon: "undo", label: "恢复 AI 写的原文", hidden: !menuMore.rewritten || typeof menuMore.meta.original !== "string" || menuMore.meta.original === menuMore.narrative || busy, onSelect: () => void game.repo.restoreNarrative(menuMore.id).then(() => { void refresh(); toast("已恢复原文"); }) },
+        { icon: "undo", label: "恢复 AI 写的原文", hidden: !menuMore.rewritten || typeof menuMore.meta.original !== "string" || menuMore.meta.original === menuMore.narrative || busy, onSelect: () => void game.repo.restoreNarrative(menuMore.id).then(() => game.afterTextEdit(menuMore.worldId, menuMore.id)).then(() => { void refresh(); toast("已恢复原文"); }) },
         { icon: "feather", label: "改我的行动", hidden: !menuMore.actionText || menuMore.actionMode === "continue" || menuMore.actionMode === "skip" || busy, onSelect: () => setEditing({ node: menuMore, field: "action", text: menuMore.actionText ?? "" }) },
         { icon: "bookmark", label: "加书签", hidden: menuMore.kind === "edit", onSelect: () => setBookmark({ node: menuMore, name: menuMore.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
         { icon: "share", label: "做成书摘卡", hidden: menuMore.kind === "edit" || !menuMore.narrative.trim(), onSelect: () => setCardNode(menuMore) },

@@ -102,28 +102,68 @@ fn integers_and_blobs_and_parameter_types_obey_contract() {
 }
 
 #[test]
-fn backups_use_online_snapshot_and_keep_twenty() {
+fn backups_use_compressed_online_snapshot_keep_five_and_support_deletion() {
     let directory = tempfile::tempdir().unwrap();
     let store = SqlStore::open(directory.path().into()).unwrap();
     store.query("CREATE TABLE t(x)", vec![]).unwrap();
     store.query("INSERT INTO t VALUES (42)", vec![]).unwrap();
     assert!(store.backup("../bad").is_err());
-    for _ in 0..22 {
+    for _ in 0..7 {
         store.backup("test").unwrap();
     }
     let backups = store.list_backups().unwrap();
-    assert_eq!(backups.len(), 20);
+    assert_eq!(backups.len(), 5);
     assert!(backups.windows(2).all(|p| p[0].name > p[1].name));
     let backup = &backups[0];
-    assert!(DateTime::parse_from_rfc3339(&backup.at).is_ok());
+    assert!(chrono::DateTime::parse_from_rfc3339(&backup.at).is_ok());
+    assert!(backup.name.ends_with(".sqlite.zip"));
     assert!(backup.size > 0);
-    let connection = Connection::open(directory.path().join("backups").join(&backup.name)).unwrap();
+    let stage = tempfile::tempdir().unwrap();
+    let file = db_backup::materialize(&directory.path().join("backups"), &backup.name, stage.path()).unwrap();
+    assert!(backup.size < fs::metadata(&file).unwrap().len());
+    let connection = Connection::open(file).unwrap();
     assert_eq!(
         connection
             .query_row("SELECT x FROM t", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         42
     );
+    let receipt = store.delete_backups(&[backup.name.clone(), "../game.sqlite".into()]).unwrap();
+    assert_eq!(receipt.inventory.items.len(), 4);
+    assert_eq!(receipt.failed, 1);
+    assert_eq!(receipt.inventory.total_bytes, backups.iter().skip(1).map(|item| item.size).sum::<u64>());
+    let remaining = receipt.inventory.items.into_iter().map(|item| item.name).collect::<Vec<_>>();
+    let receipt = store.delete_backups(&remaining).unwrap();
+    assert_eq!(receipt.failed, 0);
+    assert!(receipt.inventory.items.is_empty());
+    assert_eq!(receipt.inventory.total_bytes, 0);
+    assert!(directory.path().join("game.sqlite").is_file());
+}
+
+#[test]
+fn startup_removes_only_legacy_backups_even_without_schema_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = app_store(directory.path());
+    store.query("INSERT INTO t VALUES (7)", vec![]).unwrap();
+    let files = directory.path().join("backups");
+    let current = store.backup("manual").unwrap();
+    let obsolete = files.join("20261120T010203.999999999Z-manual.sqlite");
+    fs::write(&obsolete, b"old database backup").unwrap();
+    let pi = obsolete.with_extension("pi");
+    fs::create_dir(&pi).unwrap();
+    fs::write(pi.join("manifest.json"), "old sidecar").unwrap();
+    let orphan = files.join("20261120T020203.999999999Z-auto.pi");
+    fs::create_dir(&orphan).unwrap();
+    let unknown = files.join("export.sqlite");
+    fs::write(&unknown, b"unmanaged").unwrap();
+    drop(store);
+    for _ in 0..2 {
+        let reopened = SqlStore::open(directory.path().into()).unwrap();
+        assert_eq!(values(&reopened), vec![json!(7)]);
+        assert_eq!(reopened.list_backups().unwrap()[0].name, current);
+        assert!(!obsolete.exists() && !pi.exists() && !orphan.exists());
+        assert!(unknown.is_file());
+    }
 }
 
 #[test]
@@ -197,7 +237,7 @@ fn restore_replaces_live_data_and_saves_it_first() {
     store.query("CREATE TABLE later(y)", vec![]).unwrap();
 
     let saved = store.restore(&good).unwrap();
-    assert!(saved.ends_with("-before-restore.sqlite"));
+    assert!(saved.ends_with("-before-restore.sqlite.zip"));
     assert_eq!(values(&store), vec![json!(1)]);
     assert!(store.query("SELECT * FROM later", vec![]).is_err());
     // The reopened connection is usable and writable.
@@ -210,7 +250,7 @@ fn restore_replaces_live_data_and_saves_it_first() {
         .list_backups()
         .unwrap()
         .into_iter()
-        .filter(|b| b.name.ends_with("-before-restore.sqlite"))
+        .filter(|b| b.name.ends_with("-before-restore.sqlite.zip"))
         .count();
     assert_eq!(before_restore, 2);
     // A store opened afresh sees the restored data on disk.
@@ -286,7 +326,7 @@ fn restore_fence_rejects_old_queued_save_and_preserves_matching_pi_context() {
     assert_eq!(fs::read_to_string(&session_file).unwrap(),"new transcript must survive\n");
     assert!(values(&store).is_empty());
     // Corrupt matching sidecar must fail before touching the live database.
-    fs::write(directory.path().join("backups").join(&backup).with_extension("pi").join("manifest.json"),"{\"version\":1,\"databaseSha256\":\"wrong\",\"files\":[]}").unwrap();
+    fs::write(directory.path().join("backups").join(&backup), b"not an intact archive").unwrap();
     store.query("INSERT INTO t VALUES(5)",vec![]).unwrap();
     assert!(store.restore(&backup).is_err());assert_eq!(values(&store),vec![json!(5)]);
 }

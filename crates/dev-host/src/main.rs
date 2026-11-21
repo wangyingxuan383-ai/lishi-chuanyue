@@ -198,6 +198,12 @@ impl Host {
                 .list_backups()
                 .map(|items| json!(items))
                 .map_err(sql_error),
+            "sqlBackupInventory" => self.sql.backup_inventory().map(|inventory| json!(inventory)).map_err(sql_error),
+            "sqlDeleteBackups" => {
+                let names: Vec<String> = serde_json::from_value(params.get("names").cloned().unwrap_or_default())
+                    .map_err(|_| invalid("缺少备份清单"))?;
+                self.sql.delete_backups(&names).map(|deleted| json!(deleted)).map_err(sql_error)
+            }
             // Restore checks running work while holding the shared SQL lock.
             "sqlRestore" => self
                 .sql

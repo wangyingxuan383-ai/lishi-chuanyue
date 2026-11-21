@@ -68,7 +68,7 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
           <button className="primary grow" disabled={busy || !title.trim()} onClick={() => void save()}>保存</button>
         </div>
       </div> : <div className="stack gap-10">
-        <p className="muted m-0">第 {row.from}～{row.to} 回合 · {c.edited ? "你改过" : "AI 写的"}</p>
+        <p className="muted m-0">第 {row.from}～{row.to} 回合 · {c.edited ? "你改过" : "AI 写的"}{c.stale ? (c.edited ? " · 正文后来改过，可以点“重写”按现在的正文更新" : " · 正文改过，摘要会在下一段写好后自动更新") : ""}</p>
         <p className="codex-text m-0">{c.summary}</p>
         {row.turns.length > 0 && <details>
           <summary className="muted">这一章每回合发生了什么</summary>

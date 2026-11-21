@@ -10,6 +10,8 @@ import type { EraContext } from "../../engine/era";
 import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { Card, CardKind, Place, WorldState } from "../../engine/types";
+import { SourceScopeRow } from "./SourceScope";
+import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
 import { Sheet } from "./Sheet";
 import { Switch } from "./Switch";
 import { BuiltinContent } from "./BuiltinContent";
@@ -47,12 +49,13 @@ function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing
   const label = editing.type === "place" ? "地点" : isEra ? eraLabel : `${editing.kind}卡`;
   // 让 AI 改 (R29-T005): the answer fills the fields; nothing is saved until 保存.
   const [instruction, setInstruction] = useState(""), [useSource, setUseSource] = useState(!!state.source), [revising, setRevising] = useState(false);
+  const [scope, setScope] = useState<SourceScope>(AUTO_SCOPE);
   const [before, setBefore] = useState<{ name: string; aliases: string; text: string } | null>(null);
   const revise = async () => {
     if (!instruction.trim() || revising) return;
     setRevising(true);
     try {
-      const result = await game.reviseEntry(worldId, { label, name: name.trim(), aliases: splitNames(aliases), text }, instruction, { useSource: useSource && !!state.source });
+      const result = await game.reviseEntry(worldId, { label, name: name.trim(), aliases: splitNames(aliases), text }, instruction, { useSource: useSource && !!state.source, scope });
       setBefore({ name, aliases, text });
       if (!isEra || result.name) setName(result.name);
       if (!isEra) setAliases(result.aliases.join("、"));
@@ -62,6 +65,10 @@ function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing
     finally { setRevising(false); }
   };
   const isHere = editing.type === "place" && !!editing.place && editing.place.id === state.placeId;
+  // The protagonist's 本事 card can stay the AI's to keep up after a hand edit: it sees
+  // the edited text when it updates, so what the player fixed carries forward.
+  const ability = editing.type === "card" && isAbilityCard(name.trim() || original?.name || "", state.protagonist.name);
+  const [aiKeeps, setAiKeeps] = useState(!original || original.source === "AI");
   // A name another entry already has would update that entry instead (AUDIT_V4_FUNCTION F4).
   const pool = editing.type === "place" ? state.places.map((p) => ({ id: p.id, name: p.name })) : state.cards.filter((c) => c.kind !== "时代").map((c) => ({ id: c.id, name: c.name }));
   const taken = !isEra && name.trim() && pool.find((x) => x.name === name.trim() && x.id !== original?.id);
@@ -77,7 +84,7 @@ function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing
       const fields = { name: clean, aliases: splitNames(aliases), description: text, source: "玩家" as const };
       void run({ places: [stored ? { op: "update", id: original!.id, ...fields } : { op: "add", ...fields }] }, stored ? `修改地点：${clean}` : `新建地点：${clean}`);
     } else {
-      const fields = { kind: editing.kind, name: clean, keys: isEra ? [] : splitNames(aliases), content: text, source: "玩家" as const };
+      const fields = { kind: editing.kind, name: clean, keys: isEra ? [] : splitNames(aliases), content: text, source: ability && aiKeeps ? "AI" as const : "玩家" as const };
       void run({ cards: [stored ? { op: "update", id: original!.id, ...fields } : { op: "add", ...fields }] }, stored ? `修改${label}：${clean}` : `新建${label}：${clean}`);
     }
   };
@@ -97,11 +104,13 @@ function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing
         </label>
         {isEra && <p className="muted m-0">{text.length} / {ERA_CARD_LIMIT} 字{text.length > ERA_CARD_LIMIT ? "，超出的部分不会交给 AI" : `。${eraLabel}每回合都会交给 AI。`}</p>}
         {taken && <p className="field-hint warn">已经有叫“{name.trim()}”的了，换个名字，或者去改那一张。</p>}
+        {ability && <Switch label="AI 随剧情更新这张卡" note={aiKeeps ? "升级、突破、学会新招时 AI 会照你改过的接着写" : "只按你写的，AI 不会改"} checked={aiKeeps} onChange={setAiKeeps} />}
         <details className="ai-revise" open={!!before || undefined}>
           <summary>让 AI 改</summary>
           <div className="stack gap-2">
-            <textarea rows={2} maxLength={500} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder={isEra ? "如：货币改成金魂币、银魂币、铜魂币；补上魂师等级的称呼" : "如：写得更具体些，补上来历和规矩"} />
+            <textarea rows={2} maxLength={500} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder={isEra ? "如：货币改成金灵币、银灵币、铜灵币；补上修行境界的称呼" : "如：写得更具体些，补上来历和规矩"} />
             {state.source && <Switch label="参考原著" note={useSource ? "带上原著札记和相关原文片段" : "只按故事设定改"} checked={useSource} onChange={setUseSource} />}
+            {state.source && useSource && <SourceScopeRow worldId={worldId} binding={state.source} value={scope} purpose="revise" disabled={revising} onChange={setScope} />}
             <div className="row">
               {before && <button className="ghost" disabled={revising} onClick={() => { setName(before.name); setAliases(before.aliases); setText(before.text); setBefore(null); }}>撤回 AI 的修改</button>}
               <span className="grow" />
@@ -125,7 +134,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
   onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
   onOpenStory: () => void;
   /** Lets the AI organize the 设定集 from the premise; true when something was added. */
-  onOrganize: (replaceOwnEra: boolean, useSource?: boolean) => Promise<boolean>;
+  onOrganize: (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => Promise<boolean>;
 }) {
   const { ask, toast } = useApp();
   const [builtin, setBuiltin] = useState(false);
@@ -133,6 +142,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
   const [expanded, setExpanded] = useState(false);
   const [organizing, setOrganizing] = useState(false);
   const [organizeSource, setOrganizeSource] = useState(true);
+  const [organizeScope, setOrganizeScope] = useState<SourceScope>(AUTO_SCOPE);
   const [filter, setFilter] = useState<"全部" | CodexKind>("全部");
   const [query, setQuery] = useState("");
   const [selecting, setSelecting] = useState(false);
@@ -149,7 +159,8 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
     const own = eraCard?.source === "玩家";
     if (own && !await ask({ title: `让 AI 重新整理${eraLabel}？`, message: `会按故事设定重写，换掉你写的${eraLabel}。之后可以撤销。`, confirm: "重新整理" })) return;
     setOrganizing(true);
-    try { await onOrganize(own, organizeSource && !!state.source); } finally { setOrganizing(false); }
+    // 资料范围 is for one request: the next 整理 starts from 自动 again (D184).
+    try { await onOrganize(own, organizeSource && !!state.source, organizeScope); } finally { setOrganizing(false); setOrganizeScope(AUTO_SCOPE); }
   };
   const items = (kind: "地点" | CardKind): { id: string; name: string; text: string; tag?: string; edit: Editing }[] =>
     kind === "地点"
@@ -196,6 +207,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
           {eraCard.content.length > 90 && <button className="ghost" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : "展开"}</button>}
         </> : <p className="muted codex-note mb-0">还没有{eraLabel}，AI 只按故事设定来写。可以写下这个世界的称谓、货币、风俗和其他背景。</p>}
         {state.source && <Switch label="AI 整理时参考原著" note={organizeSource ? "带上原著札记和相关原文，整理出原著里的势力、地点和规矩" : "只按故事设定整理"} checked={organizeSource} onChange={setOrganizeSource} />}
+        {state.source && organizeSource && <SourceScopeRow worldId={worldId} binding={state.source} value={organizeScope} purpose="organize" disabled={organizing} onChange={setOrganizeScope} />}
       </section>
       {(() => {
         // 主角的本事 (D181): where the protagonist's abilities live, next to the era card, not deep in a group.
@@ -208,7 +220,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
           </div>
           {ability?.content.trim()
             ? <><p className="muted codex-note">{ability.source === "AI" ? "AI 随剧情更新" : "你写的，AI 不会改"} · 每回合都交给 AI</p><p className="codex-text">{ability.content}</p></>
-            : <p className="muted codex-note mb-0">主角自己的本事（武魂、魂环、等级、境界、功法等）记在这里，每回合都交给 AI。AI 整理设定集时会随剧情补上，也可以自己写。</p>}
+            : <p className="muted codex-note mb-0">主角自己的本事（修为等级、境界、功法招式、法宝、特殊能力等）记在这里，每回合都交给 AI。AI 整理设定集时会随剧情补上，也可以自己写。</p>}
         </section>;
       })()}
       <button className="ghost t-left" onClick={onOpenStory}>故事设定与要点 ›</button>

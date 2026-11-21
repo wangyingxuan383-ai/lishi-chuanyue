@@ -4,10 +4,21 @@ use crate::{agent_workspace as ws, Error, Result};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::{HashMap, HashSet}, fs, io::{ErrorKind, Write}, path::Path};
+use std::{collections::{HashMap, HashSet}, fs, io::{ErrorKind, Read}, path::Path};
 
-fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn io(_: std::io::Error) -> Error { Error::Invalid("助手会话备份文件未能校验，原存档保留".into()) }
+
+fn digest(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).map_err(io)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(io)?;
+        if count == 0 { break; }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
 
 pub(crate) fn snapshot(db: &Connection, root: &Path, backup: &Path) -> Result<()> {
     let sidecar=backup.with_extension("pi");
@@ -22,12 +33,12 @@ pub(crate) fn snapshot(db: &Connection, root: &Path, backup: &Path) -> Result<()
         if crate::pi_runtime::require_owned_path(&owned,source).is_err() || !source.is_file(){continue;}
         let real=source.canonicalize().map_err(io)?;
         if !real.starts_with(owned.canonicalize().map_err(io)?){continue;}
-        let bytes=fs::read(real).map_err(io)?;
         let file=format!("{}.jsonl",uuid::Uuid::new_v4());
-        fs::write(sidecar.join(&file),&bytes).map_err(io)?;
-        files.push(json!({"sessionId":id,"file":file,"sha256":digest(&bytes)}));
+        let destination = sidecar.join(&file);
+        fs::copy(real, &destination).map_err(io)?;
+        files.push(json!({"sessionId":id,"file":file,"sha256":digest(&destination)?}));
     }
-    let manifest=json!({"version":1,"databaseSha256":digest(&fs::read(backup).map_err(io)?),"files":files});
+    let manifest=json!({"version":1,"databaseSha256":digest(backup)?,"files":files});
     fs::write(sidecar.join("manifest.json"),manifest.to_string()).map_err(io)?;
     Ok(())
 }
@@ -43,7 +54,7 @@ pub(crate) fn prepare(db: &Connection, root: &Path, backup: &Path) -> Result<()>
             let manifest: Value = serde_json::from_str(
                 &fs::read_to_string(sidecar.join("manifest.json")).map_err(io)?,
             ).map_err(|_| invalid())?;
-            if manifest["version"] != 1 || manifest["databaseSha256"] != digest(&fs::read(backup).map_err(io)?) {
+            if manifest["version"] != 1 || manifest["databaseSha256"] != digest(backup)? {
                 return Err(Error::Invalid("数据库和助手备份不匹配，尚未恢复存档".into()));
             }
             let mut file_names = HashSet::new();
@@ -76,8 +87,7 @@ pub(crate) fn prepare(db: &Connection, root: &Path, backup: &Path) -> Result<()>
             if let Some((file, sha)) = entries.get(id) {
                 let source = sidecar.join(file);
                 if !fs::symlink_metadata(&source).map_err(io)?.is_file() { return Err(invalid()); }
-                let bytes = fs::read(&source).map_err(io)?;
-                if *sha != digest(&bytes) {
+                if *sha != digest(&source)? {
                     return Err(Error::Invalid("助手会话备份校验失败，尚未恢复存档".into()));
                 }
                 let directory = root.join("agent-sessions").join(id);
@@ -85,7 +95,8 @@ pub(crate) fn prepare(db: &Connection, root: &Path, backup: &Path) -> Result<()>
                 let destination = directory.join(format!("restored-{}.jsonl", uuid::Uuid::new_v4()));
                 let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&destination).map_err(io)?;
                 created.push(destination.clone());
-                output.write_all(&bytes).map_err(io)?;
+                let mut input = fs::File::open(source).map_err(io)?;
+                std::io::copy(&mut input, &mut output).map_err(io)?;
                 db.execute(
                     "UPDATE pi_sessions SET session_file=? WHERE id=?",
                     params![destination.to_string_lossy(), id],

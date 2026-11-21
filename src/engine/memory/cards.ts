@@ -69,7 +69,7 @@ function shadowed(text: string, at: number, term: string, longer: string[]): boo
  */
 /** The name of the card for the protagonist's abilities and growth. */
 export const abilityCardName = (protagonist: string) => `${protagonist.trim() || "主角"}的本事`;
-/** “唐舞的本事”: the one card for the protagonist's abilities and growth (upkeep-6). */
+/** “林舟的本事”: the one card for the protagonist's abilities and growth (upkeep-6). */
 export function isAbilityCard(name: string, protagonist: string): boolean {
   const n = name.trim();
   return n.endsWith("的本事") && (n === `${protagonist.trim() || "主角"}的本事` || n === "主角的本事");

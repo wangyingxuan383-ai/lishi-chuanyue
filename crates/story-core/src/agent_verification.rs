@@ -427,7 +427,7 @@ mod tests {
         let d = draft();
         let w = workspace();
         let mut r = report();
-        r["findings"][0]["citations"][0]["quote"] = "魂骨同部位不能重复吸收".into();
+        r["findings"][0]["citations"][0]["quote"] = "同一种丹药不能重复服用".into();
         assert!(validate_report(&p, &d, &w, &r).is_err());
         let mut wrong = d.clone();
         wrong["evidenceLedger"][0]["searchSnippet"] = true.into();
@@ -444,10 +444,10 @@ mod tests {
         let p = plan();
         let mut d = draft();
         let w = workspace();
-        d["evidenceLedger"].as_array_mut().unwrap().push(json!({"id":"world-page","callId":"read-world","sourceKind":"world","sourceTool":"read_resource","quote":"背包中仍保存尚未吸收的魂骨。","snapshot":{"head":"n"},"location":{"kind":"state"}}));
+        d["evidenceLedger"].as_array_mut().unwrap().push(json!({"id":"world-page","callId":"read-world","sourceKind":"world","sourceTool":"read_resource","quote":"背包中仍保存尚未服用的丹药。","snapshot":{"head":"n"},"location":{"kind":"state"}}));
         let mut r = report();
         r["findings"][0]["basis"] = "local_consistency".into();
-        r["findings"][0]["citations"] = json!([{"callId":"read-world","quote":"尚未吸收的魂骨"}]);
+        r["findings"][0]["citations"] = json!([{"callId":"read-world","quote":"尚未服用的丹药"}]);
         assert!(validate_report(&p, &d, &w, &r).is_err());
         r["status"] = "insufficient".into();
         let saved = validate_report(&p, &d, &w, &r).unwrap();

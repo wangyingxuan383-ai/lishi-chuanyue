@@ -102,6 +102,8 @@ export interface ChatResult {
   usage: ChatUsage | null;
   firstTokenMs: number | null;
   totalMs: number;
+  /** The model that answered (the backup's when it took over); set by the game's calls. */
+  servedBy?: string;
 }
 
 export class ChatError extends Error {

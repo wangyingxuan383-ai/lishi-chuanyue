@@ -157,7 +157,11 @@ describe("writing assistance", () => {
     const alternative = await s.game.repo.createLine(s.world.id, s.node.id, "另一路", false);
     const next = await s.game.repo.appendNode(s.world.id, alternative.id, { parentId: s.node.id, kind: "turn", narrative: "下一段", state: sampleState() });
     const batch = s.platform.sql.batch.bind(s.platform.sql);
+    // The player's change happens once, just before the write (it may itself write a batch).
+    let changed = false;
     vi.spyOn(s.platform.sql, "batch").mockImplementation(async (statements) => {
+      if (changed) return batch(statements);
+      changed = true;
       if (change === "line") await s.game.repo.setCurrentLine(s.world.id, alternative.id);
       if (change === "head") await s.game.repo.moveLine(s.line.id, next.id);
       if (change === "text") await s.game.repo.updateNarrative(s.node.id, "玩家刚改的新文字");

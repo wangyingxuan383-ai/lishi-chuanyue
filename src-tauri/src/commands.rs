@@ -1,7 +1,7 @@
 use crate::{
     credentials::{Credentials, SecretStatus},
     error::{blocking, Result},
-    sql::{BackupInfo, SqlStore, Statement},
+    sql::{BackupDeletion, BackupInfo, BackupInventory, SqlStore, Statement},
     stream::{self, GetResponse, Resume, StreamEvent, StreamInfo, Streams, Timeouts},
 };
 use serde::Serialize;
@@ -37,6 +37,18 @@ pub async fn sql_backup(store: State<'_, Arc<SqlStore>>, label: String) -> Resul
 pub async fn sql_list_backups(store: State<'_, Arc<SqlStore>>) -> Result<Vec<BackupInfo>> {
     let store = Arc::clone(store.inner());
     blocking(move || store.list_backups()).await
+}
+
+#[tauri::command]
+pub async fn sql_backup_inventory(store: State<'_, Arc<SqlStore>>) -> Result<BackupInventory> {
+    let store = Arc::clone(store.inner());
+    blocking(move || store.backup_inventory()).await
+}
+
+#[tauri::command]
+pub async fn sql_delete_backups(store: State<'_, Arc<SqlStore>>, names: Vec<String>) -> Result<BackupDeletion> {
+    let store = Arc::clone(store.inner());
+    blocking(move || store.delete_backups(&names)).await
 }
 
 /// Replaces the live database with a backup; returns the before-restore backup's name.

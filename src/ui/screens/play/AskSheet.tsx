@@ -3,14 +3,19 @@ import { AGENT_TASK_RECIPES, taskRecipeText } from "../../../content/agentTasks"
 import { useApp } from "../../app/context";
 import { MenuSheet, Sheet } from "../../components/Sheet";
 import { StoryText } from "../../components/StoryText";
+import { SourceScopeRow } from "../../components/SourceScope";
+import { AUTO_SCOPE, type SourceScope } from "../../../engine/sources/scope";
+import type { SourceBinding } from "../../../engine/sources/types";
 
 /** 查一查 (R07-T001): questions about this world or the era; the story does not move. */
-export function AskSheet({ worldId, bookId, onClose }: { worldId: string; bookId?: string; onClose: () => void }) {
+export function AskSheet({ worldId, bookId, source, onClose }: { worldId: string; bookId?: string; source?: SourceBinding | null; onClose: () => void }) {
   const { game, toast } = useApp();
   const [saved, setSaved] = useState<number[]>([]);
   const [question, setQuestion] = useState("");
   const [recipes, setRecipes] = useState(false);
   const [asked, setAsked] = useState<{ q: string; a: string; pending: boolean }[]>([]);
+  /** 资料范围 (D184): kept while the sheet is open, 自动 when it opens again. */
+  const [scope, setScope] = useState<SourceScope>(AUTO_SCOPE);
   const pending = asked.some((x) => x.pending);
   /** The question in flight; closing the sheet stops it too (R30, D170). */
   const running = useRef<AbortController | null>(null);
@@ -24,7 +29,7 @@ export function AskSheet({ worldId, bookId, onClose }: { worldId: string; bookId
     const control = new AbortController();
     running.current = control;
     try {
-      const answer = await game.ask(worldId, q, (full) => update({ a: full, pending: true }), control.signal);
+      const answer = await game.ask(worldId, q, (full) => update({ a: full, pending: true }), control.signal, scope);
       update({ a: answer || "没有查到。", pending: false });
     } catch {
       update({ a: control.signal.aborted ? "已停止。" : "这次没查到，稍后再试。", pending: false });
@@ -44,6 +49,7 @@ export function AskSheet({ worldId, bookId, onClose }: { worldId: string; bookId
             {bookId && !x.pending && x.a && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); })}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
           </div>
         ))}
+        {source && <SourceScopeRow worldId={worldId} binding={source} value={scope} purpose="ask" disabled={pending} onChange={setScope} />}
         <button className="ghost" onClick={() => setRecipes(true)}>常用问题 ›</button>
         {recipes && <MenuSheet title="常用问题" onClose={() => setRecipes(false)} items={AGENT_TASK_RECIPES.filter(recipe => ["recap", "characters", "canon", "continuity", "clock-ledger"].includes(recipe.id)).map(recipe => ({ label: recipe.name, onSelect: () => setQuestion(taskRecipeText(recipe, recipe.scope, question) + `\n请按需读取技能：${recipe.skills.join("、")}。`) }))} />}
         <div className="row">

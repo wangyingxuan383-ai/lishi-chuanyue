@@ -77,9 +77,9 @@ describe("整理状况 (R30 step 2)", () => {
 
   it("upkeep keeps the protagonist's abilities in one card, prefers concrete details and may drop its own one-offs", () => {
     const state = world();
-    state.protagonist.name = "唐舞";
+    state.protagonist.name = "林舟";
     const [system] = upkeepMessages({ premise: "", state, turns: [] });
-    expect(system.content).toContain("“唐舞的本事”");
+    expect(system.content).toContain("“林舟的本事”");
     expect(system.content).toContain("不是剧情梗概");
     expect(system.content).toContain("\"drop\"");
   });

@@ -17,6 +17,7 @@ pub(crate) mod recall;
 pub mod mcp;
 pub mod organize;
 pub mod migration;
+mod db_backup;
 pub mod execution_lease;
 pub mod pi_store;
 pub mod pi_gateway;

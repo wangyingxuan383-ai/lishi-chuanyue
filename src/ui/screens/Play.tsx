@@ -1,5 +1,6 @@
 // The play screen (PLAN_V3 §4.3–4.4): story stream, choices, input bar,
 // regenerate/variants, long-press menu, stop/interrupt, character panel.
+import type { SourceScope } from "../../engine/sources/scope";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { eraContext } from "../../engine/era";
 import { nowOf, timeRows } from "../../engine/calendar/clock";
@@ -27,6 +28,7 @@ import { Icon } from "../components/Icon";
 import { buzz, motionLevel } from "../app/motion";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
 import { adoptRewrite, adoptCanonCorrection, adoptPlayerRevision, assertWritingAnchor, isLatestPassage, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview, type PlayerRevisionPreview } from "../../engine/writing/assist";
+import { FactSyncSheet, type FactSyncAsk } from "../components/FactSync";
 import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
 import { WritingDesk } from "../components/WritingDesk";
 import { PlayQualityEffects } from "../components/PlayQualityEffects";
@@ -229,6 +231,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   busyRef.current = busy;
   useEffect(() => { if (gen) closeRecap(); }, [!!gen]);
   const [writing, setWriting] = useState<WritingDraft | null>(null);
+  const [factAsk, setFactAsk] = useState<FactSyncAsk | null>(null);
   const [desk, setDesk] = useState(false);
   const writingScope = useRef({ worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active: true });
   writingScope.current = { worldId, headId: cursor?.head.id, lineId: cursor?.line.id, input, mode: currentMode.mode, busy, active };
@@ -237,12 +240,9 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     // The AI's background 设定集 tidy-up landing on the same route moves the head
     // but changes nothing the player is rewriting: the open sheet follows it.
     const head = cursor?.head;
-    setWriting((w) => {
-      if (w && head && !busy && w.anchor.worldId === worldId && w.anchor.lineId === cursor?.line.id && head.kind === "edit" && head.meta.upkeep === true && head.parentId === w.anchor.headId) {
-        return { ...w, anchor: { ...w.anchor, headId: head.id } };
-      }
-      return null;
-    });
+    const follows = (anchor: WritingAnchor) => !!head && !busy && anchor.worldId === worldId && anchor.lineId === cursor?.line.id && head.kind === "edit" && head.meta.upkeep === true && head.parentId === anchor.headId;
+    setWriting((w) => (w && follows(w.anchor) ? { ...w, anchor: { ...w.anchor, headId: head!.id } } : null));
+    setFactAsk((a) => (a && follows(a.anchor) ? { ...a, anchor: { ...a.anchor, headId: head!.id } } : null));
     setDesk(false);
   }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
   // After the third turn, once ever: everything a passage can do is behind a long press (AUDIT 4.2).
@@ -481,12 +481,28 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     const current = writingScope.current;
     if (!current.active || current.busy || current.worldId !== anchor.worldId || current.headId !== anchor.headId || current.lineId !== anchor.lineId) throw new WritingError(STALE_WRITING);
   };
-  /** A rewrite goes into the passage itself (R14 engine review); the first original stays for 恢复原文. */
+  /** Saving an edited passage first asks whether its facts change too (D183). */
   const applyRewrite = async (anchor: WritingAnchor, text: string) => {
+    checkScope(anchor);
+    if (!text.trim() || text === anchor.original) throw new WritingError("文字没有变化。");
+    setFactAsk({ anchor, text, latest: await isLatestPassage(game, anchor) });
+  };
+  /** 只改文字: into the passage itself (R14 engine review); the first original stays for 恢复原文. */
+  const saveTextOnly = async (anchor: WritingAnchor, text: string) => {
     checkScope(anchor);
     await adoptRewrite(game, anchor, text);
     await refresh();
-    toast("已改写，后面的剧情会按改过的文字继续", { label: "撤回", run: () => void game.repo.restoreNarrative(anchor.nodeId).then(() => refresh()) });
+    // Things remembered word for word from the old text no longer say what the passage says.
+    const pins = (await game.repo.pinsOnPath(anchor.worldId, anchor.nodeId)).filter((p) => p.originNodeId === anchor.nodeId && !text.includes(p.text.trim()));
+    toast(pins.length ? `已改写；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : "已改写，后面的剧情会按改过的文字继续", { label: "撤回", run: () => void game.repo.restoreNarrative(anchor.nodeId).then(() => game.afterTextEdit(anchor.worldId, anchor.nodeId)).then(() => refresh()) });
+  };
+  /** 事实也一起改: the passage's facts follow its edited text, as another version or a revision route. */
+  const adoptFactSync = async (preview: PlayerRevisionPreview) => {
+    const latest = await isLatestPassage(game, preview.anchor);
+    const revised = await adoptPlayerRevision(game, { ...preview, anchor: { ...preview.anchor, headId: writingScope.current.headId ?? preview.anchor.headId } });
+    await refresh();
+    toast(latest ? "已改好，事实跟着改了；原来的写法留作另一个版本" : "已改好，进入改写后的路线；原路线和后续剧情保留",
+      latest ? undefined : { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, preview.anchor.lineId).then(() => refresh())) });
   };
   const openWriting = (kind: "rewrite" | "polish", node: StoryNode) => {
     if (!cursor || busy) return;
@@ -639,12 +655,18 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const panelProps = {
     worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy,
     onContinuitySaved: refresh, onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
-    onOrganize: async (replaceOwnEra: boolean, useSource?: boolean) => {
-      const c = await game.organize(worldId, { replaceOwnEra, useSource });
-      if (!c) { toast("这次没整理出来，稍后再试"); return false; }
-      await refresh();
-      toast("已整理设定集，可以接着修改");
-      return true;
+    onOrganize: async (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => {
+      try {
+        const c = await game.organize(worldId, { replaceOwnEra, useSource, scope });
+        if (!c) { toast("这次没整理出来，稍后再试"); return false; }
+        await refresh();
+        toast("已整理设定集，可以接着修改");
+        return true;
+      } catch (e) {
+        // A passage started meanwhile, or the story moved on: say so instead of failing silently.
+        toast(e instanceof Error ? e.message : "这次没整理出来，稍后再试");
+        return false;
+      }
     },
     onSave: async (patch: TurnRecord, summary: string, expectedHeadId?: string) => { await game.editState(worldId, patch, summary, undefined, expectedHeadId); await refresh(); },
   };
@@ -733,6 +755,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {menuMore && <PassageMoreMenu menuMore={menuMore} busy={busy} devMode={devMode} game={game} setMenuMore={setMenuMore}
         setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode} setRawNode={setRawNode} setUsageNode={setUsageNode} />}
       {writing && <WritingAssist draft={writing} onClose={() => setWriting(null)} onAdopt={adoptWriting} />}
+      {factAsk && <FactSyncSheet ask={factAsk} onClose={() => setFactAsk(null)} onTextOnly={() => saveTextOnly(factAsk.anchor, factAsk.text)} onAdopt={adoptFactSync} />}
       {desk && <WritingDesk text={input} mode={mode.mode} onClose={() => setDesk(false)} onDone={(text, nextMode) => {
         // 旁观 has only 幕后 and 写: 做 / 说 written in the big box go in as a 幕后 note.
         setInput(text); setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === nextMode))); setDesk(false); inputBox.current?.focus();
@@ -742,7 +765,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         <Sheet title={editing.field === "action" ? "改我的行动" : "改写这段文字"} onClose={() => setEditing(null)}>
           <div className="stack">
             {editing.field === "action" && <p className="muted m-0">会从这一回合之前重新写，原来的内容保留在另一条路线里。</p>}
-            {editing.field === "narrative" && <p className="muted m-0">只改这一段的文字，钱物和时间不变；原文随时可以恢复。要连事实、能力、记录一起改，<button className="link" onClick={() => { const node = editing.node; setEditing(null); openWriting("rewrite", node); }}>让 AI 按你的要求改</button>。</p>}
+            {editing.field === "narrative" && <p className="muted m-0">改好点保存，会问你这段的事实要不要一起改；原文随时可以恢复。只想说一句要改什么、让 AI 动笔，用<button className="link" onClick={() => { const node = editing.node; setEditing(null); openWriting("rewrite", node); }}>AI 改写</button>。</p>}
             <textarea rows={editing.field === "action" ? 3 : 12} value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
             <button className="primary" disabled={!editing.text.trim()} onClick={() => {
               const { node, field, text } = editing;
@@ -781,7 +804,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {sheet === "keys" && <ShortcutsSheet onClose={() => setSheet(null)} />}
       {sheet === "reading" && <ReadingQuickSheet onClose={() => setSheet(null)} />}
       {sheet === "depth" && <DepthSheet value={depthOf(world.settings)} onChange={(depth) => { void updateSettings({ depth }).then(() => toast(`已换成${DEPTH_LABEL[depth]}档，从下一段起生效`)); }} onClose={() => setSheet(null)} />}
-      {sheet === "ask" && <AskSheet worldId={worldId} bookId={state.source?.bookId} onClose={() => setSheet(null)} />}
+      {sheet === "ask" && <AskSheet worldId={worldId} bookId={state.source?.bookId} source={state.source} onClose={() => setSheet(null)} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
         <Sheet title="重说时希望…" onClose={() => setSheet(null)}>

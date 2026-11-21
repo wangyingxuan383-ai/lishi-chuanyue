@@ -80,12 +80,17 @@ describe("local Game operations", () => {
     });
   });
 
-  it("backs up at start once a day", async () => {
+  it("backs up at start once a day only after opting in", async () => {
     const { game } = await setup();
     const now = Date.now();
-    expect(await game.autoBackup(now)).toMatch(/-auto\.sqlite$/);
+    expect(await game.autoBackup(now)).toBeNull();
+    expect(await game.platform.sql.listBackups()).toHaveLength(0);
+    await game.repo.setSetting("dailyBackup", true);
+    expect(await game.autoBackup(now)).toMatch(/-auto\.sqlite\.zip$/);
     expect(await game.autoBackup(now + 3_600_000)).toBeNull();
-    expect(await game.autoBackup(now + 2 * 86_400_000)).toMatch(/-auto\.sqlite$/);
+    expect(await game.autoBackup(now + 2 * 86_400_000)).toMatch(/-auto\.sqlite\.zip$/);
+    await game.repo.setSetting("dailyBackup", false);
+    expect(await game.autoBackup(now + 4 * 86_400_000)).toBeNull();
   });
 
   it("adds no edit node and says why when nothing changes or a part is refused", async () => {

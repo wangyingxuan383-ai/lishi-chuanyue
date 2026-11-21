@@ -45,9 +45,9 @@ describe("manual time management without a model", () => {
   it("keeps both display mappings across style changes and rejects an invalid mixed edit atomically", async () => {
     const { game, world, state, cursor } = await setup();
     const first = await game.editState(world.id, { rules: { clock: { elapsedAnchor: { atElapsedMinutes: state.time.elapsedMinutes, day: 100, minuteOfDay: 500 } } } }, "日序校准", undefined, cursor.head.id);
-    const dated = await game.editState(world.id, { rules: { clock: { clockStyle: "era", anchor: { atElapsedMinutes: state.time.elapsedMinutes, date: { era: "斗罗历", year: 10015, month: 12, day: 31, ceYear: null, lunar: false }, minuteOfDay: 1430 } } } }, "纪年校准", undefined, first.head.id);
+    const dated = await game.editState(world.id, { rules: { clock: { clockStyle: "era", anchor: { atElapsedMinutes: state.time.elapsedMinutes, date: { era: "玄元历", year: 10015, month: 12, day: 31, ceYear: null, lunar: false }, minuteOfDay: 1430 } } } }, "纪年校准", undefined, first.head.id);
     const eraState = await game.repo.getState(dated.head.id);
-    expect(nowOf(eraContext(null, eraState).clock, state.time.elapsedMinutes + 20).text).toBe("斗罗历10016年 1月1日 · 子时");
+    expect(nowOf(eraContext(null, eraState).clock, state.time.elapsedMinutes + 20).text).toBe("玄元历10016年 1月1日 · 子时");
     const counted = await game.editState(world.id, { rules: { clock: { clockStyle: "elapsed" } } }, "切回日序", undefined, dated.head.id);
     const countedState = await game.repo.getState(counted.head.id);
     expect(nowOf(eraContext(null, countedState).clock, state.time.elapsedMinutes).text).toBe("第 100 天 · 08:20");

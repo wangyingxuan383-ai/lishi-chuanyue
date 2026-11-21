@@ -1,5 +1,182 @@
 [
   {
+    "name": "AI tidy-up removals are not remembered as the player's",
+    "kind": "apply",
+    "state": {
+      "version": 1,
+      "time": {
+        "start": "天宝七载冬月十七",
+        "elapsedMinutes": 0
+      },
+      "placeId": null,
+      "protagonist": {
+        "name": "李安",
+        "aliases": [],
+        "age": 22,
+        "gender": "男",
+        "identity": "落第举子",
+        "origin": "历史系研究生",
+        "cheat": "",
+        "stats": {
+          "money": 300,
+          "debt": 0,
+          "health": 80,
+          "energy": 70,
+          "fame": 10
+        },
+        "statuses": [],
+        "items": []
+      },
+      "people": [],
+      "places": [
+        {
+          "id": "hall",
+          "name": "县衙大堂",
+          "aliases": [],
+          "description": "",
+          "source": "AI"
+        }
+      ],
+      "cards": [
+        {
+          "id": "letter",
+          "kind": "物品",
+          "name": "那封信",
+          "keys": [],
+          "content": "信",
+          "source": "AI"
+        },
+        {
+          "id": "ledger",
+          "kind": "物品",
+          "name": "旧账本",
+          "keys": [],
+          "content": "账",
+          "source": "AI"
+        }
+      ],
+      "goals": [],
+      "era": {
+        "packId": "tang-748"
+      },
+      "deviations": []
+    },
+    "record": {
+      "cards": [
+        {
+          "op": "remove",
+          "name": "那封信",
+          "by": "AI"
+        },
+        {
+          "op": "remove",
+          "name": "旧账本"
+        }
+      ],
+      "places": [
+        {
+          "op": "remove",
+          "name": "县衙大堂",
+          "by": "AI"
+        }
+      ]
+    },
+    "options": {
+      "mode": "do",
+      "difficulty": "标准",
+      "currency": {
+        "units": [
+          {
+            "name": "贯",
+            "value": 1000
+          },
+          {
+            "name": "文",
+            "value": 1
+          }
+        ],
+        "aliases": {
+          "缗": "贯",
+          "钱": "文",
+          "枚": "文",
+          "个": "文"
+        }
+      },
+      "clock": {
+        "date": {
+          "era": "天宝",
+          "year": 7,
+          "month": 12,
+          "day": 29,
+          "ceYear": 748,
+          "lunar": true
+        },
+        "hour": 8,
+        "label": "",
+        "rules": {
+          "lunar": true,
+          "eras": [
+            {
+              "name": "天宝",
+              "startCe": 742,
+              "yearWord": "载"
+            },
+            {
+              "name": "至德",
+              "startCe": 756,
+              "startMonth": 7,
+              "yearWord": "载"
+            }
+          ]
+        }
+      },
+      "advanceTime": false
+    },
+    "expected": {
+      "state": {
+        "version": 1,
+        "time": {
+          "start": "天宝七载冬月十七",
+          "elapsedMinutes": 0
+        },
+        "placeId": null,
+        "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 22,
+          "gender": "男",
+          "identity": "落第举子",
+          "origin": "历史系研究生",
+          "cheat": "",
+          "stats": {
+            "money": 300,
+            "debt": 0,
+            "health": 80,
+            "energy": 70,
+            "fame": 10
+          },
+          "statuses": [],
+          "items": []
+        },
+        "people": [],
+        "places": [],
+        "cards": [],
+        "goals": [],
+        "era": {
+          "packId": "tang-748"
+        },
+        "deviations": [],
+        "dismissed": [
+          "旧账本"
+        ]
+      },
+      "chips": [],
+      "notes": [],
+      "log": [],
+      "minutes": 0
+    }
+  },
+  {
     "name": "action default",
     "kind": "apply",
     "state": {

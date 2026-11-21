@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../../platform/memory";
 import { Game } from "../game";
 import { saveBook } from "./library";
-import { deleteNote, draftFromParts, estimateNote, gapRanges, getNote, listNotes, newLocalNote, newNote, noteBatches, noteMaterials, noteProgressDetail, noteProgressLabel, noteReplyProblem, noteStepsDone, notesForTurn, readNoteText, renameNote, runNote, saveNote } from "./notes";
+import { askedAbout, deleteNote, draftFromParts, estimateNote, gapRanges, getNote, listNotes, newLocalNote, newNote, noteBatches, noteMaterials, noteProgressDetail, noteProgressLabel, noteReplyProblem, noteStepsDone, notesForTurn, readNoteText, renameNote, restorePrevious, runNote, saveNote, startNoteUpdate } from "./notes";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { newBinding, type SourceBook } from "./types";
 import { sampleState } from "../testing/fixtures";
 
 const longBook = (): SourceBook => ({ id: crypto.randomUUID(), title: "长河", format: "txt", createdAt: new Date().toISOString(), sections:
-  Array.from({ length: 12 }, (_, i) => ({ title: `第${i + 1}章`, text: `${i % 3 === 0 ? "唐三在史莱克学院修炼。" : "小镇平静如常。"}${"风吹过山谷。".repeat(1100)}` })) });
+  Array.from({ length: 12 }, (_, i) => ({ title: `第${i + 1}章`, text: `${i % 3 === 0 ? "沈青在青云书院修炼。" : "小镇平静如常。"}${"风吹过山谷。".repeat(1100)}` })) });
 
 async function setup() {
   const platform = await createMemoryPlatform();
@@ -72,6 +72,25 @@ describe("原著札记 (D162)", () => {
     expect(noteReplyProblem({ text: "抱歉，我无法回答是人物的原话。由此引出后面的误会。（第202～207章）", finishReason: "stop" })).toBeNull();
   });
 
+  it("keeps the current and previous coverage of a book note through a failed update and an archive round trip", async () => {
+    const { repo, book } = await setup();
+    const { world } = await repo.createWorld({ title: "札记续整理", eraId: "free", opening: {
+      parentId: null, kind: "opening", narrative: "开场", state: { ...sampleState(), source: newBinding(book.id) },
+    } });
+    const first: ReturnType<typeof newNote> = { ...newNote(book.id, "plot", { from: 0, to: 0 }, "旧版范围", world.id), status: "done", content: "第一章见到船工。", refs: [0] };
+    await saveNote(repo, first);
+    const update = startNoteUpdate(first, 1);
+    const signal = new AbortController().signal;
+    const stopped = await runNote(repo, update, book.title, { model: "test", call: async () => { throw new Error("fixture interruption"); } }, signal, () => {});
+    expect(stopped).toMatchObject({ status: "failed", refs: [0] });
+    const done = await runNote(repo, stopped, book.title, { model: "test", call: async () => "船工在第二章启程。" }, signal, () => {});
+    expect(done).toMatchObject({ status: "done", refs: [0, 1], previousContent: first.content, scope: { to: 1, previous: { to: 0, refs: [0] } } });
+
+    const imported = await importWorld(repo, await exportWorld(repo, world.id), "new");
+    const [copy] = (await exportWorld(repo, imported)).books![0].notes!.filter((note) => note.worldId === imported);
+    expect(await restorePrevious(repo, copy.id)).toMatchObject({ content: first.content, scope: { to: 0 }, refs: [0] });
+  });
+
   it("splits a saved multi-chapter gap without sending its completed neighbours again", async () => {
     const { repo } = await setup();
     const book: SourceBook = {
@@ -106,9 +125,9 @@ describe("原著札记 (D162)", () => {
     const { repo, book } = await setup();
     const range = await noteMaterials(repo, { bookId: book.id, kind: "plot", scope: { from: 2, to: 4 } });
     expect([...new Set(range.map((m) => m.section))]).toEqual([2, 3, 4]);
-    const person = await noteMaterials(repo, { bookId: book.id, kind: "person", scope: { subject: "唐三" } });
+    const person = await noteMaterials(repo, { bookId: book.id, kind: "person", scope: { subject: "沈青" } });
     expect(person.length).toBeGreaterThan(0);
-    expect(person.every((m) => m.text.includes("唐三"))).toBe(true);
+    expect(person.every((m) => m.text.includes("沈青"))).toBe(true);
     expect(person.map((m) => m.section)).toEqual([...person.map((m) => m.section)].sort((a, b) => a - b));
     expect(await noteMaterials(repo, { bookId: book.id, kind: "person", scope: { subject: "没有这人" } })).toEqual([]);
   });
@@ -330,26 +349,37 @@ describe("原著札记 (D162)", () => {
     const done = (n: ReturnType<typeof newNote>, content: string) => ({ ...n, content, status: "done" as const });
     await saveNote(repo, done(newNote(book.id, "plot", { from: 0, to: 4 }, "前段主线"), "前段"));
     await saveNote(repo, done(newNote(book.id, "plot", { from: 5, to: 11 }, "后段主线"), "后段"));
-    await saveNote(repo, done(newNote(book.id, "person", { subject: "唐三", aliases: ["三哥"] }, "人物：唐三"), "唐门弟子"));
-    await saveNote(repo, { ...done(newNote(book.id, "person", { subject: "小舞" }, "人物：小舞"), "柔骨兔"), active: false });
+    await saveNote(repo, done(newNote(book.id, "person", { subject: "沈青", aliases: ["青哥"] }, "人物：沈青"), "沈家弟子"));
+    await saveNote(repo, { ...done(newNote(book.id, "person", { subject: "阿柳" }, "人物：阿柳"), "白狐"), active: false });
     await saveNote(repo, done(newNote(book.id, "question", { question: "别的故事的问题" }, "别处", other), "不该出现"));
     const binding = { ...newBinding(book.id, true), position: 6 };
-    const notes = await notesForTurn(repo, binding, here, "三哥推门进来，小舞跟在后面。");
-    expect(notes.map((n) => n.title)).toEqual(["后段主线", "人物：唐三"]);
+    const notes = await notesForTurn(repo, binding, here, "青哥推门进来，阿柳跟在后面。");
+    expect(notes.map((n) => n.title)).toEqual(["后段主线", "人物：沈青"]);
     expect((await listNotes(repo, book.id, here)).some((n) => n.title === "别处")).toBe(false);
+  });
+
+  it("brings in an answer saved from 查一查 when the passage is about it, even under a reading limit", async () => {
+    const { repo, book } = await setup();
+    const { world } = await repo.createWorld({ title: "试", eraId: "free", settings: { premise: "" }, opening: { parentId: null, kind: "opening", narrative: "开场", state: sampleState(), meta: {} } });
+    await saveNote(repo, { ...newNote(book.id, "question", { question: "王掌柜是什么来头？" }, "王掌柜是什么来头", world.id), content: "王掌柜原是镖局的账房。", status: "done" as const });
+    const binding = { ...newBinding(book.id, true), position: 2, through: 5 };
+    expect((await notesForTurn(repo, binding, world.id, "王掌柜把算盘一推，抬头看你。")).map((n) => n.title)).toEqual(["王掌柜是什么来头"]);
+    expect(await notesForTurn(repo, binding, world.id, "雨下了一整夜。")).toEqual([]);
+    expect(askedAbout("一斗米多少钱", "他买了一斗米")).toBe(true);
+    expect(askedAbout("核对一下是什么", "这是什么东西")).toBe(false);
   });
 
   it("excludes mixed later chapters and notes with unknown scope from a limited story", async () => {
     const { repo, book } = await setup();
     const done = (n: ReturnType<typeof newNote>, refs: number[]) => ({ ...n, refs, status: "done" as const, content: n.title });
     await saveNote(repo, done(newNote(book.id,"plot",{from:0,to:11},"后文主线"),[0,11]));
-    await saveNote(repo, done(newNote(book.id,"person",{subject:"唐三"},"后文身份"),[0,11]));
-    await saveNote(repo, done(newNote(book.id,"person",{subject:"唐三"},"旧札记范围不明"),[]));
-    await saveNote(repo, done(newNote(book.id,"person",{subject:"唐三"},"已知身份"),[0]));
+    await saveNote(repo, done(newNote(book.id,"person",{subject:"沈青"},"后文身份"),[0,11]));
+    await saveNote(repo, done(newNote(book.id,"person",{subject:"沈青"},"旧札记范围不明"),[]));
+    await saveNote(repo, done(newNote(book.id,"person",{subject:"沈青"},"已知身份"),[0]));
     await saveNote(repo, done(newNote(book.id,"plot",{from:0,to:0},"当前主线"),[0]));
     const binding={...newBinding(book.id,true),through:0};
-    expect((await notesForTurn(repo,binding,"","唐三")).map(n=>n.title)).toEqual(["当前主线","已知身份"]);
-    expect((await notesForTurn(repo,{...binding,through:null},"","唐三")).length).toBe(5);
+    expect((await notesForTurn(repo,binding,"","沈青")).map(n=>n.title)).toEqual(["当前主线","已知身份"]);
+    expect((await notesForTurn(repo,{...binding,through:null},"","沈青")).length).toBe(5);
   });
 
   it("a request that never answers is freed by 暂停, and 接着整理 works afterwards (R30)", async () => {

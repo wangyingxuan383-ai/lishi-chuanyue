@@ -7,7 +7,6 @@ impl Engine {
     pub(super) async fn maintain_requests(self: &Arc<Self>, shared: &Shared, plan: &RunPlan, narrative: &str, upkeep_state: &Value) -> Result<()> {
         let shared = shared.clone();
         let narrative = narrative.to_owned();
-        let state = &plan.state;
         {
             if let Some(messages) = plan.meta["upkeepMessages"].as_array() {
                 let messages = crate::stage_context::organization(&plan, messages, &narrative);
@@ -22,45 +21,55 @@ impl Engine {
                 }
             }
             if let Some(messages) = plan.meta["chapterMessages"].as_array() {
-                let (mut messages, groups) = crate::stage_context::chapter(messages, &narrative, plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize);
-                if state["era"]["mode"] == "free" {
-                    for message in &mut messages {
-                        if message["role"] == "system" {
-                            message["content"] = message["content"]
-                                .as_str()
-                                .unwrap_or("")
-                                .replace("历史互动小说", "互动小说")
-                                .into();
-                        }
-                    }
+                if let Some(chapter) = self.summarize_chapter(&shared, plan, messages, &narrative, "chapter").await? {
+                    shared.lock().map_err(|_| Error::Cancelled)?.draft["chapter"] = chapter;
                 }
-                let mut summaries=vec![];let mut complete=true;
-                if groups.len()>1 {
-                    for (index, group) in groups.iter().enumerate(){
-                        let mut request=messages.clone();let content=request.last_mut().ok_or_else(||Error::Invalid("章节上下文缺失".into()))?;
-                        content["content"]=format!("{}\n【本章剧情·第{}/{}组】\n{}\n仅总结本组实际发生的事，后续将合并整章。",content["content"].as_str().unwrap_or(""),index+1,groups.len(),group).into();
-                        if let Some(response)=self.optional_complete(&shared,&format!("chapter:part:{index}"),request).await? {
-                            if let Some(chapter)=crate::organize::parse_chapter(&response.text){summaries.push(chapter);}else{complete=false;break;}
-                        }else{complete=false;break;}
-                    }
-                }
-                let content=messages.last_mut().ok_or_else(||Error::Invalid("章节上下文缺失".into()))?;
-                content["content"]=format!("{}\n【本章剧情】\n{}",content["content"].as_str().unwrap_or(""),if groups.len()>1{format!("以下为按原文顺序核实的分组摘要，请合并整章，不能新增事实：\n{}",json!(summaries))}else{groups.first().cloned().unwrap_or_default()}).into();
-                if let Some(response) = if complete {self.optional_complete(&shared, "chapter", messages).await?} else {None}
-                {
-                    if let Some(chapter) = crate::organize::parse_chapter(&response.text) {
-                        shared.lock().map_err(|_| Error::Cancelled)?.draft["chapter"] = chapter;
-                    }
+            }
+            // Chapters a later edit made out of date are summarized again from the text now (D183).
+            for (index, refresh) in plan.meta["chapterRefresh"].as_array().into_iter().flatten().enumerate() {
+                let (Some(id), Some(messages)) = (refresh["id"].as_str(), refresh["messages"].as_array()) else { continue };
+                if let Some(chapter) = self.summarize_chapter(&shared, plan, messages, "", &format!("chapter:refresh:{index}")).await? {
+                    shared.lock().map_err(|_| Error::Cancelled)?.draft["chapterRefreshed"][id] = chapter;
                 }
             }
         }
         Ok(())
     }
 
+    /// One chapter summary: grouped when the chapter is long, then merged; None when any step fails.
+    async fn summarize_chapter(self: &Arc<Self>, shared: &Shared, plan: &RunPlan, messages: &[Value], narrative: &str, purpose: &str) -> Result<Option<Value>> {
+        let (mut messages, groups) = crate::stage_context::chapter(messages, narrative, plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize);
+        if plan.state["era"]["mode"] == "free" {
+            for message in &mut messages {
+                if message["role"] == "system" {
+                    message["content"] = message["content"].as_str().unwrap_or("").replace("历史互动小说", "互动小说").into();
+                }
+            }
+        }
+        let mut summaries = vec![];
+        if groups.len() > 1 {
+            for (index, group) in groups.iter().enumerate() {
+                let mut request = messages.clone();
+                let content = request.last_mut().ok_or_else(|| Error::Invalid("章节上下文缺失".into()))?;
+                content["content"] = format!("{}\n【本章剧情·第{}/{}组】\n{}\n仅总结本组实际发生的事，后续将合并整章。", content["content"].as_str().unwrap_or(""), index + 1, groups.len(), group).into();
+                let Some(response) = self.optional_complete(shared, &format!("{purpose}:part:{index}"), request).await? else { return Ok(None) };
+                let Some(chapter) = crate::organize::parse_chapter(&response.text) else { return Ok(None) };
+                summaries.push(chapter);
+            }
+        }
+        let content = messages.last_mut().ok_or_else(|| Error::Invalid("章节上下文缺失".into()))?;
+        content["content"] = format!("{}\n【本章剧情】\n{}", content["content"].as_str().unwrap_or(""), if groups.len() > 1 { format!("以下为按原文顺序核实的分组摘要，请合并整章，不能新增事实：\n{}", json!(summaries)) } else { groups.first().cloned().unwrap_or_default() }).into();
+        Ok(match self.optional_complete(shared, purpose, messages).await? {
+            Some(response) => crate::organize::parse_chapter(&response.text),
+            None => None,
+        })
+    }
+
     /// Registers the tidying that follows a saved passage as its own run (D168).
     /// It holds a lease of its own, so the next passage never waits for it.
     pub(super) fn start_maintenance(self: &Arc<Self>, plan: &RunPlan, narrative: &str, result: &Value) -> Result<Option<String>> {
-        if plan.meta["upkeepMessages"].is_null() && plan.meta["chapterMessages"].is_null() {
+        let refresh = plan.meta["chapterRefresh"].as_array().filter(|a| !a.is_empty());
+        if plan.meta["upkeepMessages"].is_null() && plan.meta["chapterMessages"].is_null() && refresh.is_none() {
             return Ok(None);
         }
         let node = result["nodeId"].as_str().ok_or(Error::Stale)?.to_owned();
@@ -81,6 +90,18 @@ impl Engine {
         let mut meta = json!({"maintainNode": node, "passageRun": plan.id, "budgetChars": plan.meta["budgetChars"]});
         for key in ["upkeepMessages", "upkeepVersion", "chapterMessages", "chapterFirstId", "chapterVersion", "modelRequestLimit"] {
             if !plan.meta[key].is_null() { meta[key] = plan.meta[key].clone(); }
+        }
+        if let Some(refresh) = refresh {
+            // The text each refresh reads, so a summary of text edited again meanwhile is not saved.
+            let db = self.store.lock()?;
+            let mut list = vec![];
+            for item in refresh.iter().take(2) {
+                let (Some(first), Some(last)) = (item["firstNodeId"].as_str(), item["lastNodeId"].as_str()) else { continue };
+                let mut item = item.clone();
+                item["hash"] = span_hash(&db, first, last)?.into();
+                list.push(item);
+            }
+            meta["chapterRefresh"] = Value::Array(list);
         }
         tidy.meta = meta;
         self.start(tidy).map(Some)
@@ -109,7 +130,11 @@ impl Engine {
         let available = writer.is_none_or(|l| l.ticket.owner_id.is_empty()
             || l.expires_at_ms <= execution_lease::now_ms()
             || Some(l.ticket.owner_id.as_str()) == plan.meta["passageRun"].as_str());
-        let still_head = available && head.as_deref() == Some(plan.head_id.as_str());
+        // The passage's text when the tidy-up was asked for: an edit since then
+        // means its results describe text that is gone (D183).
+        let text_now: Option<String> = tx.query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).optional()?;
+        let same_text = text_now.as_deref() == Some(plan.original.as_str());
+        let still_head = available && same_text && head.as_deref() == Some(plan.head_id.as_str());
         let mut upkeep_done = false;
         if still_head && c.draft["upkeepPatch"].is_object() {
             let patch = &c.draft["upkeepPatch"];
@@ -131,15 +156,42 @@ impl Engine {
         if c.draft["chapter"].is_object() {
             let chapter = &c.draft["chapter"];
             let first = plan.meta["chapterFirstId"].as_str().filter(|s| *s != "{{NODE_ID}}").unwrap_or(&node).to_owned();
-            // A later passage may have summarized the same chapter first.
-            let taken = tx.query_row("SELECT 1 FROM chapters WHERE world_id=? AND first_node_id=?", params![plan.world_id, first], |_| Ok(())).optional()?.is_some();
+            // A later passage may have summarized the same chapter first, on this route.
+            // Another route sharing the first passage has a chapter of its own (D183).
+            let taken = tx.query_row("WITH RECURSIVE up(id) AS (SELECT ? UNION ALL SELECT n.parent_id FROM nodes n JOIN up u ON n.id=u.id WHERE n.parent_id IS NOT NULL)
+                SELECT 1 FROM chapters WHERE world_id=? AND first_node_id=? AND last_node_id IN (SELECT id FROM up)", params![node, plan.world_id, first], |_| Ok(())).optional()?.is_some();
             if !taken {
-                tx.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",params![uuid::Uuid::new_v4().simple().to_string(),plan.world_id,first,node,chapter["title"].as_str().unwrap_or("未命名章节"),chapter["gist"].as_str().unwrap_or(""),chapter["summary"].as_str().unwrap_or(""),plan.model.aux_model.as_ref().unwrap_or(&plan.model.model),plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"),time])?;
+                tx.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,created_at,stale) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![uuid::Uuid::new_v4().simple().to_string(),plan.world_id,first,node,chapter["title"].as_str().unwrap_or("未命名章节"),chapter["gist"].as_str().unwrap_or(""),chapter["summary"].as_str().unwrap_or(""),plan.model.aux_model.as_ref().unwrap_or(&plan.model.model),plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"),time,if same_text { None } else { Some(1) }])?;
             }
+        }
+        for refresh in plan.meta["chapterRefresh"].as_array().into_iter().flatten() {
+            let (Some(id), Some(first), Some(last)) = (refresh["id"].as_str(), refresh["firstNodeId"].as_str(), refresh["lastNodeId"].as_str()) else { continue };
+            let chapter = &c.draft["chapterRefreshed"][id];
+            if !chapter.is_object() || refresh["hash"].as_str() != Some(span_hash(&tx, first, last)?.as_str()) {
+                continue;
+            }
+            // Only one still waiting and not written by the player since.
+            tx.execute("UPDATE chapters SET title=?,gist=?,summary=?,model=?,prompt_version=?,stale=NULL WHERE id=? AND world_id=? AND stale=1 AND edited=0",
+                params![chapter["title"].as_str().unwrap_or("未命名章节"), chapter["gist"].as_str().unwrap_or(""), chapter["summary"].as_str().unwrap_or(""), plan.model.aux_model.as_ref().unwrap_or(&plan.model.model), plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"), id, plan.world_id])?;
         }
         write_usage(&tx, &plan.id, &plan.world_id, Some(&node), "ok")?;
         tx.execute("UPDATE execution_runs SET status='committed',result_json=?,updated_at=? WHERE id=? AND status='running'", params![json!({"worldId":plan.world_id,"nodeId":node}).to_string(), time, plan.id])?;
         tx.commit()?;
         Ok(())
     }
+}
+
+/// The text of a chapter's span (its passages from `last` back to `first`), as one fingerprint.
+fn span_hash(db: &rusqlite::Connection, first: &str, last: &str) -> Result<String> {
+    let mut stmt = db.prepare("WITH RECURSIVE up(id, parent, narrative, seq) AS (SELECT id,parent_id,narrative,seq FROM nodes WHERE id=?1 UNION ALL SELECT n.id,n.parent_id,n.narrative,n.seq FROM nodes n JOIN up u ON n.id=u.parent WHERE u.id<>?2) SELECT id,narrative FROM up ORDER BY seq")?;
+    let mut hasher = Sha256::new();
+    let rows = stmt.query_map(params![last, first], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, narrative) = row?;
+        hasher.update(id.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(narrative.as_bytes());
+        hasher.update([0x1e]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }

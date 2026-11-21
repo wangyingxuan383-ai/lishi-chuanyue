@@ -86,6 +86,8 @@ export interface CardPatch {
   keys?: string[];
   content?: string;
   source?: Card["source"];
+  /** A removal by the AI's own 设定集 tidy-up: not remembered as the player's deletion. */
+  by?: "AI";
 }
 
 export interface PlacePatch {
@@ -93,6 +95,8 @@ export interface PlacePatch {
   id?: string;
   name?: string;
   aliases?: string[];
+  /** As for cards. */
+  by?: "AI";
   description?: string;
   source?: Card["source"];
 }
@@ -618,7 +622,8 @@ export function applyRecord(
     if (raw.op === "remove") {
       if (card) {
         s.cards.splice(s.cards.indexOf(card), 1);
-        if (card.kind !== "时代") dismiss(card.name);
+        // 玩家删掉的，不要再建: only what the player removed, not the AI's own tidy-up.
+        if (card.kind !== "时代" && raw.by !== "AI") dismiss(card.name);
       } else log.push(`卡片“${name ?? raw.id}”不存在，删除已忽略`);
       continue;
     }
@@ -643,7 +648,7 @@ export function applyRecord(
       else if (place.id === s.placeId) log.push(`“${place.name}”是当前所在地，不能删除`);
       else {
         s.places.splice(s.places.indexOf(place), 1);
-        dismiss(place.name);
+        if (raw.by !== "AI") dismiss(place.name);
       }
       continue;
     }

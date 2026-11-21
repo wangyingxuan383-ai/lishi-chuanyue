@@ -103,6 +103,8 @@ pub fn run() {
             commands::sql_batch,
             commands::sql_backup,
             commands::sql_list_backups,
+            commands::sql_backup_inventory,
+            commands::sql_delete_backups,
             commands::sql_restore,
             commands::secret_set,
             commands::secret_has,

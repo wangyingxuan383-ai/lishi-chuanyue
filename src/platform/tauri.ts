@@ -64,6 +64,8 @@ export async function createTauriPlatform(): Promise<Platform> {
       batch: (statements) => {assertSqlWritable();return call("sql_batch", { statements: statements.map((s) => ({ sql: s.sql, params: s.params ?? [] })) });},
       backup: (label) => call("sql_backup", { label }),
       listBackups: () => call("sql_list_backups"),
+      backupInventory: () => call("sql_backup_inventory"),
+      deleteBackups: (names) => call("sql_delete_backups", { names }),
       restore: (name) => restoreWithFence(()=>call("sql_restore", { name })),
     },
     secrets: {
