@@ -616,6 +616,36 @@ async fn variant_carries_player_edits_after_the_previous_turn() {
 }
 
 #[tokio::test]
+async fn variant_reanchors_a_continuity_only_player_edit_to_the_new_passage() {
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Reply(written())]);
+    f.engine.start(f.plan("original")).unwrap();
+    assert_eq!(f.settled("original").await.status, "committed");
+    let old_turn = f.text("SELECT node_id FROM lines WHERE id='line'");
+    let patch = json!({"continuity":{"threads":[{"id":"paper","kind":"clue","title":"一张纸","detail":"纸张以后还用得上","status":"open",
+        "source":{"nodeId":old_turn,"from":"narrative","quote":"收好一张纸"}}]}});
+    {
+        let db = f.store.lock().unwrap();
+        db.execute("INSERT INTO nodes(id,world_id,parent_id,seq,kind,action_text,director_note,record_json,created_at)
+            VALUES('clue-edit','world',?,2,'edit','留下线索','玩家备注',?,'test')", rusqlite::params![old_turn, patch.to_string()]).unwrap();
+        db.execute("INSERT INTO states SELECT 'clue-edit',state_json FROM states WHERE node_id=?", [&old_turn]).unwrap();
+        db.execute("UPDATE lines SET node_id='clue-edit' WHERE id='line'", []).unwrap();
+    }
+    let mut plan = f.plan("new-variant");
+    plan.kind = "variant".into();
+    plan.head_id = "clue-edit".into();
+    plan.meta["targetId"] = old_turn.into();
+    plan.carried_edits = vec![json!({"id":"clue-edit","record":patch,"actionText":"留下线索","directorNote":"玩家备注"})];
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("new-variant").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let result = saved.result.unwrap();
+    assert_ne!(result["headId"], result["nodeId"]);
+    let record: Value = serde_json::from_str(&f.text("SELECT n.record_json FROM nodes n JOIN lines l ON l.node_id=n.id")).unwrap();
+    assert_eq!(record["continuity"]["threads"][0]["source"]["nodeId"], result["nodeId"]);
+    assert_eq!(f.text("SELECT n.director_note FROM nodes n JOIN lines l ON l.node_id=n.id"), "玩家备注");
+}
+
+#[tokio::test]
 async fn native_autoplay_stops_after_death_or_the_last_script_beat() {
     for script in [false, true] {
         let record = if script { json!({"time":5,"beat":"done"}) } else { json!({"time":5,"died":true}) };
@@ -691,6 +721,43 @@ async fn oversized_chapter_is_grouped_and_only_the_complete_summary_is_saved() {
 fn calls(calls: Vec<(&str, &str, Value)>) -> Completion {
     Completion { tool_calls: calls.into_iter().map(|(id,name,args)| json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})).collect(), finish_reason: Some("tool_calls".into()), usage: Some(json!({"prompt_tokens":10,"completion_tokens":6})), ..Default::default() }
 }
+
+#[tokio::test]
+async fn a_truncated_tool_group_runs_nothing_and_resume_requests_a_new_reply() {
+    let mut invalid = calls(vec![("good", "read_history", json!({"query":"纸"})), ("bad", "read_history", json!({}))]);
+    invalid.tool_calls[1]["function"]["arguments"] = "{\"query\":".into();
+    let f = Fixture::new(vec![Step::Reply(invalid), Step::Reply(written())]);
+    let mut plan = f.plan("bad-tools");
+    plan.meta["depth"] = "standard".into();
+    f.engine.start(plan).unwrap();
+    let failed = f.settled("bad-tools").await;
+    assert_eq!(failed.error_kind.as_deref(), Some("format"));
+    assert_eq!(failed.failure.as_ref().unwrap()["replyStep"], "model:1");
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM execution_steps WHERE step_key LIKE 'tool:%'"), 0);
+    f.engine.resume("bad-tools").unwrap();
+    assert_eq!(f.settled("bad-tools").await.status, "committed");
+    assert_eq!(f.model.count(), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
+}
+
+#[tokio::test]
+async fn a_reused_tool_id_cannot_return_a_different_querys_cache() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let f = Fixture::new(vec![Step::Wait { started: started.clone(), release: release.clone(),
+        reply: calls(vec![("same", "read_history", json!({"query":"正文"}))]) }, Step::Reply(written())]);
+    let mut plan = f.plan("tool-cache");
+    plan.meta["depth"] = "standard".into();
+    f.engine.start(plan).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    f.store.lock().unwrap().execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES(
+        'tool-cache','tool:0:same','read_history','done','{\"query\":\"另一段\"}','{\"sentinel\":\"不该带回的旧结果\"}')", []).unwrap();
+    release.notify_one();
+    assert_eq!(f.settled("tool-cache").await.status, "committed");
+    let requests = f.model.requests.lock().unwrap();
+    let output = requests[1]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == "same").unwrap().to_string();
+    assert!(output.contains("原有正文") && !output.contains("不该带回的旧结果"), "{output}");
+}
 #[tokio::test]
 async fn canon_correction_delivers_required_text_and_evidence_above_the_history_target() {
     let quote = "纸铺一张纸售价两文。";
@@ -762,7 +829,7 @@ fn up_front() -> Value {
 #[tokio::test]
 async fn a_correction_with_evidence_up_front_answers_in_one_request_and_the_skill_comes_with_it() {
     // The quote has other punctuation and no book, chapter or chunk: it is still found.
-    let reply = json!({"outcome":"changed","replacement":"两文纸。","recordPatch":{},"corrections":[{"detail":"纸价两文","citations":[{"quote":"纸铺 一张纸售价两文"}]}]});
+    let reply = json!({"outcome":"changed","replacement":"两文纸。","recordPatch":{},"corrections":[{"detail":"纸价两文","citations":[{"quote":"纸铺 一张纸售价两文","page":3}]}]});
     let (f, plan) = correction_fixture(vec![Step::Reply(prose(&reply.to_string()))], "up-front", &[up_front()], "核对纸价");
     f.engine.start(plan).unwrap();
     let saved = f.settled("up-front").await;
@@ -772,6 +839,7 @@ async fn a_correction_with_evidence_up_front_answers_in_one_request_and_the_skil
     assert_eq!(result["narrative"], "前文。两文纸。后文。");
     let cite = &result["corrections"][0]["citations"][0];
     assert_eq!(cite["quote"], "纸铺一张纸售价两文");
+    assert!(cite.get("page").is_none());
     assert_eq!((cite["bookId"].clone(), cite["section"].clone(), cite["chunk"].clone(), cite["start"].clone()), (json!("book"), json!(0), json!(0), json!(0)));
     assert_eq!(f.model.count(), 1);
     let first = f.model.requests.lock().unwrap()[0].clone();
@@ -1196,7 +1264,7 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
     drop(requests);
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
     assert_eq!(narrative, "你付了三文，收好一张纸。");
-    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-3");
+    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-4");
     assert_eq!(snapshot.draft["referenceReview"]["skipped"], 0);
     let saved: String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[&node],|r|r.get(0)).unwrap();
     let record: Value=serde_json::from_str(&saved).unwrap();
@@ -1286,6 +1354,43 @@ async fn canon_notes_tool_respects_the_same_chapter_limit_as_the_writer() {
     let requests=fixture.model.requests.lock().unwrap();
     let result=requests[1]["messages"].as_array().unwrap().iter().find(|m|m["tool_call_id"]=="n").unwrap()["content"].as_str().unwrap();
     assert!(result.contains("第一章开店")&&!result.contains("继位")&&!result.contains("未来身份"),"{result}");
+}
+
+#[tokio::test]
+async fn chosen_story_notes_are_available_without_a_book_but_off_route_notes_are_excluded() {
+    for selected in [false, true] {
+        let f = Fixture::new(vec![Step::Reply(calls(vec![("n","read_canon_notes",json!({"query":"掌柜"}))])),Step::Reply(written())]);
+        f.store.lock().unwrap().execute_batch("INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,created_at) VALUES('other','world','n0',1,'turn','旧路','test');
+            INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,status,created_at,updated_at) VALUES
+            ('here','world','plot','当前路线','{\"toNode\":\"n0\"}','掌柜已经回家。','done','t','t'),
+            ('there','world','plot','其他路线','{\"toNode\":\"other\"}','掌柜死在旧路。','done','t','t');").unwrap();
+        let mut plan = f.plan("story-notes");
+        plan.meta["depth"] = "standard".into();
+        if selected { plan.meta["sourceScope"] = json!({"mode":"notes","noteIds":["here","there"]}); }
+        f.engine.start(plan).unwrap();
+        assert_eq!(f.settled("story-notes").await.status, "committed");
+        let requests = f.model.requests.lock().unwrap();
+        assert!(tool_names(&requests[0]).contains(&"read_canon_notes".to_owned()));
+        let result = requests[1]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == "n").unwrap().to_string();
+        assert!(result.contains("掌柜已经回家") && !result.contains("掌柜死在旧路"), "{result}");
+    }
+}
+
+#[tokio::test]
+async fn only_this_storys_question_note_may_have_no_chapter_references_under_a_limit() {
+    let f = Fixture::new(vec![Step::Reply(calls(vec![("n","read_canon_notes",json!({"query":"掌柜"}))])),Step::Reply(written())]);
+    f.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','长篇','txt','test','{}');
+        INSERT INTO canon_notes(id,book_id,world_id,kind,title,content,refs_json,status,created_at,updated_at) VALUES
+        ('ours','book','world','question','问事','掌柜房钱已收。','[]','done','t','t'),
+        ('shared','book',NULL,'question','问事','掌柜将去远方。','[]','done','t','t'),
+        ('late','book','world','question','问事','掌柜以后继位。','[6]','done','t','t');").unwrap();
+    let mut plan = bound(&f, "limited-question", "standard");
+    plan.state["source"]["through"] = 5.into();
+    f.engine.start(plan).unwrap();
+    assert_eq!(f.settled("limited-question").await.status, "committed");
+    let requests = f.model.requests.lock().unwrap();
+    let result = requests[1]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == "n").unwrap().to_string();
+    assert!(result.contains("掌柜房钱已收") && !result.contains("将去远方") && !result.contains("以后继位"), "{result}");
 }
 
 #[tokio::test]
@@ -1591,6 +1696,36 @@ async fn an_edit_during_tidying_keeps_the_old_text_out_of_the_settings_and_marks
 }
 
 #[tokio::test]
+async fn an_older_edit_before_or_during_tidying_invalidates_the_whole_covered_span() {
+    for before_saving in [true, false] {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let upkeep = prose(r#"{"cards":[{"kind":"物品","name":"铜鹰符","keys":[],"content":"改前的说法"}],"places":[]}"#);
+        let chapter = prose(r#"{"title":"买纸","gist":"买了纸","summary":"主角付了两文买纸。"}"#);
+        let wait = |reply| Step::Wait { started: started.clone(), release: release.clone(), reply };
+        let steps = if before_saving { vec![wait(written()), Step::Reply(upkeep), Step::Reply(chapter)] }
+            else { vec![Step::Reply(written()), wait(upkeep), Step::Reply(chapter)] };
+        let f = Fixture::new(steps);
+        f.store.lock().unwrap().execute("UPDATE nodes SET kind='turn',narrative='旧稿 📖' WHERE id='n0'", []).unwrap();
+        let hash = "n0\x1f旧稿 📖\x1e".chars().fold(0xcbf29ce484222325u64, |acc, ch| (acc ^ ch as u64).wrapping_mul(0x100000001b3));
+        let guard = json!({"ids":["n0"],"hash":format!("{hash:x}")});
+        let mut plan = f.plan("older-edit");
+        plan.meta = json!({"upkeepMessages":[{"role":"user","content":"旧稿 📖\n{{NARRATIVE}}"}], "upkeepTextGuard":guard,
+            "chapterFirstId":"n0","chapterVersion":"chapter-2-free","chapterTextGuard":guard,
+            "chapterMessages":[{"role":"user","content":"【本章剧情】\n旧稿 📖\n{{NARRATIVE}}"}]});
+        f.engine.start(plan).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+        f.store.lock().unwrap().execute("UPDATE nodes SET narrative='玩家改过的前文', rewritten=1 WHERE id='n0'", []).unwrap();
+        release.notify_one();
+        assert_eq!(f.settled("older-edit").await.status, "committed");
+        assert_eq!(f.settled("older-edit~maintain").await.status, "committed");
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes WHERE kind='edit' OR json_extract(meta_json,'$.upkeep')=1"), 0);
+        assert_eq!(f.scalar("SELECT stale FROM chapters WHERE first_node_id='n0'"), 1);
+        assert_eq!(f.text("SELECT prompt_version FROM chapters WHERE first_node_id='n0'"), "chapter-2-free");
+    }
+}
+
+#[tokio::test]
 async fn a_route_that_shares_its_first_turn_with_another_still_gets_its_own_chapter() {
     let chapter = prose(r#"{"title":"新路","gist":"走了新路","summary":"你走了另一条路。"}"#);
     let f = Fixture::new(vec![Step::Reply(written()), Step::Reply(chapter)]);
@@ -1685,6 +1820,46 @@ async fn retry_of_sequence_invalidates_only_the_failed_child_stage() {
 }
 
 #[tokio::test]
+async fn sequence_resume_after_a_past_edit_rebuilds_only_the_unsaved_passage() {
+    let f = Fixture::new(vec![
+        Step::Reply(written()), Step::Reply(prose("旧草稿：经过城门。")),
+        Step::Reply(prose("无有效记录")), Step::Reply(written())
+    ]);
+    let mut plan = f.plan("edited-sequence");
+    plan.kind = "autoplay".into();
+    plan.meta = json!({"autoplayCount":2,"autoplayPauseMs":0,"autoplayPilot":"temporary-ai","autoplayBudgetVersion":"per-passage-1"});
+    f.engine.start(plan).unwrap();
+    let failed = f.settled("edited-sequence").await;
+    assert_eq!(failed.status, "failed", "{:?}", failed.error);
+    assert_eq!(failed.draft["steps"], 1);
+    let saved = f.text("SELECT node_id FROM lines WHERE id='line'");
+    f.store.lock().unwrap().execute("UPDATE nodes SET narrative='玩家改为在桥边喝茶。',rewritten=1 WHERE id=?", [&saved]).unwrap();
+    f.engine.resume("edited-sequence").unwrap();
+    let done = f.settled("edited-sequence").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    assert_eq!(f.model.count(), 4);
+    let requests = f.model.requests.lock().unwrap();
+    assert!(requests[3].to_string().contains("玩家改为在桥边喝茶") && !requests[3].to_string().contains("旧草稿"));
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes WHERE kind='turn'"), 2);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 4);
+    assert_eq!(done.budget.model_requests, 4);
+}
+
+#[tokio::test]
+async fn inline_upkeep_leaves_the_same_cadence_marker_as_deferred_upkeep() {
+    let upkeep = prose(r#"{"cards":[{"kind":"物品","name":"铜鹰符","keys":[],"content":"调兵信物"}],"places":[]}"#);
+    let f = Fixture::new(vec![Step::Reply(written()), Step::Reply(upkeep)]);
+    let mut plan = f.plan("inline-upkeep");
+    plan.kind = "autoplay".into();
+    plan.settings["autoUpkeep"] = true.into();
+    plan.meta = json!({"autoplayCount":1,"autoplayPilot":"temporary-ai","upkeepEvery":1,"autoplayUpkeepSystem":"整理设定"});
+    f.engine.start(plan).unwrap();
+    let done = f.settled("inline-upkeep").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes WHERE kind='edit' AND json_extract(meta_json,'$.by')='AI' AND json_extract(meta_json,'$.upkeep')=1"), 1);
+}
+
+#[tokio::test]
 async fn deferred_upkeep_does_not_move_the_next_writers_base() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -1710,6 +1885,50 @@ async fn deferred_upkeep_does_not_move_the_next_writers_base() {
     release.notify_one();
     assert_eq!(f.settled("tidy-busy~maintain").await.status, "committed");
     assert_eq!(f.text("SELECT node_id FROM lines WHERE id='line'"), head);
+}
+
+#[tokio::test]
+async fn an_expired_backup_capability_is_rechecked_and_does_not_change_the_main_models_cache() {
+    let fail = || Step::Fail(provider("network", None, false));
+    let unsupported = Error::Provider { kind:"http".into(), status:Some(400), message:"does not support tools".into(), partial:false };
+    let f = Fixture::new(vec![fail(), fail(), Step::Fail(unsupported), Step::Reply(written())]);
+    let mut plan = f.plan("fallback-capability");
+    plan.meta["depth"] = "standard".into();
+    let b = backup();
+    let key = format!("toolCapability:{}:{}:{}", b.slot, b.url, b.model);
+    let at = chrono::Utc::now().timestamp_millis() - 86_400_001;
+    f.store.lock().unwrap().execute("INSERT INTO settings(key,value) VALUES(?,?)", rusqlite::params![key, json!({"at":at,"supported":false}).to_string()]).unwrap();
+    plan.fallback_model = Some(b.clone());
+    f.engine.start(plan).unwrap();
+    let done = f.settled("fallback-capability").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    assert_eq!(*f.model.services.lock().unwrap(), ["fake", "fake", b.model.as_str(), b.model.as_str()]);
+    let requests = f.model.requests.lock().unwrap();
+    assert!(!tool_names(&requests[2]).is_empty() && tool_names(&requests[3]).is_empty());
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM settings WHERE key LIKE 'toolCapability:%'"), 1);
+    let cached: String = f.store.lock().unwrap().query_row("SELECT value FROM settings WHERE key=?", [key], |row| row.get(0)).unwrap();
+    let capability: Value = serde_json::from_str(&cached).unwrap();
+    assert_eq!(capability["supported"], false);
+    assert!(capability["at"].as_i64().unwrap() > at);
+}
+
+#[tokio::test]
+async fn an_older_run_probes_the_backup_without_remembering_its_answer_for_the_main_model() {
+    let fail = || Step::Fail(provider("network", None, false));
+    let f = Fixture::new(vec![fail(), fail(), Step::Reply(prose("我只能用文字回答。")),
+        Step::Fail(provider("auth", Some(401), false)), Step::Reply(written())]);
+    let mut plan = bound(&f, "old-capability", "standard");
+    plan.meta = json!({});
+    let b = backup();
+    plan.fallback_model = Some(b.clone());
+    f.engine.start(plan).unwrap();
+    assert_eq!(f.settled("old-capability").await.status, "failed");
+    f.engine.resume("old-capability").unwrap();
+    let done = f.settled("old-capability").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    assert_eq!(*f.model.services.lock().unwrap(), ["fake", "fake", b.model.as_str(), b.model.as_str(), "fake"]);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM settings WHERE key LIKE 'toolCapability:%'"), 1);
+    assert!(f.text("SELECT key FROM settings WHERE key LIKE 'toolCapability:%'").ends_with(&format!(":{}", b.model)));
 }
 
 #[tokio::test]

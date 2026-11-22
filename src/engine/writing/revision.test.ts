@@ -3,9 +3,10 @@ import { describe, expect, it } from "vitest";
 import { Game } from "../game";
 import { createMemoryPlatform } from "../../platform/memory";
 import { sampleState } from "../testing/fixtures";
+import { appendContinuity, readContinuity } from "../continuity";
 import * as tree from "../tree";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
-import { abilityCardName, adoptPlayerRevision, resolveCorrectionCards, canonOutcomeText, canonStop, filterCorrectionPatch, mergeRecordPatch, parsePlayerRevision, STALE_WRITING, type CanonCorrectionPreview, type PlayerRevisionRequest } from "./assist";
+import { abilityCardName, adoptPlayerRevision, resolveCorrectionCards, canonOutcomeText, canonStop, filterCorrectionPatch, mergeRecordPatch, MISSING_OPENING_SEED_REVISE, parsePlayerRevision, STALE_WRITING, type CanonCorrectionPreview, type PlayerRevisionRequest } from "./assist";
 
 const LLM = { slot: "t", url: "https://main.invalid/v1/chat/completions", model: "m", auxModel: "aux", includeUsage: true };
 
@@ -114,6 +115,21 @@ describe("按我的要求改", () => {
     expect((await s.game.repo.getState(revised.head.id)).protagonist.identity).toBe("镖师");
   });
 
+  it("carries continuity-only player edits whose quoted sources still match the new passage", async () => {
+    const s = await setup();
+    await appendContinuity(s.game, s.world.id, s.target.id, { threads: [
+      { id: "kept", kind: "clue", title: "练剑", detail: "练剑需要持续", status: "open", source: { nodeId: s.target.id, from: "action", quote: "练剑" } },
+      { id: "dropped", kind: "clue", title: "匕首", detail: "用的是匕首", status: "open", source: { nodeId: s.target.id, from: "narrative", quote: "匕首" } },
+    ] });
+    const tail = (await tree.cursor(s.game.repo, s.world.id)).head;
+    const request = { ...s.request, anchor: { ...s.request.anchor, headId: tail.id } };
+    s.reply({ replacement: "你握着短剑练到第三式。", note: "改兵器" });
+    const revised = await adoptPlayerRevision(s.game, await s.game.runPlayerRevision(request, () => {}).done);
+    expect(revised.head).toMatchObject({ kind: "edit", meta: { carriedFrom: tail.id } });
+    const { threads } = await readContinuity(s.game.repo, s.world.id, revised.head.id);
+    expect(threads).toMatchObject([{ id: "kept", source: { nodeId: revised.head.parentId, quote: "练剑" } }]);
+  });
+
   it("rejects a latest-passage preview if the player advances before the commit", async () => {
     const s = await setup();
     s.reply({ replacement: "你握着短剑练到第三式。", note: "改兵器" });
@@ -157,5 +173,47 @@ describe("按我的要求改", () => {
     s.reply({ replacement: s.target.narrative, note: "没有变化" });
     const preview = await s.game.runPlayerRevision(s.request, () => {}).done;
     await expect(adoptPlayerRevision(s.game, preview)).rejects.toThrow("没有要采用的改动");
+  });
+
+  it("survives a background AI upkeep landing in flight or before adoption, while rejecting player edits", async () => {
+    const s = await setup();
+    const origStream = s.game.platform.llm.stream.bind(s.game.platform.llm);
+    let appendedUpkeep = false;
+    s.game.platform.llm.stream = async (request, onEvent) => {
+      if (!appendedUpkeep) {
+        appendedUpkeep = true;
+        const state = await s.game.repo.getState(s.cursor.head.id);
+        await tree.append(s.game.repo, s.cursor, { kind: "edit", actionText: "AI 整理了设定集", narrative: "", state, meta: { by: "AI", upkeep: true } });
+      }
+      return origStream(request, onEvent);
+    };
+    s.reply({ replacement: "你握着短剑练到第三式。", note: "改兵器" });
+    const preview = await s.game.runPlayerRevision(s.request, () => {}).done;
+    const afterFirstUpkeep = (await tree.cursor(s.game.repo, s.world.id)).head;
+    expect(preview.anchor.headId).toBe(afterFirstUpkeep.id);
+    // A second upkeep edit lands before the player clicks 采用: still succeeds cleanly.
+    const state2 = await s.game.repo.getState(afterFirstUpkeep.id);
+    await tree.append(s.game.repo, await tree.cursor(s.game.repo, s.world.id), { kind: "edit", actionText: "AI 整理了设定集", narrative: "", state: state2, meta: { by: "AI", upkeep: true } });
+    const revised = await adoptPlayerRevision(s.game, preview);
+    expect(revised.head.narrative).toBe("你握着短剑练到第三式。");
+    expect((await tree.variants(s.game.repo, revised.head)).count).toBe(2);
+
+    // A non-upkeep player edit still invalidates an older anchor.
+    const cur = await tree.cursor(s.game.repo, s.world.id);
+    const staleAnchor = { worldId: s.world.id, lineId: cur.line.id, headId: cur.head.id, nodeId: revised.head.id, original: revised.head.narrative };
+    await tree.append(s.game.repo, cur, { kind: "edit", actionText: "手动改设定", narrative: "", state: await s.game.repo.getState(cur.head.id), meta: {} });
+    await expect(s.game.runPlayerRevision({ ...s.request, anchor: staleAnchor, range: { start: 0, end: staleAnchor.original.length } }, () => {}).done).rejects.toThrow(STALE_WRITING);
+  });
+
+  it("stops early with zero model calls when a legacy opening has no saved openingSeed", async () => {
+    const s = await setup();
+    const { world, node, line } = await s.game.repo.createWorld({
+      title: "旧存档", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "旧开场。", state: sampleState(), meta: {} },
+    });
+    let calls = 0;
+    s.game.platform.llm.stream = async () => { calls++; return "never"; };
+    const anchor = { worldId: world.id, lineId: line.id, headId: node.id, nodeId: node.id, original: node.narrative };
+    await expect(s.game.runPlayerRevision({ anchor, range: { start: 0, end: node.narrative.length }, hint: "改身份" }, () => {}).done).rejects.toThrow(MISSING_OPENING_SEED_REVISE);
+    expect(calls).toBe(0);
   });
 });

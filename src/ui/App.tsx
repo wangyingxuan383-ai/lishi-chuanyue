@@ -170,27 +170,39 @@ export default function App() {
     withViewTransition("pop", () => { flushSync(() => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s))); window.scrollTo?.(0, back); });
   }, [clearToast]);
   useEffect(() => installRipples(), []);
-  // R29-T006: a tapped "写好了" or "没写完" opens that story, at start and when the app comes back.
+  // R29-T006: a tapped "写好了" or "没写完" opens that story, at start, on resume, and from foreground taps.
+  const topRoute = useRef<Route>(stack.at(-1) ?? { name: "home" });
+  topRoute.current = stack.at(-1) ?? { name: "home" };
   useEffect(() => {
     if (!boot?.platform.system.takeLaunchTarget) return;
     const { platform, game } = boot;
     void loadNotifyPrefs(game.repo).then((prefs) => platform.system.setNotifyPrefs?.(prefs)).catch(() => {});
-    const take = async () => {
-      if (document.visibilityState !== "visible") return;
+    const take = async (event?: Event) => {
+      if (event?.type === "visibilitychange" && document.visibilityState !== "visible") return;
       const target = await platform.system.takeLaunchTarget?.().catch(() => null);
       if (!target?.worldId || !(await game.repo.getWorld(target.worldId))) return;
       const resumeRunId = target.action === "resume" ? target.runId ?? undefined : undefined;
       const next: Route = { name: "play", worldId: target.worldId, resumeRunId };
+      const top = topRoute.current;
+      const sameStory = top.name === "play" && top.worldId === next.worldId;
       setStack((s) => {
-        const top = s.at(-1);
-        return top?.name === "play" && top.worldId === next.worldId
+        const current = s.at(-1);
+        return current?.name === "play" && current.worldId === next.worldId
           ? resumeRunId ? [...s.slice(0, -1), next] : s
           : [{ name: "home" }, next];
       });
+      if (sameStory) {
+        if (!resumeRunId) game.notifyAgentChange(target.worldId);
+        window.dispatchEvent(new Event("lishi:catch-up"));
+      }
     };
     void take();
     document.addEventListener("visibilitychange", take);
-    return () => document.removeEventListener("visibilitychange", take);
+    window.addEventListener("lishi:launch-target", take);
+    return () => {
+      document.removeEventListener("visibilitychange", take);
+      window.removeEventListener("lishi:launch-target", take);
+    };
   }, [boot]);
   // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
   // a new request answers the one it replaces as cancelled.

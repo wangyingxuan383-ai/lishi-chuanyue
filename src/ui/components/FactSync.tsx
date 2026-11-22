@@ -2,11 +2,12 @@
 // “只改文字” keeps today's behaviour; “事实也一起改” asks the AI once to bring the
 // turn's record and the earlier settings in line with the edited text, which stays
 // exactly as the player wrote it.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { writingError, type PlayerRevisionPreview, type WritingAnchor } from "../../engine/writing/assist";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
-import { RecordChanges } from "./WritingAssist";
+import { DiffView, RecordChanges } from "./WritingAssist";
+import { diffStats, diffText } from "./textDiff";
 
 export interface FactSyncAsk { anchor: WritingAnchor; text: string; latest: boolean }
 
@@ -20,6 +21,8 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
   const [saving, setSaving] = useState(false);
   const task = useRef<{ cancel(): void } | null>(null);
   useEffect(() => () => task.current?.cancel(), []);
+  const stats = useMemo(() => diffStats(diffText(ask.anchor.original, ask.text)), [ask.anchor.original, ask.text]);
+  const hasDiff = stats.added > 0 || stats.removed > 0;
   const sync = async () => {
     setStep("syncing"); setError("");
     const work = game.runFactSync({ anchor: ask.anchor, text: ask.text });
@@ -38,6 +41,12 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
   const where = ask.latest ? "改好的会成为这一段的另一个版本，原来的留着。" : "这段不是最新一段：会另起一条“改写后的路线”，原路线和后面的剧情都留着。";
   return <Sheet title="这段的事实也要一起改吗？" onClose={() => { task.current?.cancel(); onClose(); }}>
     <div className="stack">
+      {hasDiff && step !== "syncing" && (
+        <details className="diff-fold">
+          <summary>查看正文改动<span className="diff-counts">{stats.removed > 0 && <em className="del">-{stats.removed}</em>}{stats.added > 0 && <em className="ins">+{stats.added}</em>}</span></summary>
+          <DiffView before={ask.anchor.original} after={ask.text} />
+        </details>
+      )}
       {step === "ask" && <>
         <p className="muted m-0">只改了措辞的话，选“只改文字”。改了人名、关系、数字、本事、物品或发生了什么，选“事实也一起改”：AI 会对照改动，把本回合记录和之前的设定一起改正（用一次请求），以后的剧情就照新的写。</p>
         <div className="stack gap-2">
@@ -61,7 +70,7 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
             ? <button className="primary" disabled={saving} onClick={() => void run(onTextOnly)}>保存文字</button>
             : <>
               <button disabled={saving} onClick={() => void run(onTextOnly)}>只改文字</button>
-              <button className="primary" disabled={saving} onClick={() => void run(() => onAdopt(preview))}>采用</button>
+              <button className="primary" disabled={saving} onClick={() => void run(() => onAdopt({ ...preview, anchor: { ...preview.anchor, headId: ask.anchor.headId } }))}>采用</button>
             </>}
         </div>
       </>}

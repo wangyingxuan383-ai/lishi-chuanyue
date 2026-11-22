@@ -66,6 +66,7 @@ pub(crate) struct Context {
     /// Where in the passage this launch is, for the failure record (D166).
     pub(crate) stage: crate::failure::Stage,
     last_reply_step: Option<String>,
+    replayed_reply: bool,
     /// Model requests counted before this launch, so a failure can say how
     /// many this attempt sent (zero means it replayed or was refused locally).
     pub(crate) requests_before: u32,
@@ -74,7 +75,7 @@ impl Context {
     pub(crate) fn new(plan: RunPlan, budget: RunBudget, draft: Value, cancel: CancellationToken) -> Context {
         let active_before = budget.active_ms;
         let requests_before = budget.model_requests;
-        Context { plan, budget, draft, started: Instant::now(), active_before, cancel, stage: crate::failure::Stage::Prepare, requests_before, last_reply_step: None }
+        Context { plan, budget, draft, started: Instant::now(), active_before, cancel, stage: crate::failure::Stage::Prepare, requests_before, last_reply_step: None, replayed_reply: false }
     }
     pub(crate) fn failure(&self, error: &Error) -> Value {
         let mut failure = crate::failure::record(error, self.stage, self.budget.model_requests.saturating_sub(self.requests_before));
@@ -464,6 +465,7 @@ impl Engine {
             let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
             c.stage = crate::failure::Stage::of_purpose(purpose);
             c.last_reply_step = None;
+            c.replayed_reply = false;
             c.plan.clone()
         };
         // Cache identity includes the actual task inputs, model and source scope.
@@ -479,6 +481,7 @@ impl Engine {
             });
             if same {
                 let result = serde_json::from_str(&cached)?;
+                shared.lock().map_err(|_| Error::Cancelled)?.replayed_reply = true;
                 self.accept_response(shared, &plan, &key, purpose, &result, !tools.is_empty() && !final_only)?;
                 self.note_reading(shared,input["request"]["messages"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;
                 return Ok(result);
@@ -673,7 +676,9 @@ impl Engine {
                     // passing reason; the backup answers it, and the rest of this run.
                     // A request that offers tools never goes to a backup already known not to take them:
                     // it could only fail there too (R30 step 3).
-                    let backup_without_tools = |backup: &crate::types::ModelConfig| !tools.is_empty() && self.store.lock().ok().and_then(|db| db.query_row("SELECT value FROM settings WHERE key=?", [format!("toolCapability:{}:{}:{}", backup.slot, backup.url, backup.model)], |r| r.get::<_, String>(0)).optional().ok().flatten()).and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).is_some_and(|v| v["supported"] == false);
+                    let backup_without_tools = |backup: &crate::types::ModelConfig| {
+                        !tools.is_empty() && self.cached_tool_support(backup).ok().flatten() == Some(false)
+                    };
                     let backup = plan.fallback_model.clone().filter(|backup| !backup.same_service(&plan.model) && crate::failure::fallback_eligible(&error) && !backup_without_tools(backup));
                     if let Some(backup) = backup {
                         if shared.lock().map_err(|_| Error::Cancelled)?.step_budget().model_requests < request_limit {
@@ -864,11 +869,11 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"));
+        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"));
         let support = if tier == Tier::Fast {
             false
         } else if modern {
-            self.cached_tool_support(&plan)?.unwrap_or(true)
+            self.cached_tool_support(&plan.model)?.unwrap_or(true)
         } else if has_book {
             self.tool_capability(&shared).await?
         } else {
@@ -877,7 +882,7 @@ impl Engine {
         if plan.kind == "correction" && !support {
             return Err(Error::fail(crate::failure::FailKind::Unsupported,"这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用"));
         }
-        let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t["function"]["name"].as_str().unwrap_or(""))).filter(|t|tier!=Tier::Standard||STANDARD_TOOLS.contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
+        let mut active_tools = if support { tools.into_iter().filter(|t|has_book||!["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t["function"]["name"].as_str().unwrap_or(""))).filter(|t|tier!=Tier::Standard||STANDARD_TOOLS.contains(&t["function"]["name"].as_str().unwrap_or(""))).collect::<Vec<_>>() } else { vec![] };
         // 资料范围 (D184): only the chosen notes → no tool that reads the original; a
         // range of chapters → no whole-book reference tools.
         let scoped_out: &[&str] = if crate::runtime_sources::notes_only(&plan) { &["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"] } else if crate::runtime_sources::scope_range(&plan).is_some() { &["locate_original_event","prepare_reference_check"] } else { &[] };
@@ -902,10 +907,13 @@ impl Engine {
             let outgoing = if plan.kind == "correction" { correction::with_read_ledger(&shared, messages.clone(), plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize)? } else { messages.clone() };
             let attempt=self.complete_with(&shared,&format!("writing:{round}"),outgoing,active_tools.clone(),false,final_only).await;
             let response=match attempt {
-                Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{self.save_tool_support(&plan,false)?;active_tools.clear();continue;},
+                Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{
+                    self.save_observed_tool_support(&shared, false)?;
+                    active_tools.clear();
+                    continue;
+                },
                 other=>other?,
             };
-            if !response.tool_calls.is_empty(){self.save_tool_support(&plan,true)?;}
             if response.tool_calls.is_empty() || final_only {
                 // A service that ignores tool_choice "none" still ends here:
                 // whatever text came back is the passage.
@@ -913,13 +921,21 @@ impl Engine {
                 response.tool_calls.clear();
                 break response;
             }
+            // Validate the whole group before saving any tool result from this reply.
+            let arguments = response.tool_calls.iter().map(|call| {
+                let raw = call["function"]["arguments"].as_str().unwrap_or_default();
+                serde_json::from_str::<Value>(if raw.trim().is_empty() { "{}" } else { raw })
+                    .ok().filter(Value::is_object)
+                    .ok_or_else(|| Error::fail(crate::failure::FailKind::Format, "AI 调用资料工具的参数不完整，可以再试一次"))
+            }).collect::<Result<Vec<_>>>()?;
+            self.save_observed_tool_support(&shared, true)?;
             messages.push(chat::assistant_message(&response));
-            for call in &response.tool_calls {
+            for (call, args) in response.tool_calls.iter().zip(arguments) {
                 let name = call["function"]["name"].as_str().unwrap_or("");
-                let args: Value =
-                    serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}"))?;
                 let key = format!("tool:{round}:{}", call["id"].as_str().unwrap_or(""));
-                let cached: Option<String> = self.store.lock()?.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done'", params![plan.id,key], |r| r.get(0)).optional()?;
+                let cached: Option<String> = self.store.lock()?.query_row(
+                    "SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done' AND kind=? AND input_json=?",
+                    params![plan.id,key,name,args.to_string()], |r| r.get(0)).optional()?;
                 let output = if let Some(cached) = cached {
                     serde_json::from_str(&cached)?
                 } else {
@@ -1047,7 +1063,7 @@ impl Engine {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
-        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3")) && !plan.meta["playerNarrative"].is_string() {
+        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4")) && !plan.meta["playerNarrative"].is_string() {
             let (revised,revised_record,report)=self.review_reference_lite(&shared,&plan,&narrative,&record).await?;
             narrative=revised; record=revised_record;
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report;
@@ -1124,11 +1140,15 @@ impl Engine {
         self.checkpoint(&shared)?;
         let result = self.commit(&shared, &narrative, record, &applied, &result)?;
         self.store.run_event(&plan,json!({"type":"done","worldId":plan.world_id,"nodeId":result["nodeId"],"chips":applied["chips"]}))?;
-        (self.committed)(format!(
-            "{}:{}",
-            plan.world_id,
-            result["nodeId"].as_str().unwrap_or("")
-        ));
+        // A spectator sequence rings once when the whole sequence finishes (finish_autoplay),
+        // rather than ringing on every child passage while the progress bar is still active.
+        if plan.meta["parentRun"].is_null() {
+            (self.committed)(format!(
+                "{}:{}",
+                plan.world_id,
+                result["nodeId"].as_str().unwrap_or("")
+            ));
+        }
         if deferred {
             // The passage is saved either way; tidying that cannot start is
             // asked for again by the next passage.
@@ -1137,35 +1157,25 @@ impl Engine {
         Ok(())
     }
 
-    fn cached_tool_support(&self,plan:&RunPlan)->Result<Option<bool>>{
-        let key=format!("toolCapability:{}:{}:{}",plan.model.slot,plan.model.url,plan.model.model);
+    fn cached_tool_support(&self,model:&crate::types::ModelConfig)->Result<Option<bool>>{
+        let key=format!("toolCapability:{}:{}:{}",model.slot,model.url,model.model);
         let raw=self.store.lock()?.query_row("SELECT value FROM settings WHERE key=?",[key],|r|r.get::<_,String>(0)).optional()?;
         Ok(raw.and_then(|s|serde_json::from_str::<Value>(&s).ok()).filter(|v|Utc::now().timestamp_millis()-v["at"].as_i64().unwrap_or(0)<86_400_000).and_then(|v|v["supported"].as_bool()))
     }
-    fn save_tool_support(&self,plan:&RunPlan,supported:bool)->Result<()>{
-        let key=format!("toolCapability:{}:{}:{}",plan.model.slot,plan.model.url,plan.model.model);
+    fn save_observed_tool_support(&self, shared: &Shared, supported: bool) -> Result<()> {
+        let context = shared.lock().map_err(|_| Error::Cancelled)?;
+        // A replay may have been served by the backup in the earlier launch.
+        if context.replayed_reply { return Ok(()); }
+        let model = context.plan.model.clone();
+        drop(context);
+        let key=format!("toolCapability:{}:{}:{}",model.slot,model.url,model.model);
         self.store.lock()?.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",params![key,json!({"at":Utc::now().timestamp_millis(),"supported":supported}).to_string()])?;Ok(())
     }
 
     async fn tool_capability(self: &Arc<Self>, shared: &Shared) -> Result<bool> {
-        let plan = shared.lock().map_err(|_| Error::Cancelled)?.plan.clone();
-        let key = format!(
-            "toolCapability:{}:{}:{}",
-            plan.model.slot, plan.model.url, plan.model.model
-        );
-        let cached: Option<String> = self
-            .store
-            .lock()?
-            .query_row("SELECT value FROM settings WHERE key=?", [&key], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        if let Some(value) = cached {
-            if let Ok(value) = serde_json::from_str::<Value>(&value) {
-                if Utc::now().timestamp_millis() - value["at"].as_i64().unwrap_or(0) < 86_400_000 {
-                    return Ok(value["supported"].as_bool().unwrap_or(false));
-                }
-            }
+        let model = shared.lock().map_err(|_| Error::Cancelled)?.plan.model.clone();
+        if let Some(supported) = self.cached_tool_support(&model)? {
+            return Ok(supported);
         }
         let result = self.complete(shared,"capability",vec![json!({"role":"user","content":"请调用 report_capability 工具，参数 value 为 ready，不要输出其他内容。"})],vec![json!({"type":"function","function":{"name":"report_capability","description":"确认工具调用能力","parameters":{"type":"object","properties":{"value":{"type":"string","enum":["ready"]}},"required":["value"],"additionalProperties":false}}})],false).await;
         let supported = match result {
@@ -1192,13 +1202,7 @@ impl Engine {
             }
             Err(error) => return Err(error),
         };
-        self.store.lock()?.execute(
-            "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
-            params![
-                key,
-                json!({"at":Utc::now().timestamp_millis(),"supported":supported}).to_string()
-            ],
-        )?;
+        self.save_observed_tool_support(shared, supported)?;
         Ok(supported)
     }
 
@@ -1317,7 +1321,7 @@ impl Engine {
         let mut meta = plan.meta.clone();
         // A saved passage keeps what describes it, not the prompts that built
         // it: those were copied into every node and only grew the save (R30).
-        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "chapterMessages", "chapterRefresh", "sourceScope", "textGuard", "textGuardAt", "codexMessages",
+        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "upkeepTextGuard", "chapterMessages", "chapterTextGuard", "chapterRefresh", "sourceScope", "textGuard", "textGuardAt", "autoplayTextHash", "codexMessages",
             "autoplayTurnSystem", "autoplayExtractSystem", "autoplayUpkeepSystem", "autoplayChapterSystem", "resumeBudgetBase", "stepBudgetBase"] {
             if let Some(object) = meta.as_object_mut() {
                 object.remove(key);
@@ -1442,16 +1446,36 @@ impl Engine {
             )?;
             head = trailing.clone();
         }
+        let mut carried_ids = std::collections::HashMap::new();
+        if let Some(old) = plan.meta["targetId"].as_str() {
+            carried_ids.insert(old, id.clone());
+        }
         for edit in &plan.carried_edits {
             let mut options = plan.options.clone();
             options["advanceTime"] = false.into();
+            let mut record = edit["record"].clone();
             let next =
-                rules::apply_record(&state, &edit["record"], &options).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?;
-            if next["state"] == state {
+                rules::apply_record(&state, &record, &options).map_err(|e| Error::fail(crate::failure::FailKind::Settle, e))?;
+            let next_id = uuid::Uuid::new_v4().simple().to_string();
+            let action = json!({"text":format!("{}（已沿用）",edit["actionText"].as_str().unwrap_or("")),"directorNote":edit["directorNote"]});
+            let old_edit = edit["id"].as_str();
+            if let Some(changes) = record.get_mut("continuity") {
+                for kind in ["knowledge", "threads"] {
+                    if let Some(items) = changes.get_mut(kind).and_then(Value::as_array_mut) {
+                        for item in items {
+                            if let Some(source) = item["source"]["nodeId"].as_str() {
+                                let mapped = if Some(source) == old_edit { Some(&next_id) } else { carried_ids.get(source) };
+                                if let Some(mapped) = mapped { item["source"]["nodeId"] = mapped.clone().into(); }
+                            }
+                        }
+                    }
+                }
+                (record, _) = crate::continuity::validate_record(&tx, &plan.world_id, &head, &next_id, "", &action, &next["state"], &record, false)?;
+            }
+            if next["state"] == state && record["continuity"].is_null() {
                 continue;
             }
             state = next["state"].clone();
-            let next_id = uuid::Uuid::new_v4().simple().to_string();
             let seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq),0)+1 FROM nodes WHERE world_id=?",
                 [&plan.world_id],
@@ -1464,13 +1488,14 @@ impl Engine {
                 Some(&head),
                 seq,
                 "edit",
-                &json!({"text":format!("{}（已沿用）",edit["actionText"].as_str().unwrap_or(""))}),
+                &action,
                 "",
-                &edit["record"],
+                &record,
                 &json!({"chips":next["chips"]}),
                 &state,
                 &time,
             )?;
+            if let Some(old) = old_edit { carried_ids.insert(old, next_id.clone()); }
             head = next_id;
         }
         if c.draft["upkeepPatch"].is_object() {
@@ -1496,7 +1521,7 @@ impl Engine {
                     &json!({"text":"AI 整理了设定集"}),
                     "",
                     patch,
-                    &json!({"by":"AI","promptVersion":plan.meta["upkeepVersion"],"chips":next["chips"]}),
+                    &json!({"by":"AI","promptVersion":plan.meta["upkeepVersion"],"chips":next["chips"],"upkeep":true}),
                     &state,
                     &time,
                 )?;

@@ -26,6 +26,30 @@ label.writing-option:has(input:checked) { border-color: var(--accent); backgroun
 /* The AI's version reads like the book. */
 .writing-assist textarea { font-family: var(--serif); font-size: 16px; line-height: 1.8; field-sizing: content; min-height: 5lh; max-height: 40dvh; }
 
+/* Inline diff preview for 改稿预览 and 改后同步. */
+.diff-box {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--raised);
+  font-family: var(--serif); font-size: 16px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 38dvh; overflow-y: auto;
+}
+.diff-del {
+  background: color-mix(in srgb, var(--loss) 14%, transparent); color: var(--loss);
+  text-decoration: line-through; text-decoration-thickness: 1.5px; padding: 0 2px; border-radius: 2px;
+}
+.diff-ins {
+  background: color-mix(in srgb, var(--gain) 16%, transparent); color: var(--gain);
+  text-decoration: underline; text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--gain) 55%, transparent);
+  padding: 0 2px; border-radius: 2px;
+}
+.diff-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); min-height: 36px; padding: 4px 10px; }
+.diff-counts { display: inline-flex; gap: 5px; font-family: var(--sans); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: 6px; }
+.diff-counts em { font-style: normal; font-weight: 600; }
+.diff-counts .del { color: var(--loss); }
+.diff-counts .ins { color: var(--gain); }
+.diff-fold { border: 1px solid var(--line); border-radius: var(--radius); padding: 0 12px 10px; background: var(--surface); }
+.diff-fold summary { min-height: 42px; font-size: 14px; font-family: var(--serif); color: var(--fg); }
+.diff-fold:not([open]) { padding-bottom: 0; }
+
 /* 展开输入: the whole sheet, the text box taking what is left. */
 .writing-desk { display: flex; flex-direction: column; gap: 12px; min-height: min(72dvh, 740px); }
 .writing-desk > textarea { flex: 1; min-height: 40dvh; resize: none; font-family: var(--serif); font-size: 17px; line-height: 1.8; }

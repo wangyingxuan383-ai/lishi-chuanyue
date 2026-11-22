@@ -66,9 +66,16 @@
 .scene-panel .scene-menu { color: var(--muted); background: transparent; border: 0; box-shadow: none; }
 
 /* Other stories: a strip of small landscapes, swiped sideways. */
-.scene-strip { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 4px 2px 12px; margin: 0 -2px; scrollbar-width: none; }
+.scene-strip {
+  display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding: 4px 4px 12px; margin: 0 -4px; scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 6px, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 6px, #000 calc(100% - 14px), transparent);
+}
 .scene-strip::-webkit-scrollbar { display: none; }
-.strip-card { --h: 210; position: relative; flex: 0 0 152px; scroll-snap-align: start; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1, 0 1px 3px var(--shadow)); overflow: hidden; }
+.strip-card { --h: 210; position: relative; flex: 0 0 152px; scroll-snap-align: start; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1, 0 1px 3px var(--shadow)); overflow: hidden; transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+@media (hover: hover) {
+  .strip-card:hover { transform: translateY(-2px); box-shadow: var(--elev-2); }
+}
 .strip-card.tone-1 { --h: 22; } .strip-card.tone-2 { --h: 158; } .strip-card.tone-3 { --h: 352; } .strip-card.tone-4 { --h: 200; }
 .strip-card.tone-5 { --h: 30; } .strip-card.tone-6 { --h: 268; } .strip-card.tone-7 { --h: 55; }
 .strip-card .strip-open { display: grid; gap: 6px; padding: 0 0 10px; }

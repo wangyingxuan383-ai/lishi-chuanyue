@@ -4,12 +4,19 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
+import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   private var agentBrowser: AgentBrowserHost? = null
+  private var webView: WebView? = null
+
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    this.webView = webView
+  }
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
@@ -52,11 +59,18 @@ class MainActivity : TauriActivity() {
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
-    // A tapped "写好了" or "没写完": the page asks for it on resume (take_launch_target).
-    LaunchTarget.capture(intent)
+    // A tapped "写好了" or "没写完": capture, clear ready notices, and wake the page immediately
+    // (tapping a notification while already in foreground or split-screen does not fire visibilitychange).
+    if (LaunchTarget.capture(intent)) {
+      GenerationService.clearReady(this)
+      webView?.post {
+        webView?.evaluateJavascript("window.dispatchEvent(new Event('lishi:launch-target'))", null)
+      }
+    }
   }
 
   override fun onDestroy() {
+    webView = null
     agentBrowser?.destroy(); agentBrowser = null
     super.onDestroy()
   }

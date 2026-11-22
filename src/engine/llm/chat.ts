@@ -144,9 +144,11 @@ export function compactChatMessages(messages: ChatMessage[]): ChatMessage[] | nu
   return changed ? compact : null;
 }
 
-/** One retry shared by context recovery and transient failures, before body/tool output. */
+/** One retry shared by stream interruptions, context recovery and early transient failures. */
 export function retryDecision(error: unknown, attempt: number, messages: ChatMessage[]): { retry: boolean; messages: ChatMessage[] } {
-  if (attempt !== 1 || !(error instanceof ChatError) || error.partial) return { retry: false, messages };
+  if (attempt !== 1 || !(error instanceof ChatError)) return { retry: false, messages };
+  if (error.kind === "stream") return { retry: true, messages };
+  if (error.partial) return { retry: false, messages };
   const compact = isContextWindowError(error) ? compactChatMessages(messages) : null;
   // The same rule as native passages (D167): no words yet, and the failure may pass.
   const transient = error.kind === "network" || error.kind === "timeout_first"
@@ -217,7 +219,7 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
       if (!chunk) return;
       if (chunk.failed) {
         ended = true;
-        fail(new ChatError("invalid_stream", undefined, text || (calls.size ? "[tool]" : ""), "AI 服务在回复途中返回了错误"));
+        fail(new ChatError("stream", undefined, text || (calls.size ? "[tool]" : ""), "AI 服务在回复途中返回了错误"));
         return;
       }
       if (chunk.reasoning && !text && !thinking) {

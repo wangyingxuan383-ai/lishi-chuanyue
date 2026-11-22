@@ -27,7 +27,7 @@ import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { Icon } from "../components/Icon";
 import { buzz, motionLevel } from "../app/motion";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
-import { adoptRewrite, adoptCanonCorrection, adoptPlayerRevision, assertWritingAnchor, isLatestPassage, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview, type PlayerRevisionPreview } from "../../engine/writing/assist";
+import { adoptRewrite, adoptCanonCorrection, adoptPlayerRevision, assertWritingAnchor, headFollowsUpkeep, isLatestPassage, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview, type PlayerRevisionPreview } from "../../engine/writing/assist";
 import { FactSyncSheet, type FactSyncAsk } from "../components/FactSync";
 import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
 import { WritingDesk } from "../components/WritingDesk";
@@ -240,7 +240,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     // The AI's background 设定集 tidy-up landing on the same route moves the head
     // but changes nothing the player is rewriting: the open sheet follows it.
     const head = cursor?.head;
-    const follows = (anchor: WritingAnchor) => !!head && !busy && anchor.worldId === worldId && anchor.lineId === cursor?.line.id && head.kind === "edit" && head.meta.upkeep === true && head.parentId === anchor.headId;
+    const follows = (anchor: WritingAnchor) => !!head && !busy && anchor.worldId === worldId && anchor.lineId === cursor?.line.id && headFollowsUpkeep(visibleNodes.current, anchor.headId, head.id);
     setWriting((w) => (w && follows(w.anchor) ? { ...w, anchor: { ...w.anchor, headId: head!.id } } : null));
     setFactAsk((a) => (a && follows(a.anchor) ? { ...a, anchor: { ...a.anchor, headId: head!.id } } : null));
     setDesk(false);
@@ -479,7 +479,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   };
   const checkScope = (anchor: WritingAnchor) => {
     const current = writingScope.current;
-    if (!current.active || current.busy || current.worldId !== anchor.worldId || current.headId !== anchor.headId || current.lineId !== anchor.lineId) throw new WritingError(STALE_WRITING);
+    if (!current.active || current.busy || current.worldId !== anchor.worldId || current.lineId !== anchor.lineId || !headFollowsUpkeep(visibleNodes.current, anchor.headId, current.headId)) throw new WritingError(STALE_WRITING);
   };
   /** Saving an edited passage first asks whether its facts change too (D183). */
   const applyRewrite = async (anchor: WritingAnchor, text: string) => {
@@ -651,6 +651,11 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   /** 回到之前: to just before the passage that ended it, keeping edits made before that passage (such as adding the challenge). */
   const backOne = () => { const target = nodes.find((n) => n.id === turn?.parentId); if (target) void goBack(target); };
   const statusText = gen && { starting: "", thinking: "构思中…", writing: "", organizing: "整理中…" }[gen.phase];
+  const sealAlert = !dead && (state.protagonist.statuses.some((x) => x.name === "垂危") || state.protagonist.stats.health <= 25)
+    ? "danger"
+    : !dead && (state.protagonist.stats.health <= 50 || (state.challenge?.status === "active" && state.challenge.deadlineMinute !== null && state.challenge.deadlineMinute - state.time.elapsedMinutes <= 2 * 1440))
+      ? "warn"
+      : undefined;
 
   const panelProps = {
     worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy,
@@ -681,7 +686,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
           <h1>{place}</h1>
           <div className="subtitle">{now.text}</div>
         </button>
-        {!wide && <button className="icon-btn" aria-label="角色" title="角色" onClick={() => setPanel(true)}><span className="name-seal" aria-hidden="true">{(state.protagonist.name.trim() || "我")[0]}</span></button>}
+        {!wide && <button className="icon-btn" aria-label="角色" title="角色" onClick={() => setPanel(true)}><span className="name-seal" data-alert={sealAlert} aria-hidden="true">{(state.protagonist.name.trim() || "我")[0]}</span></button>}
         <button className={`icon-btn depth-btn depth-${depthOf(world.settings)}`} aria-label={`生成档位：${DEPTH_LABEL[depthOf(world.settings)]}`} title={`生成档位：${DEPTH_LABEL[depthOf(world.settings)]}`} onClick={() => setSheet("depth")}><span aria-hidden="true">{DEPTH_MARK[depthOf(world.settings)]}</span></button>
         <button className="icon-btn reading-btn" aria-label="字号与主题" title="字号与主题" onClick={() => setSheet("reading")}><span aria-hidden="true">Aa</span></button>
         <button className="icon-btn" aria-label="更多" title="更多" onClick={() => setSheet("more")}><Icon name="more" /></button>
@@ -718,7 +723,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
               );
             })}
             {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
-              onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); }} />}
+              onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
             {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
             {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
             {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (

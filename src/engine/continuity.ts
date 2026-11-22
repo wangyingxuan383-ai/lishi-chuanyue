@@ -10,6 +10,7 @@ export interface ContinuityChanges { knowledge?: KnowledgeChange[]; threads?: Th
 export interface ProjectedKnowledge extends KnowledgeChange { nodeId: string; originNodeId: string; historyCount: number }
 export interface ProjectedThread extends ThreadChange { nodeId: string; originNodeId: string; historyCount: number }
 export interface ContinuityView { worldId: string; headId: string; knowledge: ProjectedKnowledge[]; threads: ProjectedThread[]; ignoredEvents: number }
+type StagedPassage = { id: string; narrative: string; action: string; changes?: ContinuityChanges };
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown, max: number): string | undefined => typeof v === "string" && !!v.trim() && v.trim().length <= max && !v.includes("\0") ? v.trim() : undefined;
 const note = (issues: string[], message: string) => { if (issues.length < 20) issues.push(message); };
@@ -102,7 +103,7 @@ export async function readContinuity(repo: Repo, worldId: string, headId: string
   return { worldId, headId, knowledge: [...knowledge.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), threads: [...threads.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), ignoredEvents };
 }
 
-export async function validateContinuity(repo: Repo, worldId: string, baseHead: string | null, currentId: string, narrative: string, action: string, state: WorldState, raw: unknown, strict: boolean) {
+export async function validateContinuity(repo: Repo, worldId: string, baseHead: string | null, currentId: string, narrative: string, action: string, state: WorldState, raw: unknown, strict: boolean, staged: StagedPassage[] = []) {
   const issues: string[] = [], changes = normalizeContinuity(raw, issues), clean: ContinuityChanges = {};
   let rows: Awaited<ReturnType<typeof pathRows>>, previous: Pick<ContinuityView, "knowledge">;
   try {
@@ -113,13 +114,16 @@ export async function validateContinuity(repo: Repo, worldId: string, baseHead: 
     note(issues, "历史资料未能校对，本回合附加知情与线索未保存");
     return { changes: clean, issues };
   }
-  const allowed = new Set([...rows.map(row => String(row.id)), currentId]);
+  const pending = new Map(staged.map((node) => [node.id, node]));
+  const allowed = new Set([...rows.map(row => String(row.id)), ...pending.keys(), currentId]);
+  const knownPeople = new Map(previous.knowledge.map((item) => [item.id, item.person]));
+  for (const node of staged) for (const item of node.changes?.knowledge ?? []) knownPeople.set(item.id, item.person);
   for (const kind of ["knowledge", "threads"] as const) for (const raw of changes[kind] ?? []) {
     const item: any = { ...raw, source: { ...raw.source, nodeId: raw.source.nodeId ?? currentId } };
-    if (!await sourceValid(repo, worldId, item.source, allowed, { id: currentId, narrative, action })) { note(issues, "知情或线索的引文不存在于当前路线的指定正文/玩家行动中"); continue; }
+    if (!await sourceValid(repo, worldId, item.source, allowed, pending.get(item.source.nodeId) ?? { id: currentId, narrative, action })) { note(issues, "知情或线索的引文不存在于当前路线的指定正文/玩家行动中"); continue; }
     if (kind === "knowledge") {
-      const actor = resolveKnowledgePerson(state, item.person), prior = previous.knowledge.find(old => old.id === item.id);
-      if (!actor || prior && prior.person !== actor.person) { note(issues, "知情记录的人物不存在、名字不唯一或同一编号改指其他人物"); continue; }
+      const actor = resolveKnowledgePerson(state, item.person), prior = knownPeople.get(item.id);
+      if (!actor || prior && prior !== actor.person) { note(issues, "知情记录的人物不存在、名字不唯一或同一编号改指其他人物"); continue; }
       Object.assign(item, actor);
     }
     (clean[kind] ??= [] as any).push(item);

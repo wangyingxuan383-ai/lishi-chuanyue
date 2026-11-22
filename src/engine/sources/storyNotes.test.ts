@@ -5,7 +5,7 @@ import { Game } from "../game";
 import { sampleState } from "../testing/fixtures";
 import * as tree from "../tree";
 import { exportWorld, importWorld } from "../archive";
-import { carryNotes, getNote, listStoryNotes, newStoryNote, noteOffRoute, notesForTurn, restorePrevious, routeIds, saveNote, startNoteUpdate, storyLastTurn } from "./notes";
+import { carryNotes, getNote, listStoryNotes, newStoryNote, noteMergeMessages, noteOffRoute, notesForTurn, restorePrevious, routeIds, saveNote, startNoteUpdate, storyLastTurn } from "./notes";
 
 const LLM = { slot: "t", url: "https://main.invalid/v1/chat/completions", model: "m", auxModel: "aux", includeUsage: true };
 
@@ -21,7 +21,7 @@ async function story() {
   await add("第三段：夜里出城。");
   await repo.addChapter({ worldId: world.id, firstNodeId: one.id, lastNodeId: two.id, title: "第一章", gist: "进城", summary: "第一章摘要：进城，认了舅舅。", model: "aux", promptVersion: "chapter-1" });
   const calls: { url: string; text: string }[] = [];
-  let reply = (text: string) => (text.includes("已有札记") ? "合并后的主线：进城、认舅、出城、上山。" : "本局主线：进城、认舅、出城。");
+  let reply = (text: string): string => (text.includes("已有札记") ? "合并后的主线：进城、认舅、出城、上山。" : "本局主线：进城、认舅、出城。");
   const refuse = { when: (_url: string, _text: string) => false };
   platform.llm.stream = async (request, onEvent) => {
     const text = (request.body as { messages: { content: string }[] }).messages.map((m) => m.content).join("\n");
@@ -35,6 +35,56 @@ async function story() {
 }
 
 describe("本局札记 (D174)", () => {
+  it("asks merge passes to keep turn citations rather than chapter citations for story notes", () => {
+    const storyNote = newStoryNote("w", "plot", {}, "主线梗概");
+    const [system] = noteMergeMessages("长安", storyNote, ["进城（第1回合）", "出城（第3回合）"], true);
+    expect(system.content).toContain("保留每条的出处回合标注");
+    expect(system.content).not.toContain("出处章节标注");
+  });
+
+  it("omits stale chapter summaries and reads the edited passages instead", async () => {
+    const { game, repo, worldId, calls } = await story();
+    const [chapter] = await repo.chaptersOnPath(worldId, (await tree.cursor(repo, worldId)).head.id);
+    await repo.updateNarrative(chapter.firstNodeId, "第一段：主角在城外买茶。");
+    expect((await repo.chaptersOnPath(worldId, (await tree.cursor(repo, worldId)).head.id))[0].stale).toBe(true);
+    const note = newStoryNote(worldId, "plot", {}, "主线梗概");
+    await saveNote(repo, note);
+    await game.runCanonNote(note.id, () => {});
+    expect(calls[0].text).toContain("主角在城外买茶");
+    expect(calls[0].text).not.toContain("第一章摘要");
+  });
+
+  it("restores the previous content and reach after rebuilding the automatic plot note", async () => {
+    const { game, repo, worldId, add, setReply } = await story();
+    await game.autoStoryPlot(worldId);
+    const [old] = await listStoryNotes(repo, worldId);
+    const next = await add("第四段：上山。");
+    await repo.addChapter({ worldId, firstNodeId: next.id, lastNodeId: next.id, title: "第二章", gist: "上山", summary: "主角上山", model: "aux", promptVersion: "chapter-1" });
+    await saveNote(repo, { ...old, scope: { ...old.scope, staleFrom: 1 } }, true);
+    setReply(() => "新主线：进城，出城，上山。");
+    await game.autoStoryPlot(worldId);
+    expect((await getNote(repo, old.id))?.scope.toNode).toBe(next.id);
+    const restored = await restorePrevious(repo, old.id);
+    expect(restored).toMatchObject({ content: old.content, refs: old.refs, scope: { to: old.scope.to, toNode: old.scope.toNode } });
+  });
+
+  it("retries an in-stream service error once before finishing the note on the backup", async () => {
+    const { game, repo, platform, worldId } = await story();
+    game.fallbackLlm = { ...LLM, url: "https://backup.invalid/v1/chat/completions" };
+    const requests: string[] = [];
+    platform.llm.stream = async (request, emit) => {
+      requests.push(request.url);
+      const backup = request.url.includes("backup.invalid");
+      emit({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: backup ? "已经整理好的主线剧情。" : "未完成正文" }, ...(backup ? { finish_reason: "stop" } : {}) }] }) });
+      if (!backup) emit({ type: "data", data: JSON.stringify({ error: { message: "upstream" } }) });
+      emit({ type: "done" });
+      return "isolated-stream";
+    };
+    const note = newStoryNote(worldId, "plot", {}, "主线梗概");
+    await saveNote(repo, note);
+    expect(await game.runCanonNote(note.id, () => {})).toMatchObject({ status: "done", content: "已经整理好的主线剧情。" });
+    expect(requests).toEqual([LLM.url, LLM.url, game.fallbackLlm.url]);
+  });
   it("builds the main plot from chapter summaries and the turns they do not cover", async () => {
     const { game, repo, worldId, calls } = await story();
     const note = newStoryNote(worldId, "plot", {}, "主线梗概");

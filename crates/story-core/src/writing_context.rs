@@ -337,7 +337,7 @@ pub fn build(input: &Value) -> Result<Value> {
         .unwrap_or_else(|| match depth {
             "fast" => 128,
             "standard" => crate::tools::catalog().iter().filter(|t| ["read_canon_notes","read_history"].contains(&t.name) || (state["source"].is_object() && ["search_original","read_original"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + 128,
-            _ => crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check","read_canon_notes"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128,
+            _ => crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128,
         });
     // Canon notes (D162): the player's digests of the book, chosen by the
     // caller for the current position and the names in play. Up to a fifth of
@@ -455,7 +455,8 @@ pub fn build(input: &Value) -> Result<Value> {
     let mut facts = String::new();
     // What the AI noted about a passage the player has since edited may say the
     // opposite of the text now (D183): those notes stay out.
-    let edited: HashSet<String> = history.iter().filter(|n| n["rewritten"] == true).filter_map(|n| n["id"].as_str().map(str::to_owned)).collect();
+    let edited: HashSet<&str> = history.iter().filter(|n| n["rewritten"] == true).filter_map(|n| n["id"].as_str())
+        .chain(input["editedFactNodeIds"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
     for f in list(&state["facts"])
         .iter()
         .rev()
@@ -708,6 +709,22 @@ mod tests {
         let cards = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "cards").unwrap()["content"].as_str().unwrap().to_owned();
         assert!(!cards.contains("黄纸"), "{cards}");
         assert!(cards.contains("你看着青纸出神") && cards.contains("你买的是一张青纸"), "{cards}");
+    }
+
+    #[test]
+    fn obsolete_ai_facts_stay_out_even_after_the_edited_passage_leaves_the_window() {
+        let mut i = input();
+        i["history"] = json!([{"id":"new","kind":"turn","narrative":"玩家确认是青纸，旧说是黄纸。官印仍在柜中。"}]);
+        i["editedFactNodeIds"] = json!(["old-edited"]);
+        i["state"]["facts"] = json!([
+            {"origin":"ai","nodeId":"old-edited","detail":"旧说是黄纸"},
+            {"origin":"player","nodeId":"old-edited","detail":"玩家确认是青纸"},
+            {"origin":"ai","nodeId":"old-untouched","detail":"官印仍在柜中"}
+        ]);
+        let context = build(&i).unwrap();
+        let cards = context["layers"].as_array().unwrap().iter().find(|layer| layer["key"] == "cards").unwrap()["content"].as_str().unwrap();
+        assert!(!cards.contains("旧说是黄纸"), "{cards}");
+        assert!(cards.contains("玩家确认是青纸") && cards.contains("官印仍在柜中"), "{cards}");
     }
     #[test]
     fn canon_notes_join_the_fixed_part_within_a_fifth_of_the_budget() {

@@ -27,8 +27,10 @@ export function Composer(p: ComposerProps) {
   const kind = agentBusy ? "wait" : busy ? "stop" : typed ? "send" : "continue";
   const label = { wait: "等待", stop: "停止", send: "发送", continue: "继续" }[kind];
   const icon = ({ wait: "hourglass", stop: "stop", send: "send", continue: "play" } as const)[kind];
+  const showTools = !dead && (typing || typed);
+  const toolCount = showTools ? ((!watch ? 1 : 0) + 1 + (typed ? 1 : 0)) : 0;
   return (
-    <div className={`dock${typing ? " typing" : ""}`}>
+    <div className={`dock${typing ? " typing" : ""}`} data-tools={toolCount}>
       {!dead && state.protagonist.statuses.some((x) => x.name === "垂危") && <p className="dying-note">你伤重垂危：再受重伤就会死去，先设法疗伤。</p>}
       {/* 旁观 and 连播: progress, or the way to start one. */}
       {!dead && (watch || auto) && (

@@ -6,7 +6,7 @@ import { sampleState } from "../testing/fixtures";
 import * as tree from "../tree";
 import { saveBook } from "./library";
 import { newNote, newStoryNote, saveNote, type CanonNote } from "./notes";
-import { bookChapters, chapterLabel, choosableNotes, isChosen, notesRange, rangeChars, rangeContext, scopeLabel, scopedMaterial, type SourceScope } from "./scope";
+import { bookChapters, chapterLabel, choosableNotes, isChosen, notesRange, rangeChars, rangeContext, scopeLabel, scopedMaterial, wholeChapterFits, type SourceScope } from "./scope";
 import { newBinding, type SourceBook } from "./types";
 
 const LLM = { slot: "main", url: "https://x/v1/chat/completions", model: "m", includeUsage: true, contextTokens: 12_000 };
@@ -184,5 +184,38 @@ describe("各功能按范围发送 (D184)", () => {
     expect(plan.meta.sourceScope).toEqual({ mode: "notes", noteIds: [note.id] });
     expect(plan.meta.referenceReviewVersion).toBeUndefined();
     expect(plan.messages.map((m) => m.content).join("\n")).toContain("主角在第一章得到匣子");
+  });
+
+  it("keeps whole chosen opening chapters beyond 3000 chars and aligns rangeContext with native JSON cost (M6)", async () => {
+    const tailMarker = "【终段秘钥·勿截断】";
+    const longChapter = `${"山雨欲来风满楼，城门紧闭。".repeat(300)}${tailMarker}`;
+    expect(longChapter.length).toBeGreaterThan(3600);
+    const s = await setup((i) => i === 0 ? longChapter : `第${i + 1}章。`);
+    s.game.llm = { ...LLM, contextTokens: 24_000 };
+    await s.game.createWorld({
+      title: "", eraId: null, settings: { premise: "进城", mode: "free", depth: "standard" }, protagonist: { name: "林舟", gender: "男", age: 18, identity: "学徒" },
+      arrival: "不穿越", origin: "", opening: { mode: "ai", hint: "" }, source: s.source, sourceScope: { mode: "chapters", from: 0, to: 0 },
+    }, () => {}).catch(() => null);
+    const plan = s.plans.at(-1) as { messages: { content: string }[] };
+    expect(plan.messages.map((m) => m.content).join("\n")).toContain(tailMarker);
+
+    // JSON escaping overhead (newlines/quotes + metadata) must prevent rangeContext from over-promising.
+    const quoted = `"风"\n`.repeat(200); // 800 raw chars, but ~1400 chars after JSON escaping + metadata
+    const s2 = await setup((i) => i === 0 ? quoted : "短章。");
+    expect(await rangeContext(s2.repo, s2.source, { from: 0, to: 0 }, 950)).toBeUndefined();
+    const chapters = await bookChapters(s2.repo, s2.source);
+    expect(wholeChapterFits(chapters, { from: 0, to: 0 }, 950)).toBe(false);
+    expect(wholeChapterFits(chapters, { from: 0, to: 0 }, 1600)).toBe(true);
+  });
+
+  it("rejects a world-owned question note whose refs exceed binding.through while allowing empty-ref questions", async () => {
+    const s = await setup();
+    const oursEmpty = s.done({ ...newNote(s.book.id, "question", { question: "城门几时开" }, "问事：城门"), worldId: s.world.id }, "卯时开。", []);
+    const oursLate = s.done({ ...newNote(s.book.id, "question", { question: "后事如何" }, "问事：后事"), worldId: s.world.id }, "后面会变。", [9]);
+    await saveNote(s.repo, oursEmpty);
+    await saveNote(s.repo, oursLate);
+    const { book } = await choosableNotes(s.repo, s.source, s.world.id);
+    expect(book.map((n) => n.id)).toContain(oursEmpty.id);
+    expect(book.map((n) => n.id)).not.toContain(oursLate.id);
   });
 });

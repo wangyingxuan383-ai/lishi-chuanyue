@@ -98,6 +98,8 @@ export default function NewGame() {
   const [drafting, setDrafting] = useState<"script" | "challenge" | null>(null);
   /** 资料范围 (D184) for this opening only; not kept in the draft or 我的开局. */
   const [openingScope, setOpeningScope] = useState<SourceScope>(AUTO_SCOPE);
+  const openingSourceKey = draft.source ? `${draft.source.bookId}:${draft.source.through ?? ""}` : "";
+  useEffect(() => { setOpeningScope(AUTO_SCOPE); }, [openingSourceKey]);
   const draftTicket = useRef(0);
   const beatBox = useRef<HTMLTextAreaElement>(null);
   /** The part 开始 last pointed at: a mode's empty field is marked only after that, not as soon as the card is picked. */
@@ -192,6 +194,7 @@ export default function NewGame() {
   const setS = <K extends keyof Draft["settings"]>(key: K, value: Draft["settings"][K]) => setDraft((d) => ({ ...d, settings: { ...d.settings, [key]: value } }));
   const switchMode = (choice: "history" | "free" | "fanfic") => {
     const mode = choice === "fanfic" ? "free" : choice;
+    setOpeningScope(AUTO_SCOPE);
     setDraft((d) => ({ ...d, fanfic: choice === "fanfic", source: d.source ? { ...d.source, fanfic: choice === "fanfic" } : null, templateId: null, eraId: null, settings: { ...d.settings, mode, clockStyle: mode === "free" ? "elapsed" : "era" } }));
     if (choice === "fanfic") setSheet(null);
     setGroup("全部");
@@ -201,6 +204,7 @@ export default function NewGame() {
   const clearForm = () => {
     const before = draft;
     const beforeIdea = idea;
+    setOpeningScope(AUTO_SCOPE);
     setDraft({ ...fresh(), fanfic: draft.fanfic, source: draft.source, settings: draft.settings, play: draft.play, aiPilot: draft.aiPilot, fortune: draft.fortune });
     setIdea("");
     setError(null); setFailure(null);
@@ -417,6 +421,7 @@ export default function NewGame() {
     if (text && text.length > OPENING_TEXT_LIMIT) { toast("这份开局设定太大，无法导入；原设定没有变化。"); return false; }
     const next = text ? parseShare(text) : null;
     if (!next) { toast("没有找到开局设定，请粘贴完整的分享文字"); return false; }
+    setOpeningScope(AUTO_SCOPE);
     setDraft(next);
     setError(null); setFailure(null);
     toast(`已导入「${next.title || "开局设定"}」`);
@@ -484,7 +489,7 @@ export default function NewGame() {
           title={templateMenu.name}
           onClose={() => setTemplateMenu(null)}
           items={[
-            { label: "用这个开局", onSelect: () => { setDraft(normalizeOpeningDraft(templateMenu.draft as unknown as Record<string, unknown>)); setSheet(null); } },
+            { label: "用这个开局", onSelect: () => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(templateMenu.draft as unknown as Record<string, unknown>)); setSheet(null); } },
             { label: "改名", onSelect: () => void renameTemplate(templateMenu) },
             { label: "删除", danger: true, onSelect: () => void deleteTemplate(templateMenu) },
           ]}
@@ -526,7 +531,7 @@ export default function NewGame() {
       {sheet === "mine" ? <>
         <div className="segmented" role="group" aria-label="我的开局分类">{["全部", "历史", "自由", "同人"].map((name) => <button key={name} aria-pressed={mineFilter === name} onClick={() => setMineFilter(name)}>{name}</button>)}</div>
         {!mineShown.length && <p className="muted">这里还没有保存的开局。填好后点“存为我的开局”，以后可以直接选用。</p>}
-        {mineShown.map((m) => <MyTemplateCard key={m.id} t={m} onUse={() => { setDraft(normalizeOpeningDraft(m.draft as unknown as Record<string, unknown>)); setSheet(null); setError(null); void (async () => { if (m.draft.source && !await getBook(game.repo, m.draft.source.bookId)) toast("这个开局的参考书籍不在本机，其他设定已保留，请重新绑定书籍。"); })(); }} onMenu={() => setTemplateMenu(m)} />)}
+        {mineShown.map((m) => <MyTemplateCard key={m.id} t={m} onUse={() => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(m.draft as unknown as Record<string, unknown>)); setSheet(null); setError(null); void (async () => { if (m.draft.source && !await getBook(game.repo, m.draft.source.bookId)) toast("这个开局的参考书籍不在本机，其他设定已保留，请重新绑定书籍。"); })(); }} onMenu={() => setTemplateMenu(m)} />)}
       </> : <>
         {free && !draft.fanfic && !draft.source?.fanfic && <details><summary>原创题材包</summary><div className="stack mt-2">
           <p className="muted">通用设定与身份灵感，先预览、编辑，再填入勾选的部分。</p>
@@ -689,7 +694,7 @@ export default function NewGame() {
       </div>
       {librarySheet}
       {genre && <GenreOpeningPreview pack={genre.pack} has={{ premise: !!draft.premise.trim(), identity: !!draft.identity.trim(), hint: !!draft.hint.trim() }} stale={genre.revision !== revision.current} onApply={useGenre} onClose={() => setGenre(null)} />}
-      {sourceLibrary && <SourceLibrary onClose={() => setSourceLibrary(false)} onSelect={(book) => { setDraft((d) => ({ ...d, source: newBinding(book.id, true), fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } })); setSourceLibrary(false); }} />}
+      {sourceLibrary && <SourceLibrary onClose={() => setSourceLibrary(false)} onSelect={(book) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source: newBinding(book.id, true), fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } })); setSourceLibrary(false); }} />}
       {menuSheets}
     </div>
   );

@@ -32,7 +32,32 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
       {node.rewritten && <span className="rewritten-mark">已改写</span>}
       {node.actionMode === "skip" && <ReportCard report={(node.record as TurnRecord | null)?.report} />}
       <TurnChanges onPanel={onPanel} fresh={fresh} extra={sourceBack} notes={node.meta.notesUsed as string[] | undefined} onNotes={onNotes} chips={[...((node.meta.chips as Chip[]) ?? []), ...taboos.map((t) => ({ text: `用词：${t.term}${t.instead ? ` → ${t.instead}` : ""}`, tone: "warn" as const }))]} />
-      {referenceReview && <details className="muted"><summary>原著核对{referenceReview.unresolved?.length ? ` · ${referenceReview.unresolved.length}项待查` : ""}</summary>{referenceReview.findings?.map((f, i) => <p key={i}>{f.claim} · {f.status === "supported" ? "有原文依据" : f.status === "branch" ? "保留玩家分支" : "资料不足"}</p>)}{referenceReview.unresolved?.map((t, i) => <p key={`u${i}`}>{t}</p>)}</details>}
+      {referenceReview && (
+        <details className="ref-review">
+          <summary>
+            <span>原著核对</span>
+            {referenceReview.unresolved?.length
+              ? <span className="ref-pill warn">{referenceReview.unresolved.length} 项待查</span>
+              : <span className="ref-pill ok">已核对</span>}
+          </summary>
+          <div className="ref-review-body">
+            {referenceReview.findings?.map((f, i) => (
+              <p key={i} className="ref-row">
+                <span className={`ref-badge ${f.status === "supported" ? "ok" : f.status === "branch" ? "branch" : "warn"}`}>
+                  {f.status === "supported" ? "原文依据" : f.status === "branch" ? "玩家分支" : "资料不足"}
+                </span>
+                <span>{f.claim}</span>
+              </p>
+            ))}
+            {referenceReview.unresolved?.map((t, i) => (
+              <p key={`u${i}`} className="ref-row">
+                <span className="ref-badge warn">待查</span>
+                <span>{t}</span>
+              </p>
+            ))}
+          </div>
+        </details>
+      )}
       {children}
     </div>
   );

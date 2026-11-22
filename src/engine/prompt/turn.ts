@@ -17,7 +17,7 @@ import { beatTitle, challengeView } from "../modes";
 
 import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-26";
+export const PROMPT_VERSION = "turn-27";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -26,6 +26,7 @@ type PromptOptions = {
   heroPanel?: string;
   heroPanelEnabled?: boolean;
   pilot?: Pilot;
+  choiceCount?: number;
 };
 type PromptSettings = WorldSettings & PromptOptions;
 const isFree = (settings: PromptOptions) => settings.mode === "free";
@@ -92,10 +93,11 @@ const RECORD_SPEC = `【输出格式】先写正文。正文结束后另起一�
 ${RECORD_FIELDS}
 </record>
 记录必须与正文一致：正文里付了钱、得到或失去东西、受伤、结识人物，记录里都要写；正文没有发生的，记录里不要写。人物、物品、目标沿用【当前】中的原名。
-items 只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写，钱不算物品。people 只写本回合真正出场或打过交道的人。
-主角已经许下的承诺、欠下的人情或债、和人约好的事，在 goals 里记成支线目标，兑现了写 done，落空了写 fail；不凭空添加任务。主线目标确实再也办不成才写 fail，一次失手不算。
-continuity只记本段明确的关键获知/误会/澄清或非目标线索/约定，每类最多8项；无变化省略。更新沿用read_continuity实际返回的id，找不到旧定位不要猜编号。原著未来知识不能赋给人物，听闻/相信不等于事情为真，未记不等于不知道；已经用goals记录的同一目标不重复造线索，参与回忆不代表已解决，不强制兑现或安排后续。只给真实本局原句，资料不足省略，不为附加元数据另行请求或重试。
-status 只记身体和精神的状况；东西记 items，知道的事、处境、别人的态度都不记在 status 里；伤好了、状况过去了就 remove。`;
+- items：只写主角真正拿到、买下、收下或失去、用掉、送出的东西；只是看见、身边本来就有的家具杂物不写，钱不算物品。
+- people：只写本回合真正出场或打过交道的人。
+- status：只记身体和精神的状况；东西记 items，知道的事、处境、别人的态度都不记在 status 里；伤好了、状况过去了就 remove。
+- goals：主角已经许下的承诺、欠下的人情或债、和人约好的事，记成支线目标，兑现了写 done，落空了写 fail；不凭空添加任务。主线目标确实再也办不成才写 fail，一次失手不算。
+- continuity：仅在出现明确的关键获知/误会/澄清或非目标线索/约定才写，每类最多 8 项，无变化省略。更新沿用 read_continuity 实际返回的 id，找不到旧定位不猜编号；不把原著未来知识赋给人物，听闻/相信不等于为真，未记不等于不知道；已在 goals 记录的目标不重复造线索，参与回忆不代表已解决，不强制兑现；只引本局真实原句，资料不足省略。`;
 
 const OPENING_EXTRA = `开场的记录块另有要求：
 - "date"：故事开始的日期，写成对象 {"era":"年号（西方背景写“公元”或“公元前”）","year":第几年,"month":月,"day":日,"ceYear":对应的公元年份（公元前为负数）}；中国背景用农历月日。如 {"era":"天宝","year":7,"month":11,"day":17,"ceYear":748}、{"era":"公元前","year":44,"month":3,"day":14,"ceYear":-44}。之后的日期由程序按经过的时间推算；
@@ -138,7 +140,7 @@ const AI_AGENCY = "主角由你来演：照他的性格、处境和目标，自�
 
 function choicesRule(settings: PromptSettings): string {
   if (settings.choiceCount <= 0) return "记录里的 choices 写空数组 []";
-  return aiPilot(settings) ? "记录里给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字），写成故事的走向而不是主角的动作，如“旧识带来一个坏消息”“让日子先平静几天”，供玩家在幕后挑选" : `记录里给 ${settings.choiceCount} 个简短、不同的建议行动（各不超过二十字），由玩家选择`;
+  return aiPilot(settings) ? "记录里给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字），写成事件或局面走向、不以主角作主语（如“旧识带来一个坏消息”“让日子先平静几天”），供玩家在幕后挑选" : `记录里给 ${settings.choiceCount} 个简短、不同的建议行动（各不超过二十字），由玩家选择`;
 }
 
 function systemParts(ctx: StoryContext, panel?: string, modes: ModeContext = {}): SystemParts {
@@ -154,11 +156,11 @@ function systemParts(ctx: StoryContext, panel?: string, modes: ModeContext = {})
       : "【时代】以【故事设定】为准。称谓、货币、器物符合那个时代；拿不准的细节写得模糊些。";
   const rulesText = `你是一部${free ? "" : "历史"}互动小说的作者兼叙事者。${aiPilot(settings) ? "主角和其他人物都由你来演，玩家在幕后指点。" : "玩家扮演主角，你写世界、其他人物和剧情。"}
 【写作要求】
-- ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}；每回合${LENGTH[settings.length]}。${free ? "文风和对白贴合玩家设定与人物身份" : `叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，对白符合时代与人物身份`}，避免重复上回合的开头和句式。
+- ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}；每回合${LENGTH[settings.length]}。${free ? "文风和对白贴合玩家设定与人物身份" : `叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，对白符合时代与人物身份`}；多写具体的动作、神态、环境细节与各具腔调的对白，少用空泛总结，避免重复上回合的开头和句式。
 - ${aiPilot(settings) ? AI_AGENCY : PLAYER_AGENCY}
 - 行动按情理决定成败，失败有后果；其他人物有自己的目的和处境，态度变化有缘由。
 - 性别、身份、年龄、钱物、生死以【当前】和已发生的故事为准；钱物只用现有数量，花用写明数目，钱不够就付不起。时间不倒退，正文的${elapsedClock(settings) ? "时间" : "时辰"}与经过时长一致，跳过多久写入 time。
-- 回忆旧事时只依据已记录的事实，不补造过去的来源、承诺或秘密；可以描写此刻的感受和环境，新事件从现在发展。
+- 回忆旧事时只依据已记录的事实，绝不为圆场补造未出现过的旧恩怨、旧信物、过往来源、承诺或秘密；未记录的过往只留白或写主角记不清，可以描写此刻的感受和环境，新事件从现在发展。
 - ${choicesRule(settings)}。
 【内容尺度】${INTENSITY_TEXT.violence[i.violence]}；${INTENSITY_TEXT.romance[i.romance]}；${free ? INTENSITY_TEXT.darkness[i.darkness].replace("时代", "世界") : INTENSITY_TEXT.darkness[i.darkness]}。`;
   return {
@@ -560,6 +562,9 @@ export interface OpeningInput extends StoryContext {
   reference?: ReferenceContext;
   /** 原著札记 for a story bound to a book (D162). */
   canonNotes?: CanonNoteBrief[];
+  /** Optional budgets when the player selected a 资料范围 (defaults to 3000). */
+  referenceBudget?: number;
+  notesBudget?: number;
   protagonist: { name: string; gender: string; age: number | null; identity: string };
   arrival: Arrival;
   origin: string;
@@ -600,9 +605,15 @@ export function openingMessages(input: OpeningInput): ChatMessage[] {
       content: `请写这部小说的开场。
 ${protagonistLine(input)}
 ${input.hint ? `玩家希望开场：${input.hint}\n` : ""}${modes ? `${modes.slice(1)}\n` : ""}从符合玩家设定的具体场景写起，${aiPilot(input.settings) ? "写到一个有意思的地方停下" : "写到需要玩家决定为止"}。
-${openingExtra(input.settings)}${packLine(input.era, input.settings)}${canonNotesBlock(input.canonNotes, 3000)}${referenceBlock(input.reference, 3000)}`,
+${openingExtra(input.settings)}${packLine(input.era, input.settings)}${canonNotesBlock(input.canonNotes, input.notesBudget ?? 3000)}${referenceBlock(input.reference, input.referenceBudget ?? 3000)}`,
     },
   ];
+}
+
+function extractChoicesRule(settings?: PromptOptions): string {
+  if (settings?.choiceCount !== undefined && settings.choiceCount <= 0) return "choices 写空数组 []。";
+  if (aiPilot(settings ?? {})) return "choices 给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字，写成事件或局面走向、不以主角作主语）。";
+  return `choices 给 ${settings?.choiceCount ?? 3} 个简短、不同的建议行动（各不超过二十字）。`;
 }
 
 /** The player wrote the opening themselves: only extract the starting state. */
@@ -613,7 +624,8 @@ export function openingExtractMessages(input: OpeningInput & { text: string }): 
       content: `你是这部互动小说的记录员。玩家亲手写了开场。根据【故事设定】【主角】和【开场正文】，只输出一个 JSON 对象，记录故事开始时的状态。字段如下（没有的省略）：
 ${recordFields(input.settings)}
 ${openingExtra(input.settings)}${packLine(input.era, input.settings)}
-time 写 "0"。只输出 JSON，不要输出其他文字。`,
+记录必须与开场正文一致，不补造正文未写的设定；items 只记主角随身真正有的东西（不含景物与钱），status 只记身心状况；${extractChoicesRule(input.settings)}
+time 写 "0"。只输出 JSON，不要加代码块或额外说明。`,
     },
     {
       role: "user",
@@ -633,7 +645,8 @@ export function extractMessages(input: { era: EraContext; state: WorldState; act
       role: "system",
       content: `你是互动小说的记录员。根据【当前】状态和【本回合正文】，只输出一个 JSON 对象，描述本回合的变化。字段与含义如下（没有变化的字段省略；time、log、choices 必须有）：
 ${recordFields(input.settings)}
-只输出 JSON，不要输出其他文字。`,
+记录必须与正文一致，不补造正文未写的变化；人物、物品、目标沿用【当前】中的原名；items 不记景物与钱，people 只记本回合真正出场或打过交道的人，status 只记身体和精神状况（已恢复则 remove）；${extractChoicesRule(input.settings)}
+只输出 JSON，不要加代码块或额外说明。`,
     },
     { role: "user", content: `${renderState(input.state, input.era, undefined, input.settings)}${heroPanelBlock(input.settings ?? {}, snapshotPanel(input.state))}\n\n【玩家行动】${input.action}\n\n【本回合正文】\n${input.narrative}` },
   ];
@@ -686,7 +699,7 @@ export function assistMessages(idea: string, current: Partial<SetupDraft>): Chat
  "origin":"穿越前是谁（不穿越则为空字符串）",
  "hint":"开场第一幕的场景，一句话",
  "essentials":"需要一直记住的要点，每行一条，最多五条"}
-性别与身份要一致（如公主、女王是女，皇子、国王是男）。只输出 JSON。`,
+性别与身份要一致（如公主、女王是女，皇子、国王是男）。只输出 JSON，不要加代码块或额外说明。`,
     },
     { role: "user", content: `玩家的想法：${idea || "（没有写，请你自由发挥一个有意思的开局）"}\n\n已经填好的字段：\n${filled || "（无）"}` },
   ];

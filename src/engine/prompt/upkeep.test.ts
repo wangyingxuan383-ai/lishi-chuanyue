@@ -88,6 +88,17 @@ describe("整理状况 (R30 step 2)", () => {
     const [system] = upkeepMessages({ premise: "", state: world(), turns: [] });
     expect(system.content).toContain("merges");
     expect(system.content).toContain("只合并确定是同一个的");
+    expect(system.content).toContain('"kind":"势力/物品/设定"');
+    expect(system.content).toContain("普通卡片每张不超过 80 字");
+  });
+
+  it("matches the protagonist pronoun for female leads without breaking male leads", () => {
+    const state = world();
+    state.protagonist.name = "沈青";
+    state.protagonist.gender = "女";
+    const [, user] = upkeepMessages({ premise: "", state, turns: [] });
+    expect(user.content).toContain("【主角】沈青");
+    expect(user.content).toContain("剧情里的“你”就是她");
   });
 });
 

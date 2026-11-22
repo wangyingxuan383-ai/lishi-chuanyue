@@ -47,12 +47,12 @@ function levelValue(index: number, count: number): number {
 export const NAME_MAX = 12;
 const quantityText = (i: Item) => `${i.quantity}${i.unit ? ` ${i.unit}` : ""}`;
 
-function Stat({ label, value, n }: { label: string; value: string; n?: number }) {
+function Stat({ label, value, n, tone }: { label: string; value: string; n?: number; tone?: "good" | "warn" | "bad" }) {
   return (
-    <div className="stat">
+    <div className={`stat${tone ? ` stat-${tone}` : ""}`}>
       <div className="label">{label}</div>
       <div className="value">{value}</div>
-      {n !== undefined && <div className="bar"><i style={{ width: `${n}%` }} /></div>}
+      {n !== undefined && <div className="bar"><i style={{ width: `${Math.max(0, Math.min(100, n))}%` }} /></div>}
     </div>
   );
 }
@@ -357,24 +357,27 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
               })}
             </div> : <div className="stat-grid">
               <Stat label="钱" value={formatMoney(me.stats.money, era.currency)} />
-              <Stat label="健康" value={level(me.stats.health, LEVELS.health)} n={me.stats.health} />
-              <Stat label="精力" value={level(me.stats.energy, LEVELS.energy)} n={me.stats.energy} />
+              <Stat label="健康" value={level(me.stats.health, LEVELS.health)} n={me.stats.health} tone={me.stats.health >= 70 ? "good" : me.stats.health >= 35 ? "warn" : "bad"} />
+              <Stat label="精力" value={level(me.stats.energy, LEVELS.energy)} n={me.stats.energy} tone={me.stats.energy >= 60 ? "good" : me.stats.energy >= 30 ? "warn" : "bad"} />
               <Stat label="名望" value={level(me.stats.fame, LEVELS.fame)} n={me.stats.fame} />
             </div>}
             {me.stats.debt > 0 && <div className="notice">欠债 {formatMoney(me.stats.debt, era.currency)}</div>}
             <div>
-              <p className="muted">身上的状况</p>
+              <div className="row between">
+                <p className="muted m-0">身上的状况</p>
+                {!editing && me.statuses.some((x) => x.name !== "垂危") && <button className="ghost small" disabled={busy} onClick={() => setTidy(true)}>看看哪些已经好了</button>}
+              </div>
               {me.statuses.length ? me.statuses.map((s, i) => (
                 <div className="item-row" key={i}>
                   {editing && !state.protagonist.statuses.some((x) => x.name === s.name) ? <div className="stack grow">
                     <input aria-label="状况名称" placeholder="名称" value={s.name} onChange={(e) => change((d) => { d.protagonist.statuses[i].name = e.target.value; })} />
                     <input aria-label="状况说明" placeholder="说明" value={s.detail} onChange={(e) => change((d) => { d.protagonist.statuses[i].detail = e.target.value; })} />
-                  </div> : <div><b>{s.name}</b><small>{s.detail}</small></div>}
+                  </div> : <div className="grow"><b className={s.name === "垂危" ? "status-danger" : undefined}>{s.name}</b><small>{s.detail}</small></div>}
+                  {!editing && s.name === "垂危" && <span className="tag tag-loss">危重</span>}
                   {editing && <button onClick={() => change((d) => { d.protagonist.statuses.splice(i, 1); })}>去掉</button>}
                 </div>
-              )) : <p className="muted">无</p>}
-              {!editing && me.statuses.some((x) => x.name !== "垂危") && <button className="ghost" disabled={busy} onClick={() => setTidy(true)}>看看哪些已经好了</button>}
-              {editing && <button onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}><Icon name="plus" size={18} />添加状况</button>}
+              )) : <p className="muted mt-2 mb-0">无</p>}
+              {editing && <button className="mt-2" onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}><Icon name="plus" size={18} />添加状况</button>}
             </div>
             {problem && <p className="notice m-0">{problem}</p>}
           </div>

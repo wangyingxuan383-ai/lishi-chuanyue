@@ -15,7 +15,7 @@ import type { SourceBinding } from "./types";
 import type { StoryNode } from "../types";
 import * as tree from "../tree";
 
-export const NOTES_PROMPT_VERSION = "canon-notes-3";
+export const NOTES_PROMPT_VERSION = "canon-notes-4";
 export type NoteKind = "plot" | "person" | "setting" | "timeline" | "question";
 export const NOTE_KINDS: [NoteKind, string, string][] = [
   ["plot", "主线剧情", "某段章节里主角的主要经历、奇遇和转折"],
@@ -151,10 +151,10 @@ export async function saveNote(repo: Repo, note: CanonNote, existingOnly = false
     return;
   }
   await repo.platform.sql.batch([{
-    sql: `INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,scope_json=excluded.scope_json,content=excluded.content,
-      refs_json=excluded.refs_json,model=excluded.model,status=excluded.status,active=excluded.active,progress_json=excluded.progress_json,updated_at=excluded.updated_at`,
-    params: [note.id, note.bookId, note.worldId, note.kind, note.title, JSON.stringify(note.scope), note.content, JSON.stringify(note.refs), note.model,
+    sql: `INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,scope_json=excluded.scope_json,content=excluded.content,
+      previous_content=excluded.previous_content,refs_json=excluded.refs_json,model=excluded.model,status=excluded.status,active=excluded.active,progress_json=excluded.progress_json,updated_at=excluded.updated_at`,
+    params: [note.id, note.bookId, note.worldId, note.kind, note.title, JSON.stringify(note.scope), note.content, note.previousContent ?? null, JSON.stringify(note.refs), note.model,
       note.status, note.active ? 1 : 0, JSON.stringify(note.progress), note.createdAt, note.updatedAt],
   }]);
 }
@@ -394,7 +394,7 @@ async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"
     const pieces: (NoteMaterial & { ordinal: number })[] = [];
     chapters.forEach((chapter, index) => {
       const first = at.get(chapter.firstNodeId), last = at.get(chapter.lastNodeId);
-      if (first === undefined || last === undefined || first < range.from || last > range.to || !chapter.summary.trim()) return;
+      if (chapter.stale || first === undefined || last === undefined || first < range.from || last > range.to || !chapter.summary.trim()) return;
       pieces.push({ ordinal: 1_000_000 + index, section: last, title: `${chapter.title}（${turnLabel(first)}～${turnLabel(last)}）`, text: chapter.summary, digest: true });
       for (let i = first; i <= last; i++) covered.add(i);
     });
@@ -574,8 +574,9 @@ export function noteUpdateMessages(bookTitle: string, note: Pick<CanonNote, "kin
 /** Partial notes of the same request → one note. */
 const NEUTRAL = "这是对文学作品的客观概括：用中性、概括的语言叙述情节和人物关系，不复述暴力、血腥或露骨的细节，不照抄原句。";
 export function noteMergeMessages(bookTitle: string, note: Pick<CanonNote, "kind" | "scope"> & Partial<Pick<CanonNote, "source">>, parts: string[], final: boolean, compact = false, neutral = false): ChatMessage[] {
+  const story = isStory(note);
   return [
-    { role: "system", content: `${neutral ? NEUTRAL : ""}下面是${isStory(note) ? "互动小说" : "小说"}《${bookTitle}》同一份${isStory(note) ? "本局" : "原著"}札记分段整理的结果。合并成一篇完整的札记：去掉重复，按先后顺序，保留每条的出处章节标注；各段里的具体名称、数字、等级和能力都要保留，不要在合并时概括掉。${focus(note)}只输出札记正文，不超过 ${compact ? PART_MAX : final ? NOTE_MAX : PART_MAX * 2} 字。${compact ? "用简短的要点覆盖各段的关键事实。" : ""}` },
+    { role: "system", content: `${neutral ? NEUTRAL : ""}下面是${story ? "互动小说" : "小说"}《${bookTitle}》同一份${story ? "本局" : "原著"}札记分段整理的结果。合并成一篇完整的札记：去掉重复，按先后顺序，保留每条的出处${story ? "回合" : "章节"}标注，不要在合并时把具体名称、数字、等级和能力概括掉。${focus(note)}只输出札记正文，不超过 ${compact ? PART_MAX : final ? NOTE_MAX : PART_MAX * 2} 字。${compact ? "用简短的要点覆盖各段的关键事实。" : ""}` },
     { role: "user", content: parts.map((p, i) => `【第 ${i + 1} 段】\n${p}`).join("\n\n") },
   ];
 }
@@ -602,7 +603,7 @@ export function noteReplyProblem(result: Pick<ChatResult, "text" | "finishReason
   }
   if (outputWasTruncated(finish ?? null)) return new NoteReplyError("length", "模型写到一半达到了输出上限。");
   if (!content) return new NoteReplyError("empty", "模型没有写出札记正文。");
-  const hasCitedNotes = /[（(]第\s*\d+\s*(?:[～~—–至-]\s*(?:第\s*)?\d+\s*)?章[）)]/.test(content);
+  const hasCitedNotes = /[（(]第\s*\d+\s*(?:[～~—–至-]\s*(?:第\s*)?\d+\s*)?(?:章|回合)[）)]/.test(content);
   if (!hasCitedNotes && /^(?:the prompt (?:could not|cannot) be submitted|the prompt contains sensitive words|抱歉[，,！!\s]*(?:我)?(?:无法|不能)(?:提供|处理|整理|回答|生成))/i.test(content)) {
     return new NoteReplyError("suspected_refusal", "收到的回复像拒答，无法确认这段札记。");
   }
@@ -921,12 +922,13 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
 }
 
 /** Mixed summaries cannot be safely truncated into an earlier chapter range. */
-export function noteWithinScope(note: Pick<CanonNote, "kind" | "scope" | "refs">, through: number | null): boolean {
+export function noteWithinScope(note: Pick<CanonNote, "kind" | "scope" | "refs">, through: number | null, sameWorld = false): boolean {
   if (through === null) return true;
   if (note.refs.some((section) => !Number.isInteger(section) || section < 0 || section > through)) return false;
   if (note.kind === "plot" || note.kind === "timeline") return Number.isInteger(note.scope.to) && note.scope.to! <= through;
   // Older notes truncated references at 400; their complete scope is unknown.
-  return note.refs.length > 0 && note.refs.length < 400;
+  // An answer this story saved (question) was asked within its reading limit even when it cites no chapter.
+  return (note.refs.length > 0 || (note.kind === "question" && sameWorld)) && note.refs.length < 400;
 }
 
 /** Keep long imports intact on disk, then read around the current chapter. */
@@ -983,7 +985,7 @@ export async function notesForTurn(repo: Repo, binding: SourceBinding | null | u
   if (worldId) {
     const own = (await listStoryNotes(repo, worldId).catch(() => [])).filter((n) => n.active && n.status === "done" && n.content.trim());
     // A note from another route would tell the writer about events that did not happen here.
-    const route = own.some((n) => n.scope.toNode) ? await routeIds(repo, worldId).catch(() => null) : null;
+    const route = own.some((n) => n.scope.toNode || n.progress.routeNode) ? await routeIds(repo, worldId).catch(() => null) : null;
     for (const n of own) {
       if (route && noteOffRoute(n, route)) continue;
       const carried = !!n.originWorldId;
@@ -996,7 +998,7 @@ export async function notesForTurn(repo: Repo, binding: SourceBinding | null | u
   if (binding) {
     // An answer this story saved was asked within its own reading limit, though it cites no chapter.
     const notes = (await listNotes(repo, binding.bookId, worldId)).filter((n) => n.active && n.status === "done" && n.content.trim()
-      && (noteWithinScope(n, binding.through) || (n.kind === "question" && !!worldId && n.worldId === worldId)));
+      && noteWithinScope(n, binding.through, !!worldId && n.worldId === worldId));
     const at = binding.position;
     const ranges = notes.filter((n) => n.kind === "plot" || n.kind === "timeline");
     const covering = ranges.filter((n) => (n.scope.from ?? 0) <= at && at <= (n.scope.to ?? Infinity));

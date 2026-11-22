@@ -140,7 +140,7 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
         val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                 .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
-                .putExtra(Settings.EXTRA_CHANNEL_ID, GenerationService.reminderChannel(activity, issue = false))
+                .putExtra(Settings.EXTRA_CHANNEL_ID, GenerationService.mutedReminderChannel(activity))
         } else {
             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
         }

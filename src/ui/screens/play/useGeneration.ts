@@ -102,15 +102,22 @@ export function useGeneration(d: GenerationDeps) {
     return () => clearInterval(id);
   }, [!!gen]);
 
-  // Page came back from the background: replay what the stream cached meanwhile.
+  // Page came back from the background or received a foreground notification tap: replay cached stream events.
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
+    const catchUp = () => {
       void handle.current?.catchUp();
       void autoHandle.current?.catchUp();
     };
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      catchUp();
+    };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
+    window.addEventListener("lishi:catch-up", catchUp);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("lishi:catch-up", catchUp);
+    };
   }, []);
 
   /** The shared beginning of every passage: clear the notice, reset the timers, reserve space. */

@@ -312,6 +312,17 @@ describe("context budget", () => {
     expect(context.layers.find((l) => l.key === "history")!.note).toContain("先保留原著说明与证据");
   });
 
+  it("extractMessages respects choiceCount=0, aiPilot directions, and record grounding rules", () => {
+    const base = turnInput();
+    const zero = promptText(extractMessages({ era: base.era, state: base.state, action: "进门", narrative: "你推门进屋。", settings: { ...base.settings, choiceCount: 0 } }));
+    expect(zero).toContain("choices 写空数组 []");
+    expect(zero).toContain("items 不记景物与钱");
+    expect(zero).toContain("status 只记身体和精神状况");
+    const ai = promptText(extractMessages({ era: base.era, state: base.state, action: "（继续）", narrative: "掌柜迎上来。", settings: { ...base.settings, pilot: "ai" } }));
+    expect(ai).toContain("不以主角作主语");
+    expect(promptText(turnMessages(base))).toContain("绝不为圆场补造未出现过的旧恩怨");
+  });
+
   it("reports a fixed-layer overflow without silently shortening a player's source instructions", () => {
     const instructions = "完整的原著处理说明。".repeat(900);
     const reference: ReferenceContext = { bookId: "book", title: "灯下书", binding: { ...newBinding("book", true), instructions }, passages: [

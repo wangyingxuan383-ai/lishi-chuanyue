@@ -1,6 +1,6 @@
 // AI 改写: 按我的要求改 (content, the player's words are the evidence), 只润色文字
 // (wording only) and 按原著纠错 (only what the book supports) share one preview sheet.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { type WritingAnchor, type TextRange, type CanonCorrectionPreview, type PlayerRevisionPreview, CanonStop, canonOutcomeText, paragraphs, replaceRange, startWriting, runCanonCorrection, writingError } from "../../engine/writing/assist";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { ActionMode } from "../../engine/types";
@@ -10,6 +10,7 @@ import { useApp } from "../app/context";
 import { MenuSheet, Sheet } from "./Sheet";
 import { SourceScopeRow } from "./SourceScope";
 import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
+import { diffStats, diffText } from "./textDiff";
 import "./writing.css";
 
 export interface WritingDraft { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; mode: ActionMode; source?: SourceBinding | null }
@@ -30,6 +31,20 @@ const PLACEHOLDER: Record<Mode, string> = {
   polish: "可不填，如：简练一些、多些对话",
   canon: "可不填，如：核对人物身份、关系和这时的经历；也可以直接问，如“这里的规矩原著怎么写”",
 };
+
+/** Inline diff highlighting what changed between original and revised text. */
+export function DiffView({ before, after }: { before: string; after: string }) {
+  const parts = useMemo(() => diffText(before, after), [before, after]);
+  return (
+    <div className="diff-box" aria-label="正文改动对照">
+      {parts.map((part, i) =>
+        part.kind === "del" ? <del key={i} className="diff-del">{part.text}</del>
+        : part.kind === "ins" ? <ins key={i} className="diff-ins">{part.text}</ins>
+        : <span key={i}>{part.text}</span>
+      )}
+    </div>
+  );
+}
 
 /** What the turn's record and the earlier settings will change to; shared by every preview that changes facts. */
 export function RecordChanges({ changes, patch, dropped }: { changes: { name: string; before: string; after: string }[]; patch?: TurnRecord; dropped?: string[] }) {
@@ -63,6 +78,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
   const [scope, setScope] = useState<SourceScope>(AUTO_SCOPE);
   const [presetsOpen, setPresetsOpen] = useState(false);
   const [preview, setPreview] = useState("");
+  const [showDiff, setShowDiff] = useState(true);
   const [correction, setCorrection] = useState<CanonCorrectionPreview | null>(null);
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState(false);
@@ -113,6 +129,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
   };
   const outcome = correction ? correction.outcome ?? "changed" : null;
   const outcomeText = correction ? canonOutcomeText(correction, draft.source?.through) : "";
+  const previewDiff = useMemo(() => (ready && preview && preview !== original ? diffStats(diffText(original, preview)) : null), [ready, preview, original]);
   /** Something different to adopt: a change with its basis, a revision that changes text or facts, or any polish. */
   const adoptable = ready && (canon ? outcome === "changed" && !!correction?.corrections.length
     : mode === "revise" ? !!revision && (revision.replacement.trim() !== original.trim() || revision.recordChanges.length > 0 || !!revision.correctionPatch)
@@ -146,7 +163,23 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {rewrite && (canon || (mode === "revise" && !!draft.source)) && <SourceScopeRow worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose={canon ? "correction" : "revise"} disabled={pending || saving} onChange={(next) => { choose(range); setScope(next); }} />}
       <button className="ghost" disabled={pending || saving} onClick={() => setPresetsOpen(true)}>常用改稿要求</button>
       {presetsOpen && <MenuSheet title="常用改稿要求" onClose={() => setPresetsOpen(false)} items={WRITING_REQUIREMENT_PRESETS.filter(item => (item.mode === "polish" || rewrite) && (item.mode !== "canon" || !!draft.source)).map(item => ({ label: item.name, onSelect: () => { choose(range); setHint(item.hint); if (rewrite) setMode(item.mode); } }))} />}
-      {(preview || pending) && <label>{pending ? <span className="cursor-blink" role="status">正在改稿</span> : mode === "polish" ? "改稿（可以再改几个字）" : "改稿预览"}<textarea aria-label="改稿预览" readOnly={mode !== "polish"} value={preview} disabled={pending || saving} onChange={(e) => setPreview(e.target.value)} /></label>}
+      {(preview || pending) && (
+        <div className="stack gap-2">
+          <div className="row between">
+            <span className="field-label">{pending ? <span className="cursor-blink" role="status">正在改稿</span> : mode === "polish" ? "改稿（可以再改几个字）" : "改稿预览"}</span>
+            {previewDiff && (
+              <button type="button" className="ghost small diff-toggle" aria-pressed={showDiff} onClick={() => setShowDiff((v) => !v)}>
+                {showDiff ? "看纯正文" : "对照改动"}
+                <span className="diff-counts">{previewDiff.removed > 0 && <em className="del">-{previewDiff.removed}</em>}{previewDiff.added > 0 && <em className="ins">+{previewDiff.added}</em>}</span>
+              </button>
+            )}
+          </div>
+          {previewDiff && showDiff && <DiffView before={original} after={preview} />}
+          {(!previewDiff || !showDiff || mode === "polish") && (
+            <textarea aria-label="改稿预览" readOnly={mode !== "polish"} value={preview} disabled={pending || saving} onChange={(e) => setPreview(e.target.value)} />
+          )}
+        </div>
+      )}
       {revision?.note && <p className="muted m-0">{revision.note}</p>}
       {revision && <RecordChanges changes={revision.recordChanges} patch={revision.correctionPatch} dropped={revision.droppedCorrections} />}
       {revision && !adoptable && <p className="muted m-0">这次改稿和原来一样，没有要采用的改动；换个说法再改一版。</p>}
@@ -160,6 +193,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {error && <p role="alert" className="field-hint warn">{error}</p>}
       {pausedRun && canon && !pending && <button className="primary" onClick={() => void generate(pausedRun)}>接着查</button>}
       {((error && !pausedRun) || outcome === "not_found") && canon && !pending && <button onClick={() => { setError(""); pick("revise"); }}>改用“按我的要求改”</button>}
+      {error && mode === "revise" && error.includes("只润色文字") && !pending && <button onClick={() => { setError(""); pick("polish"); }}>改用“只润色文字”</button>}
       <div className="writing-actions">
         {pending ? <button onClick={() => { stop(); setError("已取消，原文没有改动。"); }}>取消生成</button> : <button disabled={saving} onClick={close}>取消</button>}
         {!pending && <button className={preview || correction ? "" : "primary"} disabled={saving || !original.trim()} onClick={() => void generate()}>{canon ? (correction ? "再查一次" : "开始核对") : preview ? "再改一版" : "生成改稿"}</button>}

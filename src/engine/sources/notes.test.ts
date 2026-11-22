@@ -19,6 +19,14 @@ async function setup() {
 }
 
 describe("原著札记 (D162)", () => {
+  it("saves the previous text on both insert and update of a book note", async () => {
+    const { repo, book } = await setup();
+    const note = { ...newNote(book.id, "plot", { from: 0, to: 2 }, "原著主线"), previousContent: "第一份旧稿" };
+    await saveNote(repo, note, false);
+    expect((await getNote(repo, note.id))?.previousContent).toBe("第一份旧稿");
+    await saveNote(repo, { ...note, previousContent: "第二份旧稿" }, false);
+    expect((await getNote(repo, note.id))?.previousContent).toBe("第二份旧稿");
+  });
   it("says how far the note has read in chapters, keeping batch counts for the developer view (R30 review #3)", async () => {
     const { repo, book } = await setup();
     const note = newNote(book.id, "plot", { from: 0, to: 11 }, "原标题");
@@ -67,9 +75,10 @@ describe("原著札记 (D162)", () => {
     expect((await exportWorld(repo, copied)).books![0].notes![0].content).toBe(imported.content);
   });
 
-  it("separates a probable refusal from a quoted reply containing a chapter range", () => {
+  it("separates a probable refusal from a quoted reply containing a chapter or turn range", () => {
     expect(noteReplyProblem({ text: "抱歉，我无法整理这段资料。", finishReason: "stop" })?.kind).toBe("suspected_refusal");
     expect(noteReplyProblem({ text: "抱歉，我无法回答是人物的原话。由此引出后面的误会。（第202～207章）", finishReason: "stop" })).toBeNull();
+    expect(noteReplyProblem({ text: "抱歉，我无法回答是掌柜的原话。由此引出后面的误会。（第12回合）", finishReason: "stop" })).toBeNull();
   });
 
   it("keeps the current and previous coverage of a book note through a failed update and an archive round trip", async () => {

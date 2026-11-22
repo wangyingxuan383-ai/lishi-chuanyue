@@ -10,7 +10,7 @@ import { sampleState } from "../testing/fixtures";
 import * as tree from "../tree";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { getNote, listStoryNotes, newStoryNote, markNotesStale, notesForTurn, saveNote } from "../sources/notes";
-import { abilityCardName, adoptPlayerRevision, adoptRewrite, parseFactSync, type FactSyncRequest } from "./assist";
+import { abilityCardName, adoptPlayerRevision, adoptRewrite, MISSING_OPENING_SEED_SYNC, parseFactSync, type FactSyncRequest } from "./assist";
 
 const LLM = { slot: "t", url: "https://main.invalid/v1/chat/completions", model: "m", auxModel: "aux", includeUsage: true };
 
@@ -227,6 +227,42 @@ describe("改后同步：事实也一起改 (D183)", () => {
     expect(parsed.narrative).toBe("你握着短剑进了城。");
     // Nothing changed in the story.
     expect((await s.repo.getNode(s.one.id))?.narrative).toBe("你握着匕首进了城。");
+  });
+
+  it("survives background AI upkeep during fact-sync and text-only rewrite", async () => {
+    const s = await story();
+    const r = request(s, s.two, "你在酒肆遇见王掌柜，他是你表哥。");
+    const origStream = s.platform.llm.stream.bind(s.platform.llm);
+    let appended = false;
+    s.platform.llm.stream = async (req, onEvent) => {
+      if (!appended) {
+        appended = true;
+        const cur = s.cursor();
+        await tree.append(s.repo, cur, { kind: "edit", actionText: "AI 整理了设定集", narrative: "", state: await s.repo.getState(cur.head.id), meta: { by: "AI", upkeep: true } });
+      }
+      return origStream(req, onEvent);
+    };
+    s.reply({ unchanged: false, recordPatch: { log: "见到表哥王掌柜" }, note: "改关系" });
+    const preview = await s.game.runFactSync(r).done;
+    expect(preview.anchor.headId).toBe((await tree.cursor(s.repo, s.worldId)).head.id);
+    // Also verify text-only adoptRewrite survives an upkeep edit appended after the anchor.
+    const cur = await tree.cursor(s.repo, s.worldId);
+    const oldAnchor = { worldId: s.worldId, lineId: cur.line.id, headId: cur.head.id, nodeId: s.one.id, original: s.one.narrative };
+    await tree.append(s.repo, cur, { kind: "edit", actionText: "AI 整理了设定集", narrative: "", state: await s.repo.getState(cur.head.id), meta: { by: "AI", upkeep: true } });
+    await adoptRewrite(s.game, oldAnchor, "你握着长剑进了城。");
+    expect((await s.repo.getNode(s.one.id))?.narrative).toBe("你握着长剑进了城。");
+  });
+
+  it("stops early with zero model calls when syncing a legacy opening without openingSeed", async () => {
+    const s = await story();
+    const { world, node, line } = await s.repo.createWorld({
+      title: "旧开场", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "旧开场正文。", state: sampleState(), meta: {} },
+    });
+    let calls = 0;
+    s.platform.llm.stream = async () => { calls++; return "never"; };
+    const anchor = { worldId: world.id, lineId: line.id, headId: node.id, nodeId: node.id, original: node.narrative };
+    await expect(s.game.runFactSync({ anchor, text: "改过的旧开场。" }).done).rejects.toThrow(MISSING_OPENING_SEED_SYNC);
+    expect(calls).toBe(0);
   });
 });
 

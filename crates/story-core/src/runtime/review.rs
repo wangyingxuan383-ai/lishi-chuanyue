@@ -1,5 +1,5 @@
 //! 原著核对: the deep tier's checked rewrite and the standard tier's lite check
-//! (reference-review-2 and reference-review-lite-3, D161, D162).
+//! (reference-review-2 and reference-review-lite-4, D161, D162).
 use super::*;
 
 impl Engine {
@@ -18,7 +18,7 @@ impl Engine {
         let result=match self.complete(shared,"reference-review-lite",messages,vec![],true).await {
             Ok(result)=>result,
             Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
-            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-3","status":"skipped","reason":error.to_string()}))),
+            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-4","status":"skipped","reason":error.to_string()}))),
         };
         // Do not repair truncated JSON into an executable record patch.
         let text=result.text.trim();
@@ -26,13 +26,13 @@ impl Engine {
         let issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
         if issues.as_array().is_some_and(|issues| issues.iter().any(|issue| !has_lite_evidence(plan, &passages, issue))) {
             return Ok((narrative.to_owned(), record.clone(), json!({
-                "version":"reference-review-lite-3","status":"partial","issues":[],
+                "version":"reference-review-lite-4","status":"partial","issues":[],
                 "unresolved":["更正没有对应到本次提供的原著原句，已保留正文和回合记录。"]
             })));
         }
         let (revised,revised_record,applied,skipped)=apply_lite_review(narrative,record,&issues);
         let unresolved=if !issues.is_array(){vec!["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]}else if skipped>0 {vec!["部分更正未能同时校准正文和回合记录，已保留本段原稿；可使用“按原著纠错”进一步核对。"]}else{vec![]};
-        Ok((revised,revised_record,json!({"version":"reference-review-lite-3","status":if !issues.is_array(){"skipped"}else if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
+        Ok((revised,revised_record,json!({"version":"reference-review-lite-4","status":if !issues.is_array(){"skipped"}else if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
     }
     pub(super) async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
@@ -127,7 +127,15 @@ pub(super) fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Ve
     let source=plan.reading_source();
     let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
     vec![
-        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。不改文风，不增删情节，不引入正文里没有的人物。只返回JSON：{\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄\",\"problem\":\"与原著哪里不符\",\"fix\":\"改正后的这句\",\"citations\":[{\"section\":1,\"chunk\":1,\"quote\":\"下面对应原著片段中的原句，逐字照抄\"}],\"recordPatch\":{}}]}。section 和 chunk 用下面原文标题显示的数字。每个问题必须附原文引文，不能引用正文或札记充当原文。recordPatch 只含受这句更正影响的回合记录字段，不受影响留空对象；数组字段提供更正后的完整列表，保留无关项目；对象字段只提供有变化的属性；不能改整局设定。按列出顺序修正记录，后项基于前项结果。正文和记录必须一致，无法同步就不要提出这条更正。最多5条；没有问题返回{\"issues\":[]}。"}),
+        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。
+规则：
+- 只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。
+- 不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。
+- 不改文风，不增删情节，不引入正文里没有的人物。
+- 每个问题必须附原文引文（section 和 chunk 用下面原文标题显示的数字，quote 逐字照抄下面对应原著片段），不能引用正文或札记充当原文。
+- recordPatch 只含受这句更正影响的回合记录字段，不受影响留空对象；数组字段提供更正后的完整列表并保留无关项目，对象字段只提供有变化的属性，不能改整局设定；按列出顺序修正记录，后项基于前项结果；正文和记录无法同步就不要提出这条更正。
+最多 5 条；没有问题返回 {\"issues\":[]}。只返回 JSON，不要加代码块或额外说明：
+{\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄\",\"problem\":\"与原著哪里不符\",\"fix\":\"改正后的这句\",\"citations\":[{\"section\":1,\"chunk\":1,\"quote\":\"下面对应原著片段中的原句，逐字照抄\"}],\"recordPatch\":{}}]}"}),
         json!({"role":"user","content":format!("【当前位置】原著第{}节前后\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（只含当前位置及之前不远的片段）{}\n【待校对正文】\n{narrative}",position+1,source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到当前位置之前的原文）".to_owned()}else{evidence})}),
     ]
 }

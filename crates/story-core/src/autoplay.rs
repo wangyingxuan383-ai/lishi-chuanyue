@@ -7,6 +7,7 @@ use crate::{
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -18,6 +19,7 @@ struct Live {
     raw_settings: Value,
     history: Vec<Value>,
     chapters: Vec<Value>,
+    text_hash: String,
 }
 
 /// Read only chapter gists, independently of the bounded prose window.
@@ -74,7 +76,7 @@ impl Engine {
             if steps >= total {
                 return self.finish_autoplay(&shared, "count");
             }
-            let live = self.autoplay_live(&plan)?;
+            let live = self.autoplay_live(&plan, true)?;
             if live.settings["pilot"] != "ai" {
                 return self.finish_autoplay(&shared, "player");
             }
@@ -122,8 +124,25 @@ impl Engine {
                 if saved.status == "running" {
                     self.store.finish(&child_id, "interrupted", None, None)?;
                 }
+                let previous = self.store.plan(&child_id)?;
+                let changed = previous.meta["autoplayTextHash"].as_str() != Some(&live.text_hash);
+                if changed {
+                    let mut fresh = self.autoplay_plan(&plan, live, index)?;
+                    if let Some(base) = previous.meta.get("stepBudgetBase") {
+                        fresh.meta["stepBudgetBase"] = base.clone();
+                    }
+                    self.store.owned(&plan, |tx| {
+                        Store::guard(tx, &fresh)?;
+                        // Keep usage and error history, but do not replay replies for the older prose.
+                        tx.execute("UPDATE execution_runs SET plan_json=?,draft_json='{}' WHERE id=?",
+                            params![serde_json::to_string(&fresh)?, child_id])?;
+                        tx.execute("UPDATE execution_steps SET status='stale' WHERE run_id=? AND status='done'", [&child_id])?;
+                        Ok(())
+                    })?;
+                    self.store.run_event(&plan, json!({"type":"text","delta":"","full":""}))?;
+                }
                 self.store.resume(&child_id)?;
-                (self.store.plan(&child_id)?, saved.draft, saved.budget)
+                (self.store.plan(&child_id)?, if changed { json!({}) } else { saved.draft }, saved.budget)
             } else {
                 let mut child = self.autoplay_plan(&plan, live, index)?;
                 if plan.meta["autoplayBudgetVersion"]=="per-passage-1"{child.meta["stepBudgetBase"]=serde_json::to_value(shared.lock().map_err(|_|Error::Cancelled)?.budget())?;}
@@ -179,7 +198,7 @@ impl Engine {
             }
             self.reconcile_child(&shared, index, &saved)?;
             let latest = self.store.plan(&plan.id)?;
-            let after = self.autoplay_live(&latest)?;
+            let after = self.autoplay_live(&latest, false)?;
             if dead(&after.state, &after.settings) {
                 return self.finish_autoplay(&shared, "died");
             }
@@ -196,7 +215,7 @@ impl Engine {
         }
     }
 
-    fn autoplay_live(&self, plan: &RunPlan) -> Result<Live> {
+    fn autoplay_live(&self, plan: &RunPlan, capture_text: bool) -> Result<Live> {
         let mut db = self.store.lock()?;
         let tx = db.transaction()?;
         // Settings can be changed between spectator steps. The route and
@@ -244,12 +263,14 @@ impl Engine {
         drop(statement);
         history.reverse();
         let chapters = chapters_on_route(&tx, &plan.world_id, &plan.head_id)?;
+        let text_hash = if capture_text { route_text_hash(&tx, &plan.world_id, &plan.head_id)? } else { String::new() };
         Ok(Live {
             state,
             settings,
             raw_settings,
             history,
             chapters,
+            text_hash,
         })
     }
 
@@ -267,7 +288,9 @@ impl Engine {
         plan.new_world = None;
         for key in [
             "upkeepMessages",
+            "upkeepTextGuard",
             "chapterMessages",
+            "chapterTextGuard",
             "chapterFirstId",
             "targetId",
             "rewriteHint",
@@ -277,6 +300,7 @@ impl Engine {
         plan.meta["parentRun"] = parent.id.clone().into();
         plan.meta["autoplayIndex"] = index.into();
         plan.meta["autoplayPromptVersion"] = "autoplay-1".into();
+        plan.meta["autoplayTextHash"] = live.text_hash.into();
         plan.meta["settingsGuard"] = live.raw_settings;
         plan.meta["sourceGuard"] = plan.state.get("source").cloned().unwrap_or(Value::Null);
         plan.options["mode"] = "continue".into();
@@ -357,8 +381,33 @@ impl Engine {
             &c.plan.id,
             json!({"type":"finished","steps":result["steps"],"reason":reason}),
         )?;
+        let completion = c.draft["lastNodeId"]
+            .as_str()
+            .filter(|id| !id.is_empty() && result["steps"].as_u64().unwrap_or(0) > 0)
+            .map(|node_id| format!("{}:{}", c.plan.world_id, node_id));
+        drop(c);
+        if let Some(id) = completion {
+            (self.committed)(id);
+        }
         Ok(())
     }
+}
+
+fn route_text_hash(db: &Connection, world: &str, head: &str) -> Result<String> {
+    let mut statement = db.prepare("WITH RECURSIVE route(id,parent_id) AS (
+        SELECT id,parent_id FROM nodes WHERE world_id=?1 AND id=?2
+        UNION SELECT n.id,n.parent_id FROM nodes n JOIN route r ON n.id=r.parent_id WHERE n.world_id=?1
+      ) SELECT n.id,n.narrative FROM route r JOIN nodes n ON n.id=r.id WHERE n.kind<>'edit' ORDER BY n.seq")?;
+    let mut rows = statement.query(params![world, head])?;
+    let mut hash = Sha256::new();
+    while let Some(row) = rows.next()? {
+        for column in 0..2 {
+            let value: String = row.get(column)?;
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn merge_budget(shared: &Shared, used: &RunBudget) -> Result<()> {
@@ -405,6 +454,15 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     let offset = (total as usize).saturating_sub(history.iter().filter(|n| n["kind"] != "edit").count());
     let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters,"canonNotes":saved["canonNotes"]});
     let mut input=input;
+    let fact_ids = plan.state["facts"].as_array().into_iter().flatten()
+        .filter(|fact| fact["origin"] == "ai").filter_map(|fact| fact["nodeId"].as_str()).collect::<Vec<_>>();
+    if !fact_ids.is_empty() {
+        let db = store.lock()?;
+        let mut statement = db.prepare("SELECT DISTINCT n.id FROM json_each(?1) f JOIN nodes n ON n.id=f.value WHERE n.world_id=?2 AND n.rewritten<>0")?;
+        let ids = statement.query_map(params![serde_json::to_string(&fact_ids)?, plan.world_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        input["editedFactNodeIds"] = json!(ids);
+    }
     input["continuity"]=crate::continuity::project(&*store.lock()?,&plan.world_id,plan.base_id.as_deref().unwrap_or(&plan.head_id)).unwrap_or_else(|_|json!({"unavailable":true}));
     let context=crate::writing_context::build(&input)?;
     plan.messages=context["messages"].as_array().cloned().unwrap_or_default();

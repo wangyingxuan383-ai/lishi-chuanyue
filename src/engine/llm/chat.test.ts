@@ -66,7 +66,10 @@ describe("streamChat", () => {
       data({ error: { message: "上游连接中断" } }),
       { type: "done" },
     ]), request);
-    await expect(handle.result).rejects.toMatchObject({ kind: "invalid_stream", partial: "没写完的正文" });
+    const error = await handle.result.catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ kind: "stream", partial: "没写完的正文" });
+    expect(retryDecision(error, 1, []).retry).toBe(true);
+    expect(retryDecision(error, 2, []).retry).toBe(false);
   });
 
   it("combines separately reported token counts without inventing missing usage", async () => {

@@ -19,6 +19,22 @@ describe("chapter summaries", () => {
     expect(user.content).toContain("第 14 回合\n赵四跑来报信。");
   });
 
+  it("handles free worlds cleanly without historical wording and preserves concrete details", () => {
+    const [freeSys] = chapterMessages({
+      mode: "free", premise: "浮空群岛，以风晶交易。", protagonist: "林舟", previous: [],
+      turns: [{ actionText: "交易", narrative: "你用三块青风晶换了一张海图。" }], firstTurn: 1,
+    });
+    expect(freeSys.content).not.toContain("历史互动小说");
+    expect(freeSys.content).toContain("沿用本局世界设定与称呼");
+    expect(freeSys.content).toContain("修为或能力等级");
+    const [histSys] = chapterMessages({
+      mode: "history", premise: "天宝七载，长安。", protagonist: "崔怀远", previous: [],
+      turns: [{ actionText: "出门", narrative: "你走到街上。" }], firstTurn: 1,
+    });
+    expect(histSys.content).toContain("历史互动小说");
+    expect(histSys.content).not.toContain("不输出 timeline、deviation");
+  });
+
   it("reads the answer, filling a missing title or gist", () => {
     expect(parseChapter('好的：{"title":"夜闯死牢","gist":"崔怀远潜入死牢","summary":"崔怀远买通狱吏……"}')).toEqual({ title: "夜闯死牢", gist: "崔怀远潜入死牢", summary: "崔怀远买通狱吏……" });
     expect(parseChapter('{"summary":"一段摘要"}')).toEqual({ title: "无题", gist: "一段摘要", summary: "一段摘要" });

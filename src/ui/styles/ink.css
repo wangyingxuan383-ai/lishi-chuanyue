@@ -77,15 +77,18 @@
 /* ---------- play screen ---------- */
 :root[data-style="ink"] .story { padding-left: var(--s-gutter); padding-right: var(--s-gutter); }
 :root[data-style="ink"] .turn + .turn::before { opacity: 0.6; }
-/* 接下来 is a card of rows with a chevron. */
-:root[data-style="ink"] .next-choices { margin: 22px 0 8px; padding: 14px 6px 6px; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-2); }
-:root[data-style="ink"] .next-head { justify-content: flex-start; padding: 0 10px; letter-spacing: 0.12em; font-family: var(--sans); font-weight: 600; color: var(--muted); }
+/* 接下来 is a card of rows with a quiet fill button. */
+:root[data-style="ink"] .next-choices { margin: 22px 0 8px; padding: 14px 8px 6px; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-2); }
+:root[data-style="ink"] .next-head { justify-content: flex-start; padding: 2px 10px 4px 22px; letter-spacing: 0.12em; font-family: var(--sans); font-weight: 600; color: var(--muted); }
 :root[data-style="ink"] .next-head::before { display: none; }
-:root[data-style="ink"] .choice { counter-increment: choice; border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); padding: 13px 34px 13px 12px; border-radius: 12px; font-family: var(--serif); }
-:root[data-style="ink"] .choice:last-child { border-bottom: none; }
+:root[data-style="ink"] .choice-row { border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); align-items: center; }
+:root[data-style="ink"] .choice-row:last-child { border-bottom: none; }
+:root[data-style="ink"] .choice { padding: 13px 8px 13px 12px; border-radius: 12px; font-family: var(--serif); }
 :root[data-style="ink"] .choice::before { content: ""; }
-:root[data-style="ink"] .choice::after { content: "›"; position: absolute; right: 14px; top: 50%; transform: translateY(-52%); font-size: 20px; color: var(--muted); }
 :root[data-style="ink"] .choice:active:not(:disabled) { background: var(--raised); }
+:root[data-style="ink"] .choice-fill { border-radius: 50%; margin-right: 2px; }
+:root[data-style="ink"] .ref-review { border: none; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1); }
+:root[data-style="ink"] .ref-review-body { border-top-style: solid; border-top-color: color-mix(in srgb, var(--line) 70%, transparent); }
 /* Changes: soft pills. */
 :root[data-style="ink"] .turn-changes { gap: 6px; font-family: var(--sans); }
 :root[data-style="ink"] .turn-changes .change { padding: 3px 10px; border-radius: var(--radius-pill); background: color-mix(in srgb, currentColor 9%, transparent); }
@@ -217,3 +220,23 @@
 :root[data-style="ink"] .scene-panel { border-color: var(--gilt-soft); }
 :root[data-style="ink"] .sheet { background-image: linear-gradient(90deg, transparent, var(--gilt-soft) 30%, var(--gilt-soft) 70%, transparent); background-size: 100% 1px; background-repeat: no-repeat; background-position: 0 0; }
 :root[data-style="ink"] .depth-btn span { border-color: var(--gilt); }
+:root[data-style="ink"] :is(.codex-era, .codex-ability, .bio-card, .hero-panel, .stat, .diff-fold) {
+  border: none; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1);
+}
+:root[data-style="ink"] .codex-ability { box-shadow: var(--elev-2), inset 0 0 0 1px var(--gilt-soft); }
+:root[data-style="ink"] .diff-box { border: none; border-radius: var(--radius); background: var(--raised); }
+:root[data-style="ink"] label.writing-option { border-color: transparent; border-radius: var(--radius); box-shadow: var(--elev-1); }
+:root[data-style="ink"] label.writing-option:has(input:checked) { border-color: var(--fg); background: var(--surface); box-shadow: var(--elev-2), 0 0 0 2px color-mix(in srgb, var(--fg) 14%, transparent); }
+:root[data-style="ink"] .codex-filters button { border-radius: var(--radius-pill); }
+:root[data-style="ink"] .codex-filters button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: transparent; }
+:root[data-style="ink"] .report-card { border-left: 3px solid var(--gilt); border-radius: 6px var(--radius-card) var(--radius-card) 6px; }
+:root[data-style="ink"] .composer-tools { background: linear-gradient(180deg, transparent, var(--dock-field) 35%); border-radius: 0 0 18px 18px; }
+:root[data-style="ink"] .dock[data-tools]:not([data-tools="0"]) .inputbar { align-items: flex-end; border-radius: 22px; }
+@media (hover: hover) {
+  :root[data-style="ink"] .choice:hover:not(:disabled) { background: var(--raised); }
+  :root[data-style="ink"] .choice-fill:hover:not(:disabled) { background: var(--raised); color: var(--accent); opacity: 1; }
+  :root[data-style="ink"] .sheet-menu button:hover:not(:disabled) { background: var(--raised); }
+  :root[data-style="ink"] .settings-entry:hover:not(:disabled) { background: var(--raised); }
+  :root[data-style="ink"] .tool-btn:hover:not(:disabled) { background: var(--raised); color: var(--accent); }
+  :root[data-style="ink"] button.primary:hover:not(:disabled) { filter: brightness(1.06); }
+}

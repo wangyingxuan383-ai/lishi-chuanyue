@@ -35,7 +35,10 @@ button.primary.soft { background: color-mix(in srgb, var(--accent) 70%, var(--li
 .facts dd { margin: 0; }
 
 /* ---------- 设定集 ---------- */
-.codex-era { padding: 12px 14px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); }
+.codex-era { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
+.codex-ability { padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--radius-card); background: var(--raised); }
+.codex-ability-title { font-family: var(--serif); font-size: 16px; }
+.codex-pin-badge { font-size: 11px; padding: 1px 6px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-family: var(--sans); white-space: nowrap; }
 .codex-text { margin: 0; white-space: pre-wrap; line-height: 1.7; font-size: 14px; }
 .person-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .person-side small { color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -45,8 +48,13 @@ button.primary.soft { background: color-mix(in srgb, var(--accent) 70%, var(--li
 .context-layer summary { cursor: pointer; line-height: 1.6; }
 .context-layer summary .muted { font-size: 13px; }
 .context-layer pre.raw { max-height: 40vh; overflow: auto; }
-button.codex-item { width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; min-height: auto; padding: 10px 0; }
+button.codex-item { width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; min-height: auto; padding: 10px 4px; }
 button.danger-text { color: var(--loss); }
+@media (hover: hover) {
+  button.codex-item:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 40%, transparent); border-radius: var(--radius); }
+  .template-card:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .fold-head:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 35%, transparent); }
+}
 
 
 /* ---------- 完整感 (direction G): 目录, search, 前情提要 ---------- */

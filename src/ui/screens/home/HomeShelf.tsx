@@ -3,6 +3,7 @@
 // half pulled out, its cover showing; under the shelf a slip tells where you
 // left off. Opening a book pulls it from the shelf, turns it to face you and
 // lifts the cover before the story comes up.
+import { useState } from "react";
 import { BookCover, TONES, seedOf, slipText } from "../../components/BookArt";
 import { Icon } from "../../components/Icon";
 import { useLongPress } from "../../components/useLongPress";
@@ -12,15 +13,16 @@ import "./home-shelf.css";
 /** Books per shelf row: enough to fill a phone's width, spine by spine. */
 const PER_ROW = 7;
 
-function ShelfBook({ card, featured, writing, onOpen, onMenu, index }: { card: WorldCard; featured: boolean; writing: boolean; onOpen: HomeViewProps["onOpen"]; onMenu: HomeViewProps["onMenu"]; index: number }) {
+function ShelfBook({ card, featured, writing, onTap, onMenu, index }: { card: WorldCard; featured: boolean; writing: boolean; onTap: (card: WorldCard) => void; onMenu: HomeViewProps["onMenu"]; index: number }) {
   const seed = seedOf(card.world.id);
-  const press = useLongPress(() => onMenu(card), () => onOpen(card, document.querySelector(`.shelf-book[data-world-id="${card.world.id}"]`)));
+  const press = useLongPress(() => onMenu(card), () => onTap(card));
   const spine = slipText(card.world.title).slice(0, 6);
   // Books are not all the same size: a little height and thickness from the seed.
   const height = 132 + (seed % 5) * 7, thick = 30 + ((seed >>> 3) % 4) * 4;
   return (
     <button className={`shelf-book tone-${seed % TONES}${featured ? " featured" : ""}${writing ? " writing" : ""}`} data-world-id={card.world.id} {...press}
-      style={{ ["--bh" as string]: `${height}px`, ["--bt" as string]: `${thick}px`, ["--i" as string]: index }} aria-label={`继续“${card.world.title}”`}>
+      style={{ ["--bh" as string]: `${height}px`, ["--bt" as string]: `${thick}px`, ["--i" as string]: index }}
+      aria-pressed={featured} aria-label={featured ? `继续“${card.world.title}”` : `抽出查看“${card.world.title}”`}>
       <span className="book3d">
         <span className="book-spine">
           <span className="spine-band" />
@@ -46,11 +48,18 @@ function PlainBooks({ count, offset }: { count: number; offset: number }) {
 }
 
 export function HomeShelf({ cards, writing, onOpen, onMenu, onNew, newStory }: HomeViewProps & { onNew: () => void }) {
-  const latest = cards[0];
+  const [selectedId, setSelectedId] = useState(cards[0]?.world.id ?? "");
+  const activeIndex = Math.max(0, cards.findIndex((c) => c.world.id === selectedId));
+  const active = cards[activeIndex] ?? cards[0];
   const rows: WorldCard[][] = [];
   for (let i = 0; i < cards.length; i += PER_ROW) rows.push(cards.slice(i, i + PER_ROW));
   const last = rows.length - 1, room = PER_ROW - rows[last].length;
-  const openLatest = () => onOpen(latest, document.querySelector(`.shelf-book[data-world-id="${latest.world.id}"]`));
+  const openBook = (card: WorldCard) => onOpen(card, document.querySelector(`.shelf-book[data-world-id="${card.world.id}"]`));
+  // Tapping the already pulled-out book opens it; tapping another spine pulls it out to preview its slip first.
+  const tapBook = (card: WorldCard) => {
+    if (card.world.id === active.world.id) openBook(card);
+    else setSelectedId(card.world.id);
+  };
   return (
     <>
       <section className="home-shelf" aria-label="书架">
@@ -58,7 +67,7 @@ export function HomeShelf({ cards, writing, onOpen, onMenu, onNew, newStory }: H
           {rows.map((row, r) => (
             <div key={r} className="shelf-row">
               <div className="shelf-books">
-                {row.map((card, i) => <ShelfBook key={card.world.id} card={card} index={r * PER_ROW + i} featured={card === latest} writing={writing.has(card.world.id)} onOpen={onOpen} onMenu={onMenu} />)}
+                {row.map((card, i) => <ShelfBook key={card.world.id} card={card} index={r * PER_ROW + i} featured={card.world.id === active.world.id} writing={writing.has(card.world.id)} onTap={tapBook} onMenu={onMenu} />)}
                 {r === last && <button className="new-book" onClick={onNew} aria-label="开始新的故事"><span className="new-book-mark" aria-hidden="true">＋</span><span className="new-book-text">新书</span></button>}
                 {r === last && room > 2 && <PlainBooks count={Math.min(4, room - 1)} offset={cards.length} />}
               </div>
@@ -66,14 +75,15 @@ export function HomeShelf({ cards, writing, onOpen, onMenu, onNew, newStory }: H
             </div>
           ))}
         </div>
-        <div className="shelf-slip">
+        <div key={active.world.id} className="shelf-slip">
           <div className="slip-head">
-            <b>{latest.world.title}</b>
-            <button className="icon-btn world-menu" aria-label={`“${latest.world.title}”的更多操作`} onClick={() => onMenu(latest)}><Icon name="more" /></button>
+            <b>{active.world.title}</b>
+            {cards.length > 1 && <span className="slip-index">{activeIndex + 1}/{cards.length}</span>}
+            <button className="icon-btn world-menu" aria-label={`“${active.world.title}”的更多操作`} onClick={() => onMenu(active)}><Icon name="more" /></button>
           </div>
-          <small>{latest.protagonist} · {latest.clock} · {writing.has(latest.world.id) ? "正在写…" : relative(latest.world.playedAt)}</small>
-          {latest.lastLine && <p className="slip-line">{latest.lastLine}</p>}
-          <button className="primary continue-btn" onClick={openLatest}><Icon name="play" size={16} />翻开继续</button>
+          <small>{active.protagonist} · {active.clock} · {writing.has(active.world.id) ? "正在写…" : active.turns ? `${active.turns} 回合 · ${relative(active.world.playedAt)}` : relative(active.world.playedAt)}</small>
+          {active.lastLine && <p className="slip-line">{active.lastLine}</p>}
+          <button className="primary continue-btn" onClick={() => openBook(active)}><Icon name="play" size={16} />翻开继续</button>
         </div>
       </section>
       {newStory}

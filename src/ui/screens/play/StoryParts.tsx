@@ -56,14 +56,22 @@ export function HeadTools({ node, variants, mouse, onSwitch, onRegen, onHints, o
 
 /** The passage being written: the action, then an ink-brush wait until the first words, then the words. */
 export function WritingTurn({ gen, statusText, waitLine, waited, slow }: { gen: Gen; statusText: string; waitLine: string; waited: number; slow: boolean }) {
+  const phaseLabel = gen.phase === "organizing" ? "整理中" : gen.phase === "thinking" ? "构思中" : "落笔中";
   return (
     <div className="turn writing-turn">
       {gen.action?.mode === "write" && gen.action.text && <div className="turn-written"><StoryText text={gen.action.text} /></div>}
       {gen.action && gen.action.mode !== "continue" && gen.action.mode !== "write" && gen.action.text && <div className={`turn-action ${gen.action.mode} flying`}>{gen.action.text}</div>}
       {gen.text ? <StoryText text={gen.text} streaming={gen.phase === "writing"} /> : (
-        <div className="ink-wait" role="status">
+        <div className="ink-wait" data-phase={gen.phase} role="status">
           <span className="ink-brush" aria-hidden="true"><i /><i /><i /></span>
-          <span className="status-line"><span className="cursor-blink">{statusText || waitLine}</span>{waited >= 2 && <span className="waited">{waited} 秒</span>}</span>
+          <div className="ink-wait-body">
+            <span className="status-line">
+              <span className="phase-pill">{phaseLabel}</span>
+              <span className="cursor-blink">{statusText || waitLine}</span>
+              {waited >= 2 && <span className="waited">{waited} 秒</span>}
+            </span>
+            <span className="ink-progress" aria-hidden="true"><i /></span>
+          </div>
         </div>
       )}
       {gen.text && statusText && <p className="status-line">{statusText}</p>}

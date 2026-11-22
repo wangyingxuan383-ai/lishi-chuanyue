@@ -281,6 +281,8 @@ pub(crate) fn locate_citation(passages: &[Value], cite: &Value, book: &Value) ->
         found["title"] = passage["title"].clone();
         if passage["page"].is_number() {
             found["page"] = passage["page"].clone();
+        } else if let Some(fields) = found.as_object_mut() {
+            fields.remove("page");
         }
         found["start"] = start.into();
         found["end"] = end.into();
@@ -315,6 +317,18 @@ mod tests {
         assert_eq!((found["section"].clone(), found["chunk"].clone()), (json!(5), json!(9)));
         assert!(locate_citation(&read, &json!({"quote":"比试"}), &json!("book")).is_none());
         assert!(locate_citation(&read, &json!({"quote":"内院比试在秋天举行"}), &json!("book")).is_none());
+    }
+
+    #[test]
+    fn only_a_page_read_from_the_original_is_returned() {
+        let mut original = passage(0, 0, "入门比试分为实战与理论两项。", 0);
+        for claimed in [json!(null), json!(3)] {
+            let found = locate_citation(&[original.clone()], &json!({"quote":"入门比试分为实战","page":claimed}), &json!("book")).unwrap();
+            assert!(found.get("page").is_none());
+        }
+        original["page"] = 12.into();
+        let found = locate_citation(&[original], &json!({"quote":"入门比试分为实战","page":3}), &json!("book")).unwrap();
+        assert_eq!(found["page"], 12);
     }
 
     #[test]

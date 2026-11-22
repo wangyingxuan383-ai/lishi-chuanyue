@@ -64,6 +64,7 @@ struct Fixture {
     engine: Arc<Engine>,
     model: Arc<ModelFixture>,
     leases: Arc<AtomicUsize>,
+    committed: Arc<Mutex<Vec<String>>>,
 }
 impl Fixture {
     fn new(challenge: bool) -> Self {
@@ -87,6 +88,8 @@ impl Fixture {
         });
         let leases = Arc::new(AtomicUsize::new(0));
         let active = leases.clone();
+        let committed = Arc::new(Mutex::new(Vec::new()));
+        let sink = committed.clone();
         let engine = Arc::new(Engine::new(
             store,
             model.clone(),
@@ -94,12 +97,13 @@ impl Fixture {
                 active.fetch_add(1, Ordering::SeqCst);
                 Box::new(Lease(active.clone()))
             }),
-            Arc::new(|_| {}),
+            Arc::new(move |id| sink.lock().unwrap().push(id)),
         ));
         Self {
             engine,
             model,
             leases,
+            committed,
         }
     }
     fn plan(&self, count: u64) -> RunPlan {
@@ -175,6 +179,8 @@ async fn native_sequence_finishes_without_reader_and_uses_new_state() {
     assert_eq!(saved.status, "committed", "{:?}", saved.error);
     assert_eq!(saved.result.as_ref().unwrap()["steps"], 2);
     assert_eq!(saved.result.as_ref().unwrap()["reason"], "count");
+    let committed = f.committed.lock().unwrap().clone();
+    assert_eq!(committed, vec![format!("w:{}", saved.result.as_ref().unwrap()["nodeId"].as_str().unwrap())]);
     assert_eq!(saved.budget.model_requests, 2);
     assert_eq!(f.scalar("SELECT COUNT(*) FROM usage"), 2);
     assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 3);
@@ -233,6 +239,7 @@ async fn whole_sequence_budget_pauses_and_continuing_grants_one_more_allowance()
     f.engine.start(f.plan(34)).unwrap();
     let saved = f.settled().await;
     assert_eq!(saved.status, "paused", "{:?}", saved.error);
+    assert!(f.committed.lock().unwrap().is_empty(), "a paused sequence must not ring once per step");
     assert_eq!(saved.draft["steps"], 30);
     assert_eq!(saved.budget.model_requests, 30);
     assert_eq!(f.model.requests.lock().unwrap().len(), 30);
@@ -241,6 +248,7 @@ async fn whole_sequence_budget_pauses_and_continuing_grants_one_more_allowance()
     f.engine.resume("auto").unwrap();
     let again = f.settled().await;
     assert_eq!(again.status, "committed", "{:?}", again.error);
+    assert_eq!(f.committed.lock().unwrap().len(), 1);
     assert_eq!(again.result.as_ref().unwrap()["steps"], 34);
     assert_eq!(again.budget.model_requests, 34);
     assert_eq!(f.model.requests.lock().unwrap().len(), 34);

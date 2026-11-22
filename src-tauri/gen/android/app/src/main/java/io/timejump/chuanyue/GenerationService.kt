@@ -261,15 +261,31 @@ class GenerationService : Service() {
             return builder
         }
 
-        /** Whether "写好了" will actually make a sound: the app's switch and the channel the system keeps. */
+        /** Whether both reminder channels ("写好了" and "没写完") will actually make a sound. */
         fun reminderAudible(context: Context): Pair<Boolean, Boolean> {
             val wanted = prefs(context).getBoolean(PREF_SOUND, true)
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return wanted to wanted
             val manager = context.getSystemService(NotificationManager::class.java) ?: return wanted to wanted
-            val channel = manager.getNotificationChannel(reminderChannel(context, issue = false))
-            val audible = manager.areNotificationsEnabled() && channel != null &&
-                channel.importance >= NotificationManager.IMPORTANCE_DEFAULT && channel.sound != null
+            if (!manager.areNotificationsEnabled()) return wanted to false
+            val audible = listOf(false, true).all { issue ->
+                val channel = manager.getNotificationChannel(reminderChannel(context, issue))
+                channel != null && channel.importance >= NotificationManager.IMPORTANCE_DEFAULT && channel.sound != null
+            }
             return wanted to audible
+        }
+
+        /** Which reminder channel to open in settings: the muted one when only one is muted, otherwise "写好了". */
+        fun mutedReminderChannel(context: Context): String {
+            val doneId = reminderChannel(context, issue = false)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return doneId
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return doneId
+            val isAudible = { id: String ->
+                val channel = manager.getNotificationChannel(id)
+                channel != null && channel.importance >= NotificationManager.IMPORTANCE_DEFAULT && channel.sound != null
+            }
+            if (!isAudible(doneId)) return doneId
+            val issueId = reminderChannel(context, issue = true)
+            return if (!isAudible(issueId)) issueId else doneId
         }
 
         /** 试一下提醒: one "写好了"-style reminder now, even with the app open. */
@@ -498,11 +514,13 @@ class GenerationService : Service() {
                     return
                 }
                 requested = true
-                phase = "thinking"
-                chars = 0
-                storyTitle = ""
-                runId = ""
-                executionId = ""
+                // Keep any progress that arrived before start() so the first notification frame is not blank.
+                val target = progress.values.lastOrNull()
+                phase = target?.phase ?: "thinking"
+                chars = target?.chars ?: 0
+                storyTitle = target?.title.orEmpty()
+                runId = target?.run.orEmpty()
+                executionId = target?.execution.orEmpty()
                 startedAt = System.currentTimeMillis()
                 try {
                     val app = context.applicationContext

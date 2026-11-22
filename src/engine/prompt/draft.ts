@@ -4,7 +4,7 @@ import type { ChatMessage } from "../llm/chat";
 import { MAX_BEATS, type ChallengeInput, type ScriptInput } from "../modes";
 import type { SetupDraft } from "./turn";
 
-export const DRAFT_PROMPT_VERSION = "draft-1";
+export const DRAFT_PROMPT_VERSION = "draft-2";
 
 /** The opening as far as the player has filled it in; `script` / `challenge` are the parts of the draft already written. */
 export type DraftInput = Partial<SetupDraft> & { script?: Partial<ScriptInput> | null; challenge?: Partial<ChallengeInput> | null };
@@ -35,7 +35,7 @@ export function draftScriptMessages(current: DraftInput): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你帮玩家给一部${story(current)}拟剧本大纲：一句话的主线，三到八幕骨架，和想要的结局。每一幕一句话，写这一幕会发生的事（谁、在哪、出了什么事），按先后排；只写局面和事件，不替主角做决定，给玩家留出选择。符合故事设定和主角的身份。玩家已经写好的部分原样保留，接着补全。只输出一个 JSON 对象：
+      content: `你帮玩家给一部${story(current)}拟剧本大纲：一句话的主线，三到八幕骨架，和想要的结局。每一幕一句话，写这一幕会发生的事（谁、在哪、出了什么事），按先后排；只写局面和事件，不替主角做决定，给玩家留出选择。符合故事设定和主角的身份。玩家已经写好的部分原样保留，接着补全。只输出一个 JSON 对象，不要加代码块或额外说明：
 {"line":"主线，一句话","beats":["第一幕","第二幕","第三幕"],"ending":"想要的结局，一句话"}`,
     },
     { role: "user", content: `开局设定：\n${setupText(current)}\n\n已经写好的大纲：\n${written || "（无）"}` },
@@ -48,7 +48,7 @@ export function draftChallengeMessages(current: DraftInput): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你帮玩家给一部${story(current)}出一个开局挑战：一个具体的目标，难，但凭主角的身份和本事有办法做到；一个期限，写成时长（如“十日”“三个月”“半年”）；一个失败条件（没有合适的可以留空）。难处要真实，符合故事设定和主角的处境。玩家已经写好的部分原样保留。只输出一个 JSON 对象：
+      content: `你帮玩家给一部${story(current)}出一个开局挑战：一个具体的目标，难，但凭主角的身份和本事有办法做到；一个期限，写成可直接计时的时长（如“十日”“三个月”“半年”，不限时则留空字符串）；一个失败条件（没有合适的可以留空）。难处要真实，符合故事设定和主角的处境。玩家已经写好的部分原样保留。只输出一个 JSON 对象，不要加代码块或额外说明：
 {"goal":"目标，一句话","limit":"期限","failIf":"失败条件，一句话"}`,
     },
     { role: "user", content: `开局设定：\n${setupText(current)}\n\n已经写好的挑战：\n${written || "（无）"}` },

@@ -88,7 +88,7 @@ impl Engine {
         tidy.carried_edits = vec![];
         tidy.trailing_ids = vec![];
         let mut meta = json!({"maintainNode": node, "passageRun": plan.id, "budgetChars": plan.meta["budgetChars"]});
-        for key in ["upkeepMessages", "upkeepVersion", "chapterMessages", "chapterFirstId", "chapterVersion", "modelRequestLimit"] {
+        for key in ["upkeepMessages", "upkeepTextGuard", "upkeepVersion", "chapterMessages", "chapterTextGuard", "chapterFirstId", "chapterVersion", "modelRequestLimit"] {
             if !plan.meta[key].is_null() { meta[key] = plan.meta[key].clone(); }
         }
         if let Some(refresh) = refresh {
@@ -98,7 +98,9 @@ impl Engine {
             for item in refresh.iter().take(2) {
                 let (Some(first), Some(last)) = (item["firstNodeId"].as_str(), item["lastNodeId"].as_str()) else { continue };
                 let mut item = item.clone();
-                item["hash"] = span_hash(&db, first, last)?.into();
+                if item["textGuard"].is_null() {
+                    item["hash"] = span_hash(&db, first, last)?.into();
+                }
                 list.push(item);
             }
             meta["chapterRefresh"] = Value::Array(list);
@@ -134,7 +136,8 @@ impl Engine {
         // means its results describe text that is gone (D183).
         let text_now: Option<String> = tx.query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).optional()?;
         let same_text = text_now.as_deref() == Some(plan.original.as_str());
-        let still_head = available && same_text && head.as_deref() == Some(plan.head_id.as_str());
+        let still_head = available && same_text && head.as_deref() == Some(plan.head_id.as_str())
+            && text_guard_matches(&tx, &plan.world_id, &plan.meta["upkeepTextGuard"])?;
         let mut upkeep_done = false;
         if still_head && c.draft["upkeepPatch"].is_object() {
             let patch = &c.draft["upkeepPatch"];
@@ -161,15 +164,22 @@ impl Engine {
             let taken = tx.query_row("WITH RECURSIVE up(id) AS (SELECT ? UNION ALL SELECT n.parent_id FROM nodes n JOIN up u ON n.id=u.id WHERE n.parent_id IS NOT NULL)
                 SELECT 1 FROM chapters WHERE world_id=? AND first_node_id=? AND last_node_id IN (SELECT id FROM up)", params![node, plan.world_id, first], |_| Ok(())).optional()?.is_some();
             if !taken {
-                tx.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,created_at,stale) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![uuid::Uuid::new_v4().simple().to_string(),plan.world_id,first,node,chapter["title"].as_str().unwrap_or("未命名章节"),chapter["gist"].as_str().unwrap_or(""),chapter["summary"].as_str().unwrap_or(""),plan.model.aux_model.as_ref().unwrap_or(&plan.model.model),plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"),time,if same_text { None } else { Some(1) }])?;
+                let fresh = same_text && text_guard_matches(&tx, &plan.world_id, &plan.meta["chapterTextGuard"])?;
+                tx.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,created_at,stale) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![uuid::Uuid::new_v4().simple().to_string(),plan.world_id,first,node,chapter["title"].as_str().unwrap_or("未命名章节"),chapter["gist"].as_str().unwrap_or(""),chapter["summary"].as_str().unwrap_or(""),plan.model.aux_model.as_ref().unwrap_or(&plan.model.model),plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"),time,if fresh { None } else { Some(1) }])?;
             }
         }
         for refresh in plan.meta["chapterRefresh"].as_array().into_iter().flatten() {
             let (Some(id), Some(first), Some(last)) = (refresh["id"].as_str(), refresh["firstNodeId"].as_str(), refresh["lastNodeId"].as_str()) else { continue };
             let chapter = &c.draft["chapterRefreshed"][id];
-            if !chapter.is_object() || refresh["hash"].as_str() != Some(span_hash(&tx, first, last)?.as_str()) {
+            if !chapter.is_object() {
                 continue;
             }
+            let fresh = if refresh["textGuard"].is_null() {
+                refresh["hash"].as_str() == Some(span_hash(&tx, first, last)?.as_str())
+            } else {
+                text_guard_matches(&tx, &plan.world_id, &refresh["textGuard"])?
+            };
+            if !fresh { continue; }
             // Only one still waiting and not written by the player since.
             tx.execute("UPDATE chapters SET title=?,gist=?,summary=?,model=?,prompt_version=?,stale=NULL WHERE id=? AND world_id=? AND stale=1 AND edited=0",
                 params![chapter["title"].as_str().unwrap_or("未命名章节"), chapter["gist"].as_str().unwrap_or(""), chapter["summary"].as_str().unwrap_or(""), plan.model.aux_model.as_ref().unwrap_or(&plan.model.model), plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"), id, plan.world_id])?;
@@ -179,6 +189,27 @@ impl Engine {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Compare the passages used to build the request (game.ts textGuard), in the
+/// same order. The new passage is guarded separately by `same_text`.
+fn text_guard_matches(db: &rusqlite::Connection, world: &str, guard: &Value) -> Result<bool> {
+    if guard.is_null() { return Ok(true); }
+    let Some(expected) = guard["hash"].as_str() else { return Ok(false) };
+    if !guard["ids"].is_array() { return Ok(false); }
+    let mut rows = db.prepare("SELECT n.id,n.narrative FROM json_each(?1) AS selected
+        LEFT JOIN nodes n ON n.id=selected.value AND n.world_id=?2 AND n.kind<>'edit'
+        ORDER BY CAST(selected.key AS INTEGER)")?;
+    let mut passages = rows.query(params![guard["ids"].to_string(), world])?;
+    let mut hash: u64 = 0xcbf29ce484222325;
+    while let Some(row) = passages.next()? {
+        let Some(id) = row.get::<_, Option<String>>(0)? else { return Ok(false) };
+        let text: String = row.get(1)?;
+        for ch in id.chars().chain(['\x1f']).chain(text.chars()).chain(['\x1e']) {
+            hash = (hash ^ ch as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(format!("{hash:x}") == expected)
 }
 
 /// The text of a chapter's span (its passages from `last` back to `first`), as one fingerprint.

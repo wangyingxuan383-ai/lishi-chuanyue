@@ -349,15 +349,25 @@ fn window(text: &str, keys: &Keys, cap: usize) -> (String, usize, usize) {
     best.unwrap_or_else(|| slice(text, 0, cap))
 }
 
-/// Canon notes (D162): the player's AI digests of the bound book. They guide
-/// writing but never enter `excerpts`, so reading one is not reading the original.
+/// Notes guide writing but never enter `excerpts`, so reading one is not reading the original.
 pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value> {
-    let Some(book) = plan.reading_source()["bookId"].as_str() else {
-        return Ok(json!({"notes":[],"reason":"未绑定参考书籍"}));
-    };
-    let mut statement = db.prepare("SELECT id,kind,title,scope_json,content,refs_json FROM canon_notes WHERE book_id=? AND active=1 AND status='done' AND content<>'' AND (world_id IS NULL OR world_id=?) ORDER BY updated_at DESC")?;
+    let book = plan.reading_source()["bookId"].as_str();
+    let mut statement = db.prepare(
+        "WITH RECURSIVE route(id,parent_id) AS (
+            SELECT id,parent_id FROM nodes WHERE world_id=?2 AND id=?3
+            UNION SELECT n.id,n.parent_id FROM nodes n JOIN route r ON n.id=r.parent_id WHERE n.world_id=?2
+         )
+         SELECT id,kind,title,scope_json,content,refs_json,world_id,'book' AS source,0 AS stale,updated_at
+         FROM canon_notes WHERE book_id=?1 AND active=1 AND status='done' AND TRIM(content)<>'' AND (world_id IS NULL OR world_id=?2)
+         UNION ALL
+         SELECT id,kind,title,scope_json,content,refs_json,world_id,'story',json_extract(scope_json,'$.staleFrom') IS NOT NULL,updated_at
+         FROM story_notes WHERE world_id=?2 AND active=1 AND status='done' AND TRIM(content)<>''
+         AND (origin_world_id IS NOT NULL OR COALESCE(json_extract(progress_json,'$.routeNode'),json_extract(scope_json,'$.toNode'),'') IN ('',?3)
+              OR EXISTS (SELECT 1 FROM route WHERE route.id=COALESCE(json_extract(progress_json,'$.routeNode'),json_extract(scope_json,'$.toNode'))))
+         ORDER BY updated_at DESC, id"
+    )?;
     let rows = statement
-        .query_map(params![book, plan.world_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?)))?
+        .query_map(params![book, plan.world_id, plan.head_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, String>(7)?, r.get::<_, bool>(8)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let query = query.trim();
     let words: Vec<&str> = query.split(|c: char| c.is_whitespace() || "，、,；;。".contains(c)).filter(|w| !w.is_empty()).collect();
@@ -366,27 +376,33 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
     let through = plan.reading_source()["through"].as_u64();
     let range = scope_range(plan);
     let chosen = chosen_notes(plan);
-    let rows: Vec<_> = rows.into_iter().filter(|(id,kind,_,scope,_,refs)| match &chosen {
-        // 资料范围 (D184): only the notes the player picked, whatever they cover.
-        Some(chosen) => chosen.contains(id),
-        None => note_within_scope(kind,scope,refs,through) && range.is_none_or(|(from, to)| note_within_range(kind,scope,refs,from,to)),
+    let rows: Vec<_> = rows.into_iter().filter(|(id,kind,_,scope,_,refs,world,source,_)| {
+        if let Some(ids) = &chosen {
+            if !ids.contains(id) { return false; }
+            // In notes mode, `range` bounds original-text lookups only; never drop chosen story or empty-ref notes.
+            return source == "story"
+                || note_within_scope(kind,scope,refs,through,world.as_deref()==Some(plan.world_id.as_str()));
+        }
+        if source == "story" { return range.is_none(); }
+        note_within_scope(kind,scope,refs,through,world.as_deref()==Some(plan.world_id.as_str()))
+            && range.is_none_or(|(from, to)| note_within_range(kind,scope,refs,from,to))
     }).collect();
     let total = rows.len();
     let mut remaining = budget(plan);
     let mut notes = vec![];
-    for (id, kind, title, scope, content, _) in rows {
+    for (id, kind, title, scope, content, _, _, source, stale) in rows {
         let haystack = format!("{title}\n{scope}\n{content}");
         if !words.is_empty() && !words.iter().any(|w| haystack.contains(w)) {
             continue;
         }
         // An empty query lists what exists; a query returns the notes themselves.
         let body = if words.is_empty() { slice(&content, 0, 160).0 } else { content.clone() };
-        let value = json!({"id":id,"kind":kind,"title":title,"content":body,"partial":units(&body) < units(&content)});
+        let value = json!({"id":id,"kind":kind,"title":title,"content":body,"source":source,"stale":stale,"partial":units(&body) < units(&content)});
         let size = cost(&value);
         if size > remaining {
             if notes.is_empty() && remaining > 400 {
                 let (body, _, _) = window(&content, &keys, remaining - 200);
-                let excerpt = json!({"id":id,"kind":kind,"title":title,"content":body,"partial":true});
+                let excerpt = json!({"id":id,"kind":kind,"title":title,"content":body,"source":source,"stale":stale,"partial":true});
                 if cost(&excerpt) <= remaining { notes.push(excerpt); }
             }
             break;
@@ -394,7 +410,7 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         remaining -= size;
         notes.push(value);
     }
-    Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记是整理或录入的原著梗概，可能有误。查证时请阅读原文。"}))
+    Ok(json!({"bookId":book,"notes":notes,"total":total,"note":"札记可能有误，标为待更新的本局札记请核对当前路线。原著查证请阅读原文。"}))
 }
 
 /// A note about the chosen chapters only (D184).
@@ -410,7 +426,7 @@ fn note_within_range(kind: &str, scope: &str, refs: &str, from: i64, to: i64) ->
     }
 }
 
-fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>) -> bool {
+fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>, same_world: bool) -> bool {
     let Some(through) = through else { return true; };
     let refs: Value = serde_json::from_str(refs).unwrap_or(Value::Null);
     let Some(refs) = refs.as_array() else { return false; };
@@ -419,7 +435,7 @@ fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>) 
         let scope: Value = serde_json::from_str(scope).unwrap_or(Value::Null);
         scope["to"].as_u64().is_some_and(|to| to <= through)
     } else {
-        !refs.is_empty() && refs.len() < 400
+        (!refs.is_empty() || kind == "question" && same_world) && refs.len() < 400
     }
 }
 
@@ -1163,10 +1179,21 @@ mod tests {
         assert!(ids.contains(&"a") && ids.contains(&"c"));
         let refused = read_db(&db, &plan, "search_original", &json!({"query":"青铜钥匙"})).unwrap_err().to_string();
         assert!(refused.contains("只用你选的札记"), "{refused}");
-        // A correction reads the original within what its notes cover.
-        plan.meta["sourceScope"] = json!({"mode":"notes","noteIds":["b"],"lookups":true,"from":5,"to":5});
+        // A correction reads the original within what its notes cover, while still letting
+        // read_canon_notes read every explicitly chosen book, question, and on-route story note.
+        db.execute("INSERT OR IGNORE INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES(?1,'试读','','line','{}','t','t','t')", params![plan.world_id]).unwrap();
+        db.execute("INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES('q','book',?,'question','问事','{}','问事札记：青铜钥匙来源','[]','','done',1,'{}','t','t')", params![plan.world_id]).unwrap();
+        db.execute("INSERT OR IGNORE INTO nodes(id,world_id,parent_id,seq,kind,narrative,created_at) VALUES(?1,?2,NULL,0,'opening','开场','t')", params![plan.head_id, plan.world_id]).unwrap();
+        db.execute("INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES('s',?,'plot','本局主线',json_object('toNode',?),'本局札记：青铜钥匙在掌柜手里','[]','','done',1,'{}','t','t')", params![plan.world_id, plan.head_id]).unwrap();
+        plan.state["source"]["through"] = 6.into();
+        plan.meta["sourceScope"] = json!({"mode":"notes","noteIds":["b","c","q","s"],"lookups":true,"from":5,"to":5});
         let found = read_db(&db, &plan, "search_original", &json!({"query":"青铜钥匙"})).unwrap();
         assert!(found["excerpts"].as_array().unwrap().iter().all(|e| e["section"] == 5), "{found}");
+        let chosen_reads = read_notes(&db, &plan, "青铜钥匙").unwrap();
+        let chosen_ids: Vec<&str> = chosen_reads["notes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert!(chosen_ids.contains(&"b") && chosen_ids.contains(&"q") && chosen_ids.contains(&"s"), "{chosen_reads}");
+        assert!(!chosen_ids.contains(&"c"), "past through must stay excluded: {chosen_reads}");
+        plan.state["source"]["through"] = Value::Null;
         // A range of chapters reads only the notes about those chapters.
         plan.meta["sourceScope"] = json!({"mode":"chapters","from":4,"to":6});
         let ids: Vec<String> = read_notes(&db, &plan, "青铜钥匙").unwrap()["notes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap().to_owned()).collect();

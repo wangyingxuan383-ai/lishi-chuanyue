@@ -8,13 +8,14 @@ object LaunchTarget {
     private var pending: Target? = null
 
     @Synchronized
-    fun capture(intent: Intent?) {
-        if (intent == null) return
-        val world = intent.getStringExtra(GenerationService.EXTRA_WORLD)?.takeIf { it.isNotBlank() && it.length <= 128 } ?: return
+    fun capture(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val world = intent.getStringExtra(GenerationService.EXTRA_WORLD)?.takeIf { it.isNotBlank() && it.length <= 128 } ?: return false
         val action = intent.getStringExtra(GenerationService.EXTRA_ACTION)?.takeIf { it == "read" || it == "resume" } ?: "read"
         val run = intent.getStringExtra(GenerationService.EXTRA_RUN)?.takeIf { it.isNotBlank() && it.length <= 160 }
         pending = Target(world, action, run)
         intent.removeExtra(GenerationService.EXTRA_WORLD)
+        return true
     }
 
     @Synchronized

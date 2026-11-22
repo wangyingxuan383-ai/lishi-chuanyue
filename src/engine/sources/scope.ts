@@ -32,17 +32,26 @@ export const chapterLabel = (section: number, title?: string) => {
 };
 export const chapterWords = (r: ScopeRange) => r.from === r.to ? `第 ${r.from + 1} 章` : `第 ${r.from + 1}～${r.to + 1} 章`;
 
-export interface BookChapter { section: number; title: string; chars: number }
+export interface BookChapter { section: number; title: string; chars: number; chunks?: number }
 
 /** The chapters the story may read (up to its 截至第几章), with their length. */
 export async function bookChapters(repo: Repo, binding: SourceBinding): Promise<BookChapter[]> {
-  const rows = await repo.platform.sql.query(`SELECT s.section, s.title, COALESCE(SUM(LENGTH(c.text)), 0) AS chars
+  const rows = await repo.platform.sql.query(`SELECT s.section, s.title, COALESCE(SUM(LENGTH(c.text)), 0) AS chars, COUNT(c.ordinal) AS chunks
     FROM source_sections s LEFT JOIN source_chunks c ON c.book_id = s.book_id AND c.section = s.section
     WHERE s.book_id = ? AND (? IS NULL OR s.section <= ?) GROUP BY s.section, s.title ORDER BY s.section`, [binding.bookId, binding.through, binding.through]);
-  return rows.map((r) => ({ section: Number(r.section), title: String(r.title), chars: Number(r.chars) }));
+  return rows.map((r) => ({ section: Number(r.section), title: String(r.title), chars: Number(r.chars), chunks: Number(r.chunks) }));
 }
 export const rangeChars = (chapters: BookChapter[], range: ScopeRange) =>
   chapters.filter((c) => c.section >= range.from && c.section <= range.to).reduce((n, c) => n + c.chars, 0);
+/** Conservative whole-chapter fit estimate aligned with `rangeContext` and native JSON budget accounting. */
+export function wholeChapterFits(chapters: BookChapter[], range: ScopeRange, room: number): boolean {
+  if (room <= 0) return false;
+  const picked = chapters.filter((c) => c.section >= range.from && c.section <= range.to);
+  if (!picked.length) return false;
+  const chars = picked.reduce((n, c) => n + c.chars, 0);
+  const chunks = picked.reduce((n, c) => n + Math.max(1, c.chunks ?? 1), 0);
+  return Math.ceil(chars * 1.06) + chunks * 120 <= room;
+}
 
 async function availableNotes(repo: Repo, notes: CanonNote[], binding: SourceBinding | null | undefined, worldId: string | null): Promise<CanonNote[]> {
   const route = worldId && notes.some((n) => n.source === "story" && n.worldId === worldId && (n.scope.toNode || n.progress.routeNode))
@@ -51,7 +60,7 @@ async function availableNotes(repo: Repo, notes: CanonNote[], binding: SourceBin
     if (n.status !== "done" || !n.active || !n.content.trim()) return false;
     if (n.source === "story") return !!worldId && n.worldId === worldId && (!route || !noteOffRoute(n, route));
     return !!binding && n.bookId === binding.bookId && (n.worldId === null || n.worldId === worldId)
-      && (noteWithinScope(n, binding.through) || (n.kind === "question" && !!worldId && n.worldId === worldId));
+      && noteWithinScope(n, binding.through, !!worldId && n.worldId === worldId);
   });
 }
 
@@ -77,7 +86,7 @@ export async function rangeContext(repo: Repo, binding: SourceBinding, range: Sc
   if (!book) return;
   const to = binding.through === null ? range.to : Math.min(range.to, binding.through);
   const params = [binding.bookId, range.from, to];
-  const [size] = await repo.platform.sql.query("SELECT SUM(LENGTH(text) + 48) AS chars FROM source_chunks WHERE book_id = ? AND section >= ? AND section <= ?", params);
+  const [size] = await repo.platform.sql.query("SELECT SUM(LENGTH(text) + 96) AS chars FROM source_chunks WHERE book_id = ? AND section >= ? AND section <= ?", params);
   // Reject large chapter ranges within SQLite before moving the text over the native bridge.
   if (size?.chars == null || Number(size.chars) > room) return;
   const rows = await repo.platform.sql.query(`SELECT c.ordinal, c.section, c.text, s.title, s.page FROM source_chunks c
@@ -88,8 +97,10 @@ export async function rangeContext(repo: Repo, binding: SourceBinding, range: Sc
     section: Number(r.section), title: String(r.title), ...(r.page == null ? {} : { page: Number(r.page) }), chunk: Number(r.ordinal),
     text: String(r.text), kind: "original" as const, start: 0, end: String(r.text).length,
   }));
-  // Each passage's label costs about forty characters.
+  // Match both prompt label size and Rust `bound_sources` (`passage.to_string()` UTF-16 length)
+  // so chapters promised as whole are never silently truncated at send time.
   if (passages.reduce((n, p) => n + p.text.length + 48, 0) > room) return;
+  if (passages.reduce((n, p) => n + JSON.stringify(p).length, 0) > room) return;
   return { bookId: String(book.id), title: String(book.title), binding: { ...binding }, passages, status: "ready" };
 }
 

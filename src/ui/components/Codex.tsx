@@ -213,13 +213,13 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
         // 主角的本事 (D181): where the protagonist's abilities live, next to the era card, not deep in a group.
         const ability = state.cards.find((c) => isAbilityCard(c.name, state.protagonist.name));
         const name = abilityCardName(state.protagonist.name);
-        return <section className="codex-era">
+        return <section className="codex-ability">
           <div className="row between">
-            <b className="grow">{ability?.name ?? name}</b>
+            <span className="row gap-2 grow"><b className="codex-ability-title">{ability?.name ?? name}</b><span className="codex-pin-badge">每回合必带</span></span>
             <button className="ghost" disabled={busy || organizing} onClick={() => open({ type: "card", kind: "设定", card: ability ?? null, name })}>{ability ? "编辑" : "写一张"}</button>
           </div>
           {ability?.content.trim()
-            ? <><p className="muted codex-note">{ability.source === "AI" ? "AI 随剧情更新" : "你写的，AI 不会改"} · 每回合都交给 AI</p><p className="codex-text">{ability.content}</p></>
+            ? <><p className="muted codex-note">{ability.source === "AI" ? "AI 随剧情更新" : "你写的，AI 不会改"}</p><p className="codex-text">{ability.content}</p></>
             : <p className="muted codex-note mb-0">主角自己的本事（修为等级、境界、功法招式、法宝、特殊能力等）记在这里，每回合都交给 AI。AI 整理设定集时会随剧情补上，也可以自己写。</p>}
         </section>;
       })()}
@@ -254,7 +254,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
         const row = (item: (typeof list)[number]) => (
           <button key={item.id} className="item-row codex-item" onClick={() => open(item.edit)}>
             <div className="grow"><b>{item.name}</b><small>{item.text ? preview(item.text) : "（还没有描述，不会交给 AI）"}</small></div>
-            {item.tag && <span className="tag">{item.tag}</span>}
+            {item.tag && <span className={`tag${item.tag === "AI 整理" ? " tag-ai" : ""}`}>{item.tag}</span>}
           </button>
         );
         return (

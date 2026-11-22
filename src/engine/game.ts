@@ -15,14 +15,14 @@ import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, outputWasTruncated, r
 import { hasChinese, isRefusal, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, writingContextTemplate, renderState, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
-  type Arrival, type ContextLayer, type SetupDraft, type TurnPromptInput,
+  type Arrival, type ContextLayer, type OpeningInput, type SetupDraft, type TurnPromptInput,
   canonNotesBlock,
   fitNotes,
   notesRoom,
 } from "./prompt/turn";
 import { CODEX_FREE_PROMPT_VERSION, CODEX_PROMPT_VERSION, codexMessages, codexPatch, codexSummary, type CodexInput } from "./prompt/codex";
 import { UPKEEP_EVERY, UPKEEP_FREE_PROMPT_VERSION, UPKEEP_PROMPT_VERSION, parseStatusTidy, statusTidyMessages, upkeepMessages } from "./prompt/upkeep";
-import { CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
+import { CHAPTER_FREE_PROMPT_VERSION, CHAPTER_PROMPT_VERSION, chapterMessages, parseChapter } from "./prompt/chapter";
 import { askMessages } from "./prompt/ask";
 import type { TabooHit } from "./era/taboo";
 import { completeJson, lenientJson } from "./record/parse";
@@ -39,7 +39,7 @@ import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenc
 import { sourceAnalysisMessages, sourceAnalysisResult } from "./sources/analysis";
 import { validBinding, type SourceBinding, type AnalysisJob } from "./sources/types";
 import { asJson, startRun, type RunPlan } from "./execution";
-import { assertWritingAnchor, isLatestPassage, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
+import { assertWritingAnchor, isLatestPassage, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, MISSING_OPENING_SEED_REVISE, MISSING_OPENING_SEED_SYNC, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
 
 export type { ChallengeInput, ScriptInput } from "./modes";
 
@@ -112,12 +112,15 @@ export function nativeFailReason(status: string, message: string | null, errorKi
  * The passages the native assembly reads (D169): the last 200, enough for the
  * window and for 相关旧事, numbered from the opening by `historyOffset`.
  */
-function nativeHistory(input: { history: StoryNode[]; allTurns?: StoryNode[] }) {
+function nativeHistory(input: { history: StoryNode[]; allTurns?: StoryNode[]; state: WorldState }) {
   const path = input.allTurns ?? input.history;
   const recent = path.slice(-200);
-  const historyOffset = path.slice(0, path.length - recent.length).filter((n) => n.kind !== "edit").length;
+  const older = path.slice(0, path.length - recent.length);
+  const historyOffset = older.filter((n) => n.kind !== "edit").length;
+  const factNodes = new Set(input.state.facts?.filter((fact) => fact.origin === "ai").map((fact) => fact.nodeId));
+  const editedFactNodeIds = older.filter((n) => n.rewritten && factNodes.has(n.id)).map((n) => n.id);
   // `rewritten`: the text was edited since it was written, so what the AI noted about it then may be stale (D183).
-  return { history: recent.map(({ id, kind, actionMode, actionText, narrative, rewritten }) => ({ id, kind, actionMode, actionText, narrative, ...(rewritten ? { rewritten: true } : {}) })), historyOffset };
+  return { history: recent.map(({ id, kind, actionMode, actionText, narrative, rewritten }) => ({ id, kind, actionMode, actionText, narrative, ...(rewritten ? { rewritten: true } : {}) })), historyOffset, editedFactNodeIds };
 }
 
 /**
@@ -136,6 +139,8 @@ export function textGuard(path: Pick<StoryNode, "id" | "kind" | "narrative">[]):
   }
   return hash.toString(16);
 }
+
+const maintenanceText = (turns: StoryNode[]) => ({ ids: turns.map((turn) => turn.id), hash: textGuard(turns) });
 
 /** A saved passage run of the current head, as the play screen shows it after reopening. */
 export interface SavedExecution {
@@ -276,7 +281,7 @@ export interface TurnHandle {
 }
 
 interface UsageScope { worldId: string | null; nodeId: string | null; purpose: string }
-type CarriedEdit = Pick<StoryNode, "record" | "actionText">;
+type CarriedEdit = Pick<StoryNode, "record" | "actionText"> & Partial<Pick<StoryNode, "id" | "directorNote">>;
 
 const DEFAULT_CONTEXT_TOKENS = 12_000;
 /** Helper tasks wait like passages do (D167): thinking models are slow to start. */
@@ -284,8 +289,6 @@ const CODEX_TIMEOUT = DEFAULT_TIMEOUTS;
 /** A note reads up to 16 000 characters and writes up to 3 000. */
 const NOTE_TIMEOUT = DEFAULT_TIMEOUTS;
 const NOTE_OUTPUT_TOKENS = 8192;
-// Free-mode wording is applied at the call site, keeping the shared chapter helper unchanged.
-const FREE_CHAPTER_PROMPT_VERSION = "chapter-2-free";
 
 /** Lines of an apply log that say what happened, not what was refused. */
 const INFO_LOG = /^新人物：|只记录不提醒|按不限时处理/;
@@ -426,13 +429,15 @@ export class Game {
     // A chapter the player wrote is never summarized again, so it does not hold this back.
     const edited = !!note && note.status === "done" && note.scope.auto === true && note.scope.staleFrom !== undefined && !chapters.some((c) => c.stale && !c.edited);
     if (note && edited && !offRoute && !this.noteRuns.has(note.id)) {
-      note = { ...restartOnRoute(note, end), scope: { from: 0, to: end, auto: true } };
+      note = restartOnRoute(note, end);
+      note.scope.auto = true;
       await saveNote(this.repo, note, true);
     } else if (note && offRoute) {
       // The player went back or switched route: the automatic summary follows the route being
       // played; one the player wrote is only marked in 札记, never redone without asking.
       if (!note.scope.auto || this.noteRuns.has(note.id)) return;
-      note = { ...restartOnRoute(note, end), scope: { from: 0, to: end, auto: true } };
+      note = restartOnRoute(note, end);
+      note.scope.auto = true;
       await saveNote(this.repo, note, true);
     } else if (!note) {
       // A long story from before 0.17.0 is offered the summary in 札记 instead, with its cost shown.
@@ -486,7 +491,7 @@ export class Game {
 
   // ---------- model calls ----------
 
-  /** One streamed call with a single retry before any data arrives. */
+  /** Streamed call with bounded retry and an optional backup service. */
   private async call(
     messages: ChatMessage[],
     opts: { signal?: AbortSignal; aux?: boolean; timeouts?: typeof CODEX_TIMEOUT; outputTokens?: number; usage: UsageScope; configuration?: LlmConfig; noFallback?: boolean; onText?: (full: string) => void },
@@ -763,19 +768,24 @@ export class Game {
     const inputBudget = depthBudget(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value), depth);
     const openingQuery = [settings.premise, p.name, p.identity, input.opening.mode === "ai" ? input.opening.hint : ""].join("\n");
     // 资料范围 (D184): the opening may use only chosen notes or chapters.
-    const scoped = isChosen(input.sourceScope) && initial.source ? await scopedMaterial(this.repo, initial.source, input.sourceScope, openingQuery, Math.floor(inputBudget / 4)) : null;
-    const openingReference = fitReference(scoped ? scoped.reference : await referenceContext(this.repo, initial.source, openingQuery, Math.floor(inputBudget / 4)), scoped?.whole ? Math.floor(inputBudget / 4) : Math.min(3000, Math.floor(inputBudget / 4)));
+    const quarter = Math.floor(inputBudget / 4);
+    const scoped = isChosen(input.sourceScope) && initial.source ? await scopedMaterial(this.repo, initial.source, input.sourceScope, openingQuery, quarter) : null;
+    const referenceCap = scoped?.whole ? quarter : Math.min(3000, quarter);
+    const openingReference = fitReference(scoped ? scoped.reference : await referenceContext(this.repo, initial.source, openingQuery, quarter), referenceCap);
     const openingNotes = [
       ...(input.carry ? await this.carriedBriefs(input.carry) : []),
       ...(scoped ? scoped.notes : initial.source ? (await notesForTurn(this.repo, initial.source, "", [settings.premise, p.name, p.identity].join("\n")).catch(() => [])) : []),
     ];
-    const opening = {
-      reference: openingReference, canonNotes: openingNotes,
+    const notesBudget = scoped?.meta.mode === "notes" ? Math.max(3000, quarter) : 3000;
+    const opening: OpeningInput = {
+      reference: openingReference, canonNotes: openingNotes, notesBudget,
       era, settings, protagonistName: p.name, protagonist: p, arrival: input.arrival, origin: input.origin, hint: input.opening.mode === "ai" ? input.opening.hint : "",
       script: initial.script, challenge: initial.challenge,
     };
     const openingBaseChars = openingMessages({ ...opening, reference: undefined }).reduce((n, m) => n + m.content.length, 0) + referenceInstructionsBlock(opening.reference).length;
-    opening.reference = fitReference(opening.reference, Math.max(0, Math.min(inputBudget / 4, inputBudget - openingBaseChars)));
+    const referenceBudget = Math.max(0, Math.min(referenceCap, inputBudget - openingBaseChars));
+    opening.referenceBudget = referenceBudget;
+    opening.reference = fitReference(opening.reference, referenceBudget);
     const titlePolicy = input.titlePolicy ?? (input.title.trim() ? "manual" : "auto");
     const nameOpening = (messages: ChatMessage[]): ChatMessage[] => titlePolicy === "auto" ? [...messages, { role: "system", content: "本次是新故事开场。请结合本段实际开场拟一个小说书名（2～12字为宜，最多24字）：像书架上的网文或小说名，点出核心处境、悬念或人物志向，可用意象或反差；不用“某某的故事/某某传/穿越之XX/重生之XX/我在XX当XX”等套式，不堆砌“天下、风云、传奇、录”，不照抄主角姓名或朝代名。将书名写在本次记录对象额外字段 storyTitle 中；书名不属于剧情、人物状态或 log，不写进正文。" }] : messages;
 
@@ -1041,6 +1051,7 @@ export class Game {
         const upkeepTurns: StoryNode[] = [];
         for (const node of [...path].reverse()) { if (node.kind === "opening" || node.meta.upkeep) break; if (node.kind === "turn") upkeepTurns.unshift(node); }
         const pending = this.pendingChapter(path, input.chapters ?? []);
+        const chapterVersion = state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION;
         const futureTurn = { actionText: action.text, narrative: "{{NARRATIVE}}" };
         const plan: RunPlan = {
           id: newId(), worldId, lineId: world.lineId, headId: world.head.id, baseId: base.id, kind: batch ? "autoplay" : kind,
@@ -1051,10 +1062,10 @@ export class Game {
           options: { mode: action.mode, difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock, fortune, asked: action.mode === "skip" ? skipSpanMinutes(action.text) ?? undefined : undefined },
           action, reference: context.reference, original: kind === "continue" ? target.narrative : "",
           trailingIds: kind === "continue" ? trailing.map((n) => n.id) : [],
-          carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ record, actionText }) => ({ record, actionText }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
+          carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ id, record, actionText, directorNote }) => ({ id, record, actionText, directorNote }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
             ...world.guard,
-            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", world.guard.sourceGuard ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings, ...(batch ? { canonNotes: input.canonNotes ?? [] } : {}) }, ...(kind === "continue" ? { targetId: target.id } : {}),
+            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", world.guard.sourceGuard ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings, ...(batch ? { canonNotes: input.canonNotes ?? [] } : {}) }, ...(kind !== "turn" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
             textGuard: textGuard(path), textGuardAt: base.id,
             // 参考了哪些札记 under the passage (R30 step 2).
@@ -1062,18 +1073,18 @@ export class Game {
             ...(batch ? {
               autoplayCount: batch.turns, autoplayPilot: "temporary-ai", autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
               upkeepVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION,
-              chapterVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
+              chapterVersion,
               autoplayTurnSystem: context.messages.find((m) => m.role === "system")?.content ?? "",
               autoplayExtractSystem: extractMessages({ era, state, action: "（继续）", narrative: "{{NARRATIVE}}", settings: world.settings })[0].content,
               autoplayUpkeepSystem: upkeepMessages({ premise: world.settings.premise, state, turns: [] })[0].content,
-              autoplayChapterSystem: chapterMessages({ premise: world.settings.premise, protagonist: state.protagonist.name, previous: [], turns: [], firstTurn: 1 })[0].content,
+              autoplayChapterSystem: chapterMessages({ mode: state.era.mode, premise: world.settings.premise, protagonist: state.protagonist.name, previous: [], turns: [], firstTurn: 1 })[0].content,
             } : {}),
-            ...(kind === "turn" && world.settings.autoUpkeep && upkeepTurns.length + 1 >= UPKEEP_EVERY ? { upkeepMessages: upkeepMessages({ premise: world.settings.premise, state, turns: [...upkeepTurns, futureTurn] }), upkeepVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION } : {}),
+            ...(kind === "turn" && world.settings.autoUpkeep && upkeepTurns.length + 1 >= UPKEEP_EVERY ? { upkeepMessages: upkeepMessages({ premise: world.settings.premise, state, turns: [...upkeepTurns, futureTurn] }), upkeepTextGuard: maintenanceText(upkeepTurns), upkeepVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION } : {}),
             // Chapters an edit made out of date, summarized again by the tidy-up after this passage (D183).
-            ...(!batch && world.settings.chapterEvery ? (() => { const refresh = this.chapterRefresh(path, input.chapters ?? [], world.settings.premise, state.protagonist.name); return refresh.length ? { chapterRefresh: refresh } : {}; })() : {}),
+            ...(!batch && world.settings.chapterEvery ? (() => { const refresh = this.chapterRefresh(path, input.chapters ?? [], world.settings.premise, state.protagonist.name, state.era.mode); return refresh.length ? { chapterRefresh: refresh, chapterVersion } : {}; })() : {}),
             ...(kind === "turn" && world.settings.chapterEvery && pending.turns.length + 1 >= world.settings.chapterEvery ? {
-              chapterMessages: chapterMessages({ premise: world.settings.premise, protagonist: state.protagonist.name, previous: pending.chapters, turns: [...pending.turns, futureTurn], firstTurn: pending.firstTurn }),
-              chapterFirstId: pending.turns[0]?.id ?? "{{NODE_ID}}", chapterVersion: CHAPTER_PROMPT_VERSION,
+              chapterMessages: chapterMessages({ mode: state.era.mode, premise: world.settings.premise, protagonist: state.protagonist.name, previous: pending.chapters, turns: [...pending.turns, futureTurn], firstTurn: pending.firstTurn }),
+              chapterFirstId: pending.turns[0]?.id ?? "{{NODE_ID}}", chapterVersion, chapterTextGuard: maintenanceText(pending.turns),
             } : {}),
           },
         };
@@ -1120,9 +1131,10 @@ export class Game {
   runPlayerRevision(request: PlayerRevisionRequest, onText: (text: string) => void): { done: Promise<PlayerRevisionPreview>; cancel(): void } {
     const controller = new AbortController();
     const done = (async (): Promise<PlayerRevisionPreview> => {
-      await assertWritingAnchor(this, request.anchor);
-      const { anchor } = request, world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
-      const before = target.parentId ? await this.repo.getState(target.parentId) : (target.meta.openingSeed as WorldState | undefined) ?? await this.repo.getState(anchor.nodeId);
+      const anchor = await assertWritingAnchor(this, request.anchor);
+      const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
+      if (!target.parentId && !isOpeningSeed(target.meta.openingSeed)) throw new WritingError(MISSING_OPENING_SEED_REVISE);
+      const before = target.parentId ? await this.repo.getState(target.parentId) : target.meta.openingSeed as WorldState;
       const era = eraContext(world.eraId, before);
       const focus = anchor.original.slice(request.range.start, request.range.end);
       const surrounding = anchor.original.slice(Math.max(0, request.range.start - 700), request.range.start) + "\n【选中范围之后】" + anchor.original.slice(request.range.end, request.range.end + 700);
@@ -1148,9 +1160,9 @@ export class Game {
       const preview = helperReplyAvailable(result) ? parsePlayerRevision(result.text, request, target.record as TurnRecord | null) : null;
       await this.platform.sql.batch([this.usage(anchor.worldId, anchor.nodeId, "revise-passage", result, preview ? "ok" : "no_record", this.llm?.model ?? "")]);
       if (!preview) throw new WritingError(isRefusal({ narrative: result.text, finishReason: result.finishReason, hasRecord: false }) ? "AI 服务没有接受这次改写，可以换个说法再试。" : "这次没有给出完整的改稿，再试一次。");
-      await assertWritingAnchor(this, anchor);
+      const liveAnchor = await assertWritingAnchor(this, anchor);
       onText(preview.replacement);
-      return preview;
+      return { ...preview, anchor: liveAnchor };
     })();
     return { done, cancel() { controller.abort(); } };
   }
@@ -1162,9 +1174,10 @@ export class Game {
   runFactSync(request: FactSyncRequest): { done: Promise<PlayerRevisionPreview & { unchanged: boolean }>; cancel(): void } {
     const controller = new AbortController();
     const done = (async () => {
-      await assertWritingAnchor(this, request.anchor);
-      const { anchor } = request, world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
-      const before = target.parentId ? await this.repo.getState(target.parentId) : (target.meta.openingSeed as WorldState | undefined) ?? await this.repo.getState(anchor.nodeId);
+      const anchor = await assertWritingAnchor(this, request.anchor);
+      const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
+      if (!target.parentId && !isOpeningSeed(target.meta.openingSeed)) throw new WritingError(MISSING_OPENING_SEED_SYNC);
+      const before = target.parentId ? await this.repo.getState(target.parentId) : target.meta.openingSeed as WorldState;
       const era = eraContext(world.eraId, before);
       const both = `${anchor.original}\n${request.text}`;
       const focused = { ...before, people: before.people.filter((p) => [p.name, ...p.aliases].some((name) => name && both.includes(name))) };
@@ -1183,8 +1196,8 @@ export class Game {
       const preview = helperReplyAvailable(result) ? parseFactSync(result.text, request, target.record as TurnRecord | null) : null;
       await this.platform.sql.batch([this.usage(anchor.worldId, anchor.nodeId, "sync-facts", result, preview ? "ok" : "no_record", this.llm?.model ?? "")]);
       if (!preview) throw new WritingError("这次没有整理出记录的变化，可以再试，或者只改文字。");
-      await assertWritingAnchor(this, anchor);
-      return preview;
+      const liveAnchor = await assertWritingAnchor(this, anchor);
+      return { ...preview, anchor: liveAnchor };
     })();
     return { done, cancel() { controller.abort(); } };
   }
@@ -1193,8 +1206,8 @@ export class Game {
     let active: ReturnType<typeof startRun> | null = null, cancelled = false, detached = false;
     const handle: CanonCorrectionHandle = {} as CanonCorrectionHandle;
     const done = (async (): Promise<CanonCorrectionPreview> => {
-      await assertWritingAnchor(this, request.anchor);
-      const { anchor } = request, world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
+      const anchor = await assertWritingAnchor(this, request.anchor);
+      const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
       const onEvent = (event: Record<string, unknown>) => {
         if (detached || event.type !== "text" || typeof event.full !== "string") return;
         const value = lenientJson(event.full) as { replacement?: string; answer?: string } | null;
@@ -1254,7 +1267,8 @@ export class Game {
       }
       const preview = snapshot.result as unknown as CanonCorrectionPreview;
       preview.recordChanges = preview.outcome && preview.outcome !== "changed" ? [] : correctionRecordChanges(target.record as TurnRecord | null, preview.record);
-      await assertWritingAnchor(this, anchor);
+      const liveAnchor = await assertWritingAnchor(this, anchor);
+      preview.anchor = liveAnchor;
       if (!detached) onText(preview.outcome === "answer" ? preview.answer ?? "" : preview.outcome && preview.outcome !== "changed" ? "" : preview.replacement ?? preview.narrative);
       return preview;
     })();
@@ -1556,8 +1570,8 @@ export class Game {
   }
 
   /** Up to two newest out-of-date chapters on the path the AI may summarize again (D183); one the player wrote stays theirs. */
-  private chapterRefresh(path: StoryNode[], chapters: Chapter[], premise: string, protagonist: string): { id: string; firstNodeId: string; lastNodeId: string; messages: ChatMessage[] }[] {
-    const out: { id: string; firstNodeId: string; lastNodeId: string; messages: ChatMessage[] }[] = [];
+  private chapterRefresh(path: StoryNode[], chapters: Chapter[], premise: string, protagonist: string, mode?: "history" | "free") {
+    const out: { id: string; firstNodeId: string; lastNodeId: string; messages: ChatMessage[]; textGuard: ReturnType<typeof maintenanceText> }[] = [];
     for (let i = chapters.length - 1; i >= 0 && out.length < 2; i--) {
       const c = chapters[i];
       if (!c.stale || c.edited) continue;
@@ -1566,7 +1580,7 @@ export class Game {
       const turns = path.slice(from, to + 1).filter((n) => n.kind === "turn" && n.status !== "interrupted");
       if (!turns.length) continue;
       const firstTurn = path.slice(0, from).filter((n) => n.kind === "turn").length + 1;
-      out.push({ id: c.id, firstNodeId: c.firstNodeId, lastNodeId: c.lastNodeId, messages: chapterMessages({ premise, protagonist, previous: chapters.slice(0, i), turns, firstTurn }) });
+      out.push({ id: c.id, firstNodeId: c.firstNodeId, lastNodeId: c.lastNodeId, textGuard: maintenanceText(turns), messages: chapterMessages({ mode, premise, protagonist, previous: chapters.slice(0, i), turns, firstTurn }) });
     }
     return out;
   }
@@ -1575,11 +1589,8 @@ export class Game {
   private async summarize(worldId: string, nodeId: string, input: Parameters<typeof chapterMessages>[0]): Promise<Pick<Chapter, "title" | "gist" | "summary"> | null> {
     let result: ChatResult | null = null;
     try {
-      const messages = chapterMessages(input);
-      if ((await this.repo.getState(nodeId)).era.mode === "free") {
-        messages[0].content = messages[0].content.replace("历史互动小说", "互动小说")
-          + "\n沿用本局世界设定与称呼，不补写年表或未来事件，不输出 timeline、deviation。";
-      }
+      const mode = input.mode ?? (await this.repo.getState(nodeId)).era.mode;
+      const messages = chapterMessages({ ...input, mode });
       result = await this.call(messages, { usage: { worldId, nodeId, purpose: "chapter" }, aux: true, timeouts: CODEX_TIMEOUT });
     } catch { /* play goes on without it */ }
     const parsed = result && helperReplyAvailable(result) && completeJson(result.text) ? parseChapter(result.text) : null;
@@ -1602,11 +1613,11 @@ export class Game {
       const world = (await this.repo.getWorld(worldId))!;
       const state = await this.repo.getState(at.id);
       const protagonist = state.protagonist.name;
-      const parsed = await this.summarize(worldId, at.id, { premise: world.settings.premise, protagonist, previous: chapters, turns, firstTurn });
+      const parsed = await this.summarize(worldId, at.id, { mode: state.era.mode, premise: world.settings.premise, protagonist, previous: chapters, turns, firstTurn });
       if (!parsed) return null;
       const chapter = await this.repo.addChapter({
         worldId, firstNodeId: turns[0].id, lastNodeId: turns[turns.length - 1].id, ...parsed,
-        model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
+        model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
       });
       for (const fn of this.listeners) fn(worldId);
       return chapter;
@@ -1629,11 +1640,11 @@ export class Game {
     const state = await this.repo.getState(chapter.lastNodeId);
     const protagonist = state.protagonist.name;
     const parsed = await this.summarize(worldId, chapter.lastNodeId, {
-      premise: world.settings.premise, protagonist, previous: chapters.slice(0, index), turns,
+      mode: state.era.mode, premise: world.settings.premise, protagonist, previous: chapters.slice(0, index), turns,
       firstTurn: path.slice(0, from).filter((n) => n.kind === "turn").length + 1,
     });
     if (!parsed) return null;
-    const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? FREE_CHAPTER_PROMPT_VERSION : CHAPTER_PROMPT_VERSION, edited: false };
+    const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION, edited: false };
     if (!await this.repo.updateChapter(chapter.id, fields, chapter)) return null;
     return { ...chapter, ...fields };
   }

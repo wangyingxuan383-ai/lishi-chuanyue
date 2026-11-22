@@ -3,7 +3,7 @@
 // The choice is for this request only: each time the feature opens it is 自动.
 import { useEffect, useState } from "react";
 import type { SourceBinding } from "../../engine/sources/types";
-import { bookChapters, choosableNotes, chapterLabel, chapterWords, isChosen, notesRange, rangeChars, scopeLabel, type BookChapter, type SourceScope } from "../../engine/sources/scope";
+import { bookChapters, choosableNotes, chapterLabel, chapterWords, isChosen, notesRange, rangeChars, scopeLabel, wholeChapterFits, type BookChapter, type SourceScope } from "../../engine/sources/scope";
 import { turnLabel, type CanonNote } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
@@ -61,8 +61,7 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
   const last = Math.max(0, (chapters?.length ?? 1) - 1);
   const range = { from: Math.min(from, to), to: Math.max(from, to) };
   const chars = chapters ? rangeChars(chapters, range) : 0;
-  // Each passage's label costs a little; “约” covers it.
-  const whole = room > 0 && chars * 1.03 <= room;
+  const whole = chapters ? wholeChapterFits(chapters, range, room) : false;
   const allNotes = [...(notes?.book ?? []), ...(notes?.story ?? [])];
   const chosenIds = allNotes.filter((n) => picked.has(n.id)).map((n) => n.id);
   const noteHint = purpose === "correction" ? "先把勾选的札记交给 AI。" : purpose === "ask" ? "只依据勾选的札记回答，不查原文。" : "只把勾选的札记交给 AI，不查原文。";

@@ -30,9 +30,11 @@ describe("writing assistance", () => {
   });
   it("versions the prompt and keeps rewriting and action polishing factual", () => {
     // The version is kept with each adopted rewrite, not sent to the model.
-    expect(WRITING_PROMPT_VERSION).toBe("writing-3");
-    expect(writingMessages("rewrite", "雨", "", "前文", "do")[0].content).not.toContain(WRITING_PROMPT_VERSION);
-    expect(writingMessages("rewrite", "雨", "", "前文", "do")[0].content).toContain("不改变已经发生的事实");
+    expect(WRITING_PROMPT_VERSION).toBe("writing-4");
+    const rewrite = writingMessages("rewrite", "雨", "", "前文", "do")[0].content;
+    expect(rewrite).not.toContain(WRITING_PROMPT_VERSION);
+    expect(rewrite).toContain("不改变已经发生的事实");
+    expect(rewrite).toContain("保持原有叙事人称与说话人归属");
     expect(writingMessages("polish", "去问路", "", "前文", "say")[0].content).toContain("不写行动结果");
   });
   it("uses auxiliary model and logs world/node usage without editing or advancing", async () => {
@@ -185,5 +187,18 @@ describe("writing assistance", () => {
     expect((await s.game.repo.getLine(s.line.id))?.nodeId).toBe(cur.head.id);
     expect((await s.game.repo.getLine(bookmark.id))?.nodeId).toBe(cur.head.id);
     expect(await s.game.repo.getState(source.id)).toEqual(sampleState(280));
+  });
+  it("lets in-flight wording polish finish when only background AI upkeep lands on the route", async () => {
+    const s = await setup([reply("细雨斜织。")]);
+    const cur = await tree.cursor(s.game.repo, s.world.id);
+    const baseStream = s.platform.llm.stream.bind(s.platform.llm);
+    s.platform.llm.stream = async (req, onEvent) => {
+      await tree.append(s.game.repo, cur, { kind: "edit", actionText: "AI 整理了设定集", narrative: "", state: sampleState(), meta: { by: "AI", upkeep: true } });
+      return baseStream(req, onEvent);
+    };
+    const text = await startWriting(s.game, { anchor: s.anchor, kind: "rewrite", text: s.anchor.original, hint: "更简练", mode: "do" }, () => {}).done;
+    expect(text).toBe("细雨斜织。");
+    const updated = await assertWritingAnchor(s.game, s.anchor);
+    expect(updated.headId).toBe((await tree.cursor(s.game.repo, s.world.id)).head.id);
   });
 });

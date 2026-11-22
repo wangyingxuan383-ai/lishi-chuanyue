@@ -55,10 +55,12 @@
 .line-row > .ghost { min-width: 40px; padding: 0 6px; }
 .ask-item { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
 .ask-item .story-text, .ask-item p { font-size: 15px; }
-.report-card { margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); font-size: 14px; font-family: var(--serif); animation: fade-up 0.24s ease-out both; }
-.report-card b { display: block; margin-bottom: 4px; letter-spacing: 0.06em; }
-.report-card p { margin: 2px 0; line-height: 1.7; }
-.report-card span { color: var(--muted); margin-right: 8px; }
+.report-card { margin: 12px 0 6px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--radius-card); background: var(--surface); font-size: 14px; font-family: var(--serif); animation: fade-up 0.24s ease-out both; }
+.report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; padding-bottom: 5px; border-bottom: 1px dashed var(--line); }
+.report-head b { margin: 0; font-size: 15px; letter-spacing: 0.1em; color: var(--accent); }
+.report-head span { font-size: 11px; font-family: var(--sans); letter-spacing: 0.14em; color: var(--muted); }
+.report-card p { margin: 4px 0; line-height: 1.75; }
+.report-card .report-tag { display: inline-block; margin-right: 8px; padding: 0 5px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-family: var(--sans); font-size: 12px; line-height: 1.6; vertical-align: 1px; }
 .story-text {
   font-size: var(--story-size); line-height: var(--story-leading);
   white-space: pre-wrap; word-break: break-word; margin: 0;
@@ -143,15 +145,36 @@ button.turn-changes {
 .next-head { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; font-size: 13px; font-weight: 500; color: var(--muted); font-family: var(--serif); letter-spacing: 0.3em; }
 .next-head::before, .next-head::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--line), transparent); }
 .choices { display: grid; gap: 0; counter-reset: choice; }
-.choice {
-  counter-increment: choice; position: relative; overflow: hidden;
-  text-align: left; font-size: calc(var(--story-size) * 0.92); line-height: 1.55; padding: 11px 6px; min-height: var(--tap);
-  background: transparent; border: none; border-bottom: 1px dashed var(--line); border-radius: 0;
-  font-family: var(--serif); animation: fade-up 0.35s var(--ease-out) both;
+.choice-row {
+  counter-increment: choice; display: flex; align-items: stretch; gap: 2px;
+  border-bottom: 1px dashed var(--line); animation: fade-up 0.35s var(--ease-out) both;
 }
-.choice:nth-child(2) { animation-delay: 60ms; } .choice:nth-child(3) { animation-delay: 120ms; } .choice:nth-child(4) { animation-delay: 180ms; }
+.choice-row:nth-child(2) { animation-delay: 60ms; } .choice-row:nth-child(3) { animation-delay: 120ms; } .choice-row:nth-child(4) { animation-delay: 180ms; }
+.choice {
+  flex: 1; min-width: 0; position: relative; overflow: hidden;
+  text-align: left; font-size: calc(var(--story-size) * 0.92); line-height: 1.55; padding: 11px 6px; min-height: var(--tap);
+  background: transparent; border: none; border-radius: 0; font-family: var(--serif);
+}
 .choice::before { content: counter(choice, cjk-decimal) "、"; color: var(--accent); }
 .choice:active:not(:disabled) { background: var(--accent-soft); }
+.choice-fill { flex: none; align-self: center; width: var(--tap); height: var(--tap); padding: 0; color: var(--muted); opacity: 0.65; border-radius: var(--radius); }
+.choice-fill:active:not(:disabled) { opacity: 1; color: var(--accent); background: var(--accent-soft); }
+
+/* 原著核对 in TurnView: quiet collapsible pill matching TurnChanges. */
+.ref-review {
+  margin: 6px 0 2px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 75%, transparent); font-size: 13px;
+}
+.ref-review > summary { min-height: 36px; padding: 4px 10px; gap: 8px; color: var(--muted); font-family: var(--serif); }
+.ref-pill { margin-left: auto; font-family: var(--sans); font-size: 11px; padding: 1px 7px; border-radius: var(--radius-pill); }
+.ref-pill.ok { color: var(--gain); background: color-mix(in srgb, var(--gain) 12%, transparent); }
+.ref-pill.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.ref-review-body { display: grid; gap: 6px; padding: 4px 10px 10px; border-top: 1px dashed var(--line); }
+.ref-row { margin: 0; display: flex; align-items: baseline; gap: 8px; line-height: 1.6; color: var(--fg); }
+.ref-badge { flex: none; font-size: 11px; padding: 0 6px; border-radius: 3px; line-height: 1.65; }
+.ref-badge.ok { color: var(--gain); background: color-mix(in srgb, var(--gain) 12%, transparent); }
+.ref-badge.branch { color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); }
+.ref-badge.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 
 /* The input bar: way of writing, the box with its tools, one main button. */
 .dock {
@@ -163,9 +186,14 @@ button.turn-changes {
 .mode-btn { flex-shrink: 0; min-width: 52px; padding: 0 10px; font-size: 15px; font-family: var(--serif); }
 .composer-field { position: relative; flex: 1; min-width: 0; display: flex; align-items: flex-end; }
 .composer-field textarea { min-height: 44px; max-height: 30vh; padding: 10px 12px; }
-.dock.typing .composer-field textarea { padding-right: 84px; }
-.composer-tools { position: absolute; right: 2px; bottom: 0; display: flex; animation: fade 0.18s ease-out both; }
-.composer-tools .icon-btn { min-width: 40px; padding: 0 8px; color: var(--muted); }
+.dock[data-tools]:not([data-tools="0"]) .composer-field textarea { padding-bottom: 36px; }
+.composer-tools {
+  position: absolute; left: 4px; right: 4px; bottom: 2px; display: flex; justify-content: flex-end; align-items: center; gap: 2px;
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
+  background: linear-gradient(180deg, transparent, var(--dock-field) 32%);
+  pointer-events: none; animation: fade 0.18s ease-out both;
+}
+.composer-tools .icon-btn { pointer-events: auto; min-width: 36px; min-height: 34px; padding: 0 7px; color: var(--muted); }
 .send-btn { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 76px; padding: 0 14px; white-space: nowrap; }
 .send-btn.stop { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 50%, transparent); }
 .send-label { font-size: 15px; }
@@ -192,7 +220,20 @@ button.turn-changes {
 .notice-actions button { min-height: 40px; padding: 6px 16px; }
 
 /* Before the first words: an ink brush circling, then the words take over. */
-.ink-wait { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+.ink-wait { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.ink-wait-body { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.phase-pill {
+  display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
+  font-family: var(--sans); font-size: 11px; font-weight: 500; letter-spacing: 0.04em; vertical-align: 1px;
+}
+.ink-progress { display: block; position: relative; height: 2px; max-width: 180px; border-radius: 999px; background: color-mix(in srgb, var(--line) 70%, transparent); overflow: hidden; }
+.ink-progress > i {
+  display: block; width: 42%; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: ink-slide 1.8s var(--ease-out) infinite;
+}
+@keyframes ink-slide { from { transform: translateX(-110%); } to { transform: translateX(260%); } }
 .ink-brush { position: relative; width: 34px; height: 34px; flex-shrink: 0; }
 .ink-brush i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 40%, transparent); animation: brush-turn 1.4s linear infinite; }
 .ink-brush i:nth-child(2) { inset: 6px; border-top-color: var(--fg); opacity: 0.55; animation-duration: 2.1s; animation-direction: reverse; }
@@ -205,3 +246,9 @@ button.turn-changes {
 .usage-line { display: block; margin: 2px 0 0; padding: 4px 0; min-height: 28px; border: 0; background: none; box-shadow: none; color: var(--muted); font-size: 12px; font-family: var(--sans); letter-spacing: 0.02em; text-align: left; opacity: 0.8; justify-content: flex-start; }
 .usage-line:hover, .usage-line:focus-visible { opacity: 1; color: var(--fg); }
 .usage-facts dd { font-variant-numeric: tabular-nums; }
+@media (hover: hover) {
+  .choice:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+  .choice-fill:hover:not(:disabled) { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+  .tool-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); color: var(--accent); }
+  button.turn-changes:hover { opacity: 0.88; }
+}

@@ -13,8 +13,8 @@ import type { ChatMessage } from "../llm/chat";
 import type { StoryNode, WorldState } from "../types";
 import { abilityCardName, isAbilityCard } from "../memory/cards";
 
-export const UPKEEP_PROMPT_VERSION = "upkeep-7";
-export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-free-7";
+export const UPKEEP_PROMPT_VERSION = "upkeep-8";
+export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-free-8";
 /** Turns between two passes. */
 export const UPKEEP_EVERY = 6;
 const STORY_CHARS = 5000;
@@ -54,6 +54,7 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
     : `- ${c.kind} · ${c.name}（${SOURCE_TEXT[c.source ?? "玩家"]}，不要改）`);
   const places = state.places.map((p) => `- ${p.name}${p.description.trim() ? `${p.source === "AI" ? "（AI 整理，可以更新）" : ""}：${short(p.description, 60)}` : "（还没有描述）"}`);
   const people = state.people.map((p) => p.name);
+  const pronoun = state.protagonist.gender === "女" ? "她" : "他";
   return [
     {
       role: "system",
@@ -68,12 +69,12 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
 - 【主角的状况】里不是身体或精神状况的（东西、知道的事、处境、别人的态度），和剧情里早已好了、过去了的，写进 statusRemove。
 - 两张标着“AI 整理，可以更新”的卡片，或两个标着“AI 整理”或“还没有描述”的地点，其实是同一样东西、同一个地方的不同叫法（如“县衙”和“县衙大堂”、“密信”和“那封信”），写进 merges：keep 是留下的那个，drop 并进去，content 写合并后的正文。只合并确定是同一个的；同类但不同的两样东西不要合并。
 - 逐张检查标着“AI 整理，可以更新”的卡片和地点：最近的剧情让它过时了（东西被取走、人死了、地方被毁、真相揭开、立场改变），就重写它的正文；没变的不要动。标着“不要改”的一律不动。
-- 只写剧情里写到的事实，不编造、不预告；别人转述的话、传闻和猜测要写明“某某说”“传闻”，不要写成定论。同一件事只写在最相关的那一张卡里。用资料口吻，每张不超过 80 字。
+- 只写剧情里写到的事实，不编造、不预告；别人转述的话、传闻和猜测要写明“某某说”“传闻”，不要写成定论。同一件事只写在最相关的那一张卡里。用资料口吻，普通卡片每张不超过 80 字（“${ability}”可写到 300 字）。
 - ${free ? "名称和称呼沿用剧情与世界卡，其他叫法写进别名。世界卡只供参考，不改写；不自动编排未来事件，不输出 timeline、deviation。" : "名称用剧情里的叫法，其他叫法写进别名；但要用这个时代该有的说法，不要照抄正文里不合时代的词（附有【这个时代不该出现的东西】时，避开里面的说法）。"}
 - 标着“AI 整理，可以更新”的卡里，只是一次性的场景、已经结束而且以后用不上的事（不是人物、地点、势力、关键物品、规矩，也不是“${ability}”），写进 drop，一次最多 3 张；拿不准的留着。
 - 没有值得记的就输出空数组。
-只输出一个 JSON 对象：
-{"cards":[{"kind":"势力","name":"名称","keys":["别名"],"content":"……"}],
+只输出一个 JSON 对象，不要加代码块或额外说明：
+{"cards":[{"kind":"势力/物品/设定","name":"名称","keys":["别名"],"content":"……"}],
  "places":[{"name":"地点名","aliases":["别名"],"description":"……"}],
  "updates":[{"name":"已有卡片或地点的名称","content":"新的正文"}],
  "people":[{"name":"人物名","role":"身份","attitude":"仇视/敌意/冷淡/一般/友善/亲近/生死之交","note":"一句备注"}],
@@ -84,7 +85,7 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
     },
     {
       role: "user",
-      content: `【主角】${state.protagonist.name}${state.protagonist.identity ? `（${short(state.protagonist.identity, 60)}）` : ""}；剧情里的“你”就是他
+      content: `【主角】${state.protagonist.name}${state.protagonist.identity ? `（${short(state.protagonist.identity, 60)}）` : ""}；剧情里的“你”就是${pronoun}（第一或第三人称视角下即主角本人）
 
 【主角的状况】${state.protagonist.statuses.map((x) => x.name).join("、") || "（无）"}
 
@@ -107,7 +108,7 @@ ${storyBlock(input.turns)}`,
 // 整理状况 (R30 step 2): on request from the character panel, which of the
 // protagonist's statuses are over or are not a condition at all. The player
 // sees the list with reasons and chooses; nothing is removed without that.
-export const STATUS_TIDY_PROMPT_VERSION = "status-tidy-1";
+export const STATUS_TIDY_PROMPT_VERSION = "status-tidy-2";
 
 export function statusTidyMessages(state: Pick<WorldState, "protagonist" | "time">, turns: Pick<StoryNode, "actionText" | "narrative">[]): ChatMessage[] {
   const now = state.time.elapsedMinutes;
@@ -122,8 +123,8 @@ export function statusTidyMessages(state: Pick<WorldState, "protagonist" | "time
 - 按最近的剧情已经好了、过去了的（伤养好了、酒醒了、吃饱了、歇过来了、毒解了）；
 - 剧情里很久没再提、按常理早该好了的轻伤小病（看“已有几天”）；
 - 根本不是身体或精神状况的（东西、知道的事、身份处境、别人的态度）。
-还在的、拿不准的不列。“垂危”不列。每条用一句话写理由，引剧情里的依据。
-只输出一个 JSON 对象：{"remove":[{"name":"状况名称，照抄","why":"一句理由"}]}`,
+还在的、拿不准的不列。“垂危”不列。每条用一句话写理由，引剧情里的依据；没有该去掉的就返回 {"remove":[]}。
+只输出一个 JSON 对象，不要加代码块或额外说明：{"remove":[{"name":"状况名称，照抄","why":"一句理由"}]}`,
     },
     {
       role: "user",
