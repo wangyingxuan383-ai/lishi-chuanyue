@@ -71,11 +71,238 @@ fn add(keys: &mut Keys, text: &str, weight: u32, limit: usize) {
 
 /// Words of asking, not of the story: “核对比试是什么” is about 比试 (R30 step 3).
 /// Mirrored in TS `REQUEST_WORDS` (src/engine/sources/library.ts).
-pub(crate) const REQUEST_WORDS: [&str; 18] = ["核对一下", "核对", "检查", "一下", "是什么", "为什么", "什么", "怎么", "是否", "有没有", "原著", "原文", "修改", "改成", "确认", "请问", "看看", "查查"];
+pub(crate) const REQUEST_WORDS: [&str; 35] = [
+    "核对一下", "核对", "检查", "一下", "是什么", "为什么", "什么", "怎么", "是否", "有没有",
+    "原著", "原文", "修改", "改成", "确认", "请问", "看看", "查查",
+    "查阅", "纠正", "改正", "纠错", "核实", "查证", "本段", "这段", "细节", "依据", "错误", "不符", "一致", "保留", "玩家", "主动", "改写",
+];
 
 /// A player's request with the asking words taken out.
 pub(crate) fn without_request_words(text: &str) -> String {
     REQUEST_WORDS.iter().fold(text.to_owned(), |acc, word| acc.replace(word, " "))
+}
+
+pub(crate) fn parse_chapter_numeral(raw: &str) -> Option<u64> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches('第')
+        .trim()
+        .trim_end_matches(['章', '回', '节', '卷', '集', '部', '篇'])
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return trimmed.parse::<u64>().ok().filter(|n| *n > 0);
+    }
+    let mut total = 0u64;
+    let mut section = 0u64;
+    let mut current = 0u64;
+    let mut has_digit = false;
+    for ch in trimmed.chars() {
+        let digit = match ch {
+            '零' | '〇' => Some(0),
+            '一' => Some(1),
+            '二' | '两' => Some(2),
+            '三' => Some(3),
+            '四' => Some(4),
+            '五' => Some(5),
+            '六' => Some(6),
+            '七' => Some(7),
+            '八' => Some(8),
+            '九' => Some(9),
+            _ => None,
+        };
+        if let Some(d) = digit {
+            current = d;
+            has_digit = true;
+            continue;
+        }
+        let unit = match ch {
+            '十' => Some(10u64),
+            '百' => Some(100),
+            '千' => Some(1000),
+            '万' => Some(10000),
+            _ => None,
+        };
+        if let Some(u) = unit {
+            if u == 10000 {
+                section = section.saturating_add(current).saturating_mul(u);
+                total = total.saturating_add(section);
+                section = 0;
+                current = 0;
+            } else {
+                let factor = if current == 0 && u == 10 { 1 } else { current };
+                section = section.saturating_add(factor.saturating_mul(u));
+                current = 0;
+            }
+            has_digit = true;
+        } else {
+            return None;
+        }
+    }
+    let value = total.saturating_add(section).saturating_add(current);
+    (has_digit && value > 0).then_some(value)
+}
+
+fn extract_chapter_numbers(title: &str) -> Vec<u64> {
+    static CHAPTER_RE: OnceLock<Regex> = OnceLock::new();
+    static LEADING_RE: OnceLock<Regex> = OnceLock::new();
+    let chapter_re = CHAPTER_RE.get_or_init(|| {
+        Regex::new(r"第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[章回节卷集部篇]").unwrap()
+    });
+    let leading_re = LEADING_RE.get_or_init(|| Regex::new(r"^\s*(\d{1,5})(?:[.、\s\-—:：]|$)").unwrap());
+    let mut nums = BTreeSet::new();
+    for cap in chapter_re.captures_iter(title) {
+        if let Some(n) = cap.get(1).and_then(|m| parse_chapter_numeral(m.as_str())) {
+            nums.insert(n);
+        }
+    }
+    if let Some(n) = leading_re
+        .captures(title)
+        .and_then(|cap| cap.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+    {
+        nums.insert(n);
+    }
+    nums.into_iter().collect()
+}
+
+pub(crate) fn chapter_query_rank(section: i64, title: &str, query: &str) -> Option<u8> {
+    let lower = title.to_lowercase();
+    let title_nums = extract_chapter_numbers(title);
+    let index_num = (section + 1).max(0) as u64;
+    let tokens: Vec<&str> = query
+        .split(|c: char| c.is_whitespace() || "，、,；;。".contains(c))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Some(2);
+    }
+    let mut title_only = true;
+    for token in tokens {
+        let in_title = lower.contains(&token.to_lowercase());
+        let num = parse_chapter_numeral(token);
+        let in_title_num = num.is_some_and(|n| title_nums.contains(&n));
+        if in_title || in_title_num {
+            continue;
+        }
+        if num.is_some_and(|n| n == index_num) {
+            title_only = false;
+            continue;
+        }
+        return None;
+    }
+    Some(if title_only { 2 } else { 1 })
+}
+
+pub(crate) fn chapter_query_matches(section: i64, title: &str, query: &str) -> bool {
+    chapter_query_rank(section, title, query).is_some()
+}
+
+/// Extract a compact query-centered snippet (reused by `reference_lookup` so the matched line stays inside the snippet).
+pub(crate) fn centered_snippet(text: &str, query: &str, cap: usize) -> String {
+    let mut keys = Vec::new();
+    add(&mut keys, &without_request_words(query), 6, 40);
+    add(&mut keys, query, 4, 40);
+    let (sample, start, end) = window(text, &keys, cap);
+    let total = units(text);
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        sample.trim(),
+        if end < total { "…" } else { "" }
+    )
+}
+
+/// List or search the table of contents within the allowed book scope (`from..=through`).
+pub(crate) fn list_sections(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Value> {
+    if notes_only(plan) {
+        return Err(Error::Invalid("这次只用你选的札记，不查原文目录；请依据札记作答".into()));
+    }
+    let binding = plan.reading_source();
+    let Some(book) = binding["bookId"].as_str() else {
+        return Ok(json!({"status":"insufficient","reason":"未绑定参考书籍","sections":[]}));
+    };
+    let meta: Option<(String, Option<i64>)> = db
+        .query_row(
+            "SELECT b.title,MAX(s.section) FROM source_books b LEFT JOIN source_sections s ON s.book_id=b.id WHERE b.id=? GROUP BY b.id",
+            [book],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((title, Some(last))) = meta else {
+        return Ok(json!({"status":"insufficient","reason":"参考书籍不存在或没有正文","sections":[]}));
+    };
+    let range = scope_range(plan);
+    let allowed = binding["through"].as_i64().unwrap_or(last).min(last);
+    let through = range.map_or(allowed, |(_, to)| to.min(allowed));
+    let from = range.map_or(0, |(from, _)| from);
+    if through < 0 || from > through {
+        return Err(Error::Invalid("原著参考范围无效".into()));
+    }
+    let position = binding["position"].as_i64().unwrap_or(0).clamp(from, through);
+    let query = args["query"].as_str().unwrap_or("").trim();
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(40).clamp(1, 80) as usize;
+    let mut stmt = db.prepare(
+        "SELECT s.section, s.title, s.page, COALESCE(SUM(LENGTH(c.text)), 0) AS chars, COUNT(c.ordinal) AS chunks
+         FROM source_sections s
+         LEFT JOIN source_chunks c ON c.book_id = s.book_id AND c.section = s.section
+         WHERE s.book_id = ? AND s.section >= ? AND s.section <= ?
+         GROUP BY s.section, s.title, s.page
+         ORDER BY s.section",
+    )?;
+    let all = stmt
+        .query_map(params![book, from, through], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let total = all.len();
+    let mut matched: Vec<_> = all
+        .into_iter()
+        .filter_map(|row| {
+            let rank = if query.is_empty() {
+                2
+            } else {
+                chapter_query_rank(row.0, &row.1, query)?
+            };
+            Some((rank, row))
+        })
+        .collect();
+    if !query.is_empty() {
+        matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    }
+    let matched_count = matched.len();
+    let mut sections = vec![];
+    for (_, (section, sec_title, page, chars, chunks)) in matched.into_iter().skip(offset).take(limit) {
+        let mut row = json!({"section": section, "title": sec_title, "chars": chars, "chunks": chunks});
+        if let Some(p) = page {
+            row["page"] = p.into();
+        }
+        sections.push(row);
+    }
+    let next = offset + sections.len();
+    Ok(json!({
+        "bookId": book,
+        "title": title,
+        "from": from,
+        "through": through,
+        "position": position,
+        "total": total,
+        "matched": matched_count,
+        "offset": offset,
+        "nextOffset": (next < matched_count).then_some(next),
+        "sections": sections,
+        "note": "section 为 0 开始的书内顺序节号（含序章/卷标时可能与章名数字不同）；找到目标节号后用 read_original(section) 或 search_original(query, from, to) 阅读原文。"
+    }))
 }
 
 /// 资料范围 (D184): the chapters one request chose, 0-based and inclusive. It
@@ -205,10 +432,16 @@ fn facts(
     position: i64,
     keys: &Keys,
     all: bool,
+    ignore_position: bool,
 ) -> Result<Vec<Fact>> {
-    let mut statement=db.prepare("SELECT f.id,f.job_id,f.section,f.chunk,f.kind,f.subject,f.aliases_json,f.statement,f.quote,f.valid_from,f.valid_through,s.title,s.page,c.text FROM canon_facts f JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section JOIN source_sections s ON s.book_id=f.book_id AND s.section=f.section JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id WHERE f.book_id=? AND f.section<=? AND COALESCE(f.valid_from,f.section)<=? AND (f.valid_through IS NULL OR f.valid_through>=?) AND (? IS NULL OR f.job_id=?)")?;
+    let sql = if ignore_position {
+        "SELECT f.id,f.job_id,f.section,f.chunk,f.kind,f.subject,f.aliases_json,f.statement,f.quote,f.valid_from,f.valid_through,s.title,s.page,c.text FROM canon_facts f JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section JOIN source_sections s ON s.book_id=f.book_id AND s.section=f.section JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id WHERE f.book_id=?1 AND f.section<=?2 AND (?3 IS NULL OR f.job_id=?3)"
+    } else {
+        "SELECT f.id,f.job_id,f.section,f.chunk,f.kind,f.subject,f.aliases_json,f.statement,f.quote,f.valid_from,f.valid_through,s.title,s.page,c.text FROM canon_facts f JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section JOIN source_sections s ON s.book_id=f.book_id AND s.section=f.section JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id WHERE f.book_id=?1 AND f.section<=?2 AND COALESCE(f.valid_from,f.section)<=?4 AND (f.valid_through IS NULL OR f.valid_through>=?4) AND (?3 IS NULL OR f.job_id=?3)"
+    };
+    let mut statement = db.prepare(sql)?;
     let job = binding["analysisId"].as_str();
-    let rows = statement.query_map(params![book, through, position, position, job, job], |r| {
+    let map_row = |r: &rusqlite::Row<'_>| {
         Ok((
             Fact {
                 id: r.get(0)?,
@@ -230,11 +463,19 @@ fn facts(
             },
             r.get::<_, String>(13)?,
         ))
-    })?;
+    };
+    let collected: Vec<(Fact, String)> = if ignore_position {
+        statement
+            .query_map(params![book, through, job], map_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        statement
+            .query_map(params![book, through, job, position], map_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
     let mut selected = vec![];
     let mut seen = HashSet::new();
-    for row in rows {
-        let (fact, original) = row?;
+    for (fact, original) in collected {
         if !["person", "relation", "event", "rule"].contains(&fact.kind.as_str())
             || fact.section < from
             || fact.quote.trim().is_empty()
@@ -371,8 +612,11 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let query = query.trim();
     let words: Vec<&str> = query.split(|c: char| c.is_whitespace() || "，、,；;。".contains(c)).filter(|w| !w.is_empty()).collect();
+    let cleaned = without_request_words(query);
+    let q_bigrams = terms(&cleaned);
     let mut keys = Vec::new();
-    add(&mut keys, query, 1, 12);
+    add(&mut keys, &cleaned, 4, 24);
+    add(&mut keys, query, 2, 16);
     let through = plan.reading_source()["through"].as_u64();
     let range = scope_range(plan);
     let chosen = chosen_notes(plan);
@@ -388,22 +632,54 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
             && range.is_none_or(|(from, to)| note_within_range(kind,scope,refs,from,to))
     }).collect();
     let total = rows.len();
+    let mut scored_rows: Vec<_> = rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(order, row)| {
+            if query.is_empty() {
+                return Some((1u32, order, row));
+            }
+            let title_lower = row.2.to_lowercase();
+            let hay_lower = format!("{}\n{}\n{}", row.2, row.3, row.4).to_lowercase();
+            let mut score = 0u32;
+            for w in &words {
+                let wl = w.to_lowercase();
+                if title_lower.contains(&wl) {
+                    score += 6;
+                } else if hay_lower.contains(&wl) {
+                    score += 4;
+                }
+            }
+            for bg in &q_bigrams {
+                if title_lower.contains(bg) {
+                    score += 3;
+                } else if hay_lower.contains(bg) {
+                    score += 1;
+                }
+            }
+            (score > 0).then_some((score, order, row))
+        })
+        .collect();
+    if !query.is_empty() {
+        scored_rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    }
     let mut remaining = budget(plan);
     let mut notes = vec![];
-    for (id, kind, title, scope, content, _, _, source, stale) in rows {
-        let haystack = format!("{title}\n{scope}\n{content}");
-        if !words.is_empty() && !words.iter().any(|w| haystack.contains(w)) {
-            continue;
-        }
-        // An empty query lists what exists; a query returns the notes themselves.
-        let body = if words.is_empty() { slice(&content, 0, 160).0 } else { content.clone() };
+    for (_, _, (id, kind, title, _scope, content, _, _, source, stale)) in scored_rows {
+        // An empty query lists what exists; a query returns the notes themselves (or focused excerpts).
+        let body = if query.is_empty() { slice(&content, 0, 160).0 } else { content.clone() };
         let value = json!({"id":id,"kind":kind,"title":title,"content":body,"source":source,"stale":stale,"partial":units(&body) < units(&content)});
         let size = cost(&value);
         if size > remaining {
-            if notes.is_empty() && remaining > 400 {
-                let (body, _, _) = window(&content, &keys, remaining - 200);
-                let excerpt = json!({"id":id,"kind":kind,"title":title,"content":body,"source":source,"stale":stale,"partial":true});
-                if cost(&excerpt) <= remaining { notes.push(excerpt); }
+            if remaining > 400 {
+                let (excerpt_body, _, _) = window(&content, &keys, remaining - 200);
+                let excerpt = json!({"id":id,"kind":kind,"title":title,"content":excerpt_body,"source":source,"stale":stale,"partial":true});
+                let excerpt_size = cost(&excerpt);
+                if excerpt_size <= remaining {
+                    remaining -= excerpt_size;
+                    notes.push(excerpt);
+                    continue;
+                }
             }
             break;
         }
@@ -440,7 +716,12 @@ fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>, 
 }
 
 fn budget(plan: &RunPlan) -> usize {
-    ((plan.meta["budgetChars"].as_u64().unwrap_or(12000) / 4).min(8000)) as usize
+    let base = plan.meta["budgetChars"].as_u64().unwrap_or(12000);
+    if plan.kind == "correction" {
+        ((base / 3).min(10000)) as usize
+    } else {
+        ((base / 4).min(8000)) as usize
+    }
 }
 fn cost(value: &Value) -> usize {
     units(&value.to_string()) + 1
@@ -522,8 +803,11 @@ pub fn read(store: &Store, plan: &RunPlan, name: &str, args: &Value) -> Result<V
 pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value) -> Result<Value> {
     // 资料范围 (D184): a request limited to chosen notes does not read the original;
     // the turn-level reference tools work on the whole allowed range, so they are off too.
-    if notes_only(plan) && ["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&name) {
+    if notes_only(plan) && ["list_sections","search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&name) {
         return Err(Error::Invalid("这次只用你选的札记，不查原文；请依据札记作答，札记里没有的写明资料不足".into()));
+    }
+    if name == "list_sections" {
+        return list_sections(db, plan, args);
     }
     if scope_range(plan).is_some() && ["locate_original_event","prepare_reference_check"].contains(&name) {
         return Err(Error::Invalid(format!("这次只查{}，请用 search_original 在这几章里检索", scope_words(scope_range(plan)))));
@@ -557,22 +841,41 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     };
     let range = scope_range(plan);
     let allowed = binding["through"].as_i64().unwrap_or(last).min(last);
-    let through = range.map_or(allowed, |(_, to)| to.min(allowed));
-    let from = range.map_or(0, |(from, _)| from);
+    let max_through = range.map_or(allowed, |(_, to)| to.min(allowed));
+    let min_from = range.map_or(0, |(from, _)| from);
+    let mut from = min_from;
+    let mut through = max_through;
+    if name == "search_original" {
+        if let Some(arg_from) = args["from"].as_i64() {
+            if arg_from > max_through {
+                return Err(Error::Invalid(if range.is_some() { format!("这次只查{}，起始章节超出范围", scope_words(range)) } else { "起始章节超出了本局允许的参考章节".into() }));
+            }
+            from = from.max(arg_from);
+        }
+        if let Some(arg_to) = args["to"].as_i64() {
+            if arg_to < min_from {
+                return Err(Error::Invalid("结束章节不在允许范围内".into()));
+            }
+            through = through.min(arg_to);
+        }
+    }
     if through < 0 || from > through {
         return Err(Error::Invalid("原著参考范围无效".into()));
     }
     let position = binding["position"].as_i64().unwrap_or(0).clamp(from, through);
+    let raw_query = args["query"].as_str().unwrap_or("").trim();
+    let ignore_position = matches!(plan.kind.as_str(), "correction" | "ask");
     let mut keys = query_keys(plan, args);
     let notes = facts(
-        &db,
+        db,
         book,
         binding,
         from,
         through,
         position,
         &keys,
-        name == "read_canon_facts" && args["query"].as_str().unwrap_or("").is_empty(),
+        name == "read_canon_facts" && raw_query.is_empty(),
+        ignore_position,
     )?;
     if name == "read_canon_facts" {
         let mut remaining = budget(plan);
@@ -591,8 +894,28 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             "note":"人物资料和摘要只辅助定位，不代表已读原文；没有整理资料时仍应搜索并阅读原文。较早身份须核对后续变化，人物知情范围按本局正文判断。"}),
         );
     }
+    let cleaned_query = without_request_words(raw_query);
+    let explicit_terms: HashSet<String> = {
+        let mut set: HashSet<String> = terms(&cleaned_query).into_iter().collect();
+        if set.is_empty() {
+            set.extend(terms(raw_query));
+        }
+        set
+    };
+    let explicit_mode = name == "search_original" && !raw_query.is_empty();
+    let mut fact_alias_terms = HashSet::new();
     for note in &notes {
+        let note_matches_explicit = !explicit_mode || {
+            let identity = format!("{}\n{}", note.subject, note.aliases.join("\n")).to_lowercase();
+            let stmt_lower = note.statement.to_lowercase();
+            explicit_terms.iter().any(|t| identity.contains(t) || stmt_lower.contains(t))
+                || identity.contains(&raw_query.to_lowercase())
+        };
+        if !note_matches_explicit {
+            continue;
+        }
         for key in terms(&format!("{}\n{}", note.subject, note.aliases.join("\n"))) {
+            fact_alias_terms.insert(key.clone());
             if let Some((_, weight)) = keys.iter_mut().find(|(k, _)| *k == key) {
                 *weight = (*weight).max(3);
             } else if keys.len() < 480 {
@@ -606,35 +929,114 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         .query_map(params![book, from, through], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<HashMap<i64, i64>, _>>()?;
     let mut scores = HashMap::<i64, f64>::new();
-    // The model's query words, to tell a match only past the reading limit (R30 step 3).
-    let query_terms: HashSet<String> = terms(args["query"].as_str().unwrap_or("")).into_iter().collect();
+    let mut bg_scores = HashMap::<i64, f64>::new();
+    let mut explicit_hits = HashMap::<i64, usize>::new();
+    let query_terms: HashSet<String> = terms(raw_query).into_iter().collect();
     let (mut inside, mut outside) = (HashMap::<i64, usize>::new(), HashMap::<i64, usize>::new());
     // A word in a large share of the allowed text says little about where to look.
     let common = (scope.len() * 15 / 100).max(8);
+    let search_offset = if name == "search_original" { args["offset"].as_u64().unwrap_or(0) as usize } else { 0 };
     if name == "search_original" {
-        if !keys.is_empty(){
-            let placeholders=vec!["?";keys.len()].join(",");
-            let mut values=vec![book.to_owned()];values.extend(keys.iter().map(|(term,_)|term.clone()));
-            let mut stmt=db.prepare(&format!("SELECT term,postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"))?;
-            let rows=stmt.query_map(rusqlite::params_from_iter(values.iter()),|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?;
-            for row in rows{let (term,raw)=row?;let mut weight=keys.iter().find(|(key,_)|key==&term).map(|(_,w)|*w).unwrap_or(1);
-                let postings=serde_json::from_str::<Vec<i64>>(&raw).unwrap_or_default();
+        if !keys.is_empty() {
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let mut values = vec![book.to_owned()];
+            values.extend(keys.iter().map(|(term, _)| term.clone()));
+            let mut stmt = db.prepare(&format!("SELECT term,postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (term, raw) = row?;
+                let mut weight = keys.iter().find(|(key, _)| key == &term).map(|(_, w)| *w).unwrap_or(1);
+                let postings = serde_json::from_str::<Vec<i64>>(&raw).unwrap_or_default();
+                let is_explicit = explicit_terms.contains(&term) || fact_alias_terms.contains(&term);
                 if query_terms.contains(&term) {
-                    for id in &postings { *(if scope.contains_key(id) { &mut inside } else { &mut outside }).entry(*id).or_default() += 1; }
+                    for id in &postings {
+                        *(if scope.contains_key(id) { &mut inside } else { &mut outside }).entry(*id).or_default() += 1;
+                    }
                 }
-                let allowed=postings.into_iter().filter(|n|scope.contains_key(n)).collect::<Vec<_>>();
-                if allowed.len() > common { weight = weight.min(1); }
-                let score=weight as f64/(allowed.len().max(1) as f64).sqrt();for id in allowed{*scores.entry(id).or_default()+=score;}
+                let allowed_postings = postings.into_iter().filter(|n| scope.contains_key(n)).collect::<Vec<_>>();
+                if allowed_postings.is_empty() {
+                    continue;
+                }
+                if allowed_postings.len() > common {
+                    // Explicit query terms keep weight >= 3 so core character names aren't flattened to noise.
+                    weight = if is_explicit { weight.min(3) } else { weight.min(1) };
+                }
+                let score = weight as f64 / (allowed_postings.len() as f64).sqrt();
+                if explicit_mode && !is_explicit {
+                    for id in allowed_postings {
+                        *bg_scores.entry(id).or_default() += score;
+                    }
+                } else {
+                    for id in allowed_postings {
+                        *scores.entry(id).or_default() += score;
+                        if is_explicit {
+                            *explicit_hits.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Single-character or punctuation-stripped queries that yield 0 bigrams still match verbatim chunks.
+        if explicit_mode && explicit_terms.is_empty() {
+            let mut stmt = db.prepare("SELECT ordinal FROM source_chunks WHERE book_id=? AND section>=? AND section<=? AND instr(lower(text), lower(?)) > 0 LIMIT 48")?;
+            for row in stmt.query_map(params![book, from, through, raw_query], |r| r.get::<_, i64>(0))? {
+                let id = row?;
+                *scores.entry(id).or_default() += 6.0;
+                *explicit_hits.entry(id).or_default() += 1;
             }
         }
         for note in &notes {
             if scope.contains_key(&note.chunk) {
-                *scores.entry(note.chunk).or_default() += 2.0;
+                let target = if explicit_mode && !scores.contains_key(&note.chunk) { &mut bg_scores } else { &mut scores };
+                *target.entry(note.chunk).or_default() += 2.0;
             }
         }
-        let mut stmt=db.prepare("SELECT section,title FROM source_sections WHERE book_id=? AND section>=? AND section<=?")?;
-        let titles=stmt.query_map(params![book,from,through],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        for (section,title) in titles {let score: f64=keys.iter().filter(|(key,_)|title.contains(key)).map(|(_,w)|*w as f64*2.0).sum();if score>0.0{for (&id,&s) in &scope{if s==section{*scores.entry(id).or_default()+=score;}}}}
+        let mut stmt = db.prepare("SELECT section,title FROM source_sections WHERE book_id=? AND section>=? AND section<=?")?;
+        let titles = stmt.query_map(params![book, from, through], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let lower_titles: Vec<(i64, String, String)> = titles.into_iter().map(|(s, t)| (s, t.to_lowercase(), t)).collect();
+        if explicit_mode {
+            // Direct chapter-title / chapter-number match (e.g. “第三十五章” or “35 渡口”).
+            let matched_chapters: Vec<i64> = lower_titles.iter().filter(|(s, _, orig)| chapter_query_matches(*s, orig, raw_query)).map(|(s, _, _)| *s).collect();
+            if !matched_chapters.is_empty() {
+                let boost = 12.0 / (matched_chapters.len() as f64).sqrt();
+                for (&id, &s) in &scope {
+                    if matched_chapters.contains(&s) {
+                        *scores.entry(id).or_default() += boost;
+                        *explicit_hits.entry(id).or_default() += 1;
+                    }
+                }
+            }
+            for term in &explicit_terms {
+                let matched_secs: Vec<i64> = lower_titles.iter().filter(|(_, lower, _)| lower.contains(term)).map(|(s, _, _)| *s).collect();
+                if matched_secs.is_empty() { continue; }
+                let boost = 10.0 / (matched_secs.len() as f64).sqrt();
+                for (&id, &s) in &scope {
+                    if matched_secs.contains(&s) {
+                        *scores.entry(id).or_default() += boost;
+                        *explicit_hits.entry(id).or_default() += 1;
+                    }
+                }
+            }
+            // Multi-term coverage bonus + gentle tie-breaking from background context ONLY on chunks that actually matched.
+            for (id, score) in scores.iter_mut() {
+                let hits = explicit_hits.get(id).copied().unwrap_or(1);
+                *score *= 1.0 + 0.35 * (hits.saturating_sub(1) as f64);
+                if let Some(bg) = bg_scores.get(id) {
+                    *score += (*bg).min(1.5);
+                }
+            }
+        } else {
+            for (key, weight) in &keys {
+                let matched_secs: Vec<i64> = lower_titles.iter().filter(|(_, lower, _)| lower.contains(key)).map(|(s, _, _)| *s).collect();
+                if matched_secs.is_empty() { continue; }
+                let boost = (*weight as f64 * 2.0) / (matched_secs.len() as f64).sqrt();
+                for (&id, &s) in &scope {
+                    if matched_secs.contains(&s) {
+                        *scores.entry(id).or_default() += boost;
+                    }
+                }
+            }
+        }
     } else {
         let section = args["section"]
             .as_i64()
@@ -683,11 +1085,12 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             })
             .then_with(|| a.cmp(b))
     });
-    let mut ids: Vec<i64> = ranked.into_iter().take(48).map(|(id, _)| id).collect();
+    let total_hits = ranked.len();
+    let mut ids: Vec<i64> = ranked.into_iter().skip(search_offset).take(48).map(|(id, _)| id).collect();
     // Nothing matched: the passage at the current position, marked as such, so it
     // is not mistaken for a hit (R30 step 3).
     let mut nearby_only = false;
-    if name == "search_original" {
+    if name == "search_original" && search_offset == 0 {
         if let Some(nearby) = scope
             .iter()
             .filter(|(_, s)| **s == position)
@@ -709,7 +1112,16 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     let mut excerpts = vec![];
     let mut analysis = vec![];
     let mut budget_limited = false;
-    for id in ids.into_iter().take(5) {
+    let mut window_keys = keys.clone();
+    if explicit_mode {
+        window_keys = explicit_terms.iter().map(|t| (t.clone(), 8)).collect();
+        for (k, w) in &keys {
+            if !explicit_terms.contains(k) {
+                window_keys.push((k.clone(), (*w).min(2)));
+            }
+        }
+    }
+    for id in ids.iter().copied().take(5) {
         let (section,text,label,page):(i64,String,String,Option<i64>)=db.query_row("SELECT c.section,c.text,s.title,s.page FROM source_chunks c JOIN source_sections s ON s.book_id=c.book_id AND s.section=c.section WHERE c.book_id=? AND c.ordinal=? AND c.section<=?",params![book,id,through],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         let mut excerpt = json!({"kind":"original","bookId":book,"title":label,"section":section,"chunk":id,"start":0,"end":0,"text":""});
         if nearby_only {
@@ -721,7 +1133,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         let overhead = cost(&excerpt) + 12;
         let mut cap = remaining.saturating_sub(overhead);
         cap = cap.min(if name == "search_original" {
-            1600
+            1200
         } else {
             2400
         });
@@ -730,7 +1142,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             break;
         }
         loop {
-            let mut focus_keys=keys.clone();
+            let mut focus_keys = window_keys.clone();
             if name=="read_original" && args["chunk"]==id {
                 if let Some(start)=args["start"].as_u64(){let focus=utf16_slice(&text,start as usize,args["end"].as_u64().unwrap_or(start+200) as usize);add(&mut focus_keys,&focus,20,80);}
             }
@@ -746,7 +1158,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
                 remaining -= size;
                 if excerpts.is_empty() {
                     if let Some(locator) =
-                        analysis_locator(&db, binding, &excerpt, &keys, &mut remaining)?
+                        analysis_locator(db, binding, &excerpt, &window_keys, &mut remaining)?
                     {
                         analysis.push(locator);
                     }
@@ -766,6 +1178,27 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         json!({"bookId":book,"title":title,"through":through,"position":position,"status":if ready {"ready"} else {"insufficient"},"excerpts":excerpts,"notes":analysis,
         "reason":if ready {Value::Null} else if budget_limited {json!("budget")} else {json!("no_match")},
         "note":"这些是实际原著正文，不是本局已经发生的事实。原文优先于整理和模型记忆；按出处及当前原著位置判断身份变化，较早身份须复核，角色只能知道本局获知的事。玩家明确改写与合理后果保留，AI自行写错不算玩家改写。"});
+    if name == "search_original" && !nearby_only {
+        output["totalHits"] = total_hits.into();
+        let shown = output["excerpts"].as_array().map(Vec::len).unwrap_or(0);
+        let next_off = search_offset + shown;
+        if next_off < total_hits {
+            output["nextOffset"] = next_off.into();
+            let mut more = vec![];
+            for id in ids.iter().copied().skip(shown).take(8) {
+                if let Ok((sec, sec_title)) = db.query_row(
+                    "SELECT c.section, s.title FROM source_chunks c JOIN source_sections s ON s.book_id=c.book_id AND s.section=c.section WHERE c.book_id=? AND c.ordinal=?",
+                    params![book, id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                ) {
+                    more.push(json!({"section": sec, "chunk": id, "title": sec_title}));
+                }
+            }
+            if !more.is_empty() {
+                output["moreMatches"] = more.into();
+            }
+        }
+    }
     if nearby_only {
         output["match"] = "nearby".into();
         output["note"] = "没有找到和查询词对应的原文；下面只是当前原著位置附近的一段，不能当作查到的依据。".into();
@@ -1066,10 +1499,27 @@ mod tests {
             2,
             1,
             &keys,
-            false
+            false,
+            false,
         )
         .unwrap()
         .is_empty());
+        assert_eq!(
+            facts(
+                &store.lock().unwrap(),
+                "book",
+                &plan.state["source"],
+                0,
+                2,
+                1,
+                &keys,
+                false,
+                true,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
         plan.state["source"]["position"] = json!(2);
         assert_eq!(
             read(&store, &plan, "read_canon_facts", &json!({"query":"玄影"})).unwrap()["facts"]
@@ -1252,6 +1702,63 @@ mod tests {
         assert_eq!(result["beyondScope"], true, "{result}");
         assert!(result["scopeNote"].as_str().unwrap().contains("第 11 章之后"));
         assert!(!result.to_string().contains("院长宣布"));
+    }
+
+    #[test]
+    fn explicit_query_is_not_polluted_by_background_instructions_and_supports_pagination_and_toc() {
+        let mut sections: Vec<String> = (0..12)
+            .map(|i| format!("第{}日，参考原著人物性格与关系，城中风平浪静。", i + 1))
+            .collect();
+        sections[9] = format!(
+            "{}翠微楼的玄铁令由林晚照掌管，绝无二话。{}",
+            "前文铺垫山雨欲来。".repeat(70),
+            "后文众人各自散去。".repeat(70)
+        );
+        let (store, mut plan) = setup(&sections);
+        plan.kind = "correction".into();
+        plan.state["source"]["instructions"] = "参考原著人物性格与关系".into();
+        plan.state["source"]["position"] = 0.into();
+        {
+            let db = store.lock().unwrap();
+            db.execute("UPDATE source_sections SET title='序章 楔子' WHERE book_id='book' AND section=0", []).unwrap();
+            for s in 1..12i64 {
+                let title = if s == 9 { "第九章 翠微楼玄铁令".to_owned() } else { format!("第{s}章") };
+                db.execute("UPDATE source_sections SET title=?1 WHERE book_id='book' AND section=?2", params![title, s]).unwrap();
+            }
+            // Zero-match explicit query must report nearby_only even though instructions match every chapter.
+            let miss = read_db(&db, &plan, "search_original", &json!({"query":"不存在的星辰剑"})).unwrap();
+            assert_eq!(miss["match"], "nearby", "{miss}");
+            // locate_original_event must center its snippet around the actual match (at char ~630+) and hide nearby misses.
+            let located = read_db(&db, &plan, "locate_original_event", &json!({"queries":["翠微楼 玄铁令","不存在的星辰剑"]})).unwrap();
+            assert!(located["items"][0]["candidates"][0]["snippet"].as_str().unwrap().contains("玄铁令"), "{located}");
+            assert_eq!(located["items"][1]["status"], "insufficient", "{located}");
+            assert_eq!(located["items"][1]["nearbyOnly"], true, "{located}");
+            // list_sections matches Chinese/Arabic numerals and titles on shifted front-matter books.
+            let toc = read_db(&db, &plan, "list_sections", &json!({"query":"9"})).unwrap();
+            assert!(toc["sections"].as_array().unwrap().iter().any(|s| s["section"] == 9), "{toc}");
+            let toc_cn = read_db(&db, &plan, "list_sections", &json!({"query":"第九章"})).unwrap();
+            assert_eq!(toc_cn["sections"][0]["section"], 9, "{toc_cn}");
+            // search_original supports from/to filtering and reports totalHits/nextOffset/moreMatches.
+            let paged = read_db(&db, &plan, "search_original", &json!({"query":"城中风平浪静","offset":0})).unwrap();
+            assert!(paged["totalHits"].as_u64().unwrap() >= 10, "{paged}");
+            assert!(paged["nextOffset"].is_u64(), "{paged}");
+            let ranged = read_db(&db, &plan, "search_original", &json!({"query":"翠微楼","from":8,"to":10})).unwrap();
+            assert_eq!(ranged["excerpts"][0]["section"], 9, "{ranged}");
+        }
+    }
+
+    #[test]
+    fn read_canon_notes_matches_unspaced_chinese_phrases_by_tokens_and_allows_empty_query() {
+        let (store, plan) = setup(&["正文".to_owned()]);
+        let db = store.lock().unwrap();
+        db.execute(
+            "INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,status,active,progress_json,model,created_at,updated_at) VALUES('n1','book',NULL,'person','人物：林晚照','{}','林晚照在翠微楼掌管玄铁令。','[0]','done',1,'{}','m','t','t')",
+            [],
+        ).unwrap();
+        let listed = read_notes(&db, &plan, "").unwrap();
+        assert_eq!(listed["notes"].as_array().unwrap().len(), 1);
+        let hit = read_notes(&db, &plan, "林晚照玄铁令").unwrap();
+        assert_eq!(hit["notes"].as_array().unwrap().len(), 1, "{hit}");
     }
 
 }

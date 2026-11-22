@@ -684,3 +684,37 @@ async fn stop_during_pending_input_cannot_launch_a_prompt_after_abort() {
     bounded(f.host.shutdown()).await.unwrap();
     bounded(server).await.unwrap();
 }
+
+#[tokio::test]
+async fn resume_after_initial_user_event_never_duplicates_original_prompt() {
+    let (f, mut peer) = Fixture::new();
+    // Simulate a task whose initial prompt was already delivered into Pi JSONL & pi_events.
+    {
+        let db = f.store.lock().unwrap();
+        db.execute(
+            "INSERT INTO pi_events(task_id,seq,event_json,created_at) VALUES('task',1,?,'test')",
+            rusqlite::params![json!({"event":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"读取原著并核对设定"}]}}}).to_string()],
+        ).unwrap();
+    }
+    let server = tokio::spawn(async move {
+        peer.create().await;
+        // First resume with a pending continuation sends that input as prompt (NOT original task text) with resume=true.
+        let prompt = peer.read().await;
+        assert_eq!(prompt["method"], "prompt");
+        assert_eq!(prompt["params"]["resume"], true);
+        let text = prompt["params"]["text"].as_str().unwrap().to_owned();
+        assert!(text.contains("只核对第三章"), "{text}");
+        assert!(!text.contains("读取原著并核对设定"), "must not duplicate initial task prompt: {text}");
+        peer.send(json!({"type":"event","sessionId":"pi-session","taskId":"task","event":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":text}]}}})).await;
+        let finish = peer.tool("finish-resume", "finish_task", json!({"summary":"续跑核对完成","outcome":"no_changes_needed"})).await;
+        assert_eq!(finish["ok"], true, "{finish}");
+        peer.reply(&prompt, json!({"text":"已按续跑完成"})).await;
+        peer.close().await;
+    });
+    bounded(f.create()).await;
+    let reply = bounded(f.host.prompt_text("只核对第三章")).await.unwrap();
+    assert_eq!(reply["taskReceipt"]["status"], "completed");
+    assert_eq!(reply["taskReceipt"]["consumedIntentRevision"], 1);
+    bounded(f.host.shutdown()).await.unwrap();
+    bounded(server).await.unwrap();
+}

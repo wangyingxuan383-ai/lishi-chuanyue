@@ -211,11 +211,15 @@ pub fn persistable_event(record: &Value) -> Option<Value> {
                     clean["result"]["usage"] = usage(&original["result"]["usage"]);
                 }
                 clean["resultRef"] =
-                    json!({"callId":clean["toolCallId"],"path":"","offset":0,"limit":1200});
+                    json!({"callId":clean["toolCallId"],"path":"","offset":0,"limit":4800});
             }
         }
         "agent_start" | "agent_end" | "agent_settled" | "turn_start" | "turn_end" => {
             booleans(original, &mut clean, &["aborted", "willRetry"]);
+        }
+        "thinking_status" => {
+            booleans(original, &mut clean, &["active"]);
+            string_fields(original, &mut clean, &["attemptId"], 256);
         }
         "context_state" => {
             let raw=&original["data"];let mut data=json!({"version":1});
@@ -809,8 +813,10 @@ fn object_args(value: &Value) -> Value {
 }
 fn action(tool: &str) -> &str {
     match tool {
+        "list_sections" => "查看原著目录",
         "search_original" => "检索原著",
         "read_original" => "阅读原著",
+        "read_canon_notes" => "查阅原著札记",
         "read_canon_facts" => "核对原著资料",
         "search_resources" => "搜索本局资料",
         "read_resource" | "read_world" | "read_story_resources" => "读取本局资料",
@@ -819,6 +825,7 @@ fn action(tool: &str) -> &str {
         "list_skills" => "查看技能目录",
         "read_skill_resource" => "读取技能资料",
         "stage_edit" => "调整本局资料",
+        "stage_edits" => "批量调整本局资料",
         "stage_story_turn" => "准备正式剧情",
         "stage_route" => "准备路线",
         "stage_clock" => "调整时间",

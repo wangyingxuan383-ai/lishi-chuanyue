@@ -69,16 +69,19 @@ export function sourceAnalysisResult(raw: string, book: SourceBook, chunk: Sourc
 }
 
 /** Scoped and time-appropriate entity notes only expand a query; they never replace text. */
-export async function relevantSourceFacts(repo: Repo, binding: SourceBinding, keys: Map<string, number>, through: number, position: number): Promise<SourceFact[]> {
+export async function relevantSourceFacts(repo: Repo, binding: SourceBinding, keys: Map<string, number>, through: number, position: number, opts: { ignorePosition?: boolean } = {}): Promise<SourceFact[]> {
   if (!keys.size) return [];
+  const exists = await repo.platform.sql.query("SELECT 1 FROM canon_facts WHERE book_id=? LIMIT 1", [binding.bookId]);
+  if (!exists.length) return [];
   const patterns = [...keys.keys()].slice(0, 240).map((key) => `%${key}%`);
+  const timeClause = opts.ignorePosition ? "" : "AND COALESCE(f.valid_from,f.section)<=? AND (f.valid_through IS NULL OR f.valid_through>=?)";
   const rows = await repo.platform.sql.query(`SELECT f.*,c.text AS original FROM canon_facts f
 JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section
 JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id
-WHERE f.book_id=? AND f.section<=? AND COALESCE(f.valid_from,f.section)<=? AND (f.valid_through IS NULL OR f.valid_through>=?)
+WHERE f.book_id=? AND f.section<=? ${timeClause}
 ${binding.analysisId ? "AND f.job_id=?" : ""}
 AND (${patterns.map(() => "(f.subject LIKE ? OR f.aliases_json LIKE ? OR f.statement LIKE ?)").join(" OR ")})`,
-  [binding.bookId, through, position, position, ...(binding.analysisId ? [binding.analysisId] : []), ...patterns.flatMap((pattern) => [pattern, pattern, pattern])]);
+  [binding.bookId, through, ...(opts.ignorePosition ? [] : [position, position]), ...(binding.analysisId ? [binding.analysisId] : []), ...patterns.flatMap((pattern) => [pattern, pattern, pattern])]);
   const scored: { fact: SourceFact; score: number }[] = [], seen = new Set<string>();
   for (const row of rows) {
     const kind = row.kind as SourceFactKind, quote = String(row.quote);

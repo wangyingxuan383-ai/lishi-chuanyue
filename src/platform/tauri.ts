@@ -1,5 +1,6 @@
 import {assertSqlWritable,restoreWithFence} from "./sql-maintenance";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
 import { PlatformError, type Failure, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText, type NotifyPrefs } from "./types";
 import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
@@ -58,6 +59,24 @@ export async function createTauriPlatform(): Promise<Platform> {
       list: () => call("execution_list"),
       stop: (id, executionId) => call("execution_stop", { id, executionId }),
       resume: (id) => call("execution_resume", { id }),
+      subscribe(id, onEvent) {
+        let active = true;
+        let unlisten: (() => void) | null = null;
+        void listen<{ runId?: string; seq?: number; event?: unknown }>("execution://event", (msg) => {
+          if (!active) return;
+          const payload = msg.payload;
+          if (!payload || payload.runId !== id || !payload.event || typeof payload.event !== "object") return;
+          onEvent({ seq: typeof payload.seq === "number" ? payload.seq : 0, event: payload.event as never });
+        }).then((fn) => {
+          if (!active) fn();
+          else unlisten = fn;
+        }).catch(() => {});
+        return () => {
+          active = false;
+          unlisten?.();
+          unlisten = null;
+        };
+      },
     },
     sql: {
       query: (sql, params = []) => call("sql_query", { sql, params }),

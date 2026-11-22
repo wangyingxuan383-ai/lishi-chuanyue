@@ -103,20 +103,38 @@ export async function deleteBook(repo: Repo, id: string) {
  * Words of asking, not of the story: “核对比试是什么” is about 比试 (R30 step 3).
  * Mirrored in Rust `REQUEST_WORDS` (crates/story-core/src/runtime_sources.rs).
  */
-export const REQUEST_WORDS = ["核对一下", "核对", "检查", "一下", "是什么", "为什么", "什么", "怎么", "是否", "有没有", "原著", "原文", "修改", "改成", "确认", "请问", "看看", "查查"];
+export const REQUEST_WORDS = [
+  "核对一下", "核对", "检查", "一下", "是什么", "为什么", "什么", "怎么", "是否", "有没有",
+  "原著", "原文", "修改", "改成", "确认", "请问", "看看", "查查",
+  "查阅", "纠正", "改正", "纠错", "核实", "查证", "本段", "这段", "细节", "依据", "错误", "不符", "一致", "保留", "玩家", "主动", "改写",
+];
 export const withoutRequestWords = (text: string) => REQUEST_WORDS.reduce((acc, word) => acc.split(word).join(" "), text);
+
+/** Sample evenly across a long list of unique terms so the middle of a multi-paragraph passage is never dropped. */
+function sampleTerms(found: string[], limit: number): string[] {
+  if (found.length <= limit) return found;
+  const head = Math.ceil(limit / 3);
+  const tail = Math.floor(limit / 3);
+  const mid = limit - head - tail;
+  const middlePool = found.slice(head, found.length - tail);
+  const step = Math.max(1, middlePool.length / Math.max(1, mid));
+  const picked: string[] = [...found.slice(0, head)];
+  for (let i = 0; i < mid && Math.floor(i * step) < middlePool.length; i++) picked.push(middlePool[Math.floor(i * step)]);
+  picked.push(...found.slice(found.length - tail));
+  return picked;
+}
 
 export function queryTerms(query: string | ReferenceQuery, instructions: string): Map<string, number> {
   const weights = new Map<string, number>();
-  const add = (text: string | null | undefined, weight: number, limit: number) => {
+  const add = (text: string | null | undefined, weight: number, limit: number, even = false) => {
     const found = terms(text ?? "");
-    // Both ends matter: a correction and the last line of a long saved use must survive.
-    const selected = found.length > limit ? [...found.slice(0, Math.ceil(limit / 2)), ...found.slice(-Math.floor(limit / 2))] : found;
+    const selected = even ? sampleTerms(found, limit)
+      : found.length > limit ? [...found.slice(0, Math.ceil(limit / 2)), ...found.slice(-Math.floor(limit / 2))] : found;
     for (const term of selected) weights.set(term, Math.max(weights.get(term) ?? 0, weight));
   };
-  if (typeof query === "string") add(query, 3, 120);
+  if (typeof query === "string") add(query, 3, 120, true);
   else {
-    add(query.text, 4, 60); add(query.rewriteHint && withoutRequestWords(query.rewriteHint), 5, 60); add(query.directorNote, 4, 40);
+    add(query.text, 4, 90, true); add(query.rewriteHint && withoutRequestWords(query.rewriteHint), 5, 60); add(query.directorNote, 4, 40);
     add(query.entities?.flatMap((e) => [e.name, ...e.aliases ?? []]).join("\n"), 3, 60);
     add(query.place, 3, 20); add(query.recent?.slice(-4000), 1, 80);
   }
@@ -154,7 +172,7 @@ const passageLabel = (p: ReferencePassage) => `\n[原著·${p.title}${p.page ? `
  * The passages about `query` within what the story may read. `range` (资料范围,
  * D184) narrows it to the chapters one request chose; it never widens it.
  */
-export async function referenceContext(repo: Repo, binding: SourceBinding | null | undefined, query: string | ReferenceQuery, budget: number, range?: { from: number; to: number } | null): Promise<ReferenceContext | undefined> {
+export async function referenceContext(repo: Repo, binding: SourceBinding | null | undefined, query: string | ReferenceQuery, budget: number, range?: { from: number; to: number } | null, opts: { ignorePosition?: boolean } = {}): Promise<ReferenceContext | undefined> {
   if (!binding) return;
   const [meta] = await repo.platform.sql.query("SELECT b.id,b.title,MAX(s.section) AS last FROM source_books b JOIN source_sections s ON s.book_id=b.id WHERE b.id=? GROUP BY b.id", [binding.bookId]);
   if (!meta) return;
@@ -164,7 +182,7 @@ export async function referenceContext(repo: Repo, binding: SourceBinding | null
   const from = Math.max(0, Math.min(range?.from ?? 0, through));
   const position = Math.max(from, Math.min(binding.position, through));
   const keys = queryTerms(query, binding.instructions);
-  const facts = (await relevantSourceFacts(repo, binding, keys, through, position)).filter((f) => f.section >= from);
+  const facts = (await relevantSourceFacts(repo, binding, keys, through, position, opts)).filter((f) => f.section >= from);
   for (const fact of facts) for (const term of terms([fact.subject, ...fact.aliases].join("\n"))) {
     if (keys.has(term) || keys.size < 480) keys.set(term, Math.max(keys.get(term) ?? 0, 3));
   }
@@ -173,28 +191,41 @@ export async function referenceContext(repo: Repo, binding: SourceBinding | null
   // Filter before ranking and compute rarity only within the allowed range.
   const allowed = await repo.platform.sql.query(`SELECT c.ordinal,c.section ${join} WHERE c.book_id=? AND c.section>=? AND c.section<=?`, [book.id, from, through]);
   const allowedIds = new Set(allowed.map((r) => Number(r.ordinal)));
+  const common = Math.max(8, Math.floor(allowed.length * 0.15));
   const scores = new Map<number, number>();
   if (keys.size) for (const row of await repo.platform.sql.query(`SELECT term,postings FROM source_terms WHERE book_id=? AND term IN (${[...keys].map(() => "?").join(",")})`, [book.id, ...keys.keys()])) {
     const postings = (JSON.parse(String(row.postings)) as number[]).filter((id) => allowedIds.has(id));
-    for (const ordinal of postings) scores.set(ordinal, (scores.get(ordinal) ?? 0) + (keys.get(String(row.term)) ?? 1) / Math.sqrt(postings.length));
+    if (!postings.length) continue;
+    const rawWeight = keys.get(String(row.term)) ?? 1;
+    const weight = postings.length > common ? Math.min(rawWeight, 2) : rawWeight;
+    const delta = weight / Math.sqrt(postings.length);
+    for (const ordinal of postings) scores.set(ordinal, (scores.get(ordinal) ?? 0) + delta);
   }
   for (const fact of facts) if (allowedIds.has(fact.chunk)) scores.set(fact.chunk, (scores.get(fact.chunk) ?? 0) + 2);
   const titles = await repo.platform.sql.query("SELECT section,title FROM source_sections WHERE book_id=? AND section>=? AND section<=?", [book.id, from, through]);
-  const titleScores = new Map(titles.map(row => [Number(row.section), [...keys].reduce((n, [key, weight]) => n + (String(row.title).includes(key) ? weight * 2 : 0), 0)]));
+  const lowerTitles = titles.map((row) => ({ section: Number(row.section), lower: String(row.title).toLowerCase() }));
+  const titleScores = new Map<number, number>();
+  for (const [key, weight] of keys) {
+    const matched = lowerTitles.filter((t) => t.lower.includes(key));
+    if (!matched.length) continue;
+    const boost = (weight * 2) / Math.sqrt(matched.length);
+    for (const t of matched) titleScores.set(t.section, (titleScores.get(t.section) ?? 0) + boost);
+  }
   for (const row of allowed) { const extra = titleScores.get(Number(row.section)) ?? 0; if (extra) scores.set(Number(row.ordinal), (scores.get(Number(row.ordinal)) ?? 0) + extra); }
   const sectionOf = new Map(allowed.map((r) => [Number(r.ordinal), Number(r.section)]));
   const rank = (a: number, b: number) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0) || Math.abs((sectionOf.get(a) ?? 0) - position) - Math.abs((sectionOf.get(b) ?? 0) - position) || a - b;
   const ids = [...scores.keys()].sort(rank).slice(0, 48);
   const candidates = ids.length ? await repo.platform.sql.query(`SELECT ${fields} ${join} WHERE c.book_id=? AND c.section>=? AND c.section<=? AND c.ordinal IN (${ids.map(() => "?").join(",")})`, [book.id, from, through, ...ids]) : [];
   candidates.sort((a, b) => rank(Number(a.ordinal), Number(b.ordinal)));
-  const nearby = await repo.platform.sql.query(`SELECT ${fields} ${join} WHERE c.book_id=? AND c.section=? ORDER BY c.ordinal LIMIT 1`, [book.id, position]);
-  const selected = [...new Map([...candidates, ...(candidates.length ? [] : nearby)].map((r) => [r.ordinal, r])).values()].slice(0, Math.min(48, Math.ceil(budget / 800) + 1));
+  const nearbyOnly = candidates.length === 0;
+  const nearby = nearbyOnly ? await repo.platform.sql.query(`SELECT ${fields} ${join} WHERE c.book_id=? AND c.section=? ORDER BY c.ordinal LIMIT 1`, [book.id, position]) : [];
+  const selected = [...new Map([...candidates, ...nearby].map((r) => [r.ordinal, r])).values()].slice(0, Math.min(48, Math.ceil(budget / 800) + 1));
   const passages: ReferenceContext["passages"] = [];
   // Always gather the original alongside a summary, keeping its immutable provenance.
   for (const row of selected) {
     if (!String(row.text).trim()) continue;
     const section = Number(row.section), ordinal = Number(row.ordinal), info = { title: String(row.title), page: row.page == null ? undefined : Number(row.page) };
-    passages.push({ section, ...info, chunk: ordinal, ...matchWindow(String(row.text), keys), kind: "original" });
+    passages.push({ section, ...info, chunk: ordinal, ...matchWindow(String(row.text), keys), kind: "original", ...(nearbyOnly ? { match: "nearby" as const } : {}) });
   }
   for (const fact of facts) {
     const original = passages.find((p) => p.kind === "original" && p.section === fact.section && p.chunk === fact.chunk && p.text.includes(fact.quote));

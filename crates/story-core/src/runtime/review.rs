@@ -8,10 +8,11 @@ impl Engine {
     /// applied locally only where its quote occurs exactly once. Anything that
     /// goes wrong keeps the passage as written: the check never stops a turn.
     pub(super) async fn review_reference_lite(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, narrative:&str, record:&Value)->Result<(String,Value,Value)>{
-        self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
+        self.emit_run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
-        let passages = lite_review_passages(plan, cap);
-        let mut messages=lite_review_messages(plan,narrative,cap);
+        let extra_passages = shared.lock().map_err(|_| Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
+        let passages = lite_review_passages(plan, &extra_passages, cap);
+        let mut messages=lite_review_messages_with(plan, &passages, narrative);
         if let Some(message)=messages.last_mut() {
             message["content"]=format!("{}\n【本回合记录】\n{}",message["content"].as_str().unwrap_or(""),record).into();
         }
@@ -23,16 +24,33 @@ impl Engine {
         // Do not repair truncated JSON into an executable record patch.
         let text=result.text.trim();
         let body=text.strip_prefix("```json").or_else(||text.strip_prefix("```")).and_then(|s|s.strip_suffix("```")).unwrap_or(text).trim();
-        let issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
-        if issues.as_array().is_some_and(|issues| issues.iter().any(|issue| !has_lite_evidence(plan, &passages, issue))) {
+        let raw_issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
+        let Some(raw_list) = raw_issues.as_array() else {
             return Ok((narrative.to_owned(), record.clone(), json!({
-                "version":"reference-review-lite-4","status":"partial","issues":[],
-                "unresolved":["更正没有对应到本次提供的原著原句，已保留正文和回合记录。"]
+                "version":"reference-review-lite-4","status":"skipped","issues":[],"skipped":0,
+                "unresolved":["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]
             })));
+        };
+        // Filter per issue so one unverified citation does not discard independently verified fixes.
+        let mut verified_issues = Vec::new();
+        let mut unverified = 0usize;
+        for issue in raw_list.iter().take(5) {
+            if has_lite_evidence(plan, &passages, issue) {
+                verified_issues.push(issue.clone());
+            } else {
+                unverified += 1;
+            }
         }
-        let (revised,revised_record,applied,skipped)=apply_lite_review(narrative,record,&issues);
-        let unresolved=if !issues.is_array(){vec!["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]}else if skipped>0 {vec!["部分更正未能同时校准正文和回合记录，已保留本段原稿；可使用“按原著纠错”进一步核对。"]}else{vec![]};
-        Ok((revised,revised_record,json!({"version":"reference-review-lite-4","status":if !issues.is_array(){"skipped"}else if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
+        let (revised,revised_record,applied,apply_skipped)=apply_lite_review(narrative,record,&Value::Array(verified_issues));
+        let skipped = unverified + apply_skipped;
+        let mut unresolved = Vec::new();
+        if unverified > 0 {
+            unresolved.push("部分更正没有对应到本次提供的原著原句，已跳过未核实的条目。");
+        }
+        if apply_skipped > 0 {
+            unresolved.push("部分更正未能同时校准正文和回合记录，已跳过冲突条目；可使用“按原著纠错”进一步核对。");
+        }
+        Ok((revised,revised_record,json!({"version":"reference-review-lite-4","status":if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
     }
     pub(super) async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
@@ -48,7 +66,7 @@ impl Engine {
         Ok(json!({"narrative":body,"record":current,"report":{"version":"reference-review-2","parts":parts.len(),"findings":findings,"unresolved":unresolved,"status":if unresolved.is_empty(){"reviewed"}else{"partial"}}}))
     }
     async fn review_reference_part(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value,part:usize)->Result<Value>{
-        self.store.run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
+        self.emit_run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
         let compact=crate::stage_context::state(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/10).min(1500)).to_string();
         let mut reference=plan.reference.clone().unwrap_or(Value::Null);
         let mut left=(plan.meta["budgetChars"].as_u64().unwrap_or(12000)/4) as usize;
@@ -120,9 +138,15 @@ impl Engine {
 
 /// The lite check's request: the passage, what the player asked, and the
 /// original already supplied to the writer (about a fifth of the budget).
+#[cfg(test)]
 pub(super) fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Vec<Value>{
+    let passages = lite_review_passages(plan, &[], cap);
+    lite_review_messages_with(plan, &passages, narrative)
+}
+
+fn lite_review_messages_with(plan:&RunPlan, passages:&[&Value], narrative:&str)->Vec<Value>{
     let position=plan.reading_source()["position"].as_u64().unwrap_or(0);
-    let evidence=lite_review_passages(plan, cap).into_iter().map(lite_evidence_line).collect::<String>();
+    let evidence=passages.iter().copied().map(lite_evidence_line).collect::<String>();
     let notes=plan.reference.as_ref().and_then(|r|r["notes"].as_str()).unwrap_or("");
     let source=plan.reading_source();
     let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
@@ -140,20 +164,34 @@ pub(super) fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Ve
     ]
 }
 
-fn lite_review_passages(plan: &RunPlan, cap: usize) -> Vec<&Value> {
+fn lite_review_passages<'a>(plan: &'a RunPlan, extra: &'a [Value], cap: usize) -> Vec<&'a Value> {
     let source = plan.reading_source();
     let position = source["position"].as_u64().unwrap_or(0);
     let through = source["through"].as_u64().unwrap_or(u64::MAX);
     let last = through.min(position.saturating_add(LITE_REVIEW_AHEAD));
     let mut left = cap / 5;
     let mut kept = Vec::new();
-    for passage in plan.reference.as_ref().and_then(|r| r["passages"].as_array()).into_iter().flatten() {
-        if passage["kind"] != "original" || !passage["section"].as_u64().is_some_and(|section| section <= last)
-            || passage["chunk"].as_u64().is_none() || !passage["text"].as_str().is_some_and(|text| !text.trim().is_empty()) {
+    let mut seen = std::collections::HashSet::new();
+    // Combine pre-supplied passages and passages read via tools during writing (deduped).
+    let combined = plan
+        .reference
+        .as_ref()
+        .and_then(|r| r["passages"].as_array())
+        .into_iter()
+        .flatten()
+        .chain(extra.iter());
+    for passage in combined {
+        let Some(section) = passage["section"].as_u64() else { continue; };
+        let Some(chunk) = passage["chunk"].as_u64() else { continue; };
+        let Some(text) = passage["text"].as_str().filter(|t| !t.trim().is_empty()) else { continue; };
+        if passage["kind"] != "original" || section > last {
+            continue;
+        }
+        if !seen.insert((section, chunk, text)) {
             continue;
         }
         let cost = lite_evidence_line(passage).encode_utf16().count();
-        if cost > left { break; }
+        if cost > left { continue; }
         left -= cost;
         kept.push(passage);
     }
@@ -168,16 +206,27 @@ fn lite_evidence_line(passage: &Value) -> String {
         passage["text"].as_str().unwrap_or(""))
 }
 
+fn normalize_quote_for_match(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !"“”\"‘’'《》「」『』，。！？；：、,.!?;:-—…()（）[]【】".contains(*c))
+        .collect()
+}
+
 fn has_lite_evidence(plan: &RunPlan, passages: &[&Value], issue: &Value) -> bool {
     issue["citations"].as_array().is_some_and(|citations| {
         !citations.is_empty() && citations.iter().all(|cite| {
             let section = cite["section"].as_u64().and_then(|n| n.checked_sub(1));
             let chunk = cite["chunk"].as_u64().and_then(|n| n.checked_sub(1));
             cite["quote"].as_str().is_some_and(|quote| {
+                let norm_quote = normalize_quote_for_match(quote);
                 !quote.trim().is_empty() && passages.iter().any(|p| {
                     p["section"].as_u64() == section && p["chunk"].as_u64() == chunk
                         && p.get("bookId").is_none_or(|id| id == &plan.reading_source()["bookId"])
-                        && p["text"].as_str().is_some_and(|text| text.contains(quote))
+                        && p["text"].as_str().is_some_and(|text| {
+                            text.contains(quote)
+                                || (norm_quote.chars().count() >= 4
+                                    && normalize_quote_for_match(text).contains(&norm_quote))
+                        })
                 })
             })
         })
@@ -202,28 +251,64 @@ pub(super) fn apply_lite_fixes(narrative:&str, issues:&Value)->(String,Vec<Value
 }
 
 /// A sentence correction and its record patch form one unit. Never apply one
-/// side of an invalid result; untouched fields and unrelated settlements stay.
+/// side of an invalid result; independent valid fixes still apply while any
+/// later full-array replacement touching a field from a rejected issue is skipped.
 pub(super) fn apply_lite_review(narrative:&str, record:&Value, issues:&Value)->(String,Value,Vec<Value>,usize){
+    let empty_patch = serde_json::Map::new();
     let mut text=narrative.to_owned();let mut current=record.clone();let mut applied=vec![];let mut skipped=0;
+    let mut tainted_arrays = std::collections::HashSet::<String>::new();
+    let allowed = ["time","money","place","stats","items","people","status","goals","date","hour","died","currency","log","deviation","report","risk","beat","challenge","continuity","choices"];
+    let mark_tainted = |patch: &serde_json::Map<String, Value>, tainted: &mut std::collections::HashSet<String>| {
+        for (k, v) in patch {
+            if v.is_array() {
+                tainted.insert(k.clone());
+            }
+        }
+    };
     for issue in issues.as_array().into_iter().flatten().take(5) {
-        let Some(patch)=issue["recordPatch"].as_object() else {skipped+=1;continue;};
-        if patch.iter().any(|(k,v)|v.is_null()||!["time","money","place","stats","items","people","status","goals","date","hour","died","currency","log","deviation","report","risk","beat","challenge","continuity","choices"].contains(&k.as_str())) {skipped+=1;continue;}
+        let patch = match issue.get("recordPatch") {
+            None | Some(Value::Null) => &empty_patch,
+            Some(Value::Object(map)) => map,
+            _ => { skipped += 1; continue; }
+        };
+        if patch.iter().any(|(k,v)|v.is_null()||!allowed.contains(&k.as_str())) {
+            mark_tainted(patch, &mut tainted_arrays);
+            skipped += 1;
+            continue;
+        }
+        if patch.iter().any(|(k, v)| v.is_array() && tainted_arrays.contains(k)) {
+            skipped += 1;
+            continue;
+        }
         let (revised,mut fixes,_)=apply_lite_fixes(&text,&json!([issue]));
-        if fixes.is_empty(){skipped+=1;continue;}
+        if fixes.is_empty(){
+            mark_tainted(patch, &mut tainted_arrays);
+            skipped += 1;
+            continue;
+        }
+        if patch.is_empty() {
+            text = revised;
+            applied.append(&mut fixes);
+            continue;
+        }
         let mut next=current.clone();
         for (key,value) in patch {
             if let (Some(old),Some(new))=(next[key].as_object_mut(),value.as_object()){old.extend(new.clone());}
             else {next[key]=value.clone();}
         }
         let mut warnings=vec![];
-        let Some(normalized)=rules::record::normalize_record(&next,&mut warnings) else {skipped+=1;continue;};
-        if !warnings.is_empty()||patch.keys().any(|k|normalized.get(k).is_none()){skipped+=1;continue;}
+        let Some(normalized)=rules::record::normalize_record(&next,&mut warnings) else {
+            mark_tainted(patch, &mut tainted_arrays);
+            skipped += 1;
+            continue;
+        };
+        if !warnings.is_empty()||patch.keys().any(|k|normalized.get(k).is_none()){
+            mark_tainted(patch, &mut tainted_arrays);
+            skipped += 1;
+            continue;
+        }
         text=revised;current=normalized;applied.append(&mut fixes);
     }
-    // Later full-array patches may depend on earlier proposed fixes. If even
-    // one fix is rejected, keep both original sides rather than leaking that
-    // rejected change through a subsequent patch.
-    if skipped>0 {return (narrative.to_owned(),record.clone(),vec![],issues.as_array().map_or(0,|a|a.len().min(5)));}
     (text,current,applied,skipped)
 }
 
@@ -244,6 +329,15 @@ mod lite_review_tests {
         assert!(messages[0]["content"].as_str().unwrap().contains("还没有发生"));
     }
     #[test]
+    fn lite_review_uses_tool_read_passages_and_normalizes_punctuation_in_citations() {
+        let plan: RunPlan = serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"turn","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[],"state":{"source":{"bookId":"b","fanfic":true,"plot":"canon","position":5,"instructions":"沿原著"}},"settings":{},"options":{},"action":{"text":"问路"},"meta":{}})).unwrap();
+        let extra = vec![json!({"kind":"original","bookId":"b","section":5,"chunk":2,"title":"第六章","text":"“玄铁令原在翠微楼掌柜手中。”"})];
+        let passages = lite_review_passages(&plan, &extra, 12000);
+        assert_eq!(passages.len(), 1);
+        let issue = json!({"quote":"白玉令","fix":"玄铁令","citations":[{"section":6,"chunk":3,"quote":"玄铁令原在翠微楼掌柜手中"}]});
+        assert!(has_lite_evidence(&plan, &passages, &issue));
+    }
+    #[test]
     fn fixes_apply_only_where_the_quote_is_unique_and_the_size_is_close() {
         let issues = json!([{"quote":"三文","problem":"x","fix":"两文"},{"quote":"纸","problem":"y","fix":"布"},{"quote":"一句","problem":"z","fix":"很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长"}]);
         let (text, applied, skipped) = apply_lite_fixes("一张纸三文，又一张纸。一句", &issues);
@@ -251,19 +345,29 @@ mod lite_review_tests {
         assert_eq!((applied.len(), skipped), (1, 2));
     }
     #[test]
-    fn lite_corrections_update_records_atomically_without_losing_other_changes() {
+    fn lite_corrections_apply_independent_valid_fixes_and_block_tainted_arrays() {
         let record=json!({"money":-2,"time":5,"items":[{"name":"纸","delta":1}],"people":[{"name":"李四"},{"name":"店主"}]});
         let issues=json!([
             {"quote":"李四","fix":"张三","recordPatch":{"people":[{"name":"张三"},{"name":"店主"}]}},
             {"quote":"两文","fix":"三文","recordPatch":{"money":-3}},
-            {"quote":"收好","fix":"扔掉"},
+            {"quote":"收好","fix":"藏好"},
             {"quote":"纸","fix":"布","recordPatch":{"source":{}}}
         ]);
-        let (text,corrected,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&json!(issues.as_array().unwrap()[..2]));
-        assert_eq!(text,"张三付了三文，收好纸。");assert_eq!((applied.len(),skipped),(2,0));
+        // Independent valid fixes (including omitted recordPatch on pure-prose fix) succeed while forbidden "source" is skipped.
+        let (text,corrected,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&issues);
+        assert_eq!(text,"张三付了三文，藏好纸。");
+        assert_eq!((applied.len(),skipped),(3,1));
         assert_eq!(corrected["people"],json!([{"name":"张三"},{"name":"店主"}]));
         assert_eq!(corrected["money"],-3);assert_eq!(corrected["time"],5);assert_eq!(corrected["items"][0]["name"],"纸");
-        let (text,unchanged,applied,skipped)=apply_lite_review("李四付了两文，收好纸。",&record,&issues);
-        assert_eq!(text,"李四付了两文，收好纸。");assert_eq!(unchanged,record);assert!(applied.is_empty());assert_eq!(skipped,4);
+        // A later full-array patch on the same array field touched by a rejected earlier issue is safely skipped.
+        let dependent = json!([
+            {"quote":"不存在的词","fix":"张三","recordPatch":{"people":[{"name":"张三"},{"name":"店主"}]}},
+            {"quote":"店主","fix":"掌柜","recordPatch":{"people":[{"name":"张三"},{"name":"掌柜"}]}}
+        ]);
+        let (text2,unchanged,applied2,skipped2)=apply_lite_review("李四付了两文，店主点头。",&record,&dependent);
+        assert_eq!(text2,"李四付了两文，店主点头。");
+        assert_eq!(unchanged,record);
+        assert!(applied2.is_empty());
+        assert_eq!(skipped2,2);
     }
 }

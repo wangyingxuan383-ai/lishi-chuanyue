@@ -931,18 +931,21 @@ export function noteWithinScope(note: Pick<CanonNote, "kind" | "scope" | "refs">
   return (note.refs.length > 0 || (note.kind === "question" && sameWorld)) && note.refs.length < 400;
 }
 
-/** Keep long imports intact on disk, then read around the current chapter. */
-function noteExcerpt(content: string, position: number, query: string, latest = false): string {
+/** Keep long imports intact on disk, then read around the current chapter (or query hits first for lookups/corrections). */
+function noteExcerpt(content: string, position: number, query: string, latest = false, queryFirst = false): string {
   const cap = 2400;
   if (content.length <= cap) return content;
   const blocks = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const notice = blocks[0]?.startsWith("【部分札记】") ? blocks.shift()! : "";
-  const keys = terms(query).slice(0, 16);
+  const keys = terms(withoutRequestWords(query)).slice(0, 24);
   const ranked = blocks.map((line, index) => {
     const chapters = mentionedChapters(line);
     const near = chapters.length ? Math.min(...chapters.map((chapter) => Math.abs(chapter - position))) : Infinity;
     return { line, index, near, matches: keys.filter((key) => line.includes(key)).length };
-  }).sort((a, b) => a.near - b.near || b.matches - a.matches || (latest ? b.index - a.index : a.index - b.index));
+  }).sort((a, b) => (queryFirst
+    ? (b.matches - a.matches || a.near - b.near)
+    : (a.near - b.near || b.matches - a.matches))
+    || (latest ? b.index - a.index : a.index - b.index));
   const chosen = [];
   let room = cap - (notice ? notice.length + 2 : 0);
   for (const item of ranked) {
@@ -977,11 +980,14 @@ export function askedAbout(question: string, recent: string): boolean {
   return false;
 }
 
-export async function notesForTurn(repo: Repo, binding: SourceBinding | null | undefined, worldId: string, recent: string): Promise<NoteBrief[]> {
-  const ranked: [number, CanonNote, string][] = [];
+export async function notesForTurn(repo: Repo, binding: SourceBinding | null | undefined, worldId: string, recent: string, opts: { allChapters?: boolean } = {}): Promise<NoteBrief[]> {
+  const ranked: [number, CanonNote, string, number][] = [];
   const named = (n: CanonNote) => [n.scope.subject, ...(n.scope.aliases ?? [])].map((s) => s?.trim()).filter((s): s is string => !!s).some((name) => recent.includes(name));
   // Answers kept from 查一查 go in when the passage is about them (the toast promises it).
   const asked = (n: CanonNote) => n.kind === "question" && askedAbout(n.scope.question ?? n.title, recent);
+  const queryFirst = !!opts.allChapters;
+  const qKeys = queryFirst ? terms(withoutRequestWords(recent)).slice(0, 24) : [];
+  const overlap = (n: CanonNote) => qKeys.length ? qKeys.filter((k) => n.title.includes(k) || n.content.includes(k)).length : 0;
   if (worldId) {
     const own = (await listStoryNotes(repo, worldId).catch(() => [])).filter((n) => n.active && n.status === "done" && n.content.trim());
     // A note from another route would tell the writer about events that did not happen here.
@@ -989,10 +995,10 @@ export async function notesForTurn(repo: Repo, binding: SourceBinding | null | u
     for (const n of own) {
       if (route && noteOffRoute(n, route)) continue;
       const carried = !!n.originWorldId;
-      if (n.kind === "plot" && !carried) ranked.push([0, n, noteExcerpt(n.content, Infinity, recent, true)]);
-      else if ((n.kind === "person" || n.kind === "setting") && named(n)) ranked.push([carried ? 4 : 2, n, noteExcerpt(n.content, Infinity, recent, true)]);
-      else if (asked(n)) ranked.push([carried ? 4 : 2, n, noteExcerpt(n.content, Infinity, recent, true)]);
-      else if (carried && (n.kind === "plot" || n.kind === "timeline")) ranked.push([5, n, noteExcerpt(n.content, Infinity, recent, true)]);
+      if (n.kind === "plot" && !carried) ranked.push([0, n, noteExcerpt(n.content, Infinity, queryFirst ? recent : "", true, queryFirst), overlap(n)]);
+      else if ((n.kind === "person" || n.kind === "setting") && named(n)) ranked.push([carried ? 4 : 2, n, noteExcerpt(n.content, Infinity, recent, true, queryFirst), overlap(n)]);
+      else if (asked(n)) ranked.push([carried ? 4 : 2, n, noteExcerpt(n.content, Infinity, recent, true, queryFirst), overlap(n)]);
+      else if (carried && (n.kind === "plot" || n.kind === "timeline")) ranked.push([5, n, noteExcerpt(n.content, Infinity, queryFirst ? recent : "", true, queryFirst), overlap(n)]);
     }
   }
   if (binding) {
@@ -1001,13 +1007,24 @@ export async function notesForTurn(repo: Repo, binding: SourceBinding | null | u
       && noteWithinScope(n, binding.through, !!worldId && n.worldId === worldId));
     const at = binding.position;
     const ranges = notes.filter((n) => n.kind === "plot" || n.kind === "timeline");
-    const covering = ranges.filter((n) => (n.scope.from ?? 0) <= at && at <= (n.scope.to ?? Infinity));
-    const before = ranges.filter((n) => (n.scope.to ?? Infinity) < at).sort((a, b) => (b.scope.to ?? 0) - (a.scope.to ?? 0));
-    for (const n of covering) ranked.push([1, n, noteExcerpt(n.content, at, recent)]);
-    if (!covering.length && before[0]) ranked.push([1, before[0], noteExcerpt(before[0].content, at, recent)]);
-    for (const n of notes) if (((n.kind === "person" || n.kind === "setting") && named(n)) || asked(n)) ranked.push([3, n, noteExcerpt(n.content, at, recent)]);
+    if (opts.allChapters) {
+      // Corrections and lookups search the entire allowed range: rank plot/timeline notes by query match first, then proximity.
+      const scored = ranges.map((n) => ({
+        n,
+        hits: overlap(n),
+        dist: (n.scope.from ?? 0) <= at && at <= (n.scope.to ?? Infinity) ? 0
+          : Math.min(Math.abs((n.scope.from ?? 0) - at), Math.abs((n.scope.to ?? Infinity) - at)),
+      })).sort((a, b) => b.hits - a.hits || a.dist - b.dist);
+      for (const { n, hits } of scored.slice(0, 3)) ranked.push([1, n, noteExcerpt(n.content, at, recent, false, true), hits]);
+    } else {
+      const covering = ranges.filter((n) => (n.scope.from ?? 0) <= at && at <= (n.scope.to ?? Infinity));
+      const before = ranges.filter((n) => (n.scope.to ?? Infinity) < at).sort((a, b) => (b.scope.to ?? 0) - (a.scope.to ?? 0));
+      for (const n of covering) ranked.push([1, n, noteExcerpt(n.content, at, ""), 0]);
+      if (!covering.length && before[0]) ranked.push([1, before[0], noteExcerpt(before[0].content, at, ""), 0]);
+    }
+    for (const n of notes) if (((n.kind === "person" || n.kind === "setting") && named(n)) || asked(n)) ranked.push([3, n, noteExcerpt(n.content, at, recent, false, queryFirst), overlap(n)]);
   }
-  return ranked.sort((a, b) => a[0] - b[0]).map(([, n, content]) => ({
+  return ranked.sort((a, b) => a[0] - b[0] || b[3] - a[3]).map(([, n, content]) => ({
     title: noteBriefTitle(n), kind: n.kind, content, source: isStory(n) ? "story" as const : "book" as const,
   }));
 }

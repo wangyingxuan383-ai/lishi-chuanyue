@@ -236,21 +236,22 @@ fn request_headers(request: &Value) -> Result<header::HeaderMap> {
 }
 
 pub fn host(clients: ClientFactory, resolver: ModelResolver) -> ModelHttpHost {
+    let pooled: Arc<std::sync::Mutex<Option<(u64, Instant, reqwest::Client)>>> =
+        Arc::new(std::sync::Mutex::new(None));
     Arc::new(move |config, request, cancel, admit| {
         let clients = clients.clone();
         let resolver = resolver.clone();
+        let pooled = pooled.clone();
         Box::pin(async move {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
             let current = resolver(&config["reference"])?;
-            for key in ["baseUrl", "protocol", "id", "endpointRef"] {
+            for key in ["baseUrl", "protocol", "id", "endpointRef", "auxModel"] {
                 if current[key] != config["resolved"][key] {
                     return Err(invalid());
                 }
             }
-            let url = authorize_url(&current, request["url"].as_str().ok_or_else(invalid)?)?;
-            verify_gemini_model_proof(&current, &request)?;
             let body = STANDARD
                 .decode(request["body"].as_str().ok_or_else(invalid)?)
                 .map_err(|_| invalid())?;
@@ -258,12 +259,36 @@ pub fn host(clients: ClientFactory, resolver: ModelResolver) -> ModelHttpHost {
                 return Err(invalid());
             }
             let document: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
-            if !document.is_object()
-                || current["protocol"] != "gemini" && document["model"] != current["id"]
-            {
+            if !document.is_object() {
                 return Err(invalid());
             }
-            let key = current["apiKey"]
+            let raw_url = request["url"].as_str().ok_or_else(invalid)?;
+            let mut effective = current.clone();
+            let aux_allowed = matches!(
+                request["_nativePurpose"].as_str().unwrap_or(""),
+                "compaction" | "progress_review" | "subagent"
+            );
+            if aux_allowed {
+                if let Some(aux) = current["auxModel"].as_str().filter(|s| !s.is_empty()) {
+                    if current["protocol"] == "gemini" {
+                        if authorize_url(&current, raw_url).is_err() {
+                            let mut candidate = current.clone();
+                            candidate["id"] = aux.into();
+                            if authorize_url(&candidate, raw_url).is_ok() {
+                                effective = candidate;
+                            }
+                        }
+                    } else if document["model"] == aux {
+                        effective["id"] = aux.into();
+                    }
+                }
+            }
+            let url = authorize_url(&effective, raw_url)?;
+            verify_gemini_model_proof(&effective, &request)?;
+            if effective["protocol"] != "gemini" && document["model"] != effective["id"] {
+                return Err(invalid());
+            }
+            let key = effective["apiKey"]
                 .as_str()
                 .filter(|s| !s.is_empty() && s.len() <= 8192)
                 .ok_or_else(invalid)?;
@@ -273,7 +298,7 @@ pub fn host(clients: ClientFactory, resolver: ModelResolver) -> ModelHttpHost {
                 header::HeaderValue::from_static("identity"),
             );
             let (name, authorization) =
-                match current["protocol"].as_str().unwrap_or("chat-completions") {
+                match effective["protocol"].as_str().unwrap_or("chat-completions") {
                     "anthropic" => ("x-api-key", key.to_owned()),
                     "gemini" => ("x-goog-api-key", key.to_owned()),
                     _ => ("authorization", format!("Bearer {key}")),
@@ -281,14 +306,33 @@ pub fn host(clients: ClientFactory, resolver: ModelResolver) -> ModelHttpHost {
             let mut value = header::HeaderValue::from_str(&authorization).map_err(|_| invalid())?;
             value.set_sensitive(true);
             headers.insert(name, value);
-            let client = (clients)()?
-                .redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never())
-                .connect_timeout(Duration::from_secs(30))
-                .read_timeout(Duration::from_secs(180))
-                .timeout(Duration::from_secs(900))
-                .build()
-                .map_err(|_| invalid())?;
+            let epoch = story_core::pi_http::network_epoch();
+            let cached = pooled
+                .lock()
+                .ok()
+                .and_then(|guard| {
+                    guard.as_ref().and_then(|(e, at, client)| {
+                        (*e == epoch && at.elapsed() < Duration::from_secs(30))
+                            .then(|| client.clone())
+                    })
+                });
+            let client = match cached {
+                Some(client) => client,
+                None => {
+                    let built = (clients)()?
+                        .redirect(reqwest::redirect::Policy::none())
+                        .retry(reqwest::retry::never())
+                        .connect_timeout(Duration::from_secs(30))
+                        .read_timeout(Duration::from_secs(180))
+                        .timeout(Duration::from_secs(900))
+                        .build()
+                        .map_err(|_| invalid())?;
+                    if let Ok(mut guard) = pooled.lock() {
+                        *guard = Some((epoch, Instant::now(), built.clone()));
+                    }
+                    built
+                }
+            };
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }

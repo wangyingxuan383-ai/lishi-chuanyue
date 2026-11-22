@@ -6,7 +6,7 @@ import { sampleState } from "../testing/fixtures";
 import * as tree from "../tree";
 import { saveBook } from "./library";
 import { newNote, newStoryNote, saveNote, type CanonNote } from "./notes";
-import { bookChapters, chapterLabel, choosableNotes, isChosen, notesRange, rangeChars, rangeContext, scopeLabel, scopedMaterial, wholeChapterFits, type SourceScope } from "./scope";
+import { bookChapters, chapterLabel, chapterRangeSummary, chapterRowMeta, choosableNotes, extractChapterNumbers, isChosen, matchChapterQuery, notesRange, parseChapterNumeral, rangeChars, rangeContext, scopeLabel, scopedMaterial, wholeChapterFits, type SourceScope } from "./scope";
 import { newBinding, type SourceBook } from "./types";
 
 const LLM = { slot: "main", url: "https://x/v1/chat/completions", model: "m", includeUsage: true, contextTokens: 12_000 };
@@ -217,5 +217,28 @@ describe("各功能按范围发送 (D184)", () => {
     const { book } = await choosableNotes(s.repo, s.source, s.world.id);
     expect(book.map((n) => n.id)).toContain(oursEmpty.id);
     expect(book.map((n) => n.id)).not.toContain(oursLate.id);
+  });
+
+  it("matches novel chapters by Arabic/Chinese numerals, title text, and shifted front-matter indices", () => {
+    expect(parseChapterNumeral("35")).toBe(35);
+    expect(parseChapterNumeral("三十五")).toBe(35);
+    expect(parseChapterNumeral("第一百零八章")).toBe(108);
+    expect(parseChapterNumeral("第十二回")).toBe(12);
+    expect(parseChapterNumeral("两百二十")).toBe(220);
+    expect(parseChapterNumeral("无效")).toBeNull();
+    expect(extractChapterNumbers("第三十五章 水门伏兵")).toEqual([35]);
+    const shiftedBook = [
+      { section: 0, title: "序章 楔子", chars: 800 },
+      { section: 1, title: "第一卷 风起", chars: 120 },
+      { section: 2, title: "第一章 渡口", chars: 2400 },
+      { section: 36, title: "第三十五章 水门伏兵", chars: 3100 },
+    ];
+    expect(chapterRowMeta(shiftedBook[2])).toEqual({ primary: "第一章 渡口", shifted: true });
+    expect(matchChapterQuery(shiftedBook[3], "35")).toBe(true);
+    expect(matchChapterQuery(shiftedBook[3], "三十五")).toBe(true);
+    expect(matchChapterQuery(shiftedBook[3], "37")).toBe(true); // 1-based section index
+    expect(matchChapterQuery(shiftedBook[3], "35 水门")).toBe(true);
+    expect(matchChapterQuery(shiftedBook[3], "35 客栈")).toBe(false);
+    expect(chapterRangeSummary(shiftedBook, { from: 2, to: 36 })).toBe("第一章 渡口 ～ 第三十五章 水门伏兵");
   });
 });

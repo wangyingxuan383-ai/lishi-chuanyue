@@ -19,7 +19,7 @@ use std::{
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-pub const PI_PROMPT_VERSION: &str = "1.7.1";
+pub const PI_PROMPT_VERSION: &str = "1.8.0";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// Secret-bearing model configuration is passed only to Pi's memory transport.
@@ -265,13 +265,26 @@ impl PiTaskHost {
             *state.model_http.lock().map_err(|_|Error::Cancelled)?=Some(crate::pi_http::ModelHttpController::new(state.gateway.clone(),state.permit.clone(),config.model.clone(),task["model_json"].clone(),host.clone(),state.prompt_cancel.child_token()));
         }
         let definitions=state.gateway.definitions();
-        let catalog=definitions.iter().map(|t|json!({"name":t["name"],"description":t["description"]})).collect::<Vec<_>>();
-        let mut active_tools=vec!["discover_tools".to_owned(),"list_resources".into(),"read_resource".into(),"read_world".into(),"read_tool_result".into(),"list_skills".into(),"read_skill".into(),"finish_task".into()];
+        let mut active_tools:Vec<String>=vec![
+            "discover_tools","read_world","list_resources","read_resource","search_resources",
+            "list_sections","search_original","read_original","read_canon_notes",
+            "stage_edit","stage_edits","check_draft","finish_task",
+            "list_skills","read_skill","ask_user","read_tool_result",
+        ].into_iter().map(String::from).collect();
         for name in task["metadata_json"]["enabledTools"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             if !active_tools.iter().any(|n|n==name) {active_tools.push(name.into());}
         }
+        let extra_tools:Vec<&str>=definitions.iter().filter_map(|t|t["name"].as_str()).filter(|name|!active_tools.iter().any(|a|a==name)).collect();
         let mut params = json!({"directory":config.directory,"model":config.model,
-            "systemPrompt":format!("原生故事助手协议 {PI_PROMPT_VERSION}。玩家目标在用户消息中。按需读取本局资料，不凭对话印象代替最新存档。讨论、工具日志和说明不进入剧情。需要回顾时可按需检索同故事同路线的助手历史；历史要求和答复不代替本次授权、当前存档或原著证据。修改先暂存、预演并调用finish_task按已选策略采用；模型停止输出不代表目标完成。用discover_tools按需加载下列能力的参数，已加载的有效说明持续保留。玩家指定技能必须实际read_skill再执行方法；读取技能不等于核对完成，普通写作整理不用填写额外检查表。原著与本局事实分开核对，授权修改不是原著依据。原著规则、玩家事实、本局修订和正式采用四者分开。constraints.factContract=2时，原著改动分别记录sourceClaim和revisionDecision；涉及本局已发生事件必须补本局依据，不用“原著允许”证明“玩家已做”。网页和普通文件basis=external，不能冒充已导入原著。明确玩家分支可引用constraints.playerReferences中的真实原句，request引用附declaration对象/具体值/本局范围；本局自定须引用明确允许补全的原句和范围，不要求玩家重复填表。明确核对原著时先check_draft取constraints、完整resourceGroups和证据摘要；具体引文read_evidence按来源分页读取，用record_findings记录具体目标/依据或不足，再finish_task；普通写作整理无需额外报告。通过核对的完整独立资源组可以分批采用，关联资源不可拆半；未核对部分保留草稿，继续时重新check_draft并核对最新基线和冲突。blocked仅保存不采用；要采用有效部分用正常finish_task。任务完成以goalStatus和提交读回为准，部分完成不能宣称全部完成。采用后本批次写权限关闭，用read_commit_receipt/read_committed_snapshot核对固定回执并如实更新计划，不再编辑或重复提交。最终答复先用短段说明结果、主要修改和未解决事项，不展示内部ID、版本指纹或原始参数；详细清单留在修改详情。工具与脚本分页统一使用pageSize（条目数）、charBudget（文字预算）及nextCursor；不要自行按limit递增offset。脚本使用pages/collectPages辅助，不把oversized目录当作内容；read_timeline可批量读当前路线时间记录，避免逐回合逐字段扫全局。日期调整默认只校准纪年/日期，不重写历史经过，除非玩家明确要求。明确区分原文明示、合理推定和资料不足；依据季节、年龄或“万年之后”估算的具体年月日必须明确称为推定，不写成原著给出的精确日期。系统运行提示只建议执行方法，不构成玩家授权或原著证据；据此调整方法或保存暂停。当前能力仅限目录，未接通的联网或协作不能声称已经执行。资源定位：worldId={}，lineId={}，headId={}。\n本次指定技能：{}\n工具目录：{}\n{}",state.world_id,state.line_id,state.head_id,task["metadata_json"]["skills"],serde_json::to_string(&catalog)?,config.constraints),
+            "systemPrompt":format!(
+                "原生故事助手协议 {PI_PROMPT_VERSION}。玩家目标在用户消息中；按需读取最新存档，不凭印象代替。讨论、工具日志和说明不进剧情；助手历史不代替本次授权、存档或原著证据。\n\
+                工作流：核心工具已常驻，优先用 stage_edits 批量暂存多处修改（或 stage_edit 单条）；普通修改暂存后直接 finish_task 按策略采用，模型停止输出不等于完成。需更多能力时用 discover_tools 按名称加载（只传所需工具名）。\n\
+                技能与事实：玩家指定技能须先 read_skill 再执行；读技能不等于完成查证，普通写作整理无需额外报告。原著规则、玩家事实、本局修订与正式采用分开核对；constraints.factContract=2 时原著改动分别记录 sourceClaim 与 revisionDecision，涉及本局已发生事件须补本局依据。网页/文件 basis=external，不可冒充导入原著；玩家分支引用 constraints.playerReferences 原句（request 附 declaration 对象/值/本局范围），自定项引用允许补全的原句和范围。\n\
+                原著核对与分批：明确核对原著时先 check_draft 获取 constraints、resourceGroups 与 evidenceSummary.items（足够直接引用；仅缺原文细节时再 read_evidence），用 record_findings 记录目标/依据或不足后 finish_task。通过核对的独立资源组可分批采用，关联资源不可拆半；未核对草稿保留待续。blocked 仅保存不采用。采用后本批写权限关闭，直接根据 finish_task 回执（或按需 read_commit_receipt/read_committed_snapshot）收尾答复，不重复编辑提交。\n\
+                分页与时间：分页统一用 pageSize/charBudget/nextCursor；read_timeline 批量读路线时间。日期调整默认只校准纪年/日期不重写历史，明确区分原文明示、推定与资料不足。最终答复先短段总结结果、主要改动与未解决项，不露内部 ID/指纹/参数。系统运行提示只建议方法不扩大授权，未接通能力不宣称已执行。\n\
+                资源定位：worldId={}，lineId={}，headId={}。\n本次指定技能：{}\n按需可用工具（discover_tools）：{}\n{}",
+                state.world_id,state.line_id,state.head_id,task["metadata_json"]["skills"],extra_tools.join("、"),config.constraints
+            ),
             "tools":definitions,"activeTools":active_tools,"nativeAttempt":state.permit.attempt_id(),"taskContext":true,"nativeModelHttp":state.model_http_host.is_some()});
         if let Some(file) = session["session_file"].as_str() {
             require_owned_path(&config.directory, Path::new(file))?;
@@ -365,14 +378,20 @@ impl PiTaskHost {
         // A restored task may have inputs that were accepted but never reached
         // Pi's user-message boundary. Queue them in their original order; an
         // acknowledgement still does not permit an old draft to be committed.
-        let pending = {
+        let (pending, already_prompted) = {
             let db = self.0.gateway.0 .0.lock()?;
+            let already_prompted: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pi_events WHERE task_id=? AND json_extract(event_json,'$.childId') IS NULL AND json_extract(event_json,'$.event.type')='message_start' AND json_extract(event_json,'$.event.message.role')='user')",
+                [&self.0.permit.task_id],
+                |r| r.get(0),
+            )?;
             let mut statement = db.prepare("SELECT id FROM pi_inputs WHERE task_id=? AND status='pending' AND delivery IN ('steer','answer') ORDER BY seq")?;
             let ids = statement
                 .query_map([&self.0.permit.task_id], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let saved = self.0.pending.lock().map_err(|_| Error::Cancelled)?;
-            ids.into_iter()
+            let items = ids
+                .into_iter()
                 .map(|id| {
                     saved
                         .get(&id)
@@ -382,27 +401,47 @@ impl PiTaskHost {
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .flatten()
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (items, already_prompted)
         };
         let task = self.0.gateway.0.task(&self.0.permit.task_id)?;
-        let value = text(&task, "text").to_owned();
+        let initial_value = text(&task, "text").to_owned();
         self.0.prompt_active.store(true, Ordering::Release);
         let state = self.0.clone();
         let (send, receive) = tokio::sync::oneshot::channel();
         // The native run outlives this response waiter and every UI subscriber.
         tokio::spawn(async move {
             let outcome = async {
-                for (id, text) in pending {
-                    tokio::select! { biased;
-                        _=state.prompt_cancel.cancelled()=>return Err(Error::Cancelled),
-                        result=state.connection.request("steer", json!({"text":text}))=>{result.map_err(host_error)?;}
+                let (prompt_value, resume_mode) = if already_prompted {
+                    // Never push the original task text into Pi JSONL a second time on resume/answer (R31-P5).
+                    let mut iter = pending.into_iter();
+                    if let Some((first_id, first_text)) = iter.next() {
+                        for (id, text) in iter {
+                            tokio::select! { biased;
+                                _=state.prompt_cancel.cancelled()=>return Err(Error::Cancelled),
+                                result=state.connection.request("steer", json!({"text":text}))=>{result.map_err(host_error)?;}
+                            }
+                            if let Some(input)=state.pending.lock().map_err(|_|Error::Cancelled)?.get_mut(&id) {input.queued=true;}
+                        }
+                        if let Some(input)=state.pending.lock().map_err(|_|Error::Cancelled)?.get_mut(&first_id) {input.queued=true;}
+                        (first_text, true)
+                    } else {
+                        (String::new(), true)
                     }
-                    if let Some(input)=state.pending.lock().map_err(|_|Error::Cancelled)?.get_mut(&id) {input.queued=true;}
-                }
+                } else {
+                    for (id, text) in pending {
+                        tokio::select! { biased;
+                            _=state.prompt_cancel.cancelled()=>return Err(Error::Cancelled),
+                            result=state.connection.request("steer", json!({"text":text}))=>{result.map_err(host_error)?;}
+                        }
+                        if let Some(input)=state.pending.lock().map_err(|_|Error::Cancelled)?.get_mut(&id) {input.queued=true;}
+                    }
+                    (initial_value, false)
+                };
                 // Keep the input ordering lock until all restored inputs have
                 // been queued. New live supplements are delivered after them.
                 drop(send_guard);
-                run_prompt(&state, &value).await
+                run_prompt(&state, &prompt_value, resume_mode).await
             }
             .await;
             if outcome.is_err() && !state.prompt_cancel.is_cancelled() {
@@ -643,13 +682,15 @@ impl PiTaskHost {
     }
 }
 
-async fn run_prompt(state: &Arc<State>, value: &str) -> Result<Value> {
+async fn run_prompt(state: &Arc<State>, value: &str, resume: bool) -> Result<Value> {
+    let params = if resume {
+        json!({"text": value, "taskId": state.permit.task_id, "resume": true})
+    } else {
+        json!({"text": value, "taskId": state.permit.task_id})
+    };
     let response = tokio::select! {biased;
         _=state.prompt_cancel.cancelled()=>return Err(Error::Cancelled),
-        value=state.connection.request(
-            "prompt",
-            json!({"text":value,"taskId":state.permit.task_id}),
-        )=>value
+        value=state.connection.request("prompt", params)=>value
     };
     let answer = match response {
         Ok(value) => value,

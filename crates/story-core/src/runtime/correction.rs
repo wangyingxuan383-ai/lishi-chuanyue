@@ -114,13 +114,23 @@ impl Engine {
     /// One line per lookup in a correction or a question, for “查过：…” and the reason it stopped.
     pub(super) fn note_lookup(&self, shared: &Shared, name: &str, args: &Value, output: &Value) -> Result<()> {
         let query = args["query"].as_str().map(str::to_owned)
+            .or_else(|| args["queries"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")))
             .or_else(|| args["claims"].as_array().map(|c| c.iter().filter_map(|v| v.as_str().or_else(|| v["claim"].as_str())).collect::<Vec<_>>().join("；")))
             .or_else(|| args["section"].as_u64().map(|s| format!("第{}章", s + 1)))
             .unwrap_or_default();
-        let hits = ["excerpts", "facts", "notes", "candidates"].iter().find_map(|k| output[*k].as_array().map(Vec::len)).unwrap_or(0);
+        let nested_items = output["items"].as_array();
+        let hits = if let Some(items) = nested_items {
+            items.iter().filter(|i| i["nearbyOnly"] != true).map(|i| i["candidates"].as_array().map(Vec::len).unwrap_or(0)).sum()
+        } else {
+            ["excerpts", "facts", "notes", "sections", "candidates"].iter().find_map(|k| output[*k].as_array().map(Vec::len)).unwrap_or(0)
+        };
+        let beyond = output["beyondScope"] == true
+            || nested_items.is_some_and(|items| items.iter().any(|i| i["beyondScope"] == true));
+        let nearby = output["match"] == "nearby"
+            || nested_items.is_some_and(|items| !items.is_empty() && items.iter().all(|i| i["nearbyOnly"] == true));
         let message = output["message"].as_str().unwrap_or("");
         let entry = json!({"tool":name,"query":query,"hits":hits,"status":output["status"],
-            "nearby":output["match"] == "nearby","beyondScope":output["beyondScope"] == true,
+            "nearby":nearby,"beyondScope":beyond,
             "outOfRange":output["isError"] == true && (message.contains("超出了本局允许的参考章节") || message.contains("不在本次选定的资料范围"))});
         let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
         if !c.draft["lookupLog"].is_array() {
@@ -135,20 +145,50 @@ impl Engine {
 
 /// What a correction has read so far, kept in view for every request (newest
 /// first, within a quarter of the budget), leaving out what the messages already
-/// show. A system message is never trimmed, so older duplicate tool rounds go first.
+/// show (including JSON-escaped tool excerpts). Appended near the end so the
+/// earlier prompt prefix stays cacheable.
 pub(super) fn with_read_ledger(shared: &Shared, messages: Vec<Value>, budget: usize) -> Result<Vec<Value>> {
     let passages = shared.lock().map_err(|_| Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
     Ok(read_ledger(&passages, messages, budget))
 }
 
+fn passage_visible(messages: &[Value], passage: &Value, text: &str) -> bool {
+    let section = &passage["section"];
+    let chunk = &passage["chunk"];
+    messages.iter().any(|m| {
+        if m["role"] == "system" {
+            return false;
+        }
+        let Some(content) = m["content"].as_str() else {
+            return false;
+        };
+        if content.contains(text) {
+            return true;
+        }
+        if m["role"] == "tool" {
+            if let Ok(parsed) = serde_json::from_str::<Value>(content) {
+                if parsed["excerpts"].as_array().is_some_and(|arr| {
+                    arr.iter().any(|e| {
+                        e["section"] == *section
+                            && e["chunk"] == *chunk
+                            && e["text"].as_str().is_some_and(|t| t.contains(text))
+                    })
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
 fn read_ledger(passages: &[Value], mut messages: Vec<Value>, budget: usize) -> Vec<Value> {
-    let visible = |text: &str| messages.iter().any(|m| m["role"] != "system" && m["content"].as_str().is_some_and(|c| c.contains(text)));
     let room = budget / 4;
     let mut ledger = String::new();
     let mut left_out = 0usize;
     for passage in passages.iter().rev().filter(|p| p["match"] != "nearby") {
         let Some(text) = passage["text"].as_str().filter(|t| !t.is_empty()) else { continue };
-        if visible(text) {
+        if passage_visible(&messages, passage, text) {
             continue;
         }
         let entry = format!("\n[原著·{}·section={}·chunk={}]\n{}\n", passage["title"].as_str().unwrap_or(""), passage["section"], passage["chunk"], text);
@@ -164,7 +204,11 @@ fn read_ledger(passages: &[Value], mut messages: Vec<Value>, budget: usize) -> V
     if left_out > 0 {
         ledger += &format!("\n（较早读过的 {left_out} 段未列出，需要时用 read_original 重读）");
     }
-    let at = messages.iter().position(|m| m["role"] != "system").unwrap_or(messages.len());
+    // Insert right before any trailing final-only / allowance system message, keeping the prefix intact.
+    let mut at = messages.len();
+    while at > 0 && messages[at - 1]["role"] == "system" {
+        at -= 1;
+    }
     messages.insert(at, json!({"role":"system","content":format!("【本次已读原文】引文只能逐字摘自这里或上文的原文。{ledger}")}));
     messages
 }
@@ -336,12 +380,21 @@ mod tests {
         let read = [passage(0, 0, &"甲".repeat(400), 0), passage(1, 2, &"乙".repeat(400), 0), passage(2, 4, &"丙".repeat(400), 0)];
         let messages = vec![json!({"role":"system","content":"规则"}), json!({"role":"user","content":format!("要求{}", "丙".repeat(400))})];
         let out = read_ledger(&read, messages, 2000);
-        let ledger = out[1]["content"].as_str().unwrap();
+        // Appended after the user/history messages so the earlier prompt prefix stays cacheable.
+        let ledger = out[2]["content"].as_str().unwrap();
         assert!(ledger.starts_with("【本次已读原文】"));
         // 丙 is still shown in the user message; 乙 is newest of the rest; 甲 does not fit a quarter of 2000.
         assert!(ledger.contains(&"乙".repeat(400)) && !ledger.contains(&"丙".repeat(400)) && !ledger.contains(&"甲".repeat(400)));
         assert!(ledger.contains("较早读过的 1 段未列出"));
-        assert_eq!(out[2]["role"], "user");
+        assert_eq!(out[1]["role"], "user");
+        // Multi-line tool excerpts (JSON-escaped as \n) are recognized as already visible and not duplicated.
+        let multi = passage(3, 5, "第一行原文。\n第二行原文。", 0);
+        let with_tool = vec![
+            json!({"role":"system","content":"规则"}),
+            json!({"role":"user","content":"核对"}),
+            json!({"role":"tool","tool_call_id":"t1","content":json!({"excerpts":[multi.clone()]}).to_string()}),
+        ];
+        assert_eq!(read_ledger(&[multi], with_tool, 4000).len(), 3);
         // Nothing to pin: messages unchanged.
         assert_eq!(read_ledger(&[], vec![json!({"role":"user","content":"x"})], 2000).len(), 1);
     }

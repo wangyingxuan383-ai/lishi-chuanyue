@@ -24,7 +24,8 @@ export const StoryText = memo(function StoryText({ text, streaming = false, emph
       {paragraphs.map((p, i) => {
         const dateLine = emphasizeDate && DATE_LINE(p);
         const last = streaming && i === paragraphs.length - 1 ? "cursor-blink" : undefined;
-        const body = streaming ? <Streamed text={dateLine ? p.trim() : p} /> : dateLine ? p.trim() : p;
+        // Only the active trailing paragraph needs per-sentence fade spans; earlier paragraphs are already settled (R31-P3).
+        const body = last ? <Streamed text={dateLine ? p.trim() : p} /> : dateLine ? p.trim() : p;
         return dateLine
           ? <p key={i} className={["date-line", last].filter(Boolean).join(" ")}>{body}</p>
           : <p key={i} className={last}>{body}</p>;

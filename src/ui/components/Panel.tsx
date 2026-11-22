@@ -21,7 +21,7 @@ import { Sheet } from "./Sheet";
 const TABS = ["我", "行囊", "人物", "目标", "记事", "设定"] as const;
 /** Tabs with their own editors instead of the panel-wide 修改. */
 const OWN_EDITOR: readonly string[] = ["行囊", "人物", "目标", "记事", "设定"];
-type Tab = (typeof TABS)[number];
+export type Tab = (typeof TABS)[number];
 type Save = (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
 
 /** The words the panel shows for each stat, best first (AUDIT_V4 8.3). */
@@ -228,16 +228,18 @@ function StatusTidySheet({ worldId, onClose, onSave }: { worldId: string; onClos
   );
 }
 
-export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false }: {
+export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false, initialTab }: {
   worldId: string; headId: string; chapterEvery: number;
   onContinuitySaved?: () => void | Promise<void>;
   settings?: WorldSettings;
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
+  initialTab?: Tab;
   state: WorldState; era: EraContext; onClose: () => void; onSave: Save;
   onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => Promise<boolean>; busy: boolean;
 }) {
-  const [tab, setTab] = useState<Tab>("我");
+  const [tab, setTab] = useState<Tab>(initialTab ?? "我");
+  useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]);
   const [draft, setDraft] = useState<WorldState | null>(null);
   // What the draft started from: beside a docked panel a turn can be played while editing, and saving keeps what it did.
   const [base, setBase] = useState<WorldState | null>(null);

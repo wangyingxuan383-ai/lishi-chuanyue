@@ -1,16 +1,57 @@
 // 每段用量 (R29-T004): what the latest passage cost, one small line under it;
 // tapping it shows the requests by purpose. 本局用量 sums the whole story.
 import { useEffect, useState } from "react";
-import { costText, tokenText, turnUsage, usageCost, usageLine, worldUsage, type Prices, type UsageTotal } from "../../engine/usage";
+import { costText, recentUsage, runUsage, tokenText, turnUsage, usageCost, usageLine, worldUsage, type Prices, type UsageTotal } from "../../engine/usage";
 import { useApp } from "../app/context";
 import { readBudget } from "./budgetMath";
 import { Sheet } from "./Sheet";
 
-function usePrices(): Prices {
+export function usePrices(): Prices {
   const { game } = useApp();
   const [prices, setPrices] = useState<Prices>({ input: null, output: null });
   useEffect(() => { void readBudget(game.repo).then(({ input, output }) => setPrices({ input, output })); }, [game]);
   return prices;
+}
+
+/** Compact one-line usage readout for an interrupted/stopped/failed run (R31-P4). */
+export function RunUsageLine({ runId, prefix = "本次消耗：" }: { runId?: string | null; prefix?: string }) {
+  const { game } = useApp();
+  const prices = usePrices();
+  const [total, setTotal] = useState<UsageTotal | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!runId) { setTotal(null); return; }
+    let live = true;
+    void runUsage(game.platform, runId).then((t) => { if (live) setTotal(t); }).catch(() => {});
+    return () => { live = false; };
+  }, [game, runId]);
+  if (!total) return null;
+  const line = usageLine(total, prices);
+  return <>
+    <button type="button" className="usage-line notice-usage" aria-label={`${prefix}${line}`} onClick={() => setOpen(true)}>{prefix}{line}</button>
+    {open && <UsageBreakdownSheet title="本次生成的用量" total={total} prices={prices} onClose={() => setOpen(false)} />}
+  </>;
+}
+
+/** Compact one-line usage readout for helper sheets (改写, 改后同步, 查一查, 札记). */
+export function RecentUsageLine({ worldId, purposes, since, refreshKey = 0, prefix = "本次消耗：" }: { worldId?: string | null; purposes: string[]; since: string | null; refreshKey?: number; prefix?: string }) {
+  const { game } = useApp();
+  const prices = usePrices();
+  const [total, setTotal] = useState<UsageTotal | null>(null);
+  const [open, setOpen] = useState(false);
+  const key = purposes.join(",");
+  useEffect(() => {
+    if (!since) { setTotal(null); return; }
+    let live = true;
+    void recentUsage(game.platform, worldId ?? null, purposes, since).then((t) => { if (live) setTotal(t); }).catch(() => {});
+    return () => { live = false; };
+  }, [game, worldId, key, since, refreshKey]);
+  if (!total) return null;
+  const line = usageLine(total, prices);
+  return <>
+    <button type="button" className="usage-line" aria-label={`${prefix}${line}`} onClick={() => setOpen(true)}>{prefix}{line}</button>
+    {open && <UsageBreakdownSheet title="本次用量" total={total} prices={prices} onClose={() => setOpen(false)} />}
+  </>;
 }
 
 export function TurnUsageLine({ nodeId }: { nodeId: string }) {
@@ -62,7 +103,7 @@ export function UsageBreakdownSheet({ title, total, prices, note, onClose }: { t
           <dt>输入</dt><dd>{tokenText(total.input)} tokens</dd>
           <dt>输出</dt><dd>{tokenText(total.output)} tokens</dd>
           <dt>用时</dt><dd>{(total.ms / 1000).toFixed(1)} 秒</dd>
-          <dt>花费</dt><dd>{cost === null ? "在 设置 → 用量与花费 填上单价后可以估算" : costText(cost)}</dd>
+          <dt>花费</dt><dd>{cost === null ? (prices.input !== null && prices.output !== null && total.unknown === total.calls ? "本次请求均未返回用量，花费未知" : "在 设置 → 用量与花费 填上单价后可以估算") : `${costText(cost)}${total.unknown > 0 ? `（另 ${total.unknown} 次未知）` : ""}`}</dd>
         </dl>
         <h3 className="settings-sub">按用途</h3>
         {total.parts.map((p) => (

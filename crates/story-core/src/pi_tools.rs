@@ -15,6 +15,7 @@ const NAMES: &[&str] = &[
     "read_story_resources",
     "read_continuity",
     "stage_edit",
+    "stage_edits",
     "stage_story_turn",
     "stage_route",
     "discard_draft",
@@ -28,11 +29,13 @@ const NAMES: &[&str] = &[
     "list_skills",
     "read_skill",
     "read_skill_resource",
+    "list_sections",
     "locate_original_event",
     "prepare_reference_check",
     "preview_turn_record",
     "search_original",
     "read_original",
+    "read_canon_notes",
     "read_canon_facts",
     "check_draft",
     "record_findings",
@@ -61,12 +64,15 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
         .map(|mut tool| {
             if tool.name=="read_skill_resource" {tool.parameters["properties"]["version"]=json!({"type":"string","maxLength":64});}
             if tool.name=="run_script" {tool.description="运行受控JavaScript，调用示例：const r=await tools.read_resource({kind:'settings'}); text(r.value)。工具由tools.<工具名>(参数)调用。分页：for await (const page of pages('read_resource',{kind:'people'})) 可读取每页；const items=await collectPages('read_resource',{kind:'people'},{maxPages:5}) 直接返回数组，使用items.length，不是items.items。第一个参数必须是工具名称字符串，不能传回调。支持text/store/load，不能访问Node、文件、裸网络或直接提交任务。";}
-            if tool.name=="finish_task" {tool.description="按已选策略采用核对通过的完整独立资源组，未通过部分保留草稿。采用后立即关闭本批写权限；用read_commit_receipt/read_committed_snapshot/read_tool_result核对固定回执和正式快照，再更新计划并简要答复。不能继续编辑、重复提交或把部分采用说成全部完成；查询不产生剧情。";}
+            if tool.name=="finish_task" {tool.description="按已选策略采用核对通过的完整独立资源组，未通过部分保留草稿。返回结果已包含采用回执；采用后本批写权限关闭，除非需回查详细快照不必额外调read_commit_receipt，直接简要答复玩家即可。不能把部分采用说成全部完成；查询不产生剧情。";}
             if tool.name=="check_draft" {
-                tool.description="读取任务约束、草稿资源组指纹及证据数量摘要；具体证据用read_evidence按来源/书籍筛选分页读取。不会调用模型或证明原著正确。逐项结论用record_findings记录。";
-                tool.parameters["properties"]["includeEvidence"]=json!({"type":"boolean","description":"兼容完整材料读取，通常使用read_evidence分页"});
+                tool.description="读取任务约束、草稿资源组指纹及内嵌的已送达证据摘要(evidenceSummary.items，含evidenceId、location和引文预览)；仅当证据超过30条或需完整正文时再用read_evidence分页。不会调用模型或证明原著正确。逐项结论用record_findings记录。";
+                tool.parameters["properties"]["includeEvidence"]=json!({"type":"boolean","description":"兼容完整材料读取，通常直接使用evidenceSummary.items或read_evidence分页"});
                 tool.parameters["required"]=json!([]);
                 tool.read_only=true;
+            }
+            if tool.name=="stage_edits" {
+                tool.parameters["properties"]["edits"]["items"]["properties"]["ref"]=crate::pi_resources::schema();
             }
             if tool.name=="delegate_readonly" {
                 tool.parameters["properties"]["tasks"]["items"]["additionalProperties"]=false.into();
@@ -168,9 +174,11 @@ pub(crate) fn call(
             }
             meta["enabledTools"] = json!(enabled);
             save_metadata(db, task, &meta)?;
-            Ok(
-                json!({"definitions":selected,"enabledTools":enabled,"catalog":all.iter().map(|t|json!({"name":t["name"],"description":t["description"],"readOnly":t["readOnly"]})).collect::<Vec<_>>(),"message":"这些是已接通的本地能力；有效说明持续保留。发现工具不新增权限，不安装能力。"}),
-            )
+            let mut out = json!({"definitions":selected,"enabledTools":enabled,"message":"这些是已接通的本地能力；有效说明持续保留。发现工具不新增权限，不安装能力。"});
+            if names.is_empty() || args["includeCatalog"] == true {
+                out["catalog"] = json!(all.iter().map(|t|json!({"name":t["name"],"description":t["description"],"readOnly":t["readOnly"]})).collect::<Vec<_>>());
+            }
+            Ok(out)
         }
         "read_commit_receipt" | "read_committed_snapshot" => crate::pi_closeout::call(db,task,plan,request),
         "read_external_resource" => crate::pi_external::read(db,task,plan,args),
@@ -184,7 +192,7 @@ pub(crate) fn call(
         "read_skill" => read_skill(db, task, plan, request),
         "read_skill_resource" => skill_resource(db, task, plan, request),
         "preview_turn_record" => crate::reference_lookup::preview_record(plan,args),
-        "search_original" | "read_original" | "read_canon_facts" | "locate_original_event" | "prepare_reference_check" => {
+        "list_sections" | "search_original" | "read_original" | "read_canon_notes" | "read_canon_facts" | "locate_original_event" | "prepare_reference_check" => {
             original(db, plan, args, &request.tool)
         }
         "check_draft" => check_draft(db, task, plan,args),
@@ -322,7 +330,7 @@ fn skill_version(skill: &Value) -> Value {
 }
 fn skill_catalog(task: &Value) -> Result<Value> {
     Ok(
-        json!({"skills":configured_skills(task).iter().map(|s|json!({"id":skill_id(s),"name":s["name"],"description":s["description"],"version":skill_version(s),"hash":s["hash"],"capabilities":s["capabilities"],"compatibility":s["compatibility"],"resources":s["files"].as_object().map(|v|v.keys().collect::<Vec<_>>())})).collect::<Vec<_>>(),"requested":metadata(task)["skills"],"message":"这里只是技能目录。按需读取正文与支持资料，读取并不证明已完成查证或修改。"}),
+        json!({"skills":configured_skills(task).iter().map(|s|json!({"id":skill_id(s),"name":s["name"],"description":s["description"],"version":skill_version(s),"hash":s["hash"],"capabilities":s["capabilities"],"compatibility":s["compatibility"],"resources":s["files"].as_object().map(|v|json!(v.keys().collect::<Vec<_>>())).unwrap_or_else(||s["resources"].clone())})).collect::<Vec<_>>(),"requested":metadata(task)["skills"],"message":"这里只是技能目录。按需读取正文与支持资料，读取并不证明已完成查证或修改。"}),
     )
 }
 fn selected_skill(task: &Value, requested: &str) -> Result<Value> {
@@ -339,7 +347,11 @@ fn selected_skill(task: &Value, requested: &str) -> Result<Value> {
         if let Some(content) = skill["content"].as_str() {
             skill["body"] = content.into();
         } else {
+            let saved_hash = skill.get("hash").cloned();
             skill = crate::skills::read(ws::text(&skill, "name"))?;
+            if let Some(hash) = saved_hash.filter(|v| v.is_string()) {
+                skill["hash"] = hash;
+            }
         }
     }
     let id = skill_id(&skill).to_owned();
@@ -673,13 +685,18 @@ fn check_draft(db: &Connection, task: &Value, plan: &RunPlan,args:&Value) -> Res
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let evidence=rows.into_iter().filter_map(|(id,tool,raw)|{let output=ws::parse(&raw);if output["ok"]!=true{return None;}let data=&output["data"];Some(json!({"callId":id,"tool":tool,"status":data["status"],"bookId":data["bookId"],"through":data["through"],"excerpts":data["excerpts"].as_array().map(|v|v.iter().map(|e|json!({"kind":e["kind"],"bookId":e["bookId"],"section":e["section"],"chunk":e["chunk"],"title":e["title"],"page":e["page"],"start":e["start"],"end":e["end"]})).collect::<Vec<_>>()),"read":{"callId":id,"path":"","offset":0,"limit":1200}}))}).collect::<Vec<_>>();
+    let evidence=rows.into_iter().filter_map(|(id,tool,raw)|{let output=ws::parse(&raw);if output["ok"]!=true{return None;}let data=&output["data"];Some(json!({"callId":id,"tool":tool,"status":data["status"],"bookId":data["bookId"],"through":data["through"],"excerpts":data["excerpts"].as_array().map(|v|v.iter().map(|e|json!({"kind":e["kind"],"bookId":e["bookId"],"section":e["section"],"chunk":e["chunk"],"title":e["title"],"page":e["page"],"start":e["start"],"end":e["end"]})).collect::<Vec<_>>()),"read":{"callId":id,"path":"","offset":0,"limit":4800}}))}).collect::<Vec<_>>();
     let workspace = ws::workspace(db, ws::text(task, "id"))?;
     let ledger=crate::pi_receipts::pages(db,task)?;
-    let summary=json!({"count":ledger.as_array().map(Vec::len).unwrap_or(0),"readTool":"read_evidence","read":{"pageSize":20,"charBudget":6000}});
+    let total=ledger.as_array().map(Vec::len).unwrap_or(0);
+    let items:Vec<Value>=ledger.as_array().into_iter().flatten().take(30).map(|p|{
+        let preview:String=p["quote"].as_str().unwrap_or("").chars().take(160).collect();
+        json!({"evidenceId":p["id"],"sourceKind":p["sourceKind"],"callId":p["callId"],"location":p["location"],"offsetUnit":p["offsetUnit"],"start":p["start"],"end":p["end"],"quotePreview":preview})
+    }).collect();
+    let summary=json!({"count":total,"truncated":total>30,"items":items,"readTool":"read_evidence","read":{"pageSize":20,"charBudget":6000}});
     let ledger=if args["includeEvidence"]==true {ledger}else {json!([])};
     Ok(
-        json!({"evidenceSummary":summary,"constraints":crate::pi_goal_report::constraints(db,task,plan)?,"goalResult":metadata(task)["goalResult"],"evidenceLedger":ledger,"evidenceDeliveryVersion":1,"sourceReads":evidence,"referenceScope":plan.meta["agent"]["referenceScope"],"verification":crate::agent_verification::pending(&workspace),"resourceGroups":crate::pi_verification::resource_groups(&workspace)?,"skillReads":metadata(task)["skillReads"],"verified":false,"instructions":"evidenceLedger只含经成功模型请求确认实际送达的有界正文，不含搜索摘要；sourceReads仅为调用/出处定位，不代表原文已读。resourceGroups以完整原始/修改后资源绑定指纹，atomicSet内不能拆成半份采用；它们不代表事实已核实。原著请read_original，外置结果请read_tool_result按字段分页，再逐项核对。读技能不代表完成查证，目录、摘要和较早身份不能代替当前依据。玩家分支须核对真实原句，编辑授权不能证明新事实。"}),
+        json!({"evidenceSummary":summary,"constraints":crate::pi_goal_report::constraints(db,task,plan)?,"goalResult":metadata(task)["goalResult"],"evidenceLedger":ledger,"evidenceDeliveryVersion":1,"sourceReads":evidence,"referenceScope":plan.meta["agent"]["referenceScope"],"verification":crate::agent_verification::pending(&workspace),"resourceGroups":crate::pi_verification::resource_groups(&workspace)?,"skillReads":metadata(task)["skillReads"],"verified":false,"instructions":"evidenceSummary.items已内嵌最多30条实际送达成功请求的evidenceId、location、offsetUnit与引文预览，可直接用于record_findings；超过30条或需完整长引文时再调read_evidence。sourceReads仅为调用定位，不代表原文已读。resourceGroups以完整原始/修改后资源绑定指纹，atomicSet内不可拆半；它们不代表事实已核实。原著请read_original，玩家分支须核对真实原句。"}),
     )
 }
 
@@ -869,5 +886,74 @@ mod discovery_delivery_tests {
         let result=delivery("discovery","discover_tools",json!({"ok":true,"data":{"enabledTools":["search_original","read_original"],"definitions":[{"description":"长工具说明".repeat(5000)}]}}));
         assert_eq!(result["toolLoadout"],json!(["search_original","read_original"]));assert_eq!(result["data"]["storedResult"],true);
         let error=delivery("failed","discover_tools",json!({"ok":false,"error":{"message":"不能授权"}}));assert!(error.get("toolLoadout").is_none());
+    }
+
+    #[test]
+    fn p3_stage_edits_batch_atomic_and_check_draft_evidence_summary() {
+        use crate::{pi_gateway::StoryToolGateway, pi_store::PiCallRequest, Store};
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        crate::migration::migrate(&mut db, None).unwrap();
+        db.execute_batch("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w','批量测试','free','l','{\"premise\":\"旧设定\",\"rules\":[\"规则一\"]}','test','test','test');INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n','w',0,'opening','独立正文','test');INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l','w','主线','n','test');INSERT INTO states(node_id,state_json) VALUES('n','{\"time\":{\"start\":\"第一天\",\"elapsedMinutes\":0},\"source\":null}');INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES('s','w','l','P3','test','test')").unwrap();
+        let store = Store(Arc::new(Mutex::new(db)));
+        let gateway = StoryToolGateway::new(store);
+        let task = gateway.start_task("s", "t", "批量改两处设定", "auto-reversible", false, json!({"model":"no-http"}), json!({})).unwrap();
+        let permit = gateway.permit("t").unwrap();
+        let version = ws::text(&task, "base_world_version").to_owned();
+        let call = |id: &str, tool: &str, args: Value| gateway.invoke(&permit, PiCallRequest {
+            task_id: "t".into(), call_id: id.into(), tool: tool.into(), args,
+            intent_revision: 0, world_version: version.clone(), external_write: false,
+        }).unwrap();
+        // Atomic rollback when 2nd edit is invalid: 1st edit must not persist
+        let bad = call("bad-batch", "stage_edits", json!({
+            "edits": [
+                {"kind": "settings", "path": "/premise", "operation": "set", "value": "不该保留的设定"},
+                {"kind": "nonexistent_kind", "path": "/foo", "operation": "set", "value": "x"}
+            ]
+        }));
+        assert_eq!(bad["ok"], false, "{bad}");
+        let draft_after_bad = call("chk-bad", "check_draft", json!({}));
+        assert_eq!(draft_after_bad["ok"], true, "{draft_after_bad}");
+        assert!(draft_after_bad["data"]["resourceGroups"].as_array().unwrap().is_empty(), "failed batch must roll back cleanly");
+        assert!(draft_after_bad["data"]["evidenceSummary"]["items"].is_array(), "check_draft should include compact evidenceSummary.items");
+        // Valid 2-item batch stages both in one tool call
+        let ok = call("good-batch", "stage_edits", json!({
+            "edits": [
+                {"kind": "settings", "path": "/premise", "operation": "set", "value": "新背景设定"},
+                {"kind": "settings", "path": "/rules", "operation": "append", "value": "规则二"}
+            ]
+        }));
+        assert_eq!(ok["ok"], true, "{ok}");
+        assert_eq!(ok["data"]["staged"], 2);
+        let fin = call("fin", "finish_task", json!({"summary": "已批量更新两处设定", "outcome": "completed"}));
+        assert_eq!(fin["ok"], true, "{fin}");
+        assert_eq!(fin["data"]["status"], "committed");
+    }
+
+    #[test]
+    fn p3_compact_builtin_skill_snapshot_loads_body_on_demand() {
+        use crate::{pi_gateway::StoryToolGateway, pi_store::PiCallRequest, Store};
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        crate::migration::migrate(&mut db, None).unwrap();
+        db.execute_batch("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w','精简技能','free','l','{\"premise\":\"设定\"}','test','test','test');INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n','w',0,'opening','正文','test');INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l','w','主线','n','test');INSERT INTO states(node_id,state_json) VALUES('n','{\"time\":{\"start\":\"第一天\",\"elapsedMinutes\":0},\"source\":null}');INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES('s','w','l','技能','test','test')").unwrap();
+        let store = Store(Arc::new(Mutex::new(db)));
+        let gateway = StoryToolGateway::new(store.clone());
+        let task = gateway.start_task("s", "t", "按需读内置技能", "auto-reversible", true, json!({"model":"no-http"}), json!({})).unwrap();
+        // Verify metadata_json doesn't inline full skill bodies
+        let meta_text = ws::text(&task, "metadata_json");
+        assert!(meta_text.len() < 12000, "compact skillSnapshots should keep metadata_json small, got {} bytes", meta_text.len());
+        let permit = gateway.permit("t").unwrap();
+        let version = ws::text(&task, "base_world_version").to_owned();
+        let r = gateway.invoke(&permit, PiCallRequest {
+            task_id: "t".into(), call_id: "rs1".into(), tool: "read_skill".into(),
+            args: json!({"id": "canon-reference"}), intent_revision: 0, world_version: version, external_write: false,
+        }).unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(r["data"]["body"].as_str().unwrap_or("").contains("核对"), "read_skill must lazily hydrate builtin body: {r}");
     }
 }

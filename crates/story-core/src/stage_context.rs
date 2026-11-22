@@ -13,7 +13,11 @@ pub fn excerpt(s: &str, query: &str, cap: usize) -> String {
 fn arr<'a>(v:&'a Value)->&'a [Value]{v.as_array().map(Vec::as_slice).unwrap_or(&[])}
 fn text(v:&Value)->&str{v.as_str().unwrap_or("")}
 fn relevant(v:&Value,q:&str)->bool{
-    std::iter::once(text(&v["name"])).chain(arr(&v["aliases"]).iter().filter_map(Value::as_str)).any(|name|!name.is_empty()&&q.contains(name))
+    let name = text(&v["name"]);
+    if !name.is_empty() && q.contains(name) { return true; }
+    arr(&v["aliases"]).iter().chain(arr(&v["keys"]).iter())
+        .filter_map(Value::as_str)
+        .any(|alias| alias.chars().count() >= 2 && q.contains(alias))
 }
 /// Fixed scalars survive; expandable descriptions and lists fit a character
 /// allowance. Entity ids remain usable with the ordinary read tools.
@@ -30,11 +34,15 @@ pub fn state(state:&Value,query:&str,cap:usize)->Value {
     for key in ["people","items","statuses","goals","places","cards"]{
         let values=if ["items","statuses"].contains(&key){arr(&state["protagonist"][key])}else{arr(&state[key])};
         let mut ranked=values.iter().collect::<Vec<_>>();
-        ranked.sort_by_key(|v|(!relevant(v,query),std::cmp::Reverse(v["lastSeenMinute"].as_i64().unwrap_or(-1))));
+        ranked.sort_by_key(|v|(
+            !(key=="places" && !state["placeId"].is_null() && v["id"]==state["placeId"]),
+            !relevant(v,query),
+            std::cmp::Reverse(v["lastSeenMinute"].as_i64().unwrap_or(-1)),
+        ));
         let allowance=remaining.min(if key=="people"{cap/3}else{cap/6});let mut used=0;let mut selected=vec![];
         for value in ranked{
             if key=="goals"&&value["status"].as_str().is_some_and(|s|s!="进行中"){continue;}
-            let fields=if key=="people"{&["id","name","aliases","role","alive","attitude","origin","notes"][..]}else{&["id","name","kind","quantity","unit","place","status","progress","detail","description","content","source"][..]};
+            let fields=if key=="people"{&["id","name","aliases","role","alive","attitude","lastSeenMinute","origin","notes"][..]}else{&["id","name","kind","keys","quantity","unit","place","status","progress","detail","description","content","source"][..]};
             let mut item=json!({});for field in fields{if let Some(v)=value.get(*field){item[*field]=if let Some(s)=v.as_str(){excerpt(s,query,if relevant(value,query){180}else{64}).into()}else{v.clone()};}}
             let cost=units(&item.to_string())+1;if used+cost>allowance{continue;}used+=cost;selected.push(item);
         }
@@ -43,12 +51,86 @@ pub fn state(state:&Value,query:&str,cap:usize)->Value {
     }
     out["view"]=json!({"partial":true,"note":"仅本段相关资料，遗漏不等于不存在；read_world/read_characters/read_history可回读，所有原始记录留在本机。"});out
 }
+/// Compact an upkeep roster prefix only when it exceeds `cap`: keeps essential headers
+/// (主角/状况/人物表/已删/时代禁用词) and preserves every card/place name + editability tag
+/// so upkeep never creates duplicates or mutates player/pack entries.
+fn compact_org_prefix(prefix: &str, recent: &str, cap: usize) -> String {
+    let trimmed = prefix.trim_end();
+    if units(trimmed) <= cap {
+        return trimmed.to_owned();
+    }
+    let mut lines = Vec::new();
+    let mut in_list = false;
+    for line in trimmed.lines() {
+        if line.starts_with("【设定集里已有的卡片】") || line.starts_with("【已有的地点】") {
+            in_list = true;
+            lines.push(line.to_owned());
+            continue;
+        }
+        if line.starts_with('【') {
+            in_list = false;
+            lines.push(line.to_owned());
+            continue;
+        }
+        if in_list && line.starts_with("- ") {
+            // Keep full text for lines relevant to recent prose or the protagonist's abilities card;
+            // strip only the trailing description for unrelated entries while keeping name + editability tag.
+            let is_ability = line.contains("的本事");
+            let head_part = line.split('：').next().unwrap_or(line);
+            let name_token = head_part.trim_start_matches("- ").split('（').next().unwrap_or("").split('·').last().unwrap_or("").trim();
+            let hit = is_ability || (name_token.chars().count() >= 2 && recent.contains(name_token));
+            if hit {
+                lines.push(excerpt(line, recent, 220));
+            } else {
+                lines.push(head_part.to_owned());
+            }
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    let compacted = lines.join("\n");
+    if units(&compacted) <= cap {
+        return compacted;
+    }
+    // Final bounded guard if even name-only roster exceeds cap.
+    let mut out = String::new();
+    for line in compacted.lines() {
+        let next_len = units(&out) + units(line) + 1;
+        if next_len > cap {
+            break;
+        }
+        if !out.is_empty() { out.push('\n'); }
+        out.push_str(line);
+    }
+    out
+}
 pub fn organization(plan:&RunPlan,messages:&[Value],narrative:&str)->Vec<Value>{
     let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
     let original=messages.iter().filter_map(|m|m["content"].as_str()).last().unwrap_or("");
-    let old=original.split("【最近的剧情】").last().unwrap_or("").split("【最近剧情】").last().unwrap_or("").replace("{{NARRATIVE}}",narrative);
-    let recent=if units(&old)>4500{let chunks=parts(&old,4500);chunks.last().cloned().unwrap_or_default()}else{old};
+    let (marker, split_at) = if let Some(i) = original.find("【最近的剧情】") {
+        ("【最近的剧情】", Some(i))
+    } else if let Some(i) = original.find("【最近剧情】") {
+        ("【最近剧情】", Some(i))
+    } else {
+        ("【最近的剧情】", None)
+    };
+    let (raw_prefix, raw_story) = match split_at {
+        Some(i) => (&original[..i], &original[i + marker.len()..]),
+        None => ("", original),
+    };
+    let old=raw_story.replace("{{NARRATIVE}}",narrative);
     let mut output=messages.iter().filter(|m|m["role"]=="system").cloned().collect::<Vec<_>>();
+    let sys_chars=units(&json!(output).to_string());
+    let available=cap.saturating_sub(sys_chars+400).max(2400);
+    if !raw_prefix.trim().is_empty() && (raw_prefix.contains("【设定集里已有的卡片】") || raw_prefix.contains("【主角】")) {
+        let prefix_cap=(available/2).max(2400).min(6000);
+        let prefix=compact_org_prefix(raw_prefix,&old,prefix_cap);
+        let story_cap=available.saturating_sub(units(&prefix)+80).clamp(1200,5000);
+        let recent=if units(&old)>story_cap{parts(&old,story_cap).last().cloned().unwrap_or_default()}else{old};
+        output.push(json!({"role":"user","content":format!("{prefix}\n\n【最近的剧情】\n{}\n未展开的旧资料仍存在，不能据此重复创建；只整理实际读到的剧情。",recent.trim_start())}));
+        return output;
+    }
+    let recent=if units(&old)>4500{let chunks=parts(&old,4500);chunks.last().cloned().unwrap_or_default()}else{old};
     output.push(json!({"role":"user","content":format!("【故事设定】{}\n【玩家规则】{}\n【要点】{}\n【相关资料】{}\n【玩家删除的，不要再建】{}\n【最近的剧情】{}\n未展开的旧资料仍存在，不能据此重复创建；只整理实际读到的剧情。",plan.settings["premise"].as_str().unwrap_or(""),plan.settings["rules"].as_str().unwrap_or(""),plan.settings["essentials"].as_str().unwrap_or(""),state(&plan.state,&recent,(cap/4).min(3000)),excerpt(&plan.state["dismissed"].to_string(),&recent,800),recent)}));output
 }
 pub fn facts(state:&Value,query:&str,cap:usize)->Value{
@@ -100,4 +182,33 @@ pub fn chapter(messages:&[Value],narrative:&str,budget:usize)->(Vec<Value>,Vec<S
  #[test]fn growing_saves_have_bounded_stage_views_and_durable_facts(){for n in [30,100,300]{let snapshot=json!({"protagonist":{"name":"旅人","stats":{"money":125},"items":[],"statuses":[]},"time":{"elapsedMinutes":42},"people":(0..n).map(|i|json!({"id":format!("p{i}"),"name":format!("人物{i}"),"notes":"长备注".repeat(1000),"alive":true})).collect::<Vec<_>>(),"facts":(0..n).map(|i|json!({"id":format!("f{i}"),"origin":"player","detail":"历史行动".repeat(400)})).collect::<Vec<_>>()});let original=snapshot.clone();let view=state(&snapshot,"人物12",2600);assert!(units(&view.to_string())<3000);assert_eq!(view["protagonist"]["stats"]["money"],125);assert!(units(&facts(&snapshot,"人物12",1200).to_string())<1500);assert_eq!(snapshot,original);}}
  #[test]fn paragraph_groups_preserve_unicode_and_every_character(){let body="第一段🧭。\n\n".repeat(800);let p=parts(&body,500);assert_eq!(p.concat(),body);assert!(p.iter().all(|s|units(s)<=500));}
  #[test]fn chapter_groups_preserve_all_turns_with_bounded_previous_gists(){let body="回合正文🧭。\n".repeat(2000);let messages=vec![json!({"role":"system","content":"记录员"}),json!({"role":"user","content":format!("【故事设定】青桥\n【前几章梗概】{}\n【本章剧情（第1～5回合）】\n{}\n{{{{NARRATIVE}}}}","旧摘要".repeat(4000),body)})];let(base,groups)=chapter(&messages,"最后一段",6000);assert_eq!(groups.concat(),format!("{body}\n最后一段"));for group in groups{assert!(units(&json!(base).to_string())+units(&group)+1024<6000);}}
+ #[test]fn state_pins_current_place_and_preserves_last_seen_and_keys(){
+     let snapshot=json!({
+         "time":{"elapsedMinutes":500},
+         "placeId":"p99",
+         "era":{"mode":"free","clockStyle":"elapsed"},
+         "protagonist":{"name":"沈舟","items":[],"statuses":[]},
+         "people":[{"id":"u1","name":"林晚照","aliases":["林姑娘"],"role":"盟友","alive":true,"attitude":"友善","lastSeenMinute":480,"notes":"持玄铁令"}],
+         "places":(0..100).map(|i|json!({"id":format!("p{i}"),"name":format!("地点{i}"),"description":"很长很长的地点说明".repeat(20)})).collect::<Vec<_>>(),
+         "cards":[{"id":"c1","kind":"势力","name":"翠微楼","keys":["玄铁令"],"content":"江湖情报阁","source":"AI"}]
+     });
+     let view=state(&snapshot,"查探玄铁令",2600);
+     assert_eq!(view["places"][0]["id"],"p99","current placeId must be pinned first");
+     assert_eq!(view["people"][0]["lastSeenMinute"],480,"lastSeenMinute must survive projection");
+     assert_eq!(view["cards"][0]["keys"],json!(["玄铁令"]),"card keys must match and survive");
+ }
+ #[test]fn organization_preserves_structured_roster_and_editability_tags(){
+     let plan:RunPlan=serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"maintain","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[],"state":{"protagonist":{"name":"沈舟","statuses":[{"name":"受寒"}]},"cards":[],"places":[],"people":[],"dismissed":["废卡"]},"settings":{"premise":"江南风起"},"options":{},"action":{},"meta":{"budgetChars":12000}})).unwrap();
+     let messages=vec![
+         json!({"role":"system","content":"你是资料员"}),
+         json!({"role":"user","content":"【主角】沈舟\n\n【主角的状况】受寒\n\n【设定集里已有的卡片】\n- 势力 · 青衣楼（AI 整理，可以更新）：旧情报\n- 物品 · 玉佩（玩家写的，不要改）\n\n【已有的地点】\n- 渡口（还没有描述）\n\n【人物表里已有的人物（不要建卡，也不要再写进 people）】林晚照\n\n【玩家删掉的，不要再建】废卡\n\n【这个时代不该出现的东西】银两（铜钱）\n\n【最近的剧情】\n{{NARRATIVE}}"}),
+     ];
+     let out=organization(&plan,&messages,"你在渡口见到林晚照，青衣楼换了新堂主。");
+     let user=out[1]["content"].as_str().unwrap();
+     assert!(user.contains("AI 整理，可以更新"),"{user}");
+     assert!(user.contains("玩家写的，不要改"),"{user}");
+     assert!(user.contains("【主角的状况】受寒"),"{user}");
+     assert!(user.contains("【这个时代不该出现的东西】银两（铜钱）"),"{user}");
+     assert!(user.contains("青衣楼换了新堂主"),"{user}");
+ }
 }

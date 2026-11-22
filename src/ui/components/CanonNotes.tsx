@@ -6,6 +6,7 @@ import { createContext, useEffect, useRef, useState } from "react";
 import { NOTE_KINDS, NOTE_KIND_LABEL, STORY_NOTE_KINDS, NOTE_TEXT_LIMIT, deleteNote, draftFromParts, estimateNote, gapRanges, listNotes, listStoryNotes, localNoteContent, newLocalNote, newNote, newStoryNote, nextNoteReach, noteBehind, noteChapterRange, noteNearEnd, noteOffRoute, restartOnRoute, routeIds, noteProgressDetail, noteProgressLabel, noteStepsDone, noteUnit, readNoteText, renameNote, restorePrevious, saveNote, startNoteUpdate, storyLastTurn, suggestTitle, turnLabel, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { RecentUsageLine } from "./TurnUsage";
 import { RangeInputs } from "./RangeInputs";
 import { chapterLabel } from "../../engine/sources/scope";
 import { Switch } from "./Switch";
@@ -87,7 +88,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, onClose, start,
           setNotes((list) => [...(list ?? []), note]); setView({ name: "note", id: note.id });
           if (generate) run(note); else toast("札记已保存");
         }} />}
-      {view.name === "note" && current && <NoteDetail key={current.id} note={current} running={game.canonNoteRunning(current.id)} position={story ? 0 : position}
+      {view.name === "note" && current && <NoteDetail key={current.id} worldId={worldId} note={current} running={game.canonNoteRunning(current.id)} position={story ? 0 : position}
         offRoute={!!route && noteOffRoute(current, route)}
         onRestart={async () => {
           const next = restartOnRoute(current, lastTurn);
@@ -240,8 +241,8 @@ function NewNote({ bookId, worldId, story, sections, position, draft, start, onS
   );
 }
 
-function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack, onResume, onPause, onUpdate, onRestore, onCopy, onRename, onSave, onDelete }: {
-  note: CanonNote; running: boolean; last: number; position: number; offRoute: boolean; onRestart: () => Promise<void>; onBack: () => void; onResume: (resume?: NoteResume) => void; onPause: () => void;
+function NoteDetail({ note, worldId, running, last, position, offRoute, onRestart, onBack, onResume, onPause, onUpdate, onRestore, onCopy, onRename, onSave, onDelete }: {
+  note: CanonNote; worldId?: string | null; running: boolean; last: number; position: number; offRoute: boolean; onRestart: () => Promise<void>; onBack: () => void; onResume: (resume?: NoteResume) => void; onPause: () => void;
   onUpdate: (to: number) => Promise<void>; onRestore: () => Promise<void>;
   onCopy: () => void; onRename: (title: string) => Promise<void>;
   onSave: (patch: Partial<CanonNote>) => Promise<void>; onDelete: () => void;
@@ -251,14 +252,27 @@ function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack
   const [newTitle, setNewTitle] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [manual, setManual] = useState<{ batch: number; also: number[]; text: string } | null>(null);
+  const [since, setSince] = useState<string | null>(null);
+  const [usageTick, setUsageTick] = useState(0);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (running) {
+      setSince((prev) => prev ?? new Date().toISOString());
+    } else if (wasRunning.current) {
+      setUsageTick((n) => n + 1);
+    }
+    wasRunning.current = running;
+  }, [running]);
+  useEffect(() => { setSince(null); setUsageTick(0); }, [note.id]);
   const story = note.source === "story";
   const unit = noteUnit(note);
   const covered = note.scope.to ?? -1;
   const reach = () => (story ? last : nextNoteReach(note, position, last));
   const [target, setTarget] = useState(reach);
+  const [targetText, setTargetText] = useState(() => String(reach() + 1));
   useEffect(() => { setText(note.content); }, [note.content]);
   useEffect(() => { setManual(null); }, [note.id]);
-  useEffect(() => { setTarget(reach()); }, [last, covered, position]);
+  useEffect(() => { const next = reach(); setTarget(next); setTargetText(String(next + 1)); }, [last, covered, position]);
   const total = Math.max(1, note.progress.total);
   const done = noteStepsDone(note.progress);
   const gaps = note.progress.gaps ?? [];
@@ -332,8 +346,20 @@ function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack
         {story
           ? <button onClick={() => void onUpdate(last).catch((e) => toast(e instanceof Error ? e.message : "没能开始更新"))}>更新到现在（{turnLabel(last)}）</button>
           : <div className="row">
-            <label className="grow">续整理到第<input type="number" inputMode="numeric" min={covered + 2} max={last + 1} value={target + 1}
-              onChange={(e) => setTarget(Math.max(covered + 1, Math.min(last, Math.trunc(Number(e.target.value)) - 1 || 0)))} />章</label>
+            <label className="grow">续整理到第<input type="text" inputMode="numeric" pattern="[0-9]*" value={targetText}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setTargetText(raw);
+                if (/^\d+$/.test(raw.trim())) {
+                  setTarget(Math.max(covered + 1, Math.min(last, Math.trunc(Number(raw)) - 1)));
+                }
+              }}
+              onBlur={() => {
+                const raw = targetText.trim();
+                const next = /^\d+$/.test(raw) ? Math.max(covered + 1, Math.min(last, Math.trunc(Number(raw)) - 1)) : target;
+                setTarget(next);
+                setTargetText(String(next + 1));
+              }} />章</label>
             <button onClick={() => void onUpdate(target).catch((e) => toast(e instanceof Error ? e.message : "没能开始续整理"))}>续整理</button>
           </div>}
         <small className="muted">只读新增的{story ? "回合" : "章节"}，再合进现有札记；你改过的内容会保留，可以恢复上一版。</small>
@@ -347,6 +373,7 @@ function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack
         </div>
         {note.previousContent && !running && <button className="ghost" onClick={() => void onRestore()}>恢复上一版</button>}
       </>}
+      {!running && since && <RecentUsageLine worldId={worldId ?? null} purposes={["canon-notes"]} since={since} refreshKey={usageTick} />}
       <div className="row">
         <button className="ghost" onClick={onBack}>全部札记</button>
         <span className="grow" />

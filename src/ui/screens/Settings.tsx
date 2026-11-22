@@ -29,7 +29,7 @@ import { UpdateButton, UpdateDevSource } from "../components/UpdateSheet";
 import { SourceLibrary } from "../components/Sources";
 import { localFind } from "../app/localFind";
 
-const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用", cancelled: "已取消" };
+const OUTCOMES: Record<string, string> = { ok: "成功", refused: "被拒", no_record: "没有结果", failed: "失败", stale: "已过时，未采用", cancelled: "已取消", interrupted: "已中断" };
 type Page = "home" | "services" | "writing" | "memory" | "play" | "reading" | "notify" | "data" | "network" | "about" | "dev" | "budget";
 const TITLES: Record<Page, string> = {
   budget: "用量与花费",

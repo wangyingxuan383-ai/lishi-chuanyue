@@ -215,6 +215,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
     // Each actual attempt has its own usage row, including failed or cancelled attempts.
     for (let attempt = 1; ; attempt++) {
       if (cancelled) throw new ChatError("cancelled");
+      handle = null;
       let result: ChatResult | null = null;
       let outcome = "failed";
       const began = performance.now();
@@ -244,14 +245,17 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
         messages = decision.messages;
       } finally {
         const finished = handle;
-        if (finished) void finished.streamId.then((id) => game.platform.llm.ack(id)).catch(() => {});
-        await game.platform.sql.batch([game.repo.usageStatement({
-          worldId: request.anchor.worldId, nodeId: request.anchor.nodeId,
-          purpose: request.kind === "rewrite" ? "段落改写" : "行动润色", model,
-          promptTokens: result?.usage?.promptTokens ?? null, completionTokens: result?.usage?.completionTokens ?? null,
-          estimated: result?.usage?.promptTokens == null || result.usage.completionTokens == null, firstTokenMs: result?.firstTokenMs ?? null,
-          totalMs: result?.totalMs ?? performance.now() - began, outcome,
-        })]);
+        const streamId = finished ? await finished.streamId.catch(() => null) : null;
+        if (streamId) {
+          void game.platform.llm.ack(streamId).catch(() => {});
+          await game.platform.sql.batch([game.repo.usageStatement({
+            worldId: request.anchor.worldId, nodeId: request.anchor.nodeId,
+            purpose: request.kind === "rewrite" ? "段落改写" : "行动润色", model,
+            promptTokens: result?.usage?.promptTokens ?? null, completionTokens: result?.usage?.completionTokens ?? null,
+            estimated: result?.usage?.promptTokens == null || result.usage.completionTokens == null, firstTokenMs: result?.firstTokenMs ?? null,
+            totalMs: result?.totalMs ?? performance.now() - began, outcome,
+          })]);
+        }
       }
     }
   })();

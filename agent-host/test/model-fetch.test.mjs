@@ -68,3 +68,30 @@ test("native technical timeout is abort-shaped and never resends", async () => {
   await assert.rejects(bridge.fetch("https://model.invalid/v1",{method:"POST",body:"{}"}),e=>e.name==="AbortError"&&e.code==="model_timeout");
   assert.equal(calls,1); await bridge.close();
 });
+
+test("recordUsage preserves partial positive tokens when stream is aborted or errors", async () => {
+  const recorded = [];
+  const bridge = new NativeModelFetch(async (action, args) => {
+    if (action === "usage") recorded.push(args);
+    return { ok: true, data: {} };
+  });
+  await bridge.recordUsage(["req-aborted"], {
+    stopReason: "aborted",
+    usage: { input: 320, output: 18, cacheRead: 100, cacheWrite: 0, totalTokens: 438 },
+  });
+  await bridge.recordUsage(["req-err"], {
+    stopReason: "error",
+    usage: { input: 150, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 150 },
+  });
+  await bridge.recordUsage(["req-empty"], {
+    stopReason: "aborted",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+  });
+  assert.equal(recorded[0].status, "failed");
+  assert.equal(recorded[0].usage.input, 320);
+  assert.equal(recorded[0].usage.output, 18);
+  assert.equal(recorded[1].status, "failed");
+  assert.equal(recorded[1].usage.input, 150);
+  assert.deepEqual(recorded[2].usage, {});
+  await bridge.close();
+});

@@ -30,6 +30,21 @@ function resourceLoader(pi, systemPrompt, extensions) {
   };
 }
 
+function resolveThinking(model) {
+  const mode = model.thinkingMode ?? "off";
+  if (mode === "deep") return { mode, reasoning: true, thinkingLevel: "high" };
+  if (mode === "default") return { mode, reasoning: model.reasoning === true, thinkingLevel: "off" };
+  const protocol = model.protocol ?? "chat-completions";
+  const reasoning = protocol === "gemini"
+    ? true
+    : protocol === "openai-responses"
+      ? (/^(?:o[134]|gpt-5|codex)/i.test(model.id ?? "") || model.reasoning === true)
+      : protocol === "chat-completions"
+        ? (Boolean(model.compat) || model.reasoning === true)
+        : false;
+  return { mode: "off", reasoning, thinkingLevel: "off" };
+}
+
 function providerModel(model, budget) {
   const cost = model.cost ?? {};
   for (const name of ["input", "output", "cacheRead", "cacheWrite"]) {
@@ -119,7 +134,7 @@ export class PiHost {
     host.progressReview = new ProgressReview(host, options=>PiHost.create(options));
     const { session } = await pi.createAgentSession({
       cwd: directory, agentDir: directory, modelRuntime: runtime,
-      model: runtime.getModel("lishi", options.model.id), thinkingLevel: "off",
+      model: runtime.getModel("lishi", options.model.id), thinkingLevel: host.thinkingLevel ?? "off",
       noTools: "builtin", tools: tools.map((tool) => tool.name),
       customTools: tools, resourceLoader: resourceLoader(pi, options.systemPrompt, taskContext?.extensions),
       sessionManager: manager, settingsManager: settings,
@@ -152,12 +167,43 @@ export class PiHost {
     host.contextState = new ContextState(host);
     if (options.nativeModelHttp === true) host.nativeFetch = new NativeModelFetch(options.invokeModelHttp);
     let lastVisibleUpdate = -Infinity;
+    let thinkingActive = false;
+    let lastThinkingUpdate = -Infinity;
     host.unsubscribe = session.subscribe((event) => {
       if (event.type === "message_update") {
-        if (event.assistantMessageEvent?.type?.startsWith("thinking")) return;
+        const kind = event.assistantMessageEvent?.type;
+        if (kind?.startsWith("thinking")) {
+          const now = performance.now();
+          if (!thinkingActive || now - lastThinkingUpdate >= 1500) {
+            thinkingActive = true;
+            lastThinkingUpdate = now;
+            options.onEvent?.({
+              sessionId: session.sessionId,
+              taskId: host.taskId,
+              event: { type: "thinking_status", active: true, attemptId: options.nativeAttempt },
+            });
+          }
+          return;
+        }
+        if (thinkingActive && (kind === "text_start" || kind === "text_delta" || kind === "toolcall_start")) {
+          thinkingActive = false;
+          options.onEvent?.({
+            sessionId: session.sessionId,
+            taskId: host.taskId,
+            event: { type: "thinking_status", active: false, attemptId: options.nativeAttempt },
+          });
+        }
         const now = performance.now();
         if (now - lastVisibleUpdate < 100) return;
         lastVisibleUpdate = now;
+      }
+      if (event.type === "message_end" && thinkingActive) {
+        thinkingActive = false;
+        options.onEvent?.({
+          sessionId: session.sessionId,
+          taskId: host.taskId,
+          event: { type: "thinking_status", active: false, attemptId: options.nativeAttempt },
+        });
       }
       if (["message_end","tool_execution_end","turn_end","compaction_start","compaction_end"].includes(event.type)) {
         if(event.type==="message_end"&&event.message?.role==="assistant")host.contextState.response(event.message,"model");
@@ -226,7 +272,11 @@ export class PiHost {
         try { return await this.nativeFetch.fetch(input, init, { onRequest: id => { ids.push(id); this.contextState?.identifyRequest(id,purpose); }, receipts, purpose }); }
         catch (error) { if (error?.name !== "AbortError" && this.requestGeneration === generation) this.lastModelTransportError = error; throw error; }
       } : undefined;
-      const stream = withModelTransport(this.transport, () => streamSimple(model, context, boundedOptions), delegate);
+      const useAuxForPurpose = purpose === "compaction" && this.auxModelId && this.auxTransport;
+      const effectiveModel = useAuxForPurpose ? (this.runtime.getModel("lishi", this.auxModelId) ?? model) : model;
+      const effectiveTransport = useAuxForPurpose ? this.auxTransport : this.transport;
+      const effectiveOptions = useAuxForPurpose ? { ...boundedOptions, reasoning: undefined } : boundedOptions;
+      const stream = withModelTransport(effectiveTransport, () => streamSimple(effectiveModel, context, effectiveOptions), delegate);
       if (this.nativeFetch) {
         const write = stream.result().then(async message => {
           if (message?.stopReason === "error" && this.requestGeneration === generation && !this.lastModelTransportError) {
@@ -250,11 +300,26 @@ export class PiHost {
   registerModel(model) {
     const transport = modelTransport(model);
     const budget = contextBudget(model);
+    const thinking = resolveThinking(model);
+    const models = [providerModel({ ...model, reasoning: thinking.reasoning }, budget)];
+    this.auxModelId = null;
+    this.auxTransport = null;
+    if (typeof model.auxModel === "string" && model.auxModel.trim()
+        && model.auxModel.trim() !== model.id
+        && !(model.endpointRef && model.protocol === "gemini")) {
+      const auxId = model.auxModel.trim();
+      const auxSpec = { ...model, id: auxId, thinkingMode: "off" };
+      const auxThinking = resolveThinking(auxSpec);
+      models.push(providerModel({ ...auxSpec, reasoning: auxThinking.reasoning }, budget));
+      this.auxModelId = auxId;
+      this.auxTransport = modelTransport(auxSpec);
+    }
     this.runtime.registerProvider("lishi", {
       api: transport.api, baseUrl: transport.baseUrl, apiKey: model.apiKey,
-      models: [providerModel(model, budget)],
+      models,
     });
     this.transport = transport;
+    this.thinkingLevel = thinking.thinkingLevel;
     return budget;
   }
 
@@ -265,12 +330,14 @@ export class PiHost {
 
   async preflightPrompt(text) {
     const projection = this.manager.buildSessionProjection();
-    const incoming = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+    const hasText = typeof text === "string" && text.length > 0;
+    const incoming = hasText ? { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } : null;
     const common = { systemPrompt: this.session.systemPrompt || this.options.systemPrompt,
       tools: this.session.agent.state.tools };
     const standalone = estimateRequestTokens(this.pi, { ...common,
-      messages: [...projection.messages.filter(message => message.role === "system"), incoming] });
-    const projected = estimateRequestTokens(this.pi, { ...common, messages: [...projection.messages, incoming] });
+      messages: [...projection.messages.filter(message => message.role === "system"), ...(incoming ? [incoming] : [])] });
+    const projected = estimateRequestTokens(this.pi, { ...common,
+      messages: incoming ? [...projection.messages, incoming] : projection.messages });
     this.preflightCompaction = null;
     if (standalone > this.budget.effectiveInputBudgetTokens || projected <= this.budget.effectiveInputBudgetTokens) return;
     const settings = this.settings.getCompactionSettings(this.session.model);
@@ -290,7 +357,7 @@ export class PiHost {
     }
   }
 
-  async prompt(text, taskId) {
+  async prompt(text, taskId, { resume = false } = {}) {
     this.manualCompact.assertCanPrompt();
     if (this.activePrompt || this.session.isStreaming) throw new Error("Use steer or followUp while a task is running");
     this.activePrompt = true;
@@ -302,12 +369,24 @@ export class PiHost {
     this.lastAccountingError = undefined;
     this.waitingForUser = false;
     try {
-      await this.preflightPrompt(text);
+      const hasText = typeof text === "string" && text.length > 0;
+      const tailRole = this.manager.buildSessionProjection().messages.at(-1)?.role;
+      const canContinueDirectly = resume && !hasText
+        && (tailRole === "user" || tailRole === "toolResult")
+        && typeof this.session.agent?.continue === "function";
+      const effectiveText = canContinueDirectly
+        ? ""
+        : (hasText ? text : "请接着上次中断处继续完成当前任务，不要重复已完成的工作，并核对最新草稿与状态。");
+      await this.preflightPrompt(effectiveText);
       if (this.promptCancelled) {
         const error = new Error("Task cancelled before the next model request");
         error.code = "aborted"; throw error;
       }
-      await this.session.prompt(text);
+      if (canContinueDirectly) {
+        await this.session.agent.continue();
+      } else {
+        await this.session.prompt(effectiveText);
+      }
       await Promise.all([...this.accountingWrites]);
       if (this.promptCancelled) {
         const error = new Error("本次执行已停止，任务与草稿已保留");
@@ -344,6 +423,7 @@ export class PiHost {
     if (this.activePrompt || this.session.isStreaming) throw new Error("Cannot switch a running task's model");
     const budget = this.registerModel(model);
     await this.session.setModel(this.runtime.getModel("lishi", model.id));
+    if (typeof this.session.setThinkingLevel === "function") this.session.setThinkingLevel(this.thinkingLevel ?? "off");
     this.options.model = model;
     this.budget = budget;
     this.settings.applyOverrides({ compaction: this.compactionSettings() });

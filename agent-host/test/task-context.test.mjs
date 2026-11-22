@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TaskContext, TASK_CONTEXT_TYPE, TASK_CONTEXT_VERSION, taskContextExtensions } from "../src/task-context.mjs";
+import { TaskContext, TASK_CONTEXT_TYPE, TASK_CONTEXT_VERSION, coalesceConsecutiveUsers, taskContextExtensions } from "../src/task-context.mjs";
 
 const snapshot = (overrides = {}) => ({ ok: true, data: {
   goal: "读取原著，纠正本局设定，保留玩家主动改写。", corrections: [], plan: { steps: ["读取", "核对"] },
@@ -172,4 +172,22 @@ test("failed compaction reads cancel before summaries and preserve the previous 
   assert.deepEqual(await task.prepareCompaction({ preparation }), { cancel: true });
   assert.deepEqual(preparation, original);
   assert.throws(() => task.assertRequest(), error => error.code === "task_context_unavailable");
+});
+
+test("coalesceConsecutiveUsers merges adjacent user turns without mutating non-adjacent transcripts", async () => {
+  const alternating = [
+    { role: "user", content: "第一句", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "回复" }], timestamp: 2 },
+    { role: "user", content: "第二句", timestamp: 3 },
+  ];
+  assert.equal(coalesceConsecutiveUsers(alternating), alternating);
+  const consecutive = [
+    { role: "user", content: [{ type: "text", text: "初始任务" }], timestamp: 1 },
+    { role: "user", content: "续跑补充", timestamp: 2 },
+  ];
+  const merged = coalesceConsecutiveUsers(consecutive);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].role, "user");
+  const joined = merged[0].content.map(part => part.text).join("");
+  assert.ok(joined.includes("初始任务") && joined.includes("续跑补充"));
 });

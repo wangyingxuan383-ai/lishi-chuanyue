@@ -3,6 +3,7 @@ import type { Game, LlmConfig } from "./game";
 import { asJson } from "./execution";
 
 export type AgentPolicy = "auto-reversible" | "preview" | "auto";
+export type AgentThinkingMode = "off" | "default" | "deep";
 export interface AgentLimits { modelRequests: number; toolCalls: number; activeMs: number }
 export type AgentProtocol = "chat-completions" | "openai-responses" | "anthropic" | "gemini";
 export interface AgentSkill { id: string; name: string; description: string; version: string; content: string; files?: Record<string, string>; source?: string; hash?: string; capabilities?: string[]; compatibility?: string | string[] | { javascript?: boolean; unsupportedScripts?: string[]; message?: string } }
@@ -38,12 +39,14 @@ export interface AgentPreferences {
   modelUrl?: string;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
+  thinkingMode?: AgentThinkingMode;
 }
 export interface AgentSession { id: string; worldId: string; lineId: string; title: string; createdAt: string; updatedAt: string }
 export interface AgentSessionPage { sessions: AgentSession[]; nextOffset?: number | null }
 export interface AgentMessage extends AgentProjectionMessage {}
 export interface AgentBudget {
   modelRequests: number; toolCalls: number; activeMs: number; usageKnown?: boolean;
+  runningRequests?: number; unknownRequests?: number; unreportedUsageRequests?: number;
   usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number };
   priceKnown?: boolean; estimatedCost?: number | null; currency?: string | null;
 }
@@ -59,6 +62,7 @@ export interface AgentTask {
   model?: LlmConfig; inputTokens?: number; limits: AgentLimits; budget?: AgentBudget;
   inputBudget?: AgentInputBudget;
   summary?: string; error?: string; preview?: Json; changes?: Json; result?: Json;
+  drafts?: Json[]; draftCount?: number;
   execution?: { attemptId: string; phase: string; ownerStatus: string; hostActive?: boolean; formalStatus?: string; detailPhase?: string; lastHeartbeatAt?: number | null; progress?: { coverage?: number }; notice?: { decision?: string; reason?: string }; stopReceipt?: { accepted: boolean; settled: boolean } };
   phase?: string; plan?: AgentPlanItem[]; question?: AgentQuestion | null; questions?: AgentQuestion[];
   inputs?: AgentInput[]; context?: Json; subtasks?: Json[]; skillDrafts?: AgentSkillDraft[]; readOnly?: boolean;
@@ -76,8 +80,11 @@ export type AgentSnapshot = AgentExecutionSnapshot<AgentTask>;
 export interface AgentToolStep extends AgentProjectionStep {}
 
 /** Select a saved native service. The host resolves its credentials and endpoint grant. */
-export function agentModelReference(model: LlmConfig, inputTokens = model.contextTokens): Json {
+export function agentModelReference(model: LlmConfig, inputTokens = model.contextTokens, thinkingMode?: AgentThinkingMode): Json {
+  const resolvedThinking = thinkingMode ?? (model as { thinkingMode?: AgentThinkingMode }).thinkingMode;
   return asJson({ slot: model.slot, model: model.model, protocol: model.protocol,
+    ...(model.auxModel?.trim() ? { auxModel: model.auxModel.trim() } : {}),
+    ...(resolvedThinking ? { thinkingMode: resolvedThinking } : {}),
     ...(inputTokens !== undefined ? { inputTokens, contextTokens: inputTokens } : {}),
     ...(model.contextWindowTokens !== undefined ? { contextWindowTokens: model.contextWindowTokens } : {}),
     ...((model.maxOutputTokens ?? model.maxTokens) !== undefined ? { maxOutputTokens: model.maxOutputTokens ?? model.maxTokens } : {}),
@@ -208,7 +215,7 @@ export function agentInputBudget(settings: Pick<AgentPreferences, "inputTokens" 
   const effectiveTokens = contextWindowTokens === undefined ? requestedTokens : Math.max(0, Math.min(requestedTokens, contextWindowTokens - outputReserveTokens));
   return { requestedTokens, effectiveTokens, outputReserveTokens, contextWindowTokens, estimated: true, calibrated: false, legacy: false };
 }
-const DEFAULT_PREFERENCES: AgentPreferences = { policy: "auto-reversible", skills: [], customSkills: [], network: { mode: "auto" }, limits: DEFAULT_AGENT_LIMITS, limitsVersion: 2, inputTokens: DEFAULT_AGENT_INPUT_TOKENS, inputBudgetVersion: 2 };
+const DEFAULT_PREFERENCES: AgentPreferences = { policy: "auto-reversible", thinkingMode: "off", skills: [], customSkills: [], network: { mode: "auto" }, limits: DEFAULT_AGENT_LIMITS, limitsVersion: 2, inputTokens: DEFAULT_AGENT_INPUT_TOKENS, inputBudgetVersion: 2 };
 
 /** These settings contain only resource locators. Credentials stay in secret slots. */
 export async function getAgentPreferences(game: Game): Promise<AgentPreferences> {
@@ -265,10 +272,10 @@ export class AgentClient {
   fork(sessionId: string, messageId: string, title?: string): Promise<AgentSession & { selectedUserText?: string | null }> { return this.call({ op: "fork", sessionId, messageId, title }); }
   async start(input: AgentStart): Promise<{ taskId: string; runId: string }> {
     const inputTokens = input.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS;
-    return this.call({ op: "start", ...input, inputTokens, model: agentModelReference(input.model, inputTokens) });
+    return this.call({ op: "start", ...input, inputTokens, model: agentModelReference(input.model, inputTokens, input.thinkingMode) });
   }
   async enqueue(taskId: string, text: string, delivery: "steer" | "queued", request?: AgentStart): Promise<{ id?: string; status?: string; delivery?: "steer" | "queued" }> {
-    const prepared = request ? { ...request, inputTokens: request.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, model: agentModelReference(request.model, request.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS) } : undefined;
+    const prepared = request ? { ...request, inputTokens: request.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, model: agentModelReference(request.model, request.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, request.thinkingMode) } : undefined;
     return this.call({ op: "enqueue_input", id: crypto.randomUUID(), taskId, text, delivery, ...(prepared ? { request: prepared, sessionId: prepared.sessionId } : {}) });
   }
   answer(taskId: string, questionId: string, answers: Record<string, string>, cancelled = false): Promise<unknown> { return this.call({ op: "answer_question", id: crypto.randomUUID(), taskId, questionId, answers, cancelled }); }
@@ -293,6 +300,10 @@ export class AgentClient {
 
   apply(taskId: string): Promise<AgentChangeResult> { return this.call({ op: "apply", taskId }); }
   undo(taskId: string): Promise<AgentChangeResult> { return this.call({ op: "undo", taskId }); }
+  async discardDrafts(taskId: string): Promise<{ discarded: boolean; removedChanges: number; task: AgentTask }> {
+    const res = await this.call<{ discarded: boolean; removedChanges: number; task: AgentTask }>({ op: "discard_drafts", taskId });
+    return { ...res, task: taskModel(res.task) };
+  }
   async continue(taskId: string, text?: string, limits?: AgentLimits, inputTokens?: number, taskModel?: LlmConfig, modelUrl?: string, recheck = false): Promise<{ taskId: string; runId: string }> {
     return this.call({ op: "continue", taskId, text, limits, recheck, ...(inputTokens !== undefined ? { inputTokens } : {}), ...(taskModel ? { model: agentModelReference(taskModel, inputTokens) } : {}), ...(modelUrl ? { modelUrl } : {}) });
   }

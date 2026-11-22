@@ -7,30 +7,36 @@ impl Engine {
     pub(super) async fn maintain_requests(self: &Arc<Self>, shared: &Shared, plan: &RunPlan, narrative: &str, upkeep_state: &Value) -> Result<()> {
         let shared = shared.clone();
         let narrative = narrative.to_owned();
-        {
+        // Run 设定集整理 (upkeep) and 章节摘要 (chapter) concurrently (R31-P3):
+        // each step acquires `shared` only briefly outside `.await` and gets a unique step key.
+        let upkeep_fut = async {
             if let Some(messages) = plan.meta["upkeepMessages"].as_array() {
-                let messages = crate::stage_context::organization(&plan, messages, &narrative);
+                let messages = crate::stage_context::organization(plan, messages, &narrative);
                 if let Some(response) = self.optional_complete(&shared, "upkeep", messages).await? {
-                    if let Some(patch) =
-                        crate::organize::upkeep_patch(&response.text, upkeep_state)
-                    {
-                        shared.lock().map_err(|_| Error::Cancelled)?.draft["upkeepPatch"] = patch;
+                    let patch = crate::organize::upkeep_patch(&response.text, upkeep_state);
+                    let mut guard = shared.lock().map_err(|_| Error::Cancelled)?;
+                    if let Some(patch) = patch {
+                        guard.draft["upkeepPatch"] = patch;
                     }
-                    shared.lock().map_err(|_| Error::Cancelled)?.draft["upkeepAttempted"] =
-                        true.into();
+                    guard.draft["upkeepAttempted"] = true.into();
                 }
             }
+            Ok::<(), Error>(())
+        };
+        let chapter_fut = async {
             if let Some(messages) = plan.meta["chapterMessages"].as_array() {
                 if let Some(chapter) = self.summarize_chapter(&shared, plan, messages, &narrative, "chapter").await? {
                     shared.lock().map_err(|_| Error::Cancelled)?.draft["chapter"] = chapter;
                 }
             }
-            // Chapters a later edit made out of date are summarized again from the text now (D183).
-            for (index, refresh) in plan.meta["chapterRefresh"].as_array().into_iter().flatten().enumerate() {
-                let (Some(id), Some(messages)) = (refresh["id"].as_str(), refresh["messages"].as_array()) else { continue };
-                if let Some(chapter) = self.summarize_chapter(&shared, plan, messages, "", &format!("chapter:refresh:{index}")).await? {
-                    shared.lock().map_err(|_| Error::Cancelled)?.draft["chapterRefreshed"][id] = chapter;
-                }
+            Ok::<(), Error>(())
+        };
+        tokio::try_join!(upkeep_fut, chapter_fut)?;
+        // Chapters a later edit made out of date are summarized again from the text now (D183).
+        for (index, refresh) in plan.meta["chapterRefresh"].as_array().into_iter().flatten().enumerate() {
+            let (Some(id), Some(messages)) = (refresh["id"].as_str(), refresh["messages"].as_array()) else { continue };
+            if let Some(chapter) = self.summarize_chapter(&shared, plan, messages, "", &format!("chapter:refresh:{index}")).await? {
+                shared.lock().map_err(|_| Error::Cancelled)?.draft["chapterRefreshed"][id] = chapter;
             }
         }
         Ok(())

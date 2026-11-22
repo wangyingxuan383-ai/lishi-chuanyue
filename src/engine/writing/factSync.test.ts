@@ -328,4 +328,34 @@ describe("改过正文后的下一段请求 (D183)", () => {
     expect(s.plans).toHaveLength(2);
     expect(JSON.stringify((s.plans[1] as { messages: unknown }).messages)).toContain("你握着短剑进了城。");
   });
+
+  it("retryRun preserves completed writing stage when model, auxModel, or depth tier changes (R31-P5)", async () => {
+    const s = await native();
+    await s.play();
+    const { contextTokens: _dropped, ...model } = s.plans[0].model as Record<string, unknown>;
+    const saved = { ...s.plans[0], model };
+    await s.platform.sql.batch([
+      { sql: "INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,'t','t')", params: ["with-prose", s.world.id, String(s.plans[0].lineId), String(s.plans[0].headId), "failed", JSON.stringify(saved), "http"] },
+      { sql: "INSERT INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES('with-prose','model:1','writing:0','done','{}','{}')", params: [] },
+      { sql: "INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,'t','t')", params: ["no-prose", s.world.id, String(s.plans[0].lineId), String(s.plans[0].headId), "failed", JSON.stringify(saved), "http"] },
+    ]);
+    // Switch auxModel & depth tier on the active world.
+    s.game.llm = { ...s.game.llm!, auxModel: "fast-aux-model" };
+    await s.game.repo.updateSettings(s.world.id, { ...(await s.game.repo.getWorld(s.world.id))!.settings, depth: "fast" });
+    const retry = (id: string) => new Promise<void>((done) => { s.game.retryRun(id, (e) => { if (e.type === "failed" || e.type === "done" || e.type === "finished") done(); }); });
+    await retry("with-prose");
+    // Preserved completed writing stage: resumed in place with patched plan_json instead of starting anew!
+    expect(s.resumed).toEqual(["with-prose"]);
+    expect(s.plans).toHaveLength(1);
+    const [patched] = await s.platform.sql.query("SELECT plan_json FROM execution_runs WHERE id='with-prose'");
+    const nextPlan = JSON.parse(String(patched.plan_json)) as { model: { auxModel?: string }; settings: { depth?: string }; meta: { allowModelSwitchReuse?: boolean; depth?: string } };
+    expect(nextPlan.model.auxModel).toBe("fast-aux-model");
+    expect(nextPlan.settings.depth).toBe("fast");
+    expect(nextPlan.meta.depth).toBe("fast");
+    expect(nextPlan.meta.allowModelSwitchReuse).toBe(true);
+    // Without any completed stage, switching model/depth still starts fresh cleanly.
+    await retry("no-prose");
+    expect(s.resumed).toEqual(["with-prose"]);
+    expect(s.plans).toHaveLength(2);
+  });
 });

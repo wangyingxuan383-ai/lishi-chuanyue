@@ -24,7 +24,7 @@ mod android_tls;
 mod file_access_android;
 
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -56,9 +56,9 @@ pub fn run() {
             .map_err(|error| std::io::Error::other(error.message))?;
             let model = Arc::new(execution::NativeModel {
                 credentials: services.1.clone(),
-                streams: services.2.clone(),
             });
             let application = app.handle().clone();
+            let live_app = app.handle().clone();
             let notices = services.0.shared();
             let engine = Arc::new(story_core::runtime::Engine::new(
                 services.0.shared(),
@@ -75,6 +75,13 @@ pub fn run() {
             ));
             // Phase, words written and stops for the progress notification.
             engine.observe(Arc::new(keep_alive::signal));
+            // Live stream push to the WebView so streaming doesn't depend on 350ms SQLite polling (R31-P3).
+            engine.on_live_event(Arc::new(move |run_id, seq, event| {
+                let _ = live_app.emit(
+                    "execution://event",
+                    serde_json::json!({"runId": run_id, "seq": seq, "event": event}),
+                );
+            }));
             let weak = Arc::downgrade(&engine);
             engine
                 .recover_on_start()

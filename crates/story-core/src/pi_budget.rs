@@ -210,6 +210,87 @@ fn safe_usage(usage: &Value) -> Value {
     }
     result
 }
+/// Mirror one Pi model request into the unified `usage` ledger (`purpose = 'agent'`)
+/// so agent calls count in 本局用量, 用量与花费 and 本月预算 across all outcomes (R31-P4).
+fn mirror_usage(db: &Connection, task: &str, id: &str, outcome: &str) -> Result<()> {
+    let has_usage: bool = db
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !has_usage {
+        return Ok(());
+    }
+    let Some((world_id, model_raw, usage_raw, started_at, finished_at)): Option<(
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+    )> = db
+        .query_row(
+            "SELECT t.world_id, r.model_json, r.usage_json, r.started_at, r.finished_at
+             FROM pi_model_requests r
+             JOIN pi_tasks t ON t.id = r.task_id
+             WHERE r.task_id=? AND r.request_id=?",
+            params![task, id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let model_json: Value = serde_json::from_str(&model_raw).unwrap_or_default();
+    let used: Value = usage_raw
+        .as_deref()
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default();
+    let profile_id = model_json["profileId"].as_str();
+    let model_name = model_json["model"]
+        .as_str()
+        .or_else(|| model_json["id"].as_str())
+        .unwrap_or("");
+    let prompt_tokens = used["input"].as_u64().map(|inp| {
+        inp.saturating_add(used["cacheRead"].as_u64().unwrap_or(0))
+            .saturating_add(used["cacheWrite"].as_u64().unwrap_or(0)) as i64
+    });
+    let completion_tokens = used["output"].as_u64().map(|v| v as i64);
+    let estimated = i64::from(prompt_tokens.is_none() || completion_tokens.is_none());
+    let now = chrono::Utc::now().to_rfc3339();
+    let at = finished_at.as_deref().unwrap_or(&now);
+    let total_ms = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .ok()
+        .zip(chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|(s, f)| (f - s).num_milliseconds().max(0));
+    let ledger_id = format!("pi:{task}:{id}");
+    db.execute(
+        "INSERT INTO usage(id,world_id,node_id,purpose,profile_id,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at)
+         VALUES(?1,?2,NULL,'agent',?3,?4,?5,?6,?7,NULL,?8,?9,?10)
+         ON CONFLICT(id) DO UPDATE SET
+           prompt_tokens = COALESCE(excluded.prompt_tokens, usage.prompt_tokens),
+           completion_tokens = COALESCE(excluded.completion_tokens, usage.completion_tokens),
+           estimated = CASE WHEN COALESCE(excluded.prompt_tokens, usage.prompt_tokens) IS NULL OR COALESCE(excluded.completion_tokens, usage.completion_tokens) IS NULL THEN 1 ELSE 0 END,
+           total_ms = COALESCE(excluded.total_ms, usage.total_ms),
+           outcome = CASE WHEN usage.outcome = 'ok' THEN 'ok' ELSE excluded.outcome END",
+        params![
+            ledger_id,
+            world_id,
+            profile_id,
+            model_name,
+            prompt_tokens,
+            completion_tokens,
+            estimated,
+            total_ms,
+            outcome,
+            at
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn finish_model(
     db: &Connection,
     task: &str,
@@ -238,12 +319,44 @@ pub(crate) fn finish_model(
         }
     } else {
         db.execute("UPDATE pi_model_requests SET status=?,usage_json=?,finished_at=? WHERE task_id=? AND request_id=? AND status IN ('running','awaiting_usage')",params![status,usage.to_string(),chrono::Utc::now().to_rfc3339(),task,id])?;
+        let outcome = match status {
+            "success" => "ok",
+            "unknown" => "interrupted",
+            _ => "failed",
+        };
+        mirror_usage(db, task, id, outcome)?;
     }
     read_budget(db, task)
 }
 pub(crate) fn interrupt_models(db: &Connection, task: &str) -> Result<()> {
     transaction(db)?;
-    db.execute("UPDATE pi_model_requests SET status='unknown',usage_json='{}',finished_at=? WHERE task_id=? AND status IN ('running','awaiting_usage')",params![chrono::Utc::now().to_rfc3339(),task])?;
+    let (stop_rev, stop_source): (i64, Option<String>) = db
+        .query_row(
+            "SELECT stop_revision, json_extract(metadata_json, '$.stopReceipt.source') FROM pi_tasks WHERE id=?",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, None));
+    let mut stmt = db.prepare(
+        "SELECT request_id FROM pi_model_requests WHERE task_id=? AND status IN ('running','awaiting_usage')",
+    )?;
+    let pending: Vec<String> = stmt
+        .query_map([task], |r| r.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+    db.execute(
+        "UPDATE pi_model_requests SET status='unknown',usage_json=COALESCE(NULLIF(usage_json,''),'{}'),finished_at=? WHERE task_id=? AND status IN ('running','awaiting_usage')",
+        params![chrono::Utc::now().to_rfc3339(), task],
+    )?;
+    let outcome = if stop_rev > 0 && stop_source.as_deref() != Some("system_timeout") {
+        "cancelled"
+    } else {
+        "interrupted"
+    };
+    for req_id in pending {
+        mirror_usage(db, task, &req_id, outcome)?;
+    }
     Ok(())
 }
 
@@ -465,5 +578,93 @@ mod tests {
         assert_eq!(resumed["activityTimeKnown"], false);
         assert!(resumed["activeMs"].as_u64().unwrap() < 3000);
         tx.commit().unwrap();
+    }
+    #[test]
+    fn mirror_usage_records_agent_requests_across_success_failure_and_interruption() {
+        let mut db = fixture(json!({}));
+        let tx = db.transaction().unwrap();
+        let mut m = model();
+        m["profileId"] = "prof-1".into();
+        reserve_model(&tx, "t", "req-ok", "main", &m).unwrap();
+        finish_model(
+            &tx,
+            "t",
+            "req-ok",
+            &json!({"input":120,"output":45,"cacheRead":30,"cacheWrite":10}),
+            "success",
+        )
+        .unwrap();
+        reserve_model(&tx, "t", "req-fail", "main", &m).unwrap();
+        finish_model(&tx, "t", "req-fail", &json!({"input":80,"output":12}), "failed").unwrap();
+        reserve_model(&tx, "t", "req-int", "main", &m).unwrap();
+        interrupt_models(&tx, "t").unwrap();
+        tx.commit().unwrap();
+
+        let mut stmt = db
+            .prepare(
+                "SELECT id, world_id, purpose, profile_id, model, prompt_tokens, completion_tokens, estimated, outcome
+                 FROM usage ORDER BY id",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, String, Option<String>, String, Option<i64>, Option<i64>, i64, String)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0],
+            (
+                "pi:t:req-fail".into(),
+                "w".into(),
+                "agent".into(),
+                Some("prof-1".into()),
+                "own-model".into(),
+                Some(80),
+                Some(12),
+                0,
+                "failed".into(),
+            )
+        );
+        assert_eq!(
+            rows[1],
+            (
+                "pi:t:req-int".into(),
+                "w".into(),
+                "agent".into(),
+                Some("prof-1".into()),
+                "own-model".into(),
+                None,
+                None,
+                1,
+                "interrupted".into(),
+            )
+        );
+        assert_eq!(
+            rows[2],
+            (
+                "pi:t:req-ok".into(),
+                "w".into(),
+                "agent".into(),
+                Some("prof-1".into()),
+                "own-model".into(),
+                Some(160), // 120 input + 30 cacheRead + 10 cacheWrite
+                Some(45),
+                0,
+                "ok".into(),
+            )
+        );
     }
 }

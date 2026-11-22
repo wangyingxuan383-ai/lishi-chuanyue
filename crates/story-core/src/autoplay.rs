@@ -127,7 +127,9 @@ impl Engine {
                 let previous = self.store.plan(&child_id)?;
                 let changed = previous.meta["autoplayTextHash"].as_str() != Some(&live.text_hash);
                 if changed {
-                    let mut fresh = self.autoplay_plan(&plan, live, index)?;
+                    let existing_note = previous.action["directorNote"].as_str().map(str::to_owned);
+                    let pending_note = take_pending_director_note(&self.store, &plan.id)?.or(existing_note);
+                    let mut fresh = self.autoplay_plan(&plan, live, index, pending_note)?;
                     if let Some(base) = previous.meta.get("stepBudgetBase") {
                         fresh.meta["stepBudgetBase"] = base.clone();
                     }
@@ -144,7 +146,8 @@ impl Engine {
                 self.store.resume(&child_id)?;
                 (self.store.plan(&child_id)?, if changed { json!({}) } else { saved.draft }, saved.budget)
             } else {
-                let mut child = self.autoplay_plan(&plan, live, index)?;
+                let pending_note = take_pending_director_note(&self.store, &plan.id)?;
+                let mut child = self.autoplay_plan(&plan, live, index, pending_note)?;
                 if plan.meta["autoplayBudgetVersion"]=="per-passage-1"{child.meta["stepBudgetBase"]=serde_json::to_value(shared.lock().map_err(|_|Error::Cancelled)?.budget())?;}
                 self.store.register(&child)?;
                 (child, json!({}), RunBudget::default())
@@ -274,14 +277,18 @@ impl Engine {
         })
     }
 
-    fn autoplay_plan(&self, parent: &RunPlan, live: Live, index: u64) -> Result<RunPlan> {
+    fn autoplay_plan(&self, parent: &RunPlan, live: Live, index: u64, director_note: Option<String>) -> Result<RunPlan> {
         let mut plan = parent.clone();
         plan.id = format!("{}:step:{index}", parent.id);
         plan.kind = "turn".into();
         plan.base_id = Some(parent.head_id.clone());
         plan.state = live.state;
         plan.settings = live.settings;
-        plan.action = json!({"mode":"continue","text":""});
+        let director_note = director_note.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+        plan.action = match &director_note {
+            Some(note) => json!({"mode":"continue","text":"","directorNote":note}),
+            None => json!({"mode":"continue","text":""}),
+        };
         plan.original.clear();
         plan.carried_edits.clear();
         plan.trailing_ids.clear();
@@ -327,7 +334,7 @@ impl Engine {
             }
         }
         plan.options["clock"] = clock;
-        prepare_messages(&self.store, &mut plan, &live.history, &live.chapters)?;
+        prepare_messages(&self.store, &mut plan, &live.history, &live.chapters, director_note.as_deref())?;
         prepare_organization(&mut plan, &live.history, &live.chapters);
         Ok(plan)
     }
@@ -375,6 +382,7 @@ impl Engine {
             .map(|m| m.remove("settingsGuard"));
         Store::guard(&tx, &route)?;
         tx.execute("UPDATE execution_runs SET status='committed',result_json=?,updated_at=? WHERE id=? AND status='running'",params![result.to_string(),Utc::now().to_rfc3339(),c.plan.id])?;
+        let _ = tx.execute("DELETE FROM settings WHERE key=?", [format!("autoplayNote:{}", c.plan.id)]);
         tx.commit()?;
         drop(db);
         self.store.event(
@@ -434,11 +442,232 @@ fn script_finished(state: &Value) -> Option<bool> {
     Some(!beats.iter().any(|b| b["status"] == "todo"))
 }
 
-fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapters: &[Value]) -> Result<()> {
+fn take_pending_director_note(store: &Store, run_id: &str) -> Result<Option<String>> {
+    let key = format!("autoplayNote:{run_id}");
+    let mut db = store.lock()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let raw: Option<String> = tx
+        .query_row("SELECT value FROM settings WHERE key=?", [&key], |r| r.get(0))
+        .optional()?;
+    let note = raw
+        .as_deref()
+        .and_then(|v| serde_json::from_str::<String>(v).ok().or_else(|| Some(v.to_owned())))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    if raw.is_some() {
+        tx.execute("DELETE FROM settings WHERE key=?", [&key])?;
+    }
+    tx.commit()?;
+    Ok(note)
+}
+
+fn note_within_scope(kind: &str, scope: &Value, refs: &[i64], through: Option<i64>, same_world: bool) -> bool {
+    let Some(limit) = through else { return true; };
+    if refs.iter().any(|&s| s < 0 || s > limit) {
+        return false;
+    }
+    if matches!(kind, "plot" | "timeline") {
+        return scope["to"].as_i64().is_some_and(|to| to <= limit);
+    }
+    (!refs.is_empty() || (kind == "question" && same_world)) && refs.len() < 400
+}
+
+fn note_named(scope: &Value, recent: &str) -> bool {
+    if let Some(sub) = scope["subject"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if recent.contains(sub) {
+            return true;
+        }
+    }
+    scope["aliases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|name| recent.contains(name))
+}
+
+fn note_asked(scope: &Value, title: &str, recent: &str) -> bool {
+    let q = scope["question"].as_str().unwrap_or(title);
+    let pairs = crate::recall::pairs_of(q);
+    pairs.iter().filter(|p| recent.contains(p.as_str())).count() >= 2
+}
+
+fn clip_note_content(content: &str, cap: usize) -> String {
+    if content.chars().count() <= cap {
+        return content.to_owned();
+    }
+    content.chars().take(cap).collect()
+}
+
+/// Refresh active story & book canon notes per autoplay step instead of keeping
+/// step-0's frozen snapshot (R31-P4).
+fn dynamic_canon_notes(store: &Store, plan: &RunPlan, history: &[Value], director_note: &str) -> Result<Vec<Value>> {
+    let mut recent = history
+        .iter()
+        .rev()
+        .filter(|n| n["kind"] != "edit")
+        .filter_map(|n| n["narrative"].as_str())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !director_note.is_empty() {
+        recent.push('\n');
+        recent.push_str(director_note);
+    }
+    let db = store.lock()?;
+    let mut ranked: Vec<(u8, Value)> = Vec::new();
+    // 1. This story's own active notes (story_notes), skipping off-route notes.
+    let mut route_ids: Option<std::collections::HashSet<String>> = None;
+    let mut stmt = db.prepare(
+        "SELECT kind, title, scope_json, content, progress_json, origin_world_id, origin_title
+         FROM story_notes
+         WHERE world_id=? AND active=1 AND status='done' AND TRIM(content)<>''
+         ORDER BY updated_at DESC",
+    )?;
+    let story_rows = stmt
+        .query_map([&plan.world_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    for (kind, title, scope_raw, content, progress_raw, origin_world_id, origin_title) in story_rows {
+        let scope: Value = serde_json::from_str(&scope_raw).unwrap_or_default();
+        let progress: Value = serde_json::from_str(&progress_raw).unwrap_or_default();
+        let route_anchor = scope["toNode"].as_str().or_else(|| progress["routeNode"].as_str());
+        if let Some(anchor) = route_anchor {
+            let ids = route_ids.get_or_insert_with(|| {
+                let mut set = std::collections::HashSet::new();
+                if let Ok(mut q) = db.prepare(
+                    "WITH RECURSIVE route(id) AS (
+                        SELECT id FROM nodes WHERE world_id=?1 AND id=?2
+                        UNION ALL
+                        SELECT n.parent_id FROM nodes n JOIN route r ON n.id=r.id
+                        WHERE n.world_id=?1 AND n.parent_id IS NOT NULL
+                    ) SELECT id FROM route",
+                ) {
+                    if let Ok(rows) = q.query_map(params![&plan.world_id, &plan.head_id], |r| r.get::<_, String>(0)) {
+                        for id in rows.flatten() {
+                            set.insert(id);
+                        }
+                    }
+                }
+                set
+            });
+            if !ids.contains(anchor) {
+                continue;
+            }
+        }
+        let carried = origin_world_id.is_some();
+        let brief_title = if let Some(origin) = origin_title.as_deref().filter(|s| !s.is_empty()) {
+            format!("{title}（前作《{origin}》）")
+        } else {
+            title.clone()
+        };
+        let prio = if kind == "plot" && !carried {
+            Some(0)
+        } else if matches!(kind.as_str(), "person" | "setting") && note_named(&scope, &recent) {
+            Some(if carried { 4 } else { 2 })
+        } else if kind == "question" && note_asked(&scope, &title, &recent) {
+            Some(if carried { 4 } else { 2 })
+        } else if carried && matches!(kind.as_str(), "plot" | "timeline") {
+            Some(5)
+        } else {
+            None
+        };
+        if let Some(p) = prio {
+            ranked.push((p, json!({
+                "title": brief_title,
+                "kind": kind,
+                "content": clip_note_content(&content, 2400),
+                "source": "story",
+            })));
+        }
+    }
+    // 2. Bound book's canon_notes within allowed reading scope.
+    if let Some(book_id) = plan.state["source"]["bookId"].as_str().filter(|s| !s.is_empty()) {
+        let position = plan.state["source"]["position"].as_i64().unwrap_or(0);
+        let through = plan.state["source"]["through"].as_i64();
+        let mut stmt = db.prepare(
+            "SELECT kind, title, scope_json, content, refs_json, world_id
+             FROM canon_notes
+             WHERE book_id=?1 AND (world_id IS NULL OR world_id=?2)
+               AND active=1 AND status='done' AND TRIM(content)<>''
+             ORDER BY updated_at DESC",
+        )?;
+        let book_rows = stmt
+            .query_map(params![book_id, &plan.world_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut covering = Vec::new();
+        let mut before: Vec<(i64, Value)> = Vec::new();
+        for (kind, title, scope_raw, content, refs_raw, note_world_id) in book_rows {
+            let scope: Value = serde_json::from_str(&scope_raw).unwrap_or_default();
+            let refs: Vec<i64> = serde_json::from_str(&refs_raw).unwrap_or_default();
+            let same_world = note_world_id.as_deref() == Some(plan.world_id.as_str());
+            if !note_within_scope(&kind, &scope, &refs, through, same_world) {
+                continue;
+            }
+            let item = json!({
+                "title": title,
+                "kind": kind,
+                "content": clip_note_content(&content, 2400),
+                "source": "book",
+            });
+            if matches!(kind.as_str(), "plot" | "timeline") {
+                let from = scope["from"].as_i64().unwrap_or(0);
+                let to = scope["to"].as_i64().unwrap_or(i64::MAX);
+                if from <= position && position <= to {
+                    covering.push(item);
+                } else if to < position {
+                    before.push((to, item));
+                }
+            } else if (matches!(kind.as_str(), "person" | "setting") && note_named(&scope, &recent))
+                || (kind == "question" && note_asked(&scope, &title, &recent))
+            {
+                ranked.push((3, item));
+            }
+        }
+        if !covering.is_empty() {
+            for item in covering {
+                ranked.push((1, item));
+            }
+        } else if let Some((_, item)) = before.into_iter().max_by_key(|(to, _)| *to) {
+            ranked.push((1, item));
+        }
+    }
+    ranked.sort_by_key(|(p, _)| *p);
+    Ok(ranked.into_iter().map(|(_, item)| item).collect())
+}
+
+fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapters: &[Value], director_note: Option<&str>) -> Result<()> {
     let cap=plan.meta["budgetChars"].as_u64().unwrap_or(24000);
     let mut reference=Value::Null;
+    let note_str = director_note.unwrap_or("").trim();
     if plan.state["source"].is_object() {
-        let query=history.iter().rev().filter_map(|n|n["narrative"].as_str()).take(3).collect::<Vec<_>>().join("\n");
+        let mut query=history.iter().rev().filter_map(|n|n["narrative"].as_str()).take(3).collect::<Vec<_>>().join("\n");
+        if !note_str.is_empty() {
+            query.push('\n');
+            query.push_str(note_str);
+        }
         let original=crate::runtime_sources::read(store,plan,"search_original",&json!({"query":query}))?;
         reference=json!({"bookId":original["bookId"],"title":original["title"],"binding":plan.state["source"],"status":original["status"],"passages":original["excerpts"].as_array().cloned().unwrap_or_default()});
     }
@@ -446,13 +675,23 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     let mut template=if saved["template"].is_object(){saved["template"].clone()}else{
         json!({"rules":plan.meta["autoplayTurnSystem"].as_str().or_else(||plan.messages.first().and_then(|m|m["content"].as_str())).unwrap_or(""),"era":"","spec":"","notes":"","action":""})
     };
-    template["action"]="".into();
+    template["action"] = if note_str.is_empty() {
+        "".into()
+    } else {
+        format!("【幕后要求，照做但不要在正文中提及】{note_str}").into()
+    };
     template["notes"]=history.last().and_then(|n|n["meta"]["notes"].as_array()).map(|a|a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")).unwrap_or_default().into();
     let era=json!({"currency":plan.options["currency"],"clock":plan.options["clock"]});
     // 相关旧事 numbers passages from the opening; history holds the last 200.
     let total: i64 = store.lock()?.query_row("WITH RECURSIVE path AS (SELECT id,parent_id,kind FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.kind FROM nodes n JOIN path p ON n.id=p.parent_id) SELECT COUNT(*) FROM path WHERE kind<>'edit'", [&plan.head_id], |r| r.get(0))?;
     let offset = (total as usize).saturating_sub(history.iter().filter(|n| n["kind"] != "edit").count());
-    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","pins":saved["pins"],"chapters":chapters,"canonNotes":saved["canonNotes"]});
+    let refreshed_notes = dynamic_canon_notes(store, plan, history, note_str).unwrap_or_default();
+    let canon_notes = if !refreshed_notes.is_empty() {
+        Value::Array(refreshed_notes)
+    } else {
+        saved["canonNotes"].clone()
+    };
+    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","directorNote":note_str,"pins":saved["pins"],"chapters":chapters,"canonNotes":canon_notes});
     let mut input=input;
     let fact_ids = plan.state["facts"].as_array().into_iter().flatten()
         .filter(|fact| fact["origin"] == "ai").filter_map(|fact| fact["nodeId"].as_str()).collect::<Vec<_>>();
@@ -564,5 +803,61 @@ mod tests {
         let side = chapters_on_route(&db, "w", "side").unwrap();
         assert_eq!(side.len(), 1);
         assert_eq!(side[0]["lastNodeId"], "side");
+    }
+
+    #[test]
+    fn take_pending_director_note_reads_once_and_deletes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&mut conn, None).unwrap();
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES('autoplayNote:run-1', '\"下一段让掌柜先开口\"')",
+            [],
+        )
+        .unwrap();
+        let store = Store(Arc::new(Mutex::new(conn)));
+        assert_eq!(
+            take_pending_director_note(&store, "run-1").unwrap(),
+            Some("下一段让掌柜先开口".into())
+        );
+        assert_eq!(take_pending_director_note(&store, "run-1").unwrap(), None);
+    }
+
+    #[test]
+    fn dynamic_canon_notes_refreshes_on_route_and_in_scope_notes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&mut conn, None).unwrap();
+        conn.execute_batch(
+            "INSERT INTO worlds(id,title,era_id,created_at,updated_at,played_at) VALUES('w','测试','free','t','t','t');
+             INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,meta_json,created_at) VALUES
+               ('n1','w',NULL,0,'opening','长安城初雪。','{}','t'),
+               ('n2','w','n1',1,'turn','李白走入酒肆。','{}','t'),
+               ('off','w','n1',2,'turn','另一条支线。','{}','t');
+             INSERT INTO source_books(id,title,format,created_at,json) VALUES('b1','原著','txt','t','{}');
+             INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,progress_json,active,status,created_at,updated_at) VALUES
+               ('sn-plot','w','plot','本局主线','{\"toNode\":\"n2\"}','长安寻剑进行中','{}',1,'done','t','2026-01-02'),
+               ('sn-off','w','plot','支线笔记','{\"toNode\":\"off\"}','不应出现在当前路线','{}',1,'done','t','2026-01-03');
+             INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,active,status,created_at,updated_at) VALUES
+               ('cn-plot','b1',NULL,'plot','前五回','{\"from\":1,\"to\":5}','酒肆相逢','[1,3]',1,'done','t','2026-01-02'),
+               ('cn-person','b1',NULL,'person','李白札记','{\"subject\":\"李白\",\"aliases\":[\"太白\"]}','好酒善剑','[2]',1,'done','t','2026-01-02'),
+               ('cn-spoiler','b1',NULL,'person','后期剧透','{\"subject\":\"李白\"}','后期秘密','[12]',1,'done','t','2026-01-02');",
+        )
+        .unwrap();
+        let store = Store(Arc::new(Mutex::new(conn)));
+        let plan: RunPlan = serde_json::from_value(json!({
+            "id": "r1", "worldId": "w", "lineId": "l1", "headId": "n2", "baseId": "n2", "kind": "turn",
+            "model": {"slot":"s","url":"http://127.0.0.1","model":"m","auxModel":null,"includeUsage":true,"maxTokens":null,"extra":{}},
+            "messages": [], "extractMessages": [],
+            "state": {"source": {"bookId": "b1", "position": 3, "through": 5}},
+            "settings": {}, "options": {}, "action": {}, "meta": {}
+        }))
+        .unwrap();
+        let history = vec![json!({"kind": "turn", "narrative": "李白举杯独饮。"})];
+        let notes = dynamic_canon_notes(&store, &plan, &history, "").unwrap();
+        let titles: Vec<&str> = notes.iter().filter_map(|v| v["title"].as_str()).collect();
+        assert!(titles.contains(&"本局主线"), "got {titles:?}");
+        assert!(titles.contains(&"前五回"), "got {titles:?}");
+        assert!(titles.contains(&"李白札记"), "got {titles:?}");
+        assert!(!titles.contains(&"支线笔记"), "off-route note leaked: {titles:?}");
+        assert!(!titles.contains(&"后期剧透"), "spoiler note leaked: {titles:?}");
     }
 }

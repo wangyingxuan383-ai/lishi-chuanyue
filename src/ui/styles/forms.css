@@ -49,7 +49,40 @@ button.small { min-height: 32px; padding: 2px 10px; font-size: 13px; align-self:
 /* 清空重填 above the setup fields (R30): small, out of the way, right-aligned. */
 .form-tools { justify-content: flex-end; margin: -4px 0 -8px; }
 
-/* 资料范围 (D184): the row in each feature and the chosen notes on its page. */
+/* 资料范围 (D184): the row in each feature, novel-app chapter directory, and chosen notes. */
 button.settings-entry.scope-row { width: 100%; min-height: 52px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg, 8px); }
 .scope-notes { border: 0; padding: 0; margin: 0; min-width: 0; max-height: 32dvh; overflow-y: auto; }
 .scope-notes legend { padding: 0 0 4px; font-size: 13px; }
+.scope-chapter-picker { min-width: 0; }
+.scope-toc-bar input { width: 100%; }
+.scope-toc-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.scope-pick-mode { flex: none; }
+.scope-pick-mode button { min-height: 34px; padding: 4px 10px; font-size: 13px; }
+.scope-toc {
+  display: grid; gap: 4px; max-height: 34dvh; overflow-y: auto; padding: 6px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg, 8px); background: var(--surface);
+  overscroll-behavior: contain;
+}
+.scope-toc-item {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 44px; padding: 8px 10px; border: 1px solid transparent; border-radius: var(--radius, 6px);
+  background: transparent; text-align: left; color: var(--fg);
+}
+.scope-toc-item:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.scope-toc-item.selected { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.scope-toc-item.edge { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.scope-toc-main { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.scope-toc-main b { font-family: var(--serif); font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-toc-main small { font-size: 12px; color: var(--muted); }
+.scope-toc-tags { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.scope-badge { font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.scope-badge.current { border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
+.scope-badge.picked { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.scope-toc-empty { margin: 8px 6px; font-size: 13px; text-align: center; }
+.scope-toc-more { width: 100%; min-height: 38px; font-size: 13px; color: var(--accent); }
+.range-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.range-field { display: grid; gap: 3px; min-width: 0; }
+.range-field label { display: flex; align-items: center; gap: 5px; font-size: 13px; white-space: nowrap; }
+.range-field input { flex: 1; min-width: 44px; width: 0; padding: 6px 8px; text-align: center; font-variant-numeric: tabular-nums; }
+.range-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.range-swap-hint { margin: 0; }

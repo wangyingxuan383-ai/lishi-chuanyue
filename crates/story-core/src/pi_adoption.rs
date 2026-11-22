@@ -29,8 +29,25 @@ pub(crate) fn sources(db:&Connection,task:&Value,batch:&str,report:Option<&Value
     Ok(())
 }
 pub(crate) fn check_no_conflicts(work:&Value)->Result<()> {
-    if work["edits"].as_array().into_iter().flatten().any(|e|e["rebaseConflicts"].as_array().is_some_and(|v|!v.is_empty())) {
-        return Err(Error::Tool{code:"draft_rebase_conflict",field:"edits",message:"草稿包含待重新核对的冲突字段，尚不能完成".into(),next:json!({"tool":"check_draft","args":{}})});
+    let has_edit_conflict = work["edits"].as_array().into_iter().flatten().any(|e| {
+        e["needsRelocation"] == true
+            || e["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+    });
+    if has_edit_conflict {
+        return Err(Error::Tool{code:"draft_rebase_conflict",field:"edits",message:"草稿包含待重新定位或核对的冲突字段，尚不能完成".into(),next:json!({"tool":"check_draft","args":{}})});
+    }
+    let has_turn_conflict = work["turns"].as_array().into_iter().flatten().any(|t| {
+        t["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+    });
+    if has_turn_conflict {
+        return Err(Error::Tool{code:"draft_rebase_conflict",field:"turns",message:"主线已有新段落，暂存剧情需重新核对或撤回后才能完成".into(),next:json!({"tool":"check_draft","args":{}})});
+    }
+    let has_route_conflict = work["routes"].as_array().into_iter().flatten().any(|r| {
+        r["needsRelocation"] == true
+            || r["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+    });
+    if has_route_conflict {
+        return Err(Error::Tool{code:"draft_rebase_conflict",field:"routes",message:"暂存路线的起点已变化，需重新定位或撤回后才能完成".into(),next:json!({"tool":"check_draft","args":{}})});
     }
     Ok(())
 }

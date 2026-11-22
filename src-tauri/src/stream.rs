@@ -401,6 +401,7 @@ pub struct NetworkConfig {
 }
 
 static NETWORK: std::sync::RwLock<Option<NetworkConfig>> = std::sync::RwLock::new(None);
+static CACHED_CLIENT: std::sync::RwLock<Option<(NetworkConfig, Client)>> = std::sync::RwLock::new(None);
 
 /// Applies the player's network choice to every later request.
 pub fn set_network(config: NetworkConfig) -> Result<()> {
@@ -415,6 +416,8 @@ pub fn set_network(config: NetworkConfig) -> Result<()> {
         reqwest::Proxy::all(url).map_err(|_| proxy_error())?;
     }
     *NETWORK.write().unwrap_or_else(|e| e.into_inner()) = Some(config);
+    *CACHED_CLIENT.write().unwrap_or_else(|e| e.into_inner()) = None;
+    story_core::pi_http::bump_network_epoch();
     Ok(())
 }
 
@@ -425,9 +428,26 @@ fn proxy_error() -> PlatformError {
     )
 }
 
+/// Pooled HTTP client shared across requests with the same network settings (R31-P3).
 /// Also used by the update download (`updates`), so it follows the same proxy choice.
 pub(crate) fn client() -> std::result::Result<Client, StreamEvent> {
-    client_builder()?.build().map_err(|_|StreamEvent::error("network"))
+    #[cfg(target_os = "android")]
+    if !crate::android_tls::is_ready() {
+        return Err(StreamEvent::Error { kind: "network".into(), status: None, message: Some("加密连接组件还没准备好，请稍后再试".into()) });
+    }
+    let network = NETWORK
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    if let Some((cached_cfg, cached_client)) = CACHED_CLIENT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *cached_cfg == network {
+            return Ok(cached_client.clone());
+        }
+    }
+    let built = client_builder()?.build().map_err(|_| StreamEvent::error("network"))?;
+    *CACHED_CLIENT.write().unwrap_or_else(|e| e.into_inner()) = Some((network, built.clone()));
+    Ok(built)
 }
 pub(crate) fn client_builder()->std::result::Result<reqwest::ClientBuilder,StreamEvent> {
     #[cfg(target_os = "android")]

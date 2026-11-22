@@ -378,6 +378,8 @@ fn initialize(
     }
     let sql = SqlStore::open(data.clone()).map_err(|_| "agent_database_unavailable")?;
     let store = sql.shared();
+    story_core::execution_lease::init_process_role("android-agent");
+    let _ = story_core::execution_lease::expire_dead_role_leases_store(&store, "android-agent");
     let java = Arc::new(java);
     let handle = loop {
         let value = (uuid::Uuid::new_v4().as_u128() & i64::MAX as u128) as jlong;

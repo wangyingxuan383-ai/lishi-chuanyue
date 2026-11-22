@@ -160,6 +160,8 @@ export interface Platform {
     list(): Promise<{ id: string; worldId: string; status: string }[]>;
     stop(id: string, executionId?: string): Promise<RunStopReceipt>;
     resume(id: string): Promise<void>;
+    /** Optional native live-event subscription to stream text without per-token polling (R31-P3). */
+    subscribe?(id: string, onEvent: (payload: { seq?: number; event: Json }) => void): () => void;
   };
   /**
    * In-app update (R14). Android downloads, verifies and installs; Windows has

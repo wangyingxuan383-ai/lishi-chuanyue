@@ -1,7 +1,8 @@
 import { importMcpConfiguration } from "../../engine/agent-mcp";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AgentClient, agentConversationTurns, agentSessionProjection, mergeAgentSessionPage, mergeAgentDelta, agentTaskStatus, agentTaskProjection, agentSnapshotNeedsRead, agentSnapshotEvents, agentInputBudget, BUILTIN_AGENT_SKILLS, DEFAULT_AGENT_INPUT_TOKENS, DEFAULT_AGENT_OUTPUT_TOKENS, DEFAULT_AGENT_LIMITS, getAgentPreferences, saveAgentPreferences, type AgentInput, type AgentQuestion, type AgentSkill, type AgentSkillDraft, type AgentProtocol, type AgentLimits, type AgentMessage, type AgentNetwork, type AgentPolicy, type AgentPreferences, type AgentSession, type AgentSessionDetail, type AgentToolStep, type AgentSnapshot, type AgentTask } from "../../engine/agent";
+import { AgentClient, agentConversationTurns, agentSessionProjection, mergeAgentSessionPage, mergeAgentDelta, agentTaskStatus, agentTaskProjection, agentSnapshotNeedsRead, agentSnapshotEvents, agentInputBudget, BUILTIN_AGENT_SKILLS, DEFAULT_AGENT_INPUT_TOKENS, DEFAULT_AGENT_OUTPUT_TOKENS, DEFAULT_AGENT_LIMITS, getAgentPreferences, saveAgentPreferences, type AgentBudget, type AgentInput, type AgentQuestion, type AgentSkill, type AgentSkillDraft, type AgentProtocol, type AgentThinkingMode, type AgentLimits, type AgentMessage, type AgentNetwork, type AgentPolicy, type AgentPreferences, type AgentSession, type AgentSessionDetail, type AgentToolStep, type AgentSnapshot, type AgentTask } from "../../engine/agent";
 import { chatCompletionsUrl, chatModels, explainFailure, fetchModels, listProfiles, PRESETS, type Profile } from "../../engine/llm/providers";
+import { costText, tokenText, type Prices } from "../../engine/usage";
 import type { LlmConfig } from "../../engine/game";
 import type { Json } from "../../platform";
 import { useApp, type Route } from "../app/context";
@@ -9,6 +10,9 @@ import { Icon } from "../components/Icon";
 import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
 import { Switch } from "../components/Switch";
+import { usePrices } from "../components/TurnUsage";
+import { DiffView } from "../components/WritingAssist";
+import { diffStats, diffText } from "../components/textDiff";
 import "./agent.css";
 import { AgentToolPackages } from "./AgentToolPackages";
 import { AgentSources } from "./AgentSources";
@@ -22,12 +26,17 @@ const POLICIES: [AgentPolicy, string, string][] = [
   ["preview", "预览后采用", "准备好整批修改后，由你采用。"],
   ["auto", "自动执行、不可撤回", "修改直接生效，不另留本次任务的撤销副本。"],
 ];
+const THINKING_MODES: [AgentThinkingMode, string, string][] = [
+  ["off", "省时", "关闭隐式思考，响应更快、花费更低（推荐日常使用）。"],
+  ["default", "默认", "跟随模型默认思考设置，不强制开启或关闭。"],
+  ["deep", "深思", "开启深度思考，适合复杂推理或大跨度原著核对。"],
+];
 const STATUSES: Record<string, string> = { running: "执行中", committing: "正在保存", committed: "修改已采用", completed: "执行已结束", answered: "已答复", partial: "部分完成", blocked: "仍有问题受阻", previewed: "预览已准备好", paused: "进度已保存", cancelled: "已停止", interrupted: "执行中断", failed: "未完成", stale: "故事已有变化", undone: "已撤回", archived: "导入的任务记录", waiting_user: "等待你补充", waiting_approval: "等待授权", compacting: "正在整理记忆", queued: "已排队" };
 const inFlight = (status: string) => ["running", "committing", "compacting", "stopping"].includes(status);
 const canCompact = (status: string) => ["running", "paused", "failed", "cancelled", "interrupted", "blocked"].includes(status);
-const TOOL_LABELS: Record<string, string> = { list_resources: "查看本局资料", read_resource: "读取本局资料", search_resources: "搜索本局资料", stage_edit: "准备修改", stage_story_turn: "准备正式剧情", finish_task: "完成任务", list_skills: "查看可用技能", read_skill: "读取技能", read_world: "读取本局设定", check_draft: "核对草稿", search_original: "检索原著", read_original: "阅读原著", read_canon_facts: "查证原著事实", web_search: "联网搜索", read_webpage: "阅读网页", list_remote_tools: "查看外部工具", call_remote_tool: "调用外部工具" };
+const TOOL_LABELS: Record<string, string> = { list_resources: "查看本局资料", read_resource: "读取本局资料", search_resources: "搜索本局资料", stage_edit: "准备修改", stage_edits: "批量准备修改", stage_story_turn: "准备正式剧情", finish_task: "完成任务", list_skills: "查看可用技能", read_skill: "读取技能", read_world: "读取本局设定", check_draft: "核对草稿", list_sections: "查看原著目录", search_original: "检索原著", read_original: "阅读原著", read_canon_notes: "核对原著札记", read_canon_facts: "查证原著事实", web_search: "联网搜索", read_webpage: "阅读网页", list_remote_tools: "查看外部工具", call_remote_tool: "调用外部工具" };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-function modelFor(profile: Profile, override: string, preferences?: AgentPreferences | null): LlmConfig & { protocol: AgentProtocol; contextWindowTokens?: number; maxOutputTokens?: number } {
+function modelFor(profile: Profile, override: string, preferences?: AgentPreferences | null): LlmConfig & { protocol: AgentProtocol; thinkingMode: AgentThinkingMode; contextWindowTokens?: number; maxOutputTokens?: number } {
   const model = override.trim() || profile.mainModel, protocol = preferences?.protocol ?? "chat-completions";
   let url = chatCompletionsUrl(profile.baseUrl);
   if (protocol !== "chat-completions") {
@@ -41,9 +50,9 @@ function modelFor(profile: Profile, override: string, preferences?: AgentPrefere
       url = `${base}/${protocol === "openai-responses" ? "responses" : "messages"}`;
     }
   }
-  return { slot: profile.keySlot, url: preferences?.modelUrl?.trim() || url, model, auxModel: profile.auxModel ?? undefined, includeUsage: profile.includeUsage, contextTokens: preferences?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, protocol, ...(preferences?.contextWindowTokens ? { contextWindowTokens: preferences.contextWindowTokens } : {}), ...(preferences?.maxOutputTokens ? { maxOutputTokens: preferences.maxOutputTokens, maxTokens: preferences.maxOutputTokens } : {}) };
+  return { slot: profile.keySlot, url: preferences?.modelUrl?.trim() || url, model, auxModel: profile.auxModel ?? undefined, includeUsage: profile.includeUsage, contextTokens: preferences?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, protocol, thinkingMode: preferences?.thinkingMode ?? "off", ...(preferences?.contextWindowTokens ? { contextWindowTokens: preferences.contextWindowTokens } : {}), ...(preferences?.maxOutputTokens ? { maxOutputTokens: preferences.maxOutputTokens, maxTokens: preferences.maxOutputTokens } : {}) };
 }
-const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "正在思考", compacting: "正在整理记忆", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
+const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "深度思考中…", compacting: "正在整理记忆", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
 const TASK_NAMES: Record<string, string> = { ...TOOL_LABELS, browser_open:"打开资料网页",browser_read:"读取网页正文",browser_find:"查找网页内容",browser_follow:"阅读网页链接",browser_close:"关闭资料网页",list_documents:"查看资料文件",read_document:"读取资料文件",find_document:"查找资料文件",write_document:"写出资料笔记",call_tool_package:"运行工具包",draft_tool_package:"准备工具包草稿", discover_tools: "查找可用工具", read_tool_result: "读取已保存结果", update_plan: "更新任务进度", ask_user: "请你补充信息", search_agent_history: "查找助手对话", validate_changes: "检查修改影响", read_clock: "查看故事时间", stage_clock: "调整故事时间", stage_route: "准备故事路线", run_script: "处理资料", delegate_readonly: "分工查证", read_skill_resource: "读取技能资料", draft_skill: "准备常用技能", list_mcp_resources: "查看服务资料", read_mcp_resource: "读取服务资料" };
 const statusOf = agentTaskStatus;
 const pendingQuestion = (task: AgentTask): AgentQuestion | undefined => task.status!=="waiting_user" ? undefined : task.question && !["answered", "cancelled", "done"].includes(task.question.status ?? "") ? task.question : task.questions?.find((question) => !["answered", "cancelled", "done"].includes(question.status ?? ""));
@@ -87,6 +96,19 @@ function ValueContent({ value }: { value: unknown }): ReactNode {
   if (Array.isArray(value)) return value.length ? <div className="stack">{value.map((item, index) => <div className="agent-value" key={index}><ValueContent value={item} /></div>)}</div> : <span className="muted">无</span>;
   return <dl className="agent-values">{Object.entries(value as Record<string, unknown>).filter(([key]) => !PRIVATE_RESOURCE_FIELDS.has(key)).map(([key, entry]) => <div key={key}><dt>{FIELD_LABELS[key] ?? key}</dt><dd><ValueContent value={entry} /></dd></div>)}</dl>;
 }
+function FieldDiffBlock({ before, after }: { before: string; after: string }) {
+  const [raw, setRaw] = useState(false);
+  const stats = useMemo(() => diffStats(diffText(before, after)), [before, after]);
+  return (
+    <div className="stack gap-2">
+      <div className="row between">
+        <span className="diff-counts">{stats.removed > 0 && <em className="del">-{stats.removed}</em>}{stats.added > 0 && <em className="ins">+{stats.added}</em>}</span>
+        <button type="button" className="ghost small diff-toggle" aria-pressed={!raw} onClick={() => setRaw((v) => !v)}>{raw ? "对照改动" : "看修改前/后"}</button>
+      </div>
+      {raw ? <><p className="muted m-0">修改前</p><ValueContent value={before} /><p className="muted m-0">修改后</p><ValueContent value={after} /></> : <DiffView before={before} after={after} />}
+    </div>
+  );
+}
 function ChangePreview({ value }: { value: Json | undefined }) {
   const object = value && typeof value === "object" && !Array.isArray(value) ? value : null;
   const changes = Array.isArray(object?.changes) ? object.changes : [];
@@ -96,8 +118,35 @@ function ChangePreview({ value }: { value: Json | undefined }) {
     const recordBefore = before && typeof before === "object" && !Array.isArray(before) ? before : null;
     const recordAfter = after && typeof after === "object" && !Array.isArray(after) ? after : null;
     const keys = recordBefore || recordAfter ? [...new Set([...Object.keys(recordBefore ?? {}), ...Object.keys(recordAfter ?? {})])].filter((key) => !PRIVATE_RESOURCE_FIELDS.has(key) && JSON.stringify(recordBefore?.[key]) !== JSON.stringify(recordAfter?.[key])) : [];
-    return <section key={index}><p><b>{typeof change.summary === "string" ? change.summary : "本次修改"}</b></p>{keys.length ? keys.map((key) => <details key={key} open={key === "narrative"}><summary>{FIELD_LABELS[key] ?? key}</summary><p className="muted">修改前</p><ValueContent value={recordBefore?.[key]} /><p className="muted">修改后</p><ValueContent value={recordAfter?.[key]} /></details>) : before !== undefined || after !== undefined ? <><details><summary>修改前</summary><ValueContent value={before} /></details><details open><summary>修改后</summary><ValueContent value={after} /></details></> : <StoryText emphasizeDate={false} text={pretty(change)} />}</section>;
+    const hasConflict = change.needsRelocation === true || (Array.isArray(change.rebaseConflicts) && change.rebaseConflicts.length > 0);
+    return <section key={index}><p><b>{typeof change.summary === "string" ? change.summary : "本次修改"}</b></p>{hasConflict && <p className="field-hint warn">这项草稿对应的内容在主线已有变化，续跑时会重新定位核对，也可以先清空草稿。</p>}{keys.length ? keys.map((key) => {
+      const b = recordBefore?.[key], a = recordAfter?.[key];
+      const textDiff = typeof b === "string" && typeof a === "string";
+      return <details key={key} open={key === "narrative"}><summary>{FIELD_LABELS[key] ?? key}</summary>{textDiff ? <FieldDiffBlock before={b} after={a} /> : <><p className="muted">修改前</p><ValueContent value={b} /><p className="muted">修改后</p><ValueContent value={a} /></>}</details>;
+    }) : typeof before === "string" && typeof after === "string" ? <FieldDiffBlock before={before} after={after} /> : before !== undefined || after !== undefined ? <><details><summary>修改前</summary><ValueContent value={before} /></details><details open><summary>修改后</summary><ValueContent value={after} /></details></> : <StoryText emphasizeDate={false} text={pretty(change)} />}</section>;
   })}</div>;
+}
+function agentCostLine(budget: AgentBudget, prices: Prices): string {
+  const reqs = budget.modelRequests;
+  if (!reqs && !budget.activeMs) return "";
+  const inp = (budget.usage?.input ?? 0) + (budget.usage?.cacheRead ?? 0) + (budget.usage?.cacheWrite ?? 0);
+  const out = budget.usage?.output ?? 0;
+  const totalTokens = inp + out;
+  const unreported = budget.unreportedUsageRequests ?? (budget.usageKnown === false ? Math.max(1, reqs) : 0);
+  const allUnknown = reqs > 0 && unreported >= reqs && totalTokens === 0;
+  const tokPart = reqs === 0 ? "" : allUnknown ? "用量未知" : `${tokenText(totalTokens)} tokens${unreported > 0 ? `（另 ${unreported} 次未知）` : ""}`;
+  let costPart = "";
+  if (budget.priceKnown && typeof budget.estimatedCost === "number") {
+    costPart = budget.currency && !["CNY", "RMB", "¥"].includes(budget.currency) ? `约 ${budget.estimatedCost.toLocaleString("zh-CN", { maximumFractionDigits: 4 })} ${budget.currency}` : costText(budget.estimatedCost);
+  } else if (prices.input !== null && prices.output !== null && reqs > 0) {
+    if (allUnknown) costPart = "花费未知";
+    else {
+      const yuan = (inp * prices.input + out * prices.output) / 1_000_000;
+      costPart = unreported > 0 ? `已计${costText(yuan)}（另 ${unreported} 次未知）` : costText(yuan);
+    }
+  }
+  const secPart = budget.activeMs > 0 ? `${Math.max(1, Math.round(budget.activeMs / 1000))} 秒` : "";
+  return [reqs > 0 ? `模型 ${reqs} 次` : "", tokPart, costPart, secPart].filter(Boolean).join(" · ");
 }
 function sourceLinks(value: unknown): { url: string; title: string }[] {
   const found = new Map<string, string>();
@@ -348,10 +397,10 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
         const prior=snapshotCache.current[task.runId];
         const snap:AgentSnapshot=prior?{...prior,task:next,status:state.status,error:state.error??null}:{id:task.runId,worldId:route.worldId,task:next,status:state.status,error:state.error??null,result:current.result??null,events:[],messages:[],steps:[],incremental:true};
         snapshotCache.current[task.runId]=snap;setSnapshots(values=>({...values,[task.runId]:snap}));
-        if(state.execution.stopReceipt?.settled){if(["committed","completed","previewed"].includes(state.status))pausedAfterStop.current=null;break;}
+        if(state.execution.stopReceipt?.settled){break;}
         await new Promise(resolve=>setTimeout(resolve,200));
       }
-    }catch(failure){if(alive.current)setError(errorText(failure));}finally{stoppingTasks.current.delete(task.id);}
+    }catch(failure){if(alive.current)setError(errorText(failure));}finally{stoppingTasks.current.delete(task.id);if(pausedAfterStop.current===task.sessionId)pausedAfterStop.current=null;}
   };
   const act = async (work: () => Promise<unknown>) => {
     pausedAfterStop.current=null;
@@ -383,6 +432,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   const changeSession = async (id: string, savePreviousDraft = true) => {
     if (sessionId && draftOwner.current === sessionId && savePreviousDraft) await Promise.all([game.repo.setSetting(`agent:input:${sessionId}`, input), game.repo.setSetting(`agent:input-recipe:${sessionId}`, draftRecipeId)]);
     const draftRevision = ++inputRevision.current;
+    pausedAfterStop.current = null;
     historyRevision.current++; prependPosition.current = null; setOlderLoading(false);
     sessionRef.current = id; draftOwner.current = null; setSessionId(id); setDetail(null); setDraftRecipeId(null); setSnapshots({}); snapshotCache.current = {}; snapshotVersions.current = {}; setError("");
     const [savedInput, savedRecipe] = await Promise.all([game.repo.getSetting<string>(`agent:input:${id}`, ""), game.repo.getSetting<string | null>(`agent:input-recipe:${id}`, null)]);
@@ -484,6 +534,11 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     await client.continue(task.id,input.trim()||undefined,prefs?.limits,prefs?.inputTokens??DEFAULT_AGENT_INPUT_TOKENS,prefs&&selected?modelFor(selected,model,prefs):task.model,prefs?.modelUrl,check.needsRebase);
     changeInput("");
   });
+  const discardTaskDrafts = (task: AgentTask) => void act(async () => {
+    if (!await ask({ title: "清空未采用草稿？", message: "只清空这项任务尚未采用的修改草稿，已经生效的故事内容和累计用量不变。", confirm: "清空草稿", danger: true })) return;
+    await client.discardDrafts(task.id);
+    toast("已清空未采用草稿");
+  });
   const compactTask = (task: AgentTask) => void act(async () => { await client.compact(task.id, prefs?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, prefs && selected ? modelFor(selected, model, prefs) : task.model, prefs?.limits, prefs?.modelUrl); toast("已安排整理记忆"); });
   const inspectTask = (task: AgentTask) => {
     const previous = snapshotCache.current[task.runId];
@@ -517,12 +572,12 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
           <div className="agent-message-head"><small className="muted">{message.role === "user" ? "你" : "助手"}</small><button className="ghost" aria-label="从这条另起对话" onClick={() => forkAt(message)} disabled={pending}><Icon name="share" size={16} /></button></div>
           <MessageBody message={message} latest={message.id === conversation?.messages.filter(item => item.role === "assistant").at(-1)?.id} preserve={rememberPosition} />
         </div>)}
-        {turn.task && <TaskCard task={turn.task} snapshot={snapshots[turn.task.runId]} toolMessages={turn.toolMessages} replies={turn.messages.filter((message) => message.role === "assistant").map((message) => message.content)} pending={pending} onStop={() => void stopTask(turn.task!)} onApply={() => void act(async () => { await client.apply(turn.task!.id); game.notifyAgentChange(route.worldId); toast("修改已采用"); })} onUndo={() => void act(async () => { await client.undo(turn.task!.id); game.notifyAgentChange(route.worldId); toast("本次修改已撤回"); })} onContinue={() => continueTask(turn.task!)} onQuestion={() => openQuestion(turn.task!)} onCompact={() => compactTask(turn.task!)} onInspect={() => inspectTask(turn.task!)} onSource={url => { setSourceUrl(url); setSheet("sources"); }} />}
+        {turn.task && <TaskCard task={turn.task} snapshot={snapshots[turn.task.runId]} toolMessages={turn.toolMessages} replies={turn.messages.filter((message) => message.role === "assistant").map((message) => message.content)} pending={pending} onStop={() => void stopTask(turn.task!)} onApply={() => void act(async () => { await client.apply(turn.task!.id); game.notifyAgentChange(route.worldId); toast("修改已采用"); })} onUndo={() => void act(async () => { await client.undo(turn.task!.id); game.notifyAgentChange(route.worldId); toast("本次修改已撤回"); })} onContinue={() => continueTask(turn.task!)} onDiscardDrafts={() => discardTaskDrafts(turn.task!)} onQuestion={() => openQuestion(turn.task!)} onCompact={() => compactTask(turn.task!)} onInspect={() => inspectTask(turn.task!)} onSource={url => { setSourceUrl(url); setSheet("sources"); }} />}
       </section>)}
       {error && <p className="field-hint warn" role="alert">{error}</p>}
     </div></div>{!atBottom && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = reading.autoScroll; scrollBottom(true); }}><Icon name="arrow-down" size={22} /></button>}</div>
     <div className="dock agent-dock">
-      <div className="agent-toolbar"><button className="ghost agent-model-button" aria-label={`切换助手模型，当前 ${model || selected?.mainModel || "未选择"}`} title={model || selected?.mainModel} disabled={!prefs || !selected} onClick={() => setSheet("model")}><span>{model || selected?.mainModel || "选择模型"}</span><Icon name="forward" size={14} /></button><button className="ghost" aria-label="助手技能设置" onClick={() => openSettings("skills")}>{selectedSkillCount ? `技能 ${selectedSkillCount}` : "技能"}</button><button className="ghost" aria-label="助手联网设置" onClick={() => openSettings("network")}>{prefs?.network.mode === "off" ? "不联网" : "联网"}{prefs?.readOnly || draftRecipe?.readOnly ? " · 只读" : ""}</button>{liveTask && <button className="ghost danger-text" disabled={statusOf(liveTask, snapshots[liveTask.runId]) === "stopping"} onClick={() => void stopTask(liveTask)}>停止</button>}<button className="icon-btn" aria-label="助手更多操作" onClick={() => setSheet("actions")}><Icon name="more" size={20} /></button></div>
+      <div className="agent-toolbar"><button className="ghost agent-model-button" aria-label={`切换助手模型，当前 ${model || selected?.mainModel || "未选择"}`} title={model || selected?.mainModel} disabled={!prefs || !selected} onClick={() => setSheet("model")}><span>{model || selected?.mainModel || "选择模型"}</span><Icon name="forward" size={14} /></button><button className="ghost" aria-label="常用任务" onClick={() => setSheet("tasks")}>任务</button><button className="ghost" aria-label={`切换助手思考模式，当前 ${THINKING_MODES.find(([value]) => value === (prefs?.thinkingMode ?? "off"))?.[1] ?? "省时"}`} disabled={!prefs} onClick={() => { if (!prefs) return; const order: AgentThinkingMode[] = ["off", "default", "deep"]; const nextMode = order[(order.indexOf(prefs.thinkingMode ?? "off") + 1) % order.length]; const next = { ...prefs, thinkingMode: nextMode }; void saveAgentPreferences(game, next).then(() => { setPrefs(next); toast(`思考模式：${THINKING_MODES.find(([value]) => value === nextMode)?.[1] ?? nextMode}${busy ? "（下项任务生效）" : ""}`); }).catch((failure) => setError(errorText(failure))); }}>{THINKING_MODES.find(([value]) => value === (prefs?.thinkingMode ?? "off"))?.[1] ?? "省时"}</button><button className="ghost" aria-label="助手技能设置" onClick={() => openSettings("skills")}>{selectedSkillCount ? `技能 ${selectedSkillCount}` : "技能"}</button><button className="ghost" aria-label="助手联网设置" onClick={() => openSettings("network")}>{prefs?.network.mode === "off" ? "不联网" : "联网"}{prefs?.readOnly || draftRecipe?.readOnly ? " · 只读" : ""}</button>{liveTask && <button className="ghost danger-text" disabled={statusOf(liveTask, snapshots[liveTask.runId]) === "stopping"} onClick={() => void stopTask(liveTask)}>停止</button>}<button className="icon-btn" aria-label="助手更多操作" onClick={() => setSheet("actions")}><Icon name="more" size={20} /></button></div>
       {draftRecipe && <div className="row field-hint"><span className="grow">{draftRecipe.name}{busy ? " · 发送后排队" : ""}</span><button className="ghost" onClick={() => { changeInput(input); setDraftRecipeId(null); }}>取消任务选择</button></div>}
       {!!queue.length && <details className="agent-queue"><summary>等待处理 · {queue.length}条</summary>{queue.map((queued) => <div className="row" key={queued.id}><span className="grow">{queued.text}</span><button className="ghost" disabled={pending} onClick={() => void act(() => client.cancelQueued(queued.id))}>取消</button></div>)}</details>}
       <div className="inputbar"><textarea ref={textarea} aria-label="给助手的任务" rows={1} value={input} disabled={pending} placeholder={busy ? "补充当前任务…" : "告诉助手要完成什么…"} onChange={(event) => changeInput(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} /><button className={`send-btn ${input.trim() ? "primary" : ""}`} disabled={pending || (!busy && (!input.trim() || !selected || !sessionId || !prefs))} onClick={() => liveTask && !input.trim() ? void stopTask(liveTask) : send()}>{busy ? input.trim() ? draftRecipe ? "排队" : "补充" : "停止" : "发送"}</button></div>
@@ -551,7 +606,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     {routeChoice && <Sheet title="选择继续的路线" onClose={()=>setRouteChoice(null)}><div className="stack"><p>故事已切换路线，旧要求、回答和草稿仍保留。请选择在哪里继续核对。</p><button disabled={pending} onClick={()=>void act(async()=>{await client.selectOriginalRoute(routeChoice.task.id,routeChoice.currentLineId);game.notifyAgentChange(route.worldId);setRouteChoice(null);toast("已回到原路线，请继续执行并重新核对");})}>回到原路线继续</button><button disabled={pending} onClick={()=>void act(async()=>{const made=await client.create(route.worldId,routeChoice.currentLineId,"重新核对");const answers=detail?.messages.filter(m=>m.taskId===routeChoice.task.id&&m.delivery==="answer").map(messageText).join("\n")??"";changeInput([routeChoice.task.text,answers].filter(Boolean).join("\n\n"));setRouteChoice(null);await readSessions("");await changeSession(made.id);toast("已另起对话，旧草稿没有跨路线采用");})}>在当前路线另起核对</button></div></Sheet>}
     {recoveries && <Sheet title="故事修改恢复点" onClose={()=>setRecoveries(null)}><div className="stack"><p className="muted">删除对话后，已经建立的恢复点仍在这里。撤回会检查故事是否已有新进展。</p>{recoveries.map(point=><button key={point.id} disabled={pending} onClick={()=>void act(async()=>{if(!await ask({title:"撤回这批故事修改？",message:"本批采用后的故事有新进展时会停止撤回，保留现有数据。",confirm:"撤回",danger:true}))return;await client.restoreRecovery(point.id);game.notifyAgentChange(route.worldId);setRecoveries(await client.recoveryPoints(route.worldId));toast("这批修改已撤回");})}>{new Date(point.createdAt).toLocaleString("zh-CN")} · 撤回</button>)}{!recoveries.length&&<p className="muted">暂无可用恢复点。</p>}</div></Sheet>}
     {sheet === "sessions" && <Sheet title="助手对话记录" onClose={() => setSheet(null)}><div className="stack"><label>搜索对话<input value={sessionQuery} onChange={(event) => querySessions(event.target.value)} placeholder="名称或对话内容" /></label><button className="primary" disabled={pending} onClick={newSession}>新建对话</button><div className="settings-list">{sessions.map((session) => <div className="row agent-session" key={session.id}><button className="settings-entry grow" aria-pressed={session.id === sessionId} onClick={() => void act(() => changeSession(session.id))}><span><b>{session.title || "助手对话"}</b><small>{new Date(session.updatedAt).toLocaleString("zh-CN")}</small></span><span>›</span></button><button className="ghost" onClick={() => renameSession(session)} aria-label={`重命名${session.title}`}>改名</button></div>)}{!sessions.length && <p className="muted">{sessionsLoading ? "正在读取…" : "没有找到相关对话。"}</p>}</div>{nextSessionOffset != null && <button className="ghost" disabled={sessionsLoading} onClick={() => { const revision = sessionQueryRevision.current; void readSessions(sessionQuery, nextSessionOffset).catch(failure => { if (alive.current && revision === sessionQueryRevision.current) setError(errorText(failure)); }); }}>{sessionsLoading ? "正在读取…" : "更多会话"}</button>}</div></Sheet>}
-    {sheet === "question" && question && questionTask && <QuestionSheet question={question} answers={questionAnswers[question.id] ?? {}} pending={pending} onChange={(answers) => setQuestionAnswers({ ...questionAnswers, [question.id]: answers })} onClose={() => setSheet(null)} onSubmit={(cancelled) => void act(async () => { await client.answer(questionTask.id, question.id, questionAnswers[question.id] ?? {}, cancelled); setSheet(null); })} />}
+    {sheet === "question" && question && questionTask && <QuestionSheet question={question} answers={questionAnswers[question.id] ?? {}} pending={pending} onChange={(answers) => setQuestionAnswers({ ...questionAnswers, [question.id]: answers })} onClose={() => setSheet(null)} onSubmit={(cancelled) => void act(async () => { try { await client.answer(questionTask.id, question.id, questionAnswers[question.id] ?? {}, cancelled); } finally { setSheet(null); if (sessionRef.current) await refresh(sessionRef.current).catch(() => {}); } })} />}
     {sheet === "model" && prefs && selected && <AgentModelPicker profiles={profiles} selected={selected} current={model || selected.mainModel} running={busy} onClose={() => setSheet(null)} onPick={async (chosen, nextModel) => { const changedService = chosen.id !== selected.id; const next = { ...prefs, profileId: chosen.id, modelName: nextModel, ...((changedService || nextModel !== model) ? { contextWindowTokens: undefined } : {}), ...(changedService ? { modelUrl: undefined, protocol: "chat-completions" as const } : {}) }; await saveAgentPreferences(game, next); setPrefs(next); setModel(nextModel); setSheet(null); toast(busy ? "已选择，下一项任务使用此模型" : "助手模型已切换"); }} />}
     {sheet === "packages" && <AgentToolPackages client={client} onClose={() => setSheet(null)} />}
     {sheet === "sources" && sessionId && <AgentSources client={client} sessionId={sessionId} worldId={route.worldId} initialUrl={sourceUrl} onClose={() => setSheet(null)} />}
@@ -561,9 +616,11 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   </div>;
 }
 
-function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onApply, onUndo, onContinue, onQuestion, onCompact, onInspect, onSource }: { task: AgentTask; snapshot?: AgentSnapshot; toolMessages: AgentMessage[]; replies: string[]; pending: boolean; onStop: () => void; onApply: () => void; onUndo: () => void; onContinue: () => void; onQuestion: () => void; onCompact: () => void; onInspect: () => void; onSource: (url: string) => void }) {
-  const { game, platform, toast, devMode } = useApp();
+function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onApply, onUndo, onContinue, onDiscardDrafts, onQuestion, onCompact, onInspect, onSource }: { task: AgentTask; snapshot?: AgentSnapshot; toolMessages: AgentMessage[]; replies: string[]; pending: boolean; onStop: () => void; onApply: () => void; onUndo: () => void; onContinue: () => void; onDiscardDrafts: () => void; onQuestion: () => void; onCompact: () => void; onInspect: () => void; onSource: (url: string) => void }) {
+  const { game, toast, devMode } = useApp();
+  const prices = usePrices();
   const status = statusOf(task, snapshot), running = inFlight(status), budget = agentTaskProjection(task,snapshot).budget;
+  const costLine = budget ? agentCostLine(budget, prices) : "";
   const [olderSteps,setOlderSteps]=useState<AgentToolStep[]>([]), [nextBefore,setNextBefore]=useState<number|null|undefined>(), [processLoading,setProcessLoading]=useState(false);
   const loadProcess=async()=>{if(processLoading||nextBefore===null)return;setProcessLoading(true);try{const result=await new AgentClient(game).processPage(task.id,nextBefore);setOlderSteps(current=>[...new Map([...result.steps,...current].map(step=>[step.id,step])).values()]);setNextBefore(result.nextBefore);}catch(error){toast(errorText(error));}finally{setProcessLoading(false);}};
   const previewValue = task.preview ?? task.changes;
@@ -572,6 +629,8 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
   const links = sourceLinks({ result: task.result, events: snapshot?.events });
   const tools = [...new Map([...olderSteps,...(snapshot?.steps ?? [])].map(step=>[step.id,step])).values()].sort((a,b)=>a.seq-b.seq);
   const resumable = ["paused", "cancelled", "interrupted", "failed", "stale", "blocked"].includes(status);
+  const stagedDrafts = Array.isArray(task.drafts) ? task.drafts : [];
+  const draftCount = task.draftCount ?? stagedDrafts.length;
   const plan = task.plan ?? [], completed = plan.filter((item) => item.status === "completed" || item.status === "done").length;
   const current = plan.find((item) => item.status === "in_progress"), activeTool = [...tools].reverse().find((step) => step.status === "running");
   const actualResult = task.result ?? snapshot?.result;
@@ -590,7 +649,9 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
     {task.execution?.notice?.reason && <p className="field-hint" role="status">系统运行提示：{task.execution.notice.reason}</p>}
     {(task.error || snapshot?.error) && <p className="field-hint warn" role="status">{snapshot?.error ?? task.error}</p>}
     {hasChanges && <details className="agent-preview" open={status === "previewed"}><summary>{status === "previewed" ? "修改预览" : "本次修改"}</summary>{previewValue ? <ChangePreview value={Array.isArray(previewValue) ? { changes: previewValue } : previewValue} /> : <StoryText emphasizeDate={false} text={preview} />}</details>}
+    {resumable && !hasChanges && draftCount > 0 && <details className="agent-preview"><summary>已准备 {draftCount} 项草稿（未采用）</summary><ChangePreview value={{ changes: stagedDrafts }} /></details>}
     {!!remaining.length && <details className="agent-preview"><summary>{adopted ? "待继续核对的草稿" : "尚待核对的草稿"} · {remaining.length}项</summary><p className="field-hint">{adopted ? "已采用的修改保留；以下部分尚未采用，继续时重新校对。" : "这些内容尚未核对通过，不会随已通过部分一起采用。"}</p><ChangePreview value={{changes:remaining}} /></details>}
+    {costLine && <p className="agent-cost-line">{costLine}</p>}
     <details className="agent-process" onToggle={(event) => { if (event.currentTarget.open) onInspect(); }}><summary><span>{progress}{plan.length && !resumable ? ` · 计划${completed}/${plan.length}项` : budget ? ` · 模型${budget.modelRequests.toLocaleString()}次 · 工具${budget.toolCalls.toLocaleString()}次` : ""}</span></summary>
       {plan.length > 0 && <ol className="agent-plan">{plan.map((item, index) => <li key={item.id ?? index} data-status={item.status}><span>{({ pending: "待做", in_progress: "正在做", completed: "完成", done: "完成", cancelled: "已取消", blocked: "待补充" } as Record<string, string>)[item.status] ?? "待做"}</span>{item.title ?? item.step ?? item.text}</li>)}</ol>}
       {nextBefore!==null && <button className="btn btn-ghost" disabled={processLoading} onClick={()=>void loadProcess()}>{processLoading?"正在读取…":"查看更早过程"}</button>}
@@ -601,9 +662,9 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
         if (!subtask || typeof subtask !== "object" || Array.isArray(subtask)) return null;
         return <details key={typeof subtask.id === "string" ? subtask.id : index}><summary>{String(subtask.name ?? subtask.title ?? subtask.task ?? "资料核对")} · {STATUSES[String(subtask.status)] ?? "已记录"}</summary><StoryText emphasizeDate={false} text={pretty(subtask.summary ?? subtask.result)} /></details>;
       })}</div>}
-      {budget && <p className="muted">模型 {budget.modelRequests}次{task.limits?.modelRequests === 0 ? "（不限制）" : task.limits?.modelRequests ? ` / ${task.limits.modelRequests}次` : ""} · 工具 {budget.toolCalls}次{task.limits?.toolCalls === 0 ? "（不限制）" : task.limits?.toolCalls ? ` / ${task.limits.toolCalls}次` : ""} · 用时 {Math.ceil(budget.activeMs / 60000)}分钟{task.limits?.activeMs === 0 ? "（不限制）" : task.limits?.activeMs ? ` / ${Math.ceil(task.limits.activeMs / 60000)}分钟` : ""}</p>}
-      {devMode && budget?.usage && <p className="muted">已报告输入 {budget.usage.input?.toLocaleString() ?? "未知"} tokens · 输出 {budget.usage.output?.toLocaleString() ?? "未知"} tokens{budget.usageKnown === false ? "，部分请求尚未报告完整用量" : ""}</p>}
-      {budget && <p className="muted">{budget.priceKnown && typeof budget.estimatedCost === "number" ? `预计费用 ${budget.estimatedCost.toLocaleString("zh-CN", { maximumFractionDigits: 6 })}${budget.currency ? ` ${budget.currency}` : ""}` : "金额未知"}</p>}
+      {budget && <p className="muted">模型 {budget.modelRequests}次{task.limits?.modelRequests === 0 ? "（不限制）" : task.limits?.modelRequests ? ` / ${task.limits.modelRequests}次` : ""} · 工具 {budget.toolCalls}次{task.limits?.toolCalls === 0 ? "（不限制）" : task.limits?.toolCalls ? ` / ${task.limits.toolCalls}次` : ""} · 用时 {Math.max(1, Math.round(budget.activeMs / 1000))}秒{task.limits?.activeMs === 0 ? "（不限制）" : task.limits?.activeMs ? ` / ${Math.ceil(task.limits.activeMs / 60000)}分钟` : ""}</p>}
+      {budget?.usage && <p className="muted">已报告输入 {((budget.usage.input ?? 0) + (budget.usage.cacheRead ?? 0) + (budget.usage.cacheWrite ?? 0)).toLocaleString()} tokens（缓存命中 {(budget.usage.cacheRead ?? 0).toLocaleString()}） · 输出 {(budget.usage.output ?? 0).toLocaleString()} tokens{budget.usageKnown === false ? "，部分请求尚未报告完整用量" : ""}</p>}
+      {budget && <p className="muted">{budget.priceKnown && typeof budget.estimatedCost === "number" ? `预计费用 ${budget.estimatedCost.toLocaleString("zh-CN", { maximumFractionDigits: 6 })}${budget.currency ? ` ${budget.currency}` : ""}` : prices.input !== null && prices.output !== null ? (costLine.includes("花费未知") ? "花费未知（请求未返回用量）" : "按“用量与花费”单价估算，详见上方花费行") : "在 设置 → 用量与花费 填上单价后可估算费用"}</p>}
       {task.model?.model && <p className="muted">本次模型：{task.model.model}</p>}
       {(task.contextState || task.contextCheckpoint || task.context || task.inputBudget || task.inputTokens || task.model?.contextTokens) && <ContextDetails task={task} />}
       {canCompact(status) && <button className="ghost" disabled={pending} onClick={onCompact}>整理上下文</button>}
@@ -615,6 +676,7 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
       {question && <button className="primary" disabled={pending} onClick={onQuestion}>补充信息</button>}
       {status === "previewed" && <button className="primary" disabled={pending} onClick={onApply}>采用这批修改</button>}
       {!running && task.canUndo && <button disabled={pending} onClick={onUndo}>撤回最近一批</button>}
+      {resumable && draftCount > 0 && <button disabled={pending} onClick={onDiscardDrafts}>清空草稿</button>}
       {resumable && <button disabled={pending} onClick={onContinue}>{status === "stale" ? "按当前故事重新校对" : "继续执行"}</button>}
     </div>
   </div>;
@@ -794,6 +856,7 @@ function AgentSettings({ client, initialSection, preferences, recipe, profiles, 
       <p className="muted">默认输入预算为475,000 tokens，与普通游玩分开保存。字符仅用于内部估算；继续任务时保留已用次数。</p>
     </div></details>
     <div className="setting" data-agent-settings-section="execution"><Switch label="只读分析" note="只查资料和提出建议，不修改本局或外部服务。" checked={draft.readOnly ?? false} onChange={(readOnly) => setDraft({ ...draft, readOnly })} /></div>
+    <div className="setting"><div className="setting-head"><b>思考模式</b><small>{THINKING_MODES.find(([value]) => value === (draft.thinkingMode ?? "off"))?.[2]}</small></div><div className="segmented">{THINKING_MODES.map(([value, label]) => <button key={value} aria-pressed={(draft.thinkingMode ?? "off") === value} onClick={() => setDraft({ ...draft, thinkingMode: value })}>{label}</button>)}</div></div>
     <div className="setting"><div className="setting-head"><b>修改如何生效</b><small>{POLICIES.find(([value]) => value === draft.policy)?.[2]}</small></div><div className="segmented">{POLICIES.map(([value, label]) => <button key={value} aria-pressed={draft.policy === value} onClick={() => setDraft({ ...draft, policy: value })}>{label}</button>)}</div></div>
     <details data-agent-settings-section="skills"><summary>本次指定技能{draft.skills.length ? ` · ${draft.skills.length}个` : ""}</summary><div className="stack"><p className="muted">未指定时由助手自行选择；指定后，本次必须读取并执行。</p>{[...BUILTIN_AGENT_SKILLS, ...draft.customSkills].map((skill) => <div key={skill.id} className="setting"><Switch label={skill.name} note={skill.description} checked={draft.skills.includes(skill.id)} onChange={() => toggleSkill(skill.id)} /></div>)}</div></details>
     <details><summary>我的技能</summary><div className="stack"><button disabled={saving} onClick={() => void importPackage()}>从文件导入技能包</button><p className="muted">支持说明、参考资料、模板与受控 JavaScript。导入后先看内容，采用后保存为常用；不会自动选中或扩大权限。</p>{packages.map((entry) => <div className="setting agent-package" key={entry.id}><b>{entry.name} · {entry.version}</b><p>{entry.description}</p>{entry.source && <small className="muted">来源：{entry.source}</small>}{entry.capabilities?.length ? <p className="muted">所需能力：{entry.capabilities.join("、")}</p> : null}{entry.compatibility && <p className="muted">{skillCompatibility(entry.compatibility)}</p>}{entry.warnings?.map((warning) => <p className="field-hint warn" key={warning}>{warning}</p>)}<details><summary>查看说明与文件</summary><StoryText emphasizeDate={false} text={entry.content} />{Object.keys(entry.files ?? {}).filter((path) => path !== "SKILL.md").map((path) => <details key={path}><summary>{path}</summary><pre className="raw">{entry.files![path]}</pre></details>)}</details><button disabled={saving} onClick={() => void adoptPackage(entry.id)}>采用为常用技能</button></div>)}{draft.customSkills.map((skill) => <div className="writing-saved-row" key={skill.id}><span className="grow">{skill.name} · {skill.version}</span><button className="ghost" aria-label={`删除技能 ${skill.name}`} onClick={() => setDraft({ ...draft, customSkills: draft.customSkills.filter((entry) => entry.id !== skill.id), skills: draft.skills.filter((id) => id !== skill.id) })}>删除</button></div>)}<label>技能名称<input value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /></label><label>适用情景<input value={custom.description} onChange={(event) => setCustom({ ...custom, description: event.target.value })} /></label><label>技能说明<textarea rows={7} value={custom.content} onChange={(event) => setCustom({ ...custom, content: event.target.value })} placeholder="写下这个技能的做法、需要读取的资料和完成条件" /></label><button disabled={!custom.name.trim() || !custom.content.trim()} onClick={() => { const id = `user-skill-${crypto.randomUUID().slice(0, 12)}`; setDraft({ ...draft, customSkills: [...draft.customSkills, { id, name: custom.name.trim(), description: custom.description.trim(), content: custom.content, version: "1.0.0" }] }); setCustom({ name: "", description: "", content: "" }); }}>保存为我的技能</button></div></details>

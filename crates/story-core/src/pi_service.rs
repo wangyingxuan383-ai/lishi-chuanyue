@@ -100,6 +100,7 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
             "slot",
             "id",
             "model",
+            "auxModel",
             "name",
             "protocol",
             "inputTokens",
@@ -107,6 +108,7 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
             "contextWindowTokens",
             "maxOutputTokens",
             "reasoning",
+            "thinkingMode",
             "temperature",
             "topP",
             "endpointRef",
@@ -122,6 +124,7 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
         "contextWindowTokens",
         "maxOutputTokens",
         "inputTokens",
+        "thinkingMode",
     ] {
         if let Some(value) = request
             .get(key)
@@ -152,8 +155,24 @@ fn task_metadata(request:&Value)->Result<Value> {
     let selected=request["skills"].as_array().cloned().unwrap_or_default();
     let custom=request["customSkills"].as_array().cloned().unwrap_or_default();
     if selected.len()>64 || custom.len()>64 || serde_json::to_vec(&custom)?.len()>8*1024*1024 {return Err(invalid("本次技能包过多，请只选择需要的技能"));}
-    let mut snapshots=crate::skills::catalog_json().as_array().into_iter().flatten().filter_map(|s|s["name"].as_str()).map(crate::skills::read).collect::<Result<Vec<_>>>()?;
-    for skill in &mut snapshots {skill["hash"]=crate::pi_store::arguments_hash(skill).into();}
+    let mut snapshots=Vec::new();
+    for entry in crate::skills::catalog_json().as_array().into_iter().flatten() {
+        let Some(name) = entry["name"].as_str() else { continue; };
+        let full = crate::skills::read(name)?;
+        let hash = crate::pi_store::arguments_hash(&full);
+        let resources: Vec<String> = full["files"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        snapshots.push(json!({
+            "id": name,
+            "name": name,
+            "description": full["description"],
+            "version": full.get("version").cloned().unwrap_or_else(|| full["metadata"]["version"].clone()),
+            "hash": hash,
+            "capabilities": full["capabilities"],
+            "compatibility": full["compatibility"],
+            "resources": resources,
+            "builtin": true,
+        }));
+    }
     let mut names=std::collections::HashSet::new();
     for skill in snapshots.iter().chain(custom.iter()) {
         let id=skill["id"].as_str().unwrap_or_else(||text(skill,"name"));
@@ -308,8 +327,9 @@ impl AgentHostService {
             "stop" => {
                 let id=required(&request,"taskId")?.to_owned();
                 let expected=required(&request,"attemptId")?.to_owned();
+                let system_timeout=request["systemTimeout"]==true;
                 let nonce=request["requestId"].as_str().map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-                let receipt=crate::pi_lifecycle::request_stop(&self.0.gateway.0.0,&id,&expected,&nonce)?;
+                let receipt=crate::pi_lifecycle::request_stop_with_source(&self.0.gateway.0.0,&id,&expected,&nonce,system_timeout)?;
                 if receipt["settled"]!=true && self.0.stopping.lock().map_err(|_|Error::Cancelled)?.insert(expected.clone()) {
                     let this=self.clone();
                     tokio::spawn(async move {
@@ -320,14 +340,16 @@ impl AgentHostService {
                             // fences writes, and expiry reconciliation settles it.
                             let _=crate::pi_lifecycle::reconcile(&this.0.gateway.0.0);
                             tokio::time::sleep(Duration::from_secs(15)).await;
-                            let _=crate::pi_lifecycle::settle(&this.0.gateway.0.0,&id,&expected,"停止已保存，失联执行已隔离，要求与草稿保留");
+                            let reason=if system_timeout{"系统后台运行时间已到，任务已暂停，进度与草稿已保留"}else{"停止已保存，失联执行已隔离，要求与草稿保留"};
+                            let _=crate::pi_lifecycle::settle(&this.0.gateway.0.0,&id,&expected,reason);
                             return;
                         }
                         let stopped=tokio::time::timeout(Duration::from_secs(15),this.stop_task(&json!({"taskId":id}))).await;
                         if !matches!(stopped,Ok(Ok(_))) {
                             this.0.closing.store(true,Ordering::Release);
                             this.0.connection.close_transport().await;
-                            let _=crate::pi_lifecycle::settle(&this.0.gateway.0.0,&id,&expected,"玩家已停止，专用宿主收尾超时，进度与草稿已保留");
+                            let reason=if system_timeout{"系统后台运行时间已到，专用宿主收尾超时，进度与草稿已保留"}else{"玩家已停止，专用宿主收尾超时，进度与草稿已保留"};
+                            let _=crate::pi_lifecycle::settle(&this.0.gateway.0.0,&id,&expected,reason);
                             (this.0.activity)(false);
                             let callback=this.0.control_timeout.read().unwrap_or_else(|p|p.into_inner()).clone();
                             if let Some(callback)=callback {callback(&id,&expected);}
@@ -335,6 +357,42 @@ impl AgentHostService {
                     });
                 }
                 Ok(receipt)
+            }
+            "discard_drafts" => {
+                let id = required(&request, "taskId")?;
+                let removed = {
+                    let mut db = self.0.gateway.0 .0.lock()?;
+                    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    crate::maintenance::guard(&tx)?;
+                    let row = crate::agent_workspace::rows(
+                        &tx,
+                        "SELECT id,status,metadata_json FROM pi_tasks WHERE id=?",
+                        &[&id],
+                    )?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| invalid("这项助手记录不存在"))?;
+                    let mut meta = crate::agent_workspace::parse(text(&row, "metadata_json"));
+                    if ["running", "committing"].contains(&text(&row, "status"))
+                        || meta["_nativeHostActive"] == true
+                    {
+                        return Err(invalid("请先停止正在执行的任务，再清空未采用草稿"));
+                    }
+                    if ["committed", "completed"].contains(&text(&row, "status")) {
+                        return Err(invalid("这项任务已结束，没有可清空的未采用草稿"));
+                    }
+                    let res = crate::agent_workspace::discard_draft(&tx, id, &json!({"all": true}))?;
+                    if let Some(obj) = meta.as_object_mut() {
+                        obj.remove("rebase");
+                    }
+                    tx.execute(
+                        "UPDATE pi_tasks SET metadata_json=?,updated_at=? WHERE id=?",
+                        params![meta.to_string(), chrono::Utc::now().to_rfc3339(), id],
+                    )?;
+                    tx.commit()?;
+                    res["removedChanges"].as_u64().unwrap_or(0)
+                };
+                Ok(json!({"discarded": true, "removedChanges": removed, "task": self.task_summary(id)?}))
             }
             "enqueue_input" => {
                 let id=required(&request,"taskId")?;
@@ -574,7 +632,7 @@ impl AgentHostService {
         Ok(json!({"session":session,"messages":messages,"tasks":tasks,"inputs":inputs,"projectionTruncated":remaining==0,"nextOffset":if more{Some(offset+limit)}else{None}}))
     }
     fn view_task(&self,id:&str)->Result<Value>{
-        let db=self.0.gateway.0.0.lock()?;let mut row=crate::agent_workspace::rows(&db,"SELECT id,session_id,world_id,line_id,text,status,policy,read_only,base_world_version,model_json,metadata_json,lease_json,plan_json,question_json,stop_revision,result_json,error,created_at,updated_at FROM pi_tasks WHERE id=?",&[&id])?.into_iter().next().ok_or_else(||invalid("这项助手记录不存在"))?;
+        let db=self.0.gateway.0.0.lock()?;let mut row=crate::agent_workspace::rows(&db,"SELECT id,session_id,world_id,line_id,text,status,policy,read_only,base_world_version,model_json,metadata_json,lease_json,plan_json,question_json,stop_revision,workspace_json,result_json,error,created_at,updated_at FROM pi_tasks WHERE id=?",&[&id])?.into_iter().next().ok_or_else(||invalid("这项助手记录不存在"))?;
         if let Some(object)=row.as_object_mut(){for(key,value)in object{if key.ends_with("_json")&&value.is_string(){*value=crate::agent_workspace::parse(value.as_str().unwrap());}}}Ok(row)
     }
     fn task_summary(&self, id: &str) -> Result<Value> {
@@ -587,9 +645,16 @@ impl AgentHostService {
             [id],
             |r| r.get(0),
         )?;
+        let drafts = if ["committed", "completed"].contains(&text(&row, "status")) {
+            vec![]
+        } else {
+            crate::agent_workspace::preview_changes(&row["workspace_json"])
+        };
+        let draft_count = drafts.len();
         Ok(
             json!({"id":row["id"],"runId":row["id"],"sessionId":row["session_id"],"text":row["text"],"status":row["status"],"phase":if row["status"]=="running"&&row["metadata_json"]["activeOperation"]=="compact"{json!("compacting")}else{row["status"].clone()},"policy":row["policy"],"readOnly":row["read_only"]==1,"execution":execution,
             "model":row["model_json"],"inputTokens":row["model_json"]["inputTokens"],"limits":budget["limits"],"budget":budget,"plan":row["plan_json"],"question":row["question_json"],"inputs":crate::pi_control::inputs(&self.0.gateway.0,text(&row,"session_id"),Some(id))?,
+            "drafts":drafts,"draftCount":draft_count,
             "summary":result["summary"],"preview":result["preview"],"changes":result["changes"],"result":result,"error":row["error"],"canUndo":recovery,"contextCheckpoint":row["metadata_json"]["contextCheckpoint"],"contextState":row["metadata_json"]["contextState"],
             "createdAt":row["created_at"],"updatedAt":row["updated_at"]}),
         )
@@ -875,6 +940,24 @@ impl AgentHostService {
             let id = uuid::Uuid::new_v4().to_string();
             let session = required(request, "sessionId")?.to_string();
             self.directory_name(&session)?;
+            let mut metadata = task_metadata(request)?;
+            if let Ok(db) = self.0.gateway.0 .0.lock() {
+                let prior: Option<String> = db.query_row(
+                    "SELECT json_extract(metadata_json,'$.enabledTools') FROM pi_tasks WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [&session],
+                    |r| r.get(0),
+                ).ok().flatten();
+                if let Some(raw) = prior {
+                    if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&raw) {
+                        let inherited: Vec<Value> = items.into_iter().filter(|v| {
+                            v.as_str().is_some_and(|n| crate::pi_tools::supports(n) || crate::pi_async::supports(n))
+                        }).collect();
+                        if !inherited.is_empty() {
+                            metadata["enabledTools"] = json!(inherited);
+                        }
+                    }
+                }
+            }
             self.0.gateway.start_task(
                 &session,
                 &id,
@@ -882,7 +965,7 @@ impl AgentHostService {
                 request["policy"].as_str().unwrap_or("auto-reversible"),
                 request["readOnly"].as_bool().unwrap_or(false),
                 reference,
-                task_metadata(request)?,
+                metadata,
             )?;
             let permit = self.0.gateway.permit(&id)?;
             (id, session, permit)

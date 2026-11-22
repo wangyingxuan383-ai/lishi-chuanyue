@@ -109,7 +109,8 @@ export class NativeModelFetch {
   async recordUsage(ids, message) {
     const failed = ["error", "aborted"].includes(message?.stopReason);
     const accepted = !failed && message?.role === "assistant" && Array.isArray(message.content) && message.content.length > 0;
-    let usage = failed ? {} : Object.fromEntries(["input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens"]
+    // Preserve provider-reported token counts even when the request aborted or errored (R31-P4).
+    let usage = Object.fromEntries(["input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens"]
       .filter(key => Number.isSafeInteger(message?.usage?.[key]) && message.usage[key] >= 0).map(key => [key, message.usage[key]]));
     // Providers without usage leave Pi's zero-filled defaults. They are not an
     // actual report of a free request, even if the response itself succeeded.

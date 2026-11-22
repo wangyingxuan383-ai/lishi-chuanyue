@@ -201,4 +201,10 @@ describe("writing assistance", () => {
     const updated = await assertWritingAnchor(s.game, s.anchor);
     expect(updated.headId).toBe((await tree.cursor(s.game.repo, s.world.id)).head.id);
   });
+  it("writes zero usage rows when stream rejects locally before sending", async () => {
+    const s = await setup();
+    s.platform.llm.stream = async () => { throw new Error("尚未配置服务密钥"); };
+    await expect(startWriting(s.game, s.request, () => {}).done).rejects.toThrow("尚未配置服务密钥");
+    expect(await s.platform.sql.query("SELECT * FROM usage")).toHaveLength(0);
+  });
 });

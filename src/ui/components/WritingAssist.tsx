@@ -8,7 +8,8 @@ import type { SourceBinding } from "../../engine/sources/types";
 import { WRITING_REQUIREMENT_PRESETS } from "../../content/agentTasks";
 import { useApp } from "../app/context";
 import { MenuSheet, Sheet } from "./Sheet";
-import { SourceScopeRow } from "./SourceScope";
+import { RecentUsageLine } from "./TurnUsage";
+import { SourceScopeRow, SourceScopeSheet } from "./SourceScope";
 import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
 import { diffStats, diffText } from "./textDiff";
 import "./writing.css";
@@ -76,6 +77,8 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
   const [hint, setHint] = useState("");
   /** 资料范围 (D184): for this request only; 自动 each time the sheet opens. */
   const [scope, setScope] = useState<SourceScope>(AUTO_SCOPE);
+  const [targetPosition, setTargetPosition] = useState<number | undefined>(draft.source?.position);
+  const [pickChaptersOpen, setPickChaptersOpen] = useState(false);
   const [presetsOpen, setPresetsOpen] = useState(false);
   const [preview, setPreview] = useState("");
   const [showDiff, setShowDiff] = useState(true);
@@ -84,35 +87,47 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
   const [pending, setPending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [since, setSince] = useState<string | null>(null);
+  const [usageTick, setUsageTick] = useState(0);
   /** A correction paused at its allowance: 接着查 goes on from what it has read (D182). */
   const [pausedRun, setPausedRun] = useState<string | null>(null);
   const task = useRef<{ cancel(): void } | null>(null);
   const generation = useRef(0);
   const alive = useRef(true);
-  const stop = () => { generation.current++; task.current?.cancel(); task.current = null; setPending(false); setReady(false); setPreview(""); setCorrection(null); setRevision(null); };
+  const stop = () => { generation.current++; task.current?.cancel(); task.current = null; setPending(false); setReady(false); setPreview(""); setCorrection(null); setRevision(null); setTimeout(() => { if (alive.current) setUsageTick((n) => n + 1); }, 300); };
   const close = () => { if (saving) return; alive.current = false; stop(); onClose(); };
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; generation.current++; task.current?.cancel(); };
-  }, []);
+    let live = true;
+    if (draft.source) {
+      const bound = draft.source;
+      void game.repo.getState(draft.anchor.nodeId).then((s) => {
+        if (!live) return;
+        if (s.source && s.source.bookId === bound.bookId) setTargetPosition(Math.min(s.source.position, bound.through ?? Infinity));
+      }).catch(() => {});
+    }
+    return () => { live = false; alive.current = false; generation.current++; task.current?.cancel(); };
+  }, [game, draft.anchor.nodeId, draft.source?.bookId, draft.source?.through]);
   const original = rewrite ? draft.text.slice(range.start, range.end) : draft.text;
   const choose = (next: TextRange) => { if (pending || saving) return; setRange(next); setReady(false); setPreview(""); setCorrection(null); setRevision(null); setError(""); };
   const pick = (next: Mode) => { choose(range); setMode(next); };
   const isWhole = range.start === whole.start && range.end === whole.end;
-  const generate = async (resume?: string) => {
+  const generate = async (resume?: string, overrideScope?: SourceScope) => {
     if (pending || saving) return;
     const token = ++generation.current;
+    const activeScope = overrideScope ?? scope;
     setPending(true); setReady(false); setPreview(""); setCorrection(null); setRevision(null); setError(""); setPausedRun(null);
+    if (!resume) setSince(new Date().toISOString());
     const current = () => alive.current && token === generation.current;
     try {
       if (canon) {
-        const work = runCanonCorrection(game, { anchor: draft.anchor, range, hint, scope }, text => { if (current()) setPreview(text); }, resume);
+        const work = runCanonCorrection(game, { anchor: draft.anchor, range, hint, scope: activeScope }, text => { if (current()) setPreview(text); }, resume);
         task.current = work;
         const result = await work.done;
         // Only a change has a new text to show; a check or an answer is shown below as what it found.
         if (current()) { setCorrection(result); setPreview((result.outcome ?? "changed") === "changed" ? result.replacement ?? result.narrative : ""); setReady(true); }
       } else if (mode === "revise") {
-        const work = game.runPlayerRevision({ anchor: draft.anchor, range, hint, scope }, text => { if (current()) setPreview(text); });
+        const work = game.runPlayerRevision({ anchor: draft.anchor, range, hint, scope: activeScope }, text => { if (current()) setPreview(text); });
         task.current = work;
         const result = await work.done;
         if (current()) { setRevision(result); setPreview(result.replacement); setReady(true); }
@@ -125,7 +140,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
     } catch (e) {
       if (current()) { setError(writingError(e)); setPreview(""); if (e instanceof CanonStop && e.runId) setPausedRun(e.runId); }
     }
-    finally { if (current()) { setPending(false); task.current = null; } }
+    finally { if (current()) { setPending(false); task.current = null; setUsageTick((n) => n + 1); } }
   };
   const outcome = correction ? correction.outcome ?? "changed" : null;
   const outcomeText = correction ? canonOutcomeText(correction, draft.source?.through) : "";
@@ -160,7 +175,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
         {ranges.map((r, i) => <label key={r.start} className="writing-option"><input type="radio" name="writing-range" aria-label={`第 ${i + 1} 段：${brief(draft.text.slice(r.start, r.end))}`} checked={range.start === r.start && range.end === r.end} disabled={pending || saving} onChange={() => choose(r)} /><span>{draft.text.slice(r.start, r.end)}</span></label>)}
       </div> : <p className="writing-original">{original}</p>}
       <label>希望怎么改<input value={hint} disabled={pending || saving} onChange={(e) => { setHint(e.target.value); setReady(false); }} placeholder={PLACEHOLDER[mode]} /></label>
-      {rewrite && (canon || (mode === "revise" && !!draft.source)) && <SourceScopeRow worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose={canon ? "correction" : "revise"} disabled={pending || saving} onChange={(next) => { choose(range); setScope(next); }} />}
+      {rewrite && (canon || (mode === "revise" && !!draft.source)) && <SourceScopeRow worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose={canon ? "correction" : "revise"} anchorPosition={targetPosition} disabled={pending || saving} onChange={(next) => { choose(range); setScope(next); }} />}
       <button className="ghost" disabled={pending || saving} onClick={() => setPresetsOpen(true)}>常用改稿要求</button>
       {presetsOpen && <MenuSheet title="常用改稿要求" onClose={() => setPresetsOpen(false)} items={WRITING_REQUIREMENT_PRESETS.filter(item => (item.mode === "polish" || rewrite) && (item.mode !== "canon" || !!draft.source)).map(item => ({ label: item.name, onSelect: () => { choose(range); setHint(item.hint); if (rewrite) setMode(item.mode); } }))} />}
       {(preview || pending) && (
@@ -191,9 +206,12 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {correction?.related?.map((t, i) => <p className="muted" key={`r${i}`}>关联问题：{t}</p>)}
       {correction && ((correction.related?.length ?? 0) + (correction.unresolved?.length ?? 0) > 0) && <button disabled={pending || saving} onClick={() => { const paragraph = isWhole ? undefined : ranges.findIndex(r => r.start === range.start); onClose(); push({ name: "agent", worldId: draft.anchor.worldId, lineId: draft.anchor.lineId, skills: ["canon-reference"], target: { nodeId: draft.anchor.nodeId, ...(paragraph !== undefined ? { paragraph } : {}), evidence: correction.corrections.flatMap(c => c.citations) }, initialText: `继续核对局部改稿的关联问题，保留玩家主动分支：\n${[...correction.related ?? [], ...correction.unresolved ?? []].join("\n")}\n${hint}` }); }}>交给助手处理关联问题</button>}
       {error && <p role="alert" className="field-hint warn">{error}</p>}
+      {!pending && since && <RecentUsageLine worldId={draft.anchor.worldId} purposes={["revise", "revise-passage", "段落改写", "行动润色", "correction", "writing", "tool"]} since={since} refreshKey={usageTick} />}
       {pausedRun && canon && !pending && <button className="primary" onClick={() => void generate(pausedRun)}>接着查</button>}
+      {outcome === "not_found" && canon && !pending && !!draft.source && <button className="primary" onClick={() => setPickChaptersOpen(true)}>去目录选章节再查</button>}
       {((error && !pausedRun) || outcome === "not_found") && canon && !pending && <button onClick={() => { setError(""); pick("revise"); }}>改用“按我的要求改”</button>}
       {error && mode === "revise" && error.includes("只润色文字") && !pending && <button onClick={() => { setError(""); pick("polish"); }}>改用“只润色文字”</button>}
+      {pickChaptersOpen && draft.source && <SourceScopeSheet worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose="correction" initialMode="chapters" anchorPosition={targetPosition} onClose={() => setPickChaptersOpen(false)} onChange={(next) => { setPickChaptersOpen(false); choose(range); setScope(next); void generate(undefined, next); }} />}
       <div className="writing-actions">
         {pending ? <button onClick={() => { stop(); setError("已取消，原文没有改动。"); }}>取消生成</button> : <button disabled={saving} onClick={close}>取消</button>}
         {!pending && <button className={preview || correction ? "" : "primary"} disabled={saving || !original.trim()} onClick={() => void generate()}>{canon ? (correction ? "再查一次" : "开始核对") : preview ? "再改一版" : "生成改稿"}</button>}

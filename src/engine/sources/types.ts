@@ -18,6 +18,8 @@ export interface ReferencePassage {
   start?: number; end?: number;
   /** Query focus in the same chunk coordinates, used when fitting a smaller budget. */
   focus?: number;
+  /** Fallback excerpt at current position when no term matched; not a real hit. */
+  match?: "nearby";
   /** A verified locator; its quotation must still occur in an original passage. */
   fact?: SourceFactData;
 }

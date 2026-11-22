@@ -45,7 +45,7 @@ pub(crate) fn prepare(db:&Connection,task:&Value,parent:&str,args:&Value,mut cap
     Ok(json!({"parentCallId":parent,"mode":"readonly","children":children,"goalCompleted":false}))
 }
 pub(crate) fn readonly_tool(name:&str)->bool {
-    matches!(name,"discover_tools"|"list_resources"|"read_resource"|"search_resources"|"read_world"|"read_story_resources"|"read_continuity"|"read_clock"|"list_skills"|"read_skill"|"read_skill_resource"|"search_original"|"read_original"|"read_canon_facts"|"read_player_choices"|"read_tool_result"|"web_search"|"read_webpage"|"read_external_resource"|"browser_open"|"browser_read"|"browser_find"|"browser_follow"|"browser_close"|"list_documents"|"read_document"|"find_document"|"list_remote_tools"|"call_remote_tool"|"list_mcp_resources"|"read_mcp_resource"|"read_provided_draft"|"search_agent_history"|"read_agent_history" | "read_timeline" | "read_evidence" | "read_fact_sources")
+    matches!(name,"discover_tools"|"list_resources"|"read_resource"|"search_resources"|"read_world"|"read_story_resources"|"read_continuity"|"read_clock"|"list_skills"|"read_skill"|"read_skill_resource"|"list_sections"|"search_original"|"read_original"|"read_canon_notes"|"read_canon_facts"|"read_player_choices"|"read_tool_result"|"web_search"|"read_webpage"|"read_external_resource"|"browser_open"|"browser_read"|"browser_find"|"browser_follow"|"browser_close"|"list_documents"|"read_document"|"find_document"|"list_remote_tools"|"call_remote_tool"|"list_mcp_resources"|"read_mcp_resource"|"read_provided_draft"|"search_agent_history"|"read_agent_history" | "read_timeline" | "read_evidence" | "read_fact_sources")
 }
 pub(crate) fn catalog()->Vec<crate::tools::ToolDefinition> {
     let mut tools=crate::pi_tools::catalog().into_iter().filter(|tool|readonly_tool(tool.name)).collect::<Vec<_>>();
@@ -56,7 +56,11 @@ pub(crate) fn discover(args:&Value)->Result<Value> {
     let all=catalog();let names=args["names"].as_array().ok_or_else(||invalid("请提供只读工具名称列表"))?;
     if names.iter().any(|name|!name.as_str().is_some_and(|name|all.iter().any(|tool|tool.name==name))){return Err(invalid("子助手只能加载实际存在的只读工具"));}
     let definitions=all.iter().filter(|tool|names.iter().any(|name|name==tool.name)).map(|tool|json!({"name":tool.name,"description":tool.description,"parameters":tool.parameters,"readOnly":true})).collect::<Vec<_>>();
-    Ok(json!({"definitions":definitions,"enabledTools":names,"catalog":all.iter().map(|tool|json!({"name":tool.name,"description":tool.description})).collect::<Vec<_>>(),"readOnly":true}))
+    let mut out=json!({"definitions":definitions,"enabledTools":names,"readOnly":true});
+    if names.is_empty() || args["includeCatalog"]==true {
+        out["catalog"]=json!(all.iter().map(|tool|json!({"name":tool.name,"description":tool.description})).collect::<Vec<_>>());
+    }
+    Ok(out)
 }
 pub(crate) fn provided(db:&Connection,child:&ChildAuthority,args:&Value)->Result<Value> {
     let raw:String=db.query_row("SELECT provided_json FROM pi_children WHERE task_id=? AND id=?",params![child.task_id,child.id],|r|r.get(0))?;

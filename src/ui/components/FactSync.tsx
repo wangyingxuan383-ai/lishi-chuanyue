@@ -6,25 +6,29 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { writingError, type PlayerRevisionPreview, type WritingAnchor } from "../../engine/writing/assist";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { RecentUsageLine } from "./TurnUsage";
 import { DiffView, RecordChanges } from "./WritingAssist";
 import { diffStats, diffText } from "./textDiff";
 
-export interface FactSyncAsk { anchor: WritingAnchor; text: string; latest: boolean }
+export interface FactSyncAsk { anchor: WritingAnchor; text: string; latest: boolean; autoStart?: boolean }
 
 export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
   ask: FactSyncAsk; onTextOnly: () => Promise<void>; onAdopt: (preview: PlayerRevisionPreview) => Promise<void>; onClose: () => void;
 }) {
   const { game } = useApp();
-  const [step, setStep] = useState<"ask" | "syncing" | "preview">("ask");
+  const [step, setStep] = useState<"ask" | "syncing" | "preview">(ask.autoStart ? "syncing" : "ask");
   const [preview, setPreview] = useState<(PlayerRevisionPreview & { unchanged: boolean }) | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [since, setSince] = useState<string | null>(null);
+  const [usageTick, setUsageTick] = useState(0);
   const task = useRef<{ cancel(): void } | null>(null);
+  const autoStarted = useRef(false);
   useEffect(() => () => task.current?.cancel(), []);
   const stats = useMemo(() => diffStats(diffText(ask.anchor.original, ask.text)), [ask.anchor.original, ask.text]);
   const hasDiff = stats.added > 0 || stats.removed > 0;
   const sync = async () => {
-    setStep("syncing"); setError("");
+    setStep("syncing"); setError(""); setSince((prev) => prev ?? new Date().toISOString());
     const work = game.runFactSync({ anchor: ask.anchor, text: ask.text });
     task.current = work;
     try {
@@ -32,8 +36,13 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
       setPreview(result);
       setStep("preview");
     } catch (e) { setError(writingError(e)); setStep("ask"); }
-    finally { task.current = null; }
+    finally { task.current = null; setUsageTick((n) => n + 1); }
   };
+  useEffect(() => {
+    if (!ask.autoStart || autoStarted.current) return;
+    autoStarted.current = true;
+    void sync();
+  }, [ask.autoStart]);
   const run = async (action: () => Promise<void>) => {
     setSaving(true); setError("");
     try { await action(); onClose(); } catch (e) { setError(writingError(e)); } finally { setSaving(false); }
@@ -74,6 +83,7 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
             </>}
         </div>
       </>}
+      {step !== "syncing" && since && <RecentUsageLine worldId={ask.anchor.worldId} purposes={["sync-facts"]} since={since} refreshKey={usageTick} />}
       {error && <p role="alert" className="field-hint warn m-0">{error}</p>}
     </div>
   </Sheet>;

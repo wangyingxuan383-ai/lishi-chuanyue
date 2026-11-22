@@ -742,3 +742,45 @@ async fn continue_waits_for_the_previous_sessions_close_after_database_settlemen
     assert_eq!(next["taskId"],id);assert!(began.elapsed()>=Duration::from_millis(200),"continue must wait for transport ownership, not only the released DB lease");
     f.idle().await;f.connection.close_transport().await;bounded(peer_task).await.unwrap();assert_eq!(f.resolved.load(Ordering::SeqCst),2);
 }
+
+#[tokio::test]
+async fn task_summary_exposes_staged_drafts_and_discard_drafts_clears_them_safely() {
+    use story_core::{pi_gateway::StoryToolGateway, pi_store::PiCallRequest};
+    let (f, _peer) = Fixture::new();
+    let session = f.session().await;
+    let gateway = StoryToolGateway::new(f.store.clone());
+    gateway.start_task(&session, "draft-task", "准备修改草稿", "auto-reversible", false, json!({"model":"no-http"}), json!({})).unwrap();
+    let permit = gateway.permit("draft-task").unwrap();
+    let version = gateway.0.task("draft-task").unwrap()["base_world_version"].as_str().unwrap().to_owned();
+    let call = |id: &str, tool: &str, args: Value| {
+        gateway.invoke(&permit, PiCallRequest { task_id: "draft-task".into(), call_id: id.into(), tool: tool.into(), args, intent_revision: 0, world_version: version.clone(), external_write: false }).unwrap()
+    };
+    assert_eq!(call("edit-1", "stage_edit", json!({"kind":"facts","operation":"append","value":{"id":"f-dedup","detail":"新事实条目","origin":"ai","citations":[]},"summary":"追加事实"}))["ok"], true);
+    // Cross-crash idempotent dedup: identical array append under a fresh callId does NOT double-append.
+    let dedup_edit = call("edit-2-retry", "stage_edit", json!({"kind":"facts","operation":"append","value":{"id":"f-dedup","detail":"新事实条目","origin":"ai","citations":[]},"summary":"追加事实"}));
+    assert_eq!(dedup_edit["ok"], true);
+    assert_eq!(dedup_edit["data"]["deduped"], true);
+    assert_eq!(call("story-1", "stage_story_turn", json!({"narrative":"暂存剧情一段","record":{},"summary":"暂存剧情"}))["ok"], true);
+    let dedup_story = call("story-2-retry", "stage_story_turn", json!({"narrative":"暂存剧情一段","record":{},"summary":"暂存剧情"}));
+    assert_eq!(dedup_story["ok"], true);
+    assert_eq!(dedup_story["data"]["deduped"], true);
+    assert_eq!(call("route-1", "stage_route", json!({"name":"测试支线","summary":"开支线"}))["ok"], true);
+    let dedup_route = call("route-2-retry", "stage_route", json!({"name":"测试支线","summary":"开支线"}));
+    assert_eq!(dedup_route["ok"], true);
+    assert_eq!(dedup_route["data"]["deduped"], true);
+    // Running task rejects discard_drafts.
+    assert!(f.service.request(json!({"op":"discard_drafts","taskId":"draft-task"})).await.is_err());
+    // Interrupt task and verify task_summary reports all 3 deduped drafts.
+    gateway.interrupt(&permit, "中断测试").unwrap();
+    let snap = f.service.snapshot("draft-task", 0, 20).unwrap();
+    assert_eq!(snap["task"]["draftCount"], 3);
+    assert_eq!(snap["task"]["drafts"].as_array().unwrap().len(), 3);
+    let facts_after = snap["task"]["drafts"][0]["after"].as_array().unwrap();
+    assert_eq!(facts_after.iter().filter(|f| f["id"] == "f-dedup").count(), 1, "append must not double-apply across crash retry: {facts_after:?}");
+    // Discard drafts clears workspace safely without touching formal world.
+    let cleared = f.service.request(json!({"op":"discard_drafts","taskId":"draft-task"})).await.unwrap();
+    assert_eq!(cleared["discarded"], true);
+    assert_eq!(cleared["task"]["draftCount"], 0);
+    assert!(cleared["task"]["drafts"].as_array().unwrap().is_empty());
+    f.service.shutdown().await.unwrap();
+}

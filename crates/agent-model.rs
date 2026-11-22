@@ -209,6 +209,26 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
                 };
                 append_message(&mut history, target, blocks);
             }
+            let cacheable = |block: &Value| {
+                matches!(
+                    block["type"].as_str(),
+                    Some("text" | "tool_use" | "tool_result" | "image" | "document")
+                ) && (block["type"] != "text" || !block["text"].as_str().unwrap_or("").is_empty())
+            };
+            // Prompt-cache breakpoints (R31-P3): mark the end of tools, system, and the
+            // penultimate history message (skipping thinking blocks) so Anthropic caches
+            // the stable prefix across turns and tool-call loops.
+            if let Some(last_sys) = system.iter_mut().rev().find(|b| cacheable(b)) {
+                last_sys["cache_control"] = json!({"type":"ephemeral"});
+            }
+            if history.len() >= 2 {
+                let target_idx = history.len() - 2;
+                if let Some(blocks) = history[target_idx]["content"].as_array_mut() {
+                    if let Some(last_block) = blocks.iter_mut().rev().find(|b| cacheable(b)) {
+                        last_block["cache_control"] = json!({"type":"ephemeral"});
+                    }
+                }
+            }
             let mut result =
                 json!({"model":model,"messages":history,"max_tokens":limit,"stream":true});
             if !system.is_empty() {
@@ -229,7 +249,14 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
                 ],
             );
             if !tools.is_empty() {
-                result["tools"]=json!(tools.iter().map(|t|json!({"name":t["name"],"description":t["description"].as_str().unwrap_or(""),"input_schema":t["parameters"]})).collect::<Vec<_>>());
+                let mut wire_tools: Vec<Value> = tools
+                    .iter()
+                    .map(|t| json!({"name":t["name"],"description":t["description"].as_str().unwrap_or(""),"input_schema":t["parameters"]}))
+                    .collect();
+                if let Some(last_tool) = wire_tools.last_mut() {
+                    last_tool["cache_control"] = json!({"type":"ephemeral"});
+                }
+                result["tools"] = Value::Array(wire_tools);
                 if body["tool_choice"] == "none" {
                     result["tool_choice"] = json!({"type":"none"});
                 }
@@ -529,6 +556,7 @@ struct Parser {
     blocks: BTreeMap<u64, Block>,
     parts: Vec<Value>,
     prompt_blocked: bool,
+    saw_thinking: bool,
     ended: bool,
 }
 impl Parser {
@@ -541,6 +569,7 @@ impl Parser {
             blocks: BTreeMap::new(),
             parts: vec![],
             prompt_blocked: false,
+            saw_thinking: false,
             ended: false,
         }
     }
@@ -566,6 +595,12 @@ impl Parser {
         match self.protocol {
             Protocol::Responses => match text(&value["type"]) {
                 "response.output_text.delta" => self.result.text.push_str(text(&value["delta"])),
+                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                    self.saw_thinking = true;
+                }
+                "response.output_item.added" if value["item"]["type"] == "reasoning" => {
+                    self.saw_thinking = true;
+                }
                 "response.completed" | "response.incomplete" => {
                     self.final_value = Some(value["response"].clone());
                     self.ended = true;
@@ -596,6 +631,8 @@ impl Parser {
                     let block = value["content_block"].clone();
                     if block["type"] == "text" {
                         self.result.text.push_str(text(&block["text"]));
+                    } else if block["type"] == "thinking" {
+                        self.saw_thinking = true;
                     }
                     self.blocks.insert(
                         index,
@@ -624,6 +661,8 @@ impl Parser {
                             block.value[key] = format!("{old}{part}").into();
                             if key == "text" {
                                 self.result.text.push_str(part);
+                            } else if key == "thinking" && !part.is_empty() {
+                                self.saw_thinking = true;
                             }
                         }
                         "input_json_delta" => block.args.push_str(text(&delta["partial_json"])),
@@ -679,7 +718,9 @@ impl Parser {
                     self.ended = true;
                 }
                 for part in items(&candidate["content"]["parts"]) {
-                    if part["thought"] != true {
+                    if part["thought"] == true {
+                        self.saw_thinking = true;
+                    } else {
                         self.result.text.push_str(text(&part["text"]));
                     }
                     self.parts.push(part.clone());
@@ -702,6 +743,13 @@ impl Parser {
             &self.chat.result.text
         } else {
             &self.result.text
+        }
+    }
+    fn has_thinking(&self) -> bool {
+        if self.protocol == Protocol::Chat {
+            self.chat.has_thinking()
+        } else {
+            self.saw_thinking
         }
     }
     fn finish(self, sse: bool) -> Result<Completion> {
@@ -828,6 +876,7 @@ pub async fn complete(
     let mut total = 0;
     let mut first = None;
     let mut streamed_text_len = 0;
+    let mut thinking_notified = false;
     'read: loop {
         let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(if first.is_none() {story_core::chat::FIRST_BYTE_MS} else {story_core::chat::IDLE_MS}),response.chunk())=>r.map_err(|_|provider(if first.is_none() {"timeout_first"} else {"timeout_idle"},None,"等待模型内容超时",first.is_some()))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),first.is_some()))?};
         let Some(chunk) = chunk else {
@@ -855,6 +904,10 @@ pub async fn complete(
                     return Err(invalid("模型意外返回认证信息，已停止并隐藏"));
                 }
                 let done = parser.push(payload)?;
+                if !thinking_notified && streamed_text_len == 0 && parser.has_thinking() {
+                    thinking_notified = true;
+                    sink("\0phase:thinking".into());
+                }
                 if parser.current_text().len() > streamed_text_len {
                     streamed_text_len = parser.current_text().len();
                     first.get_or_insert(started.elapsed().as_millis() as u64);
@@ -1184,5 +1237,81 @@ mod tests {
         let mut parser = Parser::new(Protocol::Gemini);
         parser.push(&json!([{"candidates":[{"content":{"parts":[{"text":"完"}]}}]},{"candidates":[{"content":{"parts":[{"text":"成"}]},"finishReason":"STOP"}]}]).to_string()).unwrap();
         assert_eq!(parser.finish(false).unwrap().text, "完成");
+    }
+    #[test]
+    fn anthropic_attaches_ephemeral_cache_control_and_skips_thinking_blocks() {
+        let settings = config("anthropic");
+        let messages = vec![
+            json!({"role":"system","content":"固定规则前缀"}),
+            json!({"role":"user","content":"第一回合"}),
+            json!({"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_clock","arguments":"{}"},"providerData":{"protocol":"anthropic","content":[{"type":"thinking","thinking":"内部推理","signature":"sig1"},{"type":"text","text":"正文回答"}]}}]}),
+            json!({"role":"user","content":"第二回合"}),
+        ];
+        let request = chat::request(&settings, &messages, &[json!({"type":"function","function":{"name":"read_clock","description":"读时间","parameters":{"type":"object","properties":{}}}})], false);
+        let wire = prepare(&settings, &request, Protocol::Anthropic).unwrap();
+        assert_eq!(wire["system"][0]["cache_control"], json!({"type":"ephemeral"}));
+        assert_eq!(wire["tools"][0]["cache_control"], json!({"type":"ephemeral"}));
+        assert!(wire["messages"][1]["content"][0].get("cache_control").is_none());
+        assert_eq!(wire["messages"][1]["content"][1]["cache_control"], json!({"type":"ephemeral"}));
+        assert!(wire["messages"][2]["content"][0].get("cache_control").is_none());
+    }
+    #[tokio::test]
+    async fn thinking_phase_sentinel_emitted_once_before_text() {
+        let mut chat_parser = Parser::new(Protocol::Chat);
+        assert!(!chat_parser.has_thinking());
+        chat_parser.push(r#"{"choices":[{"delta":{"reasoning_content":"先理清人物关系"}}]}"#).unwrap();
+        assert!(chat_parser.has_thinking());
+
+        let mut gemini_parser = Parser::new(Protocol::Gemini);
+        assert!(!gemini_parser.has_thinking());
+        gemini_parser.push(r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"先核对时间线"}]}}]}"#).unwrap();
+        assert!(gemini_parser.has_thinking());
+
+        let wire = [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"第一步推理"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"第二步推理"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"雨停了。"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}),
+            json!({"type":"message_stop"}),
+        ]
+        .into_iter()
+        .map(event)
+        .collect::<String>();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let output = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{wire}", wire.len());
+            socket.write_all(output.as_bytes()).unwrap();
+        });
+        let mut cfg = config("anthropic");
+        cfg.url = format!("http://{address}/v1/messages");
+        let client = Client::builder().no_proxy().build().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_sink = seen.clone();
+        let result = complete(
+            client,
+            cfg.clone(),
+            body(&cfg),
+            "fixture-key".into(),
+            CancellationToken::new(),
+            Arc::new(move |s| seen_sink.lock().unwrap().push(s)),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.text, "雨停了。");
+        let events = seen.lock().unwrap();
+        let thinking_count = events.iter().filter(|e| e.as_str() == "\0phase:thinking").count();
+        assert_eq!(thinking_count, 1, "expected sentinel once, got {events:?}");
+        assert_eq!(events[0], "\0phase:thinking");
+        assert!(events.iter().any(|e| e == "雨停了。"));
     }
 }

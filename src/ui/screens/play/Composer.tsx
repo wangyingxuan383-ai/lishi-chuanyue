@@ -3,32 +3,47 @@
 // suggested choices moved into the story, under the latest passage, so the
 // bar never takes reading space at rest. Class names .dock / .inputbar /
 // .mode-btn / .send-btn stay for the UI checks.
-import type { RefObject } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import type { StoryNode, WorldState } from "../../../engine/types";
 import { Icon } from "../../components/Icon";
 import type { MODES } from "./constants";
 import type { Gen } from "./types";
 
 export interface ComposerProps {
-  dead: boolean; state: WorldState; watch?: boolean; auto: { step: number; total: number } | null;
+  dead: boolean; state: WorldState; watch?: boolean; auto: { step: number; total: number; runId?: string } | null;
   input: string; typing: boolean; mouse: boolean; busy: boolean; agentBusy: boolean;
   turn: StoryNode | undefined; head: StoryNode; noteOpen: boolean; note: string;
-  mode: typeof MODES[number]; modeIndex: number; gen: Gen | null; roomy: boolean;
+  mode: typeof MODES[number]; modeIndex: number; modeList: typeof MODES; gen: Gen | null; roomy: boolean;
   inputBox: RefObject<HTMLTextAreaElement | null>;
   setInput: (text: string) => void; setModeIndex: (index: number) => void;
   setNote: (note: string) => void; setNoteOpen: (open: boolean) => void; setTyping: (typing: boolean) => void;
   onModes: () => void; onDesk: () => void; onPolish: () => void; onAutoplay: () => void;
+  onQueueAutoplayNote?: (note: string) => Promise<void>;
   onSend: () => void; onStopOrSend: () => void;
 }
 
 export function Composer(p: ComposerProps) {
-  const { dead, state, watch, auto, input, typing, mouse, busy, agentBusy, noteOpen, note, mode, modeIndex, gen, roomy, inputBox } = p;
+  const { dead, state, watch, auto, input, typing, mouse, busy, agentBusy, noteOpen, note, mode, modeIndex, modeList, gen, roomy, inputBox } = p;
+  const [autoDraft, setAutoDraft] = useState("");
+  const [queuedNote, setQueuedNote] = useState("");
+  const [queueing, setQueueing] = useState(false);
+  useEffect(() => { setQueuedNote(""); }, [auto?.step, auto?.runId]);
   const typed = !!input.trim();
   const kind = agentBusy ? "wait" : busy ? "stop" : typed ? "send" : "continue";
   const label = { wait: "等待", stop: "停止", send: "发送", continue: "继续" }[kind];
   const icon = ({ wait: "hourglass", stop: "stop", send: "send", continue: "play" } as const)[kind];
   const showTools = !dead && (typing || typed);
   const toolCount = showTools ? ((!watch ? 1 : 0) + 1 + (typed ? 1 : 0)) : 0;
+  const submitAutoplayNote = async () => {
+    const clean = autoDraft.trim();
+    if (!clean || !p.onQueueAutoplayNote || queueing) return;
+    setQueueing(true);
+    try {
+      await p.onQueueAutoplayNote(clean);
+      setQueuedNote(clean);
+      setAutoDraft("");
+    } finally { setQueueing(false); }
+  };
   return (
     <div className={`dock${typing ? " typing" : ""}`} data-tools={toolCount}>
       {!dead && state.protagonist.statuses.some((x) => x.name === "垂危") && <p className="dying-note">你伤重垂危：再受重伤就会死去，先设法疗伤。</p>}
@@ -41,6 +56,31 @@ export function Composer(p: ComposerProps) {
             </span>
           ) : <span className="choices-head">AI 来演主角，你在幕后指点</span>}
           {!auto && <button className="autoplay-btn" disabled={busy} onClick={p.onAutoplay}><span>连播</span></button>}
+        </div>
+      )}
+      {!dead && auto && p.onQueueAutoplayNote && (
+        <div className="autoplay-note-bar">
+          {queuedNote ? (
+            <div className="row between autoplay-note-queued">
+              <small className="muted">下段提示：{queuedNote}</small>
+              <button type="button" className="ghost small" disabled={queueing} onClick={() => { setQueueing(true); void p.onQueueAutoplayNote?.("").finally(() => { setQueuedNote(""); setQueueing(false); }); }}>撤销</button>
+            </div>
+          ) : (
+            <div className="row autoplay-note-input">
+              <input className="grow" aria-label="下一段幕后提示" value={autoDraft} disabled={queueing} placeholder="下一段幕后提示（不打断连播）"
+                onChange={(e) => setAutoDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); void submitAutoplayNote(); } }} />
+              <button type="button" className="ghost small" disabled={queueing || !autoDraft.trim()} onClick={() => void submitAutoplayNote()}>排队</button>
+            </div>
+          )}
+        </div>
+      )}
+      {!dead && !watch && !auto && !busy && typing && modeList.length > 1 && (
+        <div className="mode-chips" role="group" aria-label="快速切换输入方式">
+          {modeList.map((m, i) => (
+            <button key={m.mode} type="button" className="mode-chip" aria-pressed={i === modeIndex}
+              onMouseDown={(e) => e.preventDefault()} onClick={() => p.setModeIndex(i)}>{m.label}</button>
+          ))}
         </div>
       )}
       {noteOpen && !watch && mode.mode !== "direct" && (

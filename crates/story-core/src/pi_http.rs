@@ -12,11 +12,19 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
 use tokio_util::sync::CancellationToken;
+
+static NETWORK_EPOCH: AtomicU64 = AtomicU64::new(0);
+pub fn network_epoch() -> u64 {
+    NETWORK_EPOCH.load(Ordering::Acquire)
+}
+pub fn bump_network_epoch() {
+    NETWORK_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
 
 pub const MAX_MODEL_CHUNK: usize = 64 * 1024;
 pub trait ModelHttpBody: Send + Sync {
@@ -40,6 +48,8 @@ struct Stream {
     cancel: CancellationToken,
     response: Mutex<Option<Arc<ModelHttpResponse>>>,
     reading: Arc<tokio::sync::Semaphore>,
+    auth_epoch: AtomicU64,
+    last_auth_ms: AtomicI64,
 }
 impl Drop for Stream {
     fn drop(&mut self) {
@@ -149,6 +159,8 @@ impl ModelHttpController {
             cancel: self.0.cancel.child_token(),
             response: Mutex::new(None),
             reading: Arc::new(tokio::sync::Semaphore::new(1)),
+            auth_epoch: AtomicU64::new(crate::agent_workspace::pi_auth_epoch()),
+            last_auth_ms: AtomicI64::new(crate::execution_lease::now_ms()),
         });
         {
             let mut streams = self.0.streams.lock().map_err(|_| Error::Cancelled)?;
@@ -197,15 +209,19 @@ impl ModelHttpController {
             admitted: admitted.clone(),
             armed: true,
         };
+        let mut host_args = args.clone();
+        host_args["_nativePurpose"] = (if self.0.child.is_some() { "subagent" } else { purpose }).into();
         let result = tokio::select! {biased;
             _=rpc_cancel.cancelled()=>return Err(Error::Cancelled),
             _=stream.cancel.cancelled()=>return Err(Error::Cancelled),
-            value=(self.0.host)(self.0.config.clone(),args.clone(),stream.cancel.clone(),admit)=>value
+            value=(self.0.host)(self.0.config.clone(),host_args,stream.cancel.clone(),admit)=>value
         };
         let response = result?;
         if !admitted.load(Ordering::Acquire) {
             return Err(invalid("原生模型宿主没有登记请求，未接收响应"));
         }
+        stream.auth_epoch.store(crate::agent_workspace::pi_auth_epoch(), Ordering::Release);
+        stream.last_auth_ms.store(crate::execution_lease::now_ms(), Ordering::Release);
         if !(200..=599).contains(&response.status) || response.headers.len() > 128 {
             return Err(invalid("原生模型响应头无效"));
         }
@@ -215,9 +231,9 @@ impl ModelHttpController {
         Ok(reply)
     }
     async fn read(&self, id: &str, rpc_cancel: CancellationToken) -> Result<Value> {
-        // Check the live immutable owner before each pull without keeping the
-        // database locked while the next network chunk is awaited.
-        self.0.gateway.authorize_model_scoped(&self.0.permit,self.0.child.as_ref())?;
+        if self.0.cancel.is_cancelled() || rpc_cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         let stream = self
             .0
             .streams
@@ -226,6 +242,20 @@ impl ModelHttpController {
             .get(id)
             .cloned()
             .ok_or_else(|| invalid("模型响应已结束，不能重复读取"))?;
+        if stream.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        // Fast path: skip per-chunk SQLite lock while no stop/lease/child write
+        // occurred and the last DB check is within 2s (R31-P3).
+        let current_epoch = crate::agent_workspace::pi_auth_epoch();
+        let now_ms = crate::execution_lease::now_ms();
+        if current_epoch != stream.auth_epoch.load(Ordering::Acquire)
+            || now_ms.saturating_sub(stream.last_auth_ms.load(Ordering::Acquire)) >= 2000
+        {
+            self.0.gateway.authorize_model_scoped(&self.0.permit,self.0.child.as_ref())?;
+            stream.auth_epoch.store(crate::agent_workspace::pi_auth_epoch(), Ordering::Release);
+            stream.last_auth_ms.store(now_ms, Ordering::Release);
+        }
         let _reading = stream
             .reading
             .clone()

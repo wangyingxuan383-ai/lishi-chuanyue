@@ -248,28 +248,6 @@ fn actor(state: &Value, query: &str) -> Option<(String, String)> {
     }
     (candidates.len() == 1).then(|| candidates.remove(0))
 }
-fn actor_state(db: &Connection, node: &str) -> Result<Value> {
-    let hero:Option<(Option<String>,Option<String>)>=db.query_row("SELECT json_extract(state_json,'$.protagonist.name'),json_extract(state_json,'$.protagonist.aliases') FROM states WHERE node_id=?",[node],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    let Some((name, aliases)) = hero else {
-        return Ok(json!({}));
-    };
-    let mut stmt=db.prepare("SELECT json_extract(p.value,'$.id'),json_extract(p.value,'$.name'),json_extract(p.value,'$.aliases') FROM states s,json_each(s.state_json,'$.people') p WHERE s.node_id=?")?;
-    let rows = stmt.query_map([node], |r| {
-        Ok((
-            r.get::<_, Option<String>>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, Option<String>>(2)?,
-        ))
-    })?;
-    let mut people = vec![];
-    for row in rows {
-        let (id, name, aliases) = row?;
-        people.push(json!({"id":id,"name":name,"aliases":aliases.and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(json!([]))}));
-    }
-    Ok(
-        json!({"protagonist":{"name":name,"aliases":aliases.and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(json!([]))},"people":people}),
-    )
-}
 fn validate_item(
     db: &Connection,
     world: &str,
@@ -306,25 +284,159 @@ fn validate_item(
     Ok(out)
 }
 
+struct ProjectCache {
+    texts: HashMap<String, (String, String, String)>,
+    states: HashMap<String, Value>,
+}
+
+fn batch_load_texts(
+    db: &Connection,
+    world: &str,
+    ids: &HashSet<String>,
+) -> Result<HashMap<String, (String, String, String)>> {
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let id_vec: Vec<&String> = ids.iter().collect();
+    for chunk in id_vec.chunks(400) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT id,narrative,action_text,director_note FROM nodes WHERE world_id=? AND id IN ({placeholders})"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        params_vec.push(&world);
+        for id in chunk {
+            params_vec.push(*id);
+        }
+        let rows = stmt.query_map(params_vec.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            ))
+        })?;
+        for row in rows {
+            let (id, narrative, action, director) = row?;
+            out.insert(id, (narrative, action, director));
+        }
+    }
+    Ok(out)
+}
+
+fn batch_load_actor_states(
+    db: &Connection,
+    ids: &HashSet<String>,
+) -> Result<HashMap<String, Value>> {
+    let mut out = HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let id_vec: Vec<&String> = ids.iter().collect();
+    for chunk in id_vec.chunks(400) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!("SELECT node_id,state_json FROM states WHERE node_id IN ({placeholders})");
+        let mut stmt = db.prepare(&sql)?;
+        let params_vec: Vec<&dyn rusqlite::ToSql> = chunk.iter().map(|id| *id as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_vec.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (node_id, raw) = row?;
+            if let Ok(state) = serde_json::from_str::<Value>(&raw) {
+                let hero_name = state["protagonist"]["name"].clone();
+                let hero_aliases = state["protagonist"]["aliases"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let people: Vec<Value> = state["people"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|p| {
+                        json!({
+                            "id": p["id"],
+                            "name": p["name"],
+                            "aliases": p["aliases"].as_array().cloned().unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+                out.insert(
+                    node_id,
+                    json!({"protagonist":{"name":hero_name,"aliases":hero_aliases},"people":people}),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn quoted_cached(
+    cache: &ProjectCache,
+    source: &Value,
+    allowed: &HashSet<String>,
+) -> bool {
+    let id = source["nodeId"].as_str().unwrap_or("");
+    let quote = source["quote"].as_str().unwrap_or("");
+    if quote.trim().is_empty() || !allowed.contains(id) {
+        return false;
+    }
+    let from = source["from"].as_str().unwrap_or("");
+    cache.texts.get(id).is_some_and(|(narrative, action, director)| {
+        if from == "narrative" {
+            narrative.contains(quote)
+        } else {
+            format!("{action}\n{director}").contains(quote)
+        }
+    })
+}
+
 /// Project only the selected head's ancestry. Each later correction is an
 /// immutable event; undo or a different branch automatically exposes the
 /// appropriate prior version instead of mutating a shared ancestor.
 pub(crate) fn project(db: &Connection, world: &str, head: &str) -> Result<Value> {
     let nodes = path(db, world, head)?;
-    let mut allowed = HashSet::new();
-    let mut knowledge = Map::new();
-    let mut threads = Map::new();
+    // Pre-normalize once and batch-fetch only the referenced node texts & states
+    // in O(1) SQL queries instead of N+1 queries per ancestry node (R31-P3).
+    let mut normalized = Vec::with_capacity(nodes.len());
+    let mut text_ids = HashSet::new();
+    let mut state_ids = HashSet::new();
     let mut ignored = 0usize;
     for node in nodes {
         let mut issues = vec![];
         let changes = normalize(&node.changes, &mut issues);
         ignored += issues.len();
+        if changes["knowledge"].is_array() {
+            state_ids.insert(node.id.clone());
+        }
+        for kind in ["knowledge", "threads"] {
+            for item in changes[kind].as_array().into_iter().flatten() {
+                let target_id = item["source"]["nodeId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&node.id);
+                text_ids.insert(target_id.to_owned());
+            }
+        }
+        normalized.push((node.id, changes));
+    }
+    let cache = ProjectCache {
+        texts: batch_load_texts(db, world, &text_ids)?,
+        states: batch_load_actor_states(db, &state_ids)?,
+    };
+    let empty_state = json!({});
+    let mut allowed = HashSet::new();
+    let mut knowledge = Map::new();
+    let mut threads = Map::new();
+    for (node_id, changes) in normalized {
         let state = if changes["knowledge"].is_array() {
-            actor_state(db, &node.id)?
+            cache.states.get(&node_id).unwrap_or(&empty_state)
         } else {
-            json!({})
+            &empty_state
         };
-        allowed.insert(node.id.clone());
+        allowed.insert(node_id.clone());
         for kind in ["knowledge", "threads"] {
             let map = if kind == "knowledge" {
                 &mut knowledge
@@ -333,39 +445,45 @@ pub(crate) fn project(db: &Connection, world: &str, head: &str) -> Result<Value>
             };
             for item in changes[kind].as_array().into_iter().flatten() {
                 let id = item["id"].as_str().unwrap();
-                match validate_item(
-                    db,
-                    world,
-                    &node.id,
-                    item,
-                    kind,
-                    &allowed,
-                    None,
-                    &state,
-                    map.get(id),
-                ) {
-                    Ok(mut item) => {
-                        let previous = map.get(id);
-                        item["originNodeId"] = previous
-                            .map(|v| v["originNodeId"].clone())
-                            .unwrap_or(json!(node.id));
-                        item["historyCount"] = json!(
-                            previous
-                                .and_then(|v| v["historyCount"].as_u64())
-                                .unwrap_or(0)
-                                + 1
-                        );
-                        item["nodeId"] = node.id.clone().into();
-                        if kind == "knowledge" && item.get("active").is_none() {
-                            item["active"] = true.into();
-                        }
-                        if kind == "threads" && item.get("recall").is_none() {
-                            item["recall"] = true.into();
-                        }
-                        map.insert(id.into(), item);
-                    }
-                    Err(_) => ignored += 1,
+                let mut out = item.clone();
+                if out["source"].get("nodeId").is_none() {
+                    out["source"]["nodeId"] = node_id.clone().into();
                 }
+                if !quoted_cached(&cache, &out["source"], &allowed) {
+                    ignored += 1;
+                    continue;
+                }
+                if kind == "knowledge" {
+                    let query = out["person"].as_str().unwrap_or("");
+                    let Some((person, name)) = actor(state, query) else {
+                        ignored += 1;
+                        continue;
+                    };
+                    if map.get(id).is_some_and(|value| value["person"] != person) {
+                        ignored += 1;
+                        continue;
+                    }
+                    out["person"] = person.into();
+                    out["personName"] = name.into();
+                }
+                let previous = map.get(id);
+                out["originNodeId"] = previous
+                    .map(|v| v["originNodeId"].clone())
+                    .unwrap_or(json!(node_id));
+                out["historyCount"] = json!(
+                    previous
+                        .and_then(|v| v["historyCount"].as_u64())
+                        .unwrap_or(0)
+                        + 1
+                );
+                out["nodeId"] = node_id.clone().into();
+                if kind == "knowledge" && out.get("active").is_none() {
+                    out["active"] = true.into();
+                }
+                if kind == "threads" && out.get("recall").is_none() {
+                    out["recall"] = true.into();
+                }
+                map.insert(id.into(), out);
             }
         }
     }

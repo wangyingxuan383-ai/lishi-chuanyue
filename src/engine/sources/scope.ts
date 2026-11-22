@@ -32,6 +32,99 @@ export const chapterLabel = (section: number, title?: string) => {
 };
 export const chapterWords = (r: ScopeRange) => r.from === r.to ? `第 ${r.from + 1} 章` : `第 ${r.from + 1}～${r.to + 1} 章`;
 
+const CN_DIGITS: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const CN_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
+
+/** Parse Arabic digits or standard Chinese numerals (e.g. “三十五” → 35, “一百零八” → 108). */
+export function parseChapterNumeral(raw: string): number | null {
+  const s = raw.trim().replace(/^第\s*/, "").replace(/\s*[章回节卷集部篇]$/, "").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  let total = 0, section = 0, current = 0, hasDigit = false;
+  for (const ch of s) {
+    if (ch in CN_DIGITS) {
+      current = CN_DIGITS[ch];
+      hasDigit = true;
+    } else if (ch in CN_UNITS) {
+      const unit = CN_UNITS[ch];
+      if (unit === 10000) {
+        section = (section + current) * unit;
+        total += section;
+        section = 0;
+        current = 0;
+      } else {
+        section += (current === 0 && !hasDigit && unit === 10 ? 1 : current === 0 && unit === 10 ? 1 : current) * unit;
+        current = 0;
+      }
+      hasDigit = true;
+    } else {
+      return null;
+    }
+  }
+  const value = total + section + current;
+  return hasDigit && value > 0 ? value : null;
+}
+
+/** Chapter numbers explicitly stated in a section title (e.g. “第三十五章 渡口” → [35]). */
+export function extractChapterNumbers(title: string): number[] {
+  const nums = new Set<number>();
+  for (const m of title.matchAll(/第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[章回节卷集部篇]/g)) {
+    const n = parseChapterNumeral(m[1]);
+    if (n !== null) nums.add(n);
+  }
+  const leading = /^\s*(\d{1,5})(?:[.、\s\-—:：]|$)/.exec(title);
+  if (leading) {
+    const n = Number(leading[1]);
+    if (Number.isSafeInteger(n) && n > 0) nums.add(n);
+  }
+  return [...nums];
+}
+
+/** Rank a chapter row against user search input: 2 = title/chapter-number match, 1 = 1-based section order fallback, 0 = no match. */
+export function chapterQueryRank(chapter: BookChapter, query: string): 0 | 1 | 2 {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return 2;
+  const titleLower = chapter.title.toLowerCase();
+  const titleNumbers = extractChapterNumbers(chapter.title);
+  const indexNum = chapter.section + 1;
+  let titleOnly = true;
+  for (const token of tokens) {
+    if (titleLower.includes(token)) continue;
+    const n = parseChapterNumeral(token);
+    if (n !== null && titleNumbers.includes(n)) continue;
+    if (n !== null && n === indexNum) { titleOnly = false; continue; }
+    return 0;
+  }
+  return titleOnly ? 2 : 1;
+}
+
+/** Match a chapter row against user search input (title text, Arabic/Chinese chapter number, or 1-based section index). */
+export function matchChapterQuery(chapter: BookChapter, query: string): boolean {
+  return chapterQueryRank(chapter, query) > 0;
+}
+
+/** Real book title & shifted-index indicator for a chapter directory row. */
+export function chapterRowMeta(chapter: BookChapter): { primary: string; shifted: boolean } {
+  const primary = chapter.title.trim() || `第 ${chapter.section + 1} 节`;
+  const nums = extractChapterNumbers(primary);
+  const shifted = nums.length > 0 && !nums.includes(chapter.section + 1);
+  return { primary, shifted };
+}
+
+/** Compact real-title summary for a chapter range (falls back to `chapterWords` when titles are unavailable). */
+export function chapterRangeSummary(chapters: BookChapter[], range: ScopeRange): string {
+  const bySection = new Map(chapters.map((c) => [c.section, c]));
+  const start = bySection.get(range.from);
+  const end = bySection.get(range.to);
+  if (range.from === range.to) return chapterLabel(range.from, start?.title);
+  const a = chapterLabel(range.from, start?.title);
+  const b = chapterLabel(range.to, end?.title);
+  return a === b ? a : `${a} ～ ${b}`;
+}
+
 export interface BookChapter { section: number; title: string; chars: number; chunks?: number }
 
 /** The chapters the story may read (up to its 截至第几章), with their length. */

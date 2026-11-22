@@ -288,11 +288,9 @@ mod desktop {
             let network_data = self.data.clone();
             let network_secrets = self.secrets.clone();
             let network_app=self.app.clone();
-            let network_streams = self.app.state::<Arc<crate::stream::Streams>>().inner().clone();
             service.set_network(Arc::new(move |request,cancel,accounting| {
                 let data=network_data.clone();
                 let secrets=network_secrets.clone();
-                let streams=network_streams.clone();
                 let app=network_app.clone();
                 Box::pin(async move {
                     if request["op"].as_str().unwrap_or("").starts_with("browser_"){return crate::agent_browser::execute(app,request,cancel).await;}
@@ -301,7 +299,7 @@ mod desktop {
                     }
                     let credentials=Arc::new(crate::credentials::Credentials::open(data,secrets)
                         .map_err(|_|story_core::Error::Invalid("联网能力的密钥未配置或地址与绑定不符".into()))?);
-                    let model=crate::execution::NativeModel { credentials,streams };
+                    let model=crate::execution::NativeModel { credentials };
                     model.network_counted(request,cancel,accounting).await
                 })
             })).map_err(core_error)?;

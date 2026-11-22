@@ -37,11 +37,55 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+static PROCESS_ROLE: OnceLock<String> = OnceLock::new();
+
+/// Tag this process's execution-lease owner prefix (e.g. `"android-agent"`) before
+/// `process_instance()` is first read so a restarted dedicated process can reclaim
+/// its dead predecessor's leases immediately without touching other processes (R31-P5).
+pub fn init_process_role(role: &str) {
+    let trimmed = role.trim();
+    if !trimmed.is_empty() {
+        let _ = PROCESS_ROLE.set(trimmed.to_owned());
+    }
+}
+
 /// Process identity deliberately differs after a restart and between the UI
 /// and dedicated Agent processes. A persisted task ID is not an ownership key.
 pub fn process_instance() -> &'static str {
     static INSTANCE: OnceLock<String> = OnceLock::new();
-    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+    INSTANCE.get_or_init(|| match PROCESS_ROLE.get() {
+        Some(role) => format!("{role}:{}", uuid::Uuid::new_v4()),
+        None => uuid::Uuid::new_v4().to_string(),
+    })
+}
+
+/// Immediately expire leases owned by previous (dead) instances of `role` so
+/// startup reconciliation does not stall up to 45s after an OOM kill.
+/// Keeps `fence` and `owner_id` intact so monotonic fencing and reconciliation work normally.
+pub fn expire_dead_role_leases_with(db: &Connection, role: &str, current_instance: &str) -> Result<usize> {
+    let trimmed = role.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    ensure_schema(db)?;
+    let prefix = format!("{trimmed}:%");
+    let changed = db.execute(
+        "UPDATE world_execution_leases SET expires_at_ms=0 WHERE owner_instance LIKE ?1 AND owner_instance<>?2 AND expires_at_ms>0",
+        params![prefix, current_instance],
+    )?;
+    Ok(changed)
+}
+
+pub fn expire_dead_role_leases(db: &Connection, role: &str) -> Result<usize> {
+    expire_dead_role_leases_with(db, role, process_instance())
+}
+
+pub fn expire_dead_role_leases_store(store: &crate::Store, role: &str) -> Result<usize> {
+    let mut db = store.lock()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = expire_dead_role_leases(&tx, role)?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 pub fn ensure_schema(db: &Connection) -> Result<()> {

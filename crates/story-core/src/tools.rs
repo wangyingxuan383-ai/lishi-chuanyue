@@ -25,6 +25,10 @@ fn text(description: &str, max: usize) -> Value {
     json!({"type":"string","description":description,"minLength":1,"maxLength":max})
 }
 
+fn optional_text(description: &str, max: usize) -> Value {
+    json!({"type":"string","description":description,"minLength":0,"maxLength":max})
+}
+
 fn integer(description: &str, min: u64, max: u64) -> Value {
     json!({"type":"integer","description":description,"minimum":min,"maximum":max})
 }
@@ -34,9 +38,10 @@ pub fn catalog() -> Vec<ToolDefinition> {
         ToolDefinition { name: "read_world", description: "读取本次运行绑定路线的当前世界、玩家要求、人物处境、参考配置和玩法；不读取别的世界。", parameters: object(json!({}), &[]), read_only: true },
         ToolDefinition { name: "read_history", description: "查阅当前路线已经发生的正文和章节摘要，可用关键词寻找旧事；其他路线不混入。", parameters: object(json!({"query":text("要寻找的旧事或关键词",4000),"limit":integer("最多返回几回合",1,40)}), &[]), read_only: true },
         ToolDefinition { name: "read_characters", description: "读取本局人物、已知身份、别名、关系及其出处；不把原著将来的身份直接透露给人物。", parameters: object(json!({"query":text("人物名、别名或关系线索",2000),"offset":integer("起始条目",0,9007199254740991),"limit":integer("返回人数",1,20)}), &[]), read_only: true },
-        ToolDefinition { name: "search_original", description: "在本局绑定书籍与允许章节范围内检索原文，返回候选位置和片段；命中并不等于已核实，随后用 read_original 阅读证据。", parameters: object(json!({"query":text("待核实的人名、别名、关系、事件或具体原著细节",4000)}), &["query"]), read_only: true },
+        ToolDefinition { name: "list_sections", description: "列出或按关键词/章号搜索原著允许范围内的章节目录（返回 section、章标题、字数），方便先看目录再读指定章。", parameters: object(json!({"query":optional_text("章名或章号关键词，可留空列出目录",200),"offset":integer("起始章节偏移",0,9_007_199_254_740_991),"limit":integer("最多返回几章",1,80)}), &[]), read_only: true },
+        ToolDefinition { name: "search_original", description: "在本局绑定书籍与允许章节范围内检索原文，返回匹配片段与更多候选位置；支持 offset 翻页与 from/to 章节限定。", parameters: object(json!({"query":text("待核实的人名、别名、关系、事件或具体原著细节",4000),"offset":integer("翻页起始偏移",0,48),"from":integer("限定起始章节序号，从 0 开始",0,9_007_199_254_740_991),"to":integer("限定结束章节序号，从 0 开始",0,9_007_199_254_740_991)}), &["query"]), read_only: true },
         ToolDefinition { name: "read_original", description: "阅读命中的原著正文及邻近片段，保留书籍版本、章节、文本块和位置出处；程序执行章节边界。", parameters: object(json!({"section":integer("章节序号，从 0 开始",0,9_007_199_254_740_991),"chunk":integer("检索返回的文本块序号",0,9_007_199_254_740_991),"neighbors":integer("同时读取前后几个相邻片段，仍须遵守章节范围",0,2),"ref":object(json!({"bookId":text("书籍标识",256),"bookVersion":text("检索返回的版本",512),"section":integer("章节序号",0,9007199254740991),"chunk":integer("文本块序号",0,9007199254740991),"start":integer("UTF16起点",0,9007199254740991),"end":integer("UTF16终点",0,9007199254740991)}), &["bookId","bookVersion","section","chunk"]),"start":integer("UTF16起点",0,9007199254740991),"end":integer("UTF16终点",0,9007199254740991)}), &[]), read_only: true },
-        ToolDefinition { name: "read_canon_notes", description: "读取当前路线的本局札记和绑定书籍的原著札记；按人名、设定或章节关键词查找，留空列出标题。札记可能有误，需要原句时用read_original。", parameters: object(json!({"query":text("人名、设定、事件或章节关键词，可留空",500)}), &[]), read_only: true },
+        ToolDefinition { name: "read_canon_notes", description: "读取当前路线的本局札记和绑定书籍的原著札记；按人名、设定或章节关键词查找，留空列出标题。札记可能有误，需要原句时用read_original。", parameters: object(json!({"query":optional_text("人名、设定、事件或章节关键词，可留空",500)}), &[]), read_only: true },
         ToolDefinition { name: "read_canon_facts", description: "读取带原著出处的已核实资料，区分原著、玩家明确改写和模型错误；摘要与模型印象不能替代原文。", parameters: object(json!({"query":text("人物、关系、地点、规则或事件",4000)}), &[]), read_only: true },
         ToolDefinition { name: "locate_original_event", description: "按当前事件、人物和地点寻找原著候选章节；不改变开局位置，不把候选当已核实。用read_original直接回传ref读原文。", parameters:object(json!({"query":text("当前事件与具体线索",4000),"queries":{"type":"array","maxItems":8,"items":{"type":"string"}}}),&[]),read_only:true },
         ToolDefinition { name: "prepare_reference_check", description: "将最多8项具体主张批量定位到原著候选；为身份、关系、能力、物品、时点和遗漏事件分别准备资料。返回verified=false，须read_original核对原句。", parameters:object(json!({"claims":{"type":"array","maxItems":8,"items":{"type":"string"}}}),&["claims"]),read_only:true },
@@ -104,7 +109,8 @@ pub fn validate_with(definitions: &[ToolDefinition], name: &str, arguments: &Val
 fn validate_field(key: &str, value: &Value, schema: &Value) -> Result<()> {
     let valid = match schema["type"].as_str() {
         Some("string") => value.as_str().is_some_and(|s| {
-            !s.trim().is_empty()
+            let min = schema["minLength"].as_u64().unwrap_or(1);
+            (min == 0 || !s.trim().is_empty())
                 && s.chars().count() <= schema["maxLength"].as_u64().unwrap_or(u64::MAX) as usize
         }),
         Some("integer") => value.as_u64().is_some_and(|n| {
@@ -162,8 +168,11 @@ mod tests {
     #[test]
     fn definitions_and_validation_share_the_contract() {
         let tools = definitions();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
         assert!(catalog().iter().all(|tool| tool.read_only));
+        validate("read_canon_notes", &json!({"query":""})).unwrap();
+        validate("list_sections", &json!({"query":"","offset":0,"limit":20})).unwrap();
+        validate("search_original", &json!({"query":"比试","offset":2,"from":1,"to":5})).unwrap();
         assert!(tools
             .iter()
             .all(|t| t["type"] == "function" && t["function"]["parameters"]["type"] == "object"));

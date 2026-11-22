@@ -125,7 +125,56 @@ pub(crate) fn capture(db: &Connection, world: &str) -> Result<Value> {
     }
     Ok(Value::Object(result))
 }
-pub(crate) fn fingerprint(db: &Connection, world: &str) -> Result<String> {
+pub(crate) static STORY_WRITE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub(crate) static PI_AUTH_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static FP_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<(i64, String), (i64, u64, String)>>> = std::sync::OnceLock::new();
+
+pub(crate) fn bump_pi_auth() {
+    PI_AUTH_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+pub(crate) fn pi_auth_epoch() -> u64 {
+    PI_AUTH_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+pub(crate) fn install_hooks(db: &Connection) {
+    if !db.is_autocommit() {
+        return;
+    }
+    let installed: bool = db
+        .query_row(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='_lishi_fp_hook'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if installed {
+        return;
+    }
+    let cid = NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64;
+    if db
+        .execute_batch(&format!(
+            "CREATE TEMP TABLE IF NOT EXISTS _lishi_fp_hook(conn_id INTEGER PRIMARY KEY); DELETE FROM _lishi_fp_hook; INSERT INTO _lishi_fp_hook VALUES({cid});"
+        ))
+        .is_err()
+    {
+        return;
+    }
+    let _ = db.update_hook(Some(
+        |_action: rusqlite::hooks::Action, _db_name: &str, table: &str, _rowid: i64| {
+            if TABLES.contains(&table) {
+                STORY_WRITE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            if matches!(table, "pi_tasks" | "pi_children" | "world_execution_leases") {
+                PI_AUTH_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        },
+    ));
+    let _ = db.rollback_hook(Some(|| {
+        STORY_WRITE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        PI_AUTH_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }));
+}
+fn fingerprint_uncached(db: &Connection, world: &str) -> Result<String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut snapshot = capture(db, world)?;
     for row in snapshot["worlds"].as_array_mut().into_iter().flatten() {
@@ -137,6 +186,37 @@ pub(crate) fn fingerprint(db: &Connection, world: &str) -> Result<String> {
     if snapshot["story_fact_sources"].as_array().is_some_and(Vec::is_empty){snapshot.as_object_mut().unwrap().remove("story_fact_sources");}
     snapshot.to_string().hash(&mut hasher);
     Ok(format!("{:016x}", hasher.finish()))
+}
+pub(crate) fn fingerprint(db: &Connection, world: &str) -> Result<String> {
+    let conn_id: Option<i64> = db
+        .query_row("SELECT conn_id FROM temp._lishi_fp_hook LIMIT 1", [], |r| r.get(0))
+        .ok();
+    let Some(cid) = conn_id else {
+        return fingerprint_uncached(db, world);
+    };
+    let data_ver: i64 = db
+        .query_row("PRAGMA data_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    let epoch = STORY_WRITE_EPOCH.load(std::sync::atomic::Ordering::Acquire);
+    let cache = FP_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cv, ce, fp)) = guard.get(&(cid, world.to_owned())) {
+            if *cv == data_ver && *ce == epoch {
+                return Ok(fp.clone());
+            }
+        }
+    }
+    let fp = fingerprint_uncached(db, world)?;
+    let epoch_after = STORY_WRITE_EPOCH.load(std::sync::atomic::Ordering::Acquire);
+    if epoch_after == epoch {
+        if let Ok(mut guard) = cache.lock() {
+            if guard.len() >= 64 {
+                guard.clear();
+            }
+            guard.insert((cid, world.to_owned()), (data_ver, epoch, fp.clone()));
+        }
+    }
+    Ok(fp)
 }
 pub(crate) fn base(db: &Connection, world: &str, line: &str) -> Result<Value> {
     let w = raw(db, "worlds", "id", world)?;
@@ -652,7 +732,7 @@ pub(crate) fn attach_read_locators(page: &mut Value, base: &Value) {
             read["path"] = path.clone();
         }
         read["offset"] = offset.into();
-        read["limit"] = 1200.into();
+        read["limit"] = 4800.into();
         read
     }
     let path = page.get("path").cloned().unwrap_or(json!(""));
@@ -927,6 +1007,34 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
         edit["routeId"] = route.clone();
     }
     let path = text(args, "path");
+    let fp = crate::pi_store::arguments_hash(&json!({
+        "kind": kind,
+        "id": rid,
+        "routeId": args["routeId"],
+        "path": path,
+        "operation": text(args, "operation"),
+        "value": args["value"],
+        "text": args["text"],
+        "find": args["find"],
+        "replace": args["replace"],
+        "before": args["before"],
+        "after": args["after"],
+    }));
+    if edit["appliedFingerprints"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(fp.as_str())))
+        && edit["rebaseConflicts"].as_array().is_none_or(Vec::is_empty)
+        && edit["needsRelocation"] != true
+    {
+        if !call.is_empty() {
+            if !w["appliedCalls"].is_array() {
+                w["appliedCalls"] = json!([]);
+            }
+            w["appliedCalls"].as_array_mut().unwrap().push(json!(call));
+            save_workspace(db, task, &w)?;
+        }
+        return Ok(json!({"staged":true,"summary":args["summary"],"reused":true,"deduped":true}));
+    }
     if !path.is_empty() && !path.starts_with('/') {
         return Err(Error::Invalid("path使用以/开头的JSON路径".into()));
     }
@@ -974,6 +1082,9 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
     if let Some(conflicts)=edit["rebaseConflicts"].as_array_mut(){conflicts.retain(|conflict|{
         let at=text(conflict,"path");!(path.is_empty()||at==path||at.starts_with(&format!("{path}/")))
     });}
+    if let Some(obj) = edit.as_object_mut() {
+        obj.remove("needsRelocation");
+    }
     if kind == "node"
         && (root == "record" || path.is_empty() && args["value"].get("record").is_some())
     {
@@ -985,6 +1096,8 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
         .push(json!(text(args, "summary")));
     if !edit["callIds"].is_array(){edit["callIds"]=json!([]);}
     if !call.is_empty(){edit["callIds"].as_array_mut().unwrap().push(json!(call));}
+    if !edit["appliedFingerprints"].is_array(){edit["appliedFingerprints"]=json!([]);}
+    edit["appliedFingerprints"].as_array_mut().unwrap().push(json!(fp));
     if edit["after"]==edit["original"] && edit["rebaseConflicts"].as_array().is_none_or(Vec::is_empty) {
         if let Some(pos)=pos {edits.remove(pos);}
     } else if let Some(pos) = pos {
@@ -1030,10 +1143,35 @@ pub(crate) fn stage_story(db: &Connection, task: &str, args: &Value) -> Result<V
     {
         return Ok(json!({"staged":true,"summary":args["summary"],"reused":true}));
     }
+    let fp = crate::pi_store::arguments_hash(&json!({
+        "narrative": text(args, "narrative").trim(),
+        "action": args["action"],
+        "record": args["record"],
+        "choices": args["choices"],
+    }));
+    if w["turns"].as_array().is_some_and(|turns| {
+        turns.iter().any(|t| {
+            t["_fingerprint"] == fp
+                || text(t, "narrative").trim() == text(args, "narrative").trim()
+        })
+    }) {
+        if !call.is_empty() {
+            if !w["appliedCalls"].is_array() {
+                w["appliedCalls"] = json!([]);
+            }
+            w["appliedCalls"].as_array_mut().unwrap().push(json!(call));
+            save_workspace(db, task, &w)?;
+        }
+        return Ok(json!({"staged":true,"summary":args["summary"],"reused":true,"deduped":true}));
+    }
     if !w["turns"].is_array() {
         w["turns"] = json!([])
     }
-    w["turns"].as_array_mut().unwrap().push(args.clone());
+    let mut staged = args.clone();
+    if let Some(obj) = staged.as_object_mut() {
+        obj.insert("_fingerprint".into(), json!(fp));
+    }
+    w["turns"].as_array_mut().unwrap().push(staged);
     if !w["appliedCalls"].is_array() {
         w["appliedCalls"] = json!([])
     }
@@ -1053,19 +1191,33 @@ pub(crate) fn stage_route(
 ) -> Result<Value> {
     let mut w = workspace(db, task)?;
     let call = ws_call(args);
-    if let Some(existing) = w["routes"]
-        .as_array()
-        .and_then(|a| a.iter().find(|r| text(r, "callId") == call))
-    {
-        return Ok(json!({"staged":true,"routeId":existing["id"],"summary":args["summary"]}));
+    if !call.is_empty() {
+        if let Some(existing) = w["routes"]
+            .as_array()
+            .and_then(|a| a.iter().find(|r| text(r, "callId") == call))
+        {
+            return Ok(json!({"staged":true,"routeId":existing["id"],"summary":args["summary"],"reused":true}));
+        }
     }
     let node_id = args["headId"]
         .as_str()
         .map(str::to_owned)
         .unwrap_or(head(db, plan)?);
     node(db, &plan.world_id, &node_id)?;
+    let fp = crate::pi_store::arguments_hash(&json!({
+        "name": args["name"],
+        "headId": node_id,
+        "activate": args["activate"] == true,
+    }));
+    if let Some(existing) = w["routes"].as_array().and_then(|a| {
+        a.iter().find(|r| {
+            r["_fingerprint"] == fp || (r["name"] == args["name"] && r["headId"] == node_id)
+        })
+    }) {
+        return Ok(json!({"staged":true,"routeId":existing["id"],"summary":args["summary"],"reused":true,"deduped":true}));
+    }
     let new = id();
-    let route = json!({"id":new,"name":args["name"],"headId":node_id,"activate":args["activate"]==true,"summary":args["summary"],"callId":call});
+    let route = json!({"id":new,"name":args["name"],"headId":node_id,"activate":args["activate"]==true,"summary":args["summary"],"callId":call,"_fingerprint":fp});
     if !w["routes"].is_array() {
         w["routes"] = json!([])
     }
@@ -1108,17 +1260,68 @@ pub(crate) fn changes(w: &Value) -> Vec<Value> {
     }
     changes
 }
+pub(crate) fn compact_changes(w: &Value) -> Vec<Value> {
+    let mut out = vec![];
+    for edit in w["edits"].as_array().into_iter().flatten() {
+        let has_conflicts = edit["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+        let needs_relocation = edit["needsRelocation"] == true;
+        if edit["after"] == edit["original"] && !has_conflicts && !needs_relocation { continue; }
+        let summary = edit["summaries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("；");
+        let mut item = json!({"kind": edit["kind"], "id": edit["id"], "summary": summary});
+        if has_conflicts { item["hasConflicts"] = true.into(); }
+        if needs_relocation { item["needsRelocation"] = true.into(); }
+        out.push(item);
+    }
+    for turn in w["turns"].as_array().into_iter().flatten() {
+        let chars = turn["narrative"].as_str().map(|s| s.chars().count()).unwrap_or(0);
+        let has_conflicts = turn["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+        let mut item = json!({"kind": "story", "summary": turn["summary"], "narrativeChars": chars});
+        if has_conflicts { item["hasConflicts"] = true.into(); }
+        out.push(item);
+    }
+    for route in w["routes"].as_array().into_iter().flatten() {
+        let has_conflicts = route["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+        let needs_relocation = route["needsRelocation"] == true;
+        let mut item = json!({"kind": "line", "id": route["id"], "summary": route["summary"]});
+        if has_conflicts { item["hasConflicts"] = true.into(); }
+        if needs_relocation { item["needsRelocation"] = true.into(); }
+        out.push(item);
+    }
+    out
+}
 pub(crate) fn preview_changes(w: &Value) -> Vec<Value> {
     let mut details = vec![];
     for edit in w["edits"].as_array().into_iter().flatten() {
-        if edit["after"]==edit["original"] {continue;}
-        details.push(json!({"kind":edit["kind"],"id":edit["id"],"routeId":edit["routeId"],"summary":edit["summaries"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("；"),"before":edit["original"],"after":edit["after"]}));
+        let has_conflicts = edit["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+        let needs_relocation = edit["needsRelocation"] == true;
+        if edit["after"]==edit["original"] && !has_conflicts && !needs_relocation {continue;}
+        let mut item = json!({"kind":edit["kind"],"id":edit["id"],"routeId":edit["routeId"],"summary":edit["summaries"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("；"),"before":edit["original"],"after":edit["after"]});
+        if has_conflicts { item["rebaseConflicts"] = edit["rebaseConflicts"].clone(); }
+        if needs_relocation { item["needsRelocation"] = true.into(); }
+        details.push(item);
     }
     for turn in w["turns"].as_array().into_iter().flatten() {
-        details.push(json!({"kind":"story","summary":turn["summary"],"before":null,"after":turn,"narrative":turn["narrative"]}));
+        let mut item = json!({"kind":"story","summary":turn["summary"],"before":null,"after":turn,"narrative":turn["narrative"]});
+        if turn["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty()) {
+            item["rebaseConflicts"] = turn["rebaseConflicts"].clone();
+        }
+        details.push(item);
     }
     for route in w["routes"].as_array().into_iter().flatten() {
-        details.push(json!({"kind":"line","id":route["id"],"summary":route["summary"],"before":null,"after":route}));
+        let mut item = json!({"kind":"line","id":route["id"],"summary":route["summary"],"before":null,"after":route});
+        if route["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty()) {
+            item["rebaseConflicts"] = route["rebaseConflicts"].clone();
+        }
+        if route["needsRelocation"] == true {
+            item["needsRelocation"] = true.into();
+        }
+        details.push(item);
     }
     details
 }
@@ -1924,9 +2127,7 @@ pub(crate) fn validate(tx: &Transaction<'_>, plan: &RunPlan, task: &str) -> Resu
     let row = workspace_task(tx, task)?;
     guard(tx, &parse(text(&row, "base_json")))?;
     let w = workspace(tx, task)?;
-    if w["edits"].as_array().into_iter().flatten().any(|e|e["rebaseConflicts"].as_array().is_some_and(|c|!c.is_empty())) {
-        return Err(Error::Tool{code:"draft_rebase_conflict",field:"edits",message:"故事变化后有冲突字段尚未重新核对；请读取草稿的rebaseConflicts并针对这些字段重新暂存或撤回".into(),next:json!({"tool":"check_draft","args":{}})});
-    }
+    crate::pi_adoption::check_no_conflicts(&w)?;
     tx.execute_batch("SAVEPOINT agent_validation")?;
     let result = apply_workspace(tx, plan, &w);
     let report = match result {
@@ -2064,5 +2265,27 @@ mod cursor_tests {
   let third=page(data.clone(),&json!({"pageSize":2,"charBudget":200,"nextCursor":second["nextCursor"]}));assert_eq!(third["value"][0]["name"],"最后项");assert!(third["nextCursor"].is_null());
   let changed=page(json!([{"name":"新内容"}]),&json!({"pageSize":2,"nextCursor":first["nextCursor"]}));assert_eq!(changed["pageError"]["code"],"page_version_changed");
   assert_eq!(page(data,&json!({"offset":2,"limit":200}))["value"][0]["name"],"最后项","old offset/limit remains readable");
+ }
+ #[test]fn fingerprint_cache_hits_on_unchanged_world_and_invalidates_on_write_or_rollback(){
+  let mut db=Connection::open_in_memory().unwrap();
+  crate::migration::migrate(&mut db,None).unwrap();
+  install_hooks(&db);
+  db.execute_batch("INSERT INTO worlds(id,title,era_id,created_at,updated_at,played_at) VALUES('w1','测试','free','t','t','t');INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n1','w1',0,'opening','开局','t');INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l1','w1','主线','n1','t');INSERT INTO states(node_id,state_json) VALUES('n1','{}');").unwrap();
+  let fp1=fingerprint(&db,"w1").unwrap();
+  let fp2=fingerprint(&db,"w1").unwrap();
+  assert_eq!(fp1,fp2,"cached fingerprint must match uncached");
+  assert_eq!(fp1,fingerprint_uncached(&db,"w1").unwrap());
+  // Mutate story table: update_hook bumps STORY_WRITE_EPOCH and invalidates cache
+  db.execute("UPDATE nodes SET narrative='改后正文' WHERE id='n1'",[]).unwrap();
+  let fp3=fingerprint(&db,"w1").unwrap();
+  assert_ne!(fp3,fp1,"fingerprint must refresh after story write");
+  assert_eq!(fp3,fingerprint_uncached(&db,"w1").unwrap());
+  // Rollback inside a transaction must not leave stale cache
+  let tx=db.transaction().unwrap();
+  tx.execute("UPDATE nodes SET narrative='临时' WHERE id='n1'",[]).unwrap();
+  let fp_tx=fingerprint(&tx,"w1").unwrap();
+  assert_ne!(fp_tx,fp3);
+  drop(tx);
+  assert_eq!(fingerprint(&db,"w1").unwrap(),fp3,"rolled-back write must restore prior fingerprint");
  }
 }

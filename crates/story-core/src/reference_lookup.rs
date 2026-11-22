@@ -83,25 +83,51 @@ pub fn read(db: &Connection, plan: &RunPlan, name: &str, args: &Value) -> Result
     for query in queries {
         let found =
             crate::runtime_sources::read_db(db, plan, "search_original", &json!({"query":query}))?;
+        let nearby_only = found["match"] == "nearby";
+        let beyond_scope = found["beyondScope"] == true;
+        let scope_note = found.get("scopeNote").cloned();
         let mut candidates = vec![];
-        for p in found["excerpts"].as_array().into_iter().flatten().take(4) {
-            let snippet = p["text"]
-                .as_str()
-                .unwrap_or("")
-                .chars()
-                .take(180)
-                .collect::<String>();
-            let item = json!({"ref":{"bookId":book,"bookVersion":format!("{book}:{revision}"),"section":p["section"],"chunk":p["chunk"],"start":p["start"],"end":p["end"]},"title":p["title"],"page":p["page"],"snippet":snippet});
-            let cost = item.to_string().encode_utf16().count();
-            if cost > global_budget {
-                break;
+        if !nearby_only {
+            for p in found["excerpts"].as_array().into_iter().flatten().take(4) {
+                let snippet = crate::runtime_sources::centered_snippet(
+                    p["text"].as_str().unwrap_or(""),
+                    &query,
+                    220,
+                );
+                let item = json!({"ref":{"bookId":book,"bookVersion":format!("{book}:{revision}"),"section":p["section"],"chunk":p["chunk"],"start":p["start"],"end":p["end"]},"title":p["title"],"page":p["page"],"snippet":snippet});
+                let cost = item.to_string().encode_utf16().count();
+                if cost > global_budget {
+                    break;
+                }
+                global_budget -= cost;
+                candidates.push(item);
             }
-            global_budget -= cost;
-            candidates.push(item);
         }
-        items.push(json!({"claim":query,"status":if candidates.is_empty(){"insufficient"}else{"candidates"},"candidates":candidates,"verified":false}));
+        let mut entry = json!({
+            "claim": query,
+            "status": if candidates.is_empty() { "insufficient" } else { "candidates" },
+            "candidates": candidates,
+            "verified": false
+        });
+        if nearby_only {
+            entry["nearbyOnly"] = true.into();
+        }
+        if beyond_scope {
+            entry["beyondScope"] = true.into();
+            if let Some(note) = scope_note {
+                entry["scopeNote"] = note;
+            }
+        }
+        items.push(entry);
     }
-    let result = json!({"bookId":book,"bookVersion":format!("{book}:{revision}"),"through":binding["through"],"items":items,"anchorKind":"candidate","verified":false,"cached":false,"note":"候选定位不是已经核实的事实；用read_original直接回传ref读原文与邻段，再判断相应时点、人物知情和玩家分支。不会改写玩家设置的原著位置。"});
+    let any_beyond = items.iter().any(|i| i["beyondScope"] == true);
+    let mut result = json!({"bookId":book,"bookVersion":format!("{book}:{revision}"),"through":binding["through"],"items":items,"anchorKind":"candidate","verified":false,"cached":false,"note":"候选定位不是已经核实的事实；用read_original直接回传ref读原文与邻段，再判断相应时点、人物知情和玩家分支。不会改写玩家设置的原著位置。"});
+    if any_beyond {
+        result["beyondScope"] = true.into();
+        if let Some(note) = result["items"].as_array().and_then(|a| a.iter().find_map(|i| i["scopeNote"].as_str())).map(str::to_owned) {
+            result["scopeNote"] = note.into();
+        }
+    }
     if has_cache {
         db.execute("INSERT OR REPLACE INTO reference_lookup_cache(cache_key,book_id,revision,scope_json,result_json,created_at) VALUES(?,?,?,?,?,?)",params![cache_key,book,revision,scope.to_string(),result.to_string(),chrono::Utc::now().to_rfc3339()])?;
         db.execute("DELETE FROM reference_lookup_cache WHERE book_id=? AND cache_key NOT IN (SELECT cache_key FROM reference_lookup_cache WHERE book_id=? ORDER BY created_at DESC LIMIT 32)",params![book,book])?;

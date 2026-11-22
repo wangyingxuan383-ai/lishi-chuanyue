@@ -4,6 +4,7 @@ import { createMemoryPlatform } from "../../platform/memory";
 import { sampleState } from "../testing/fixtures";
 import { newBinding, type SourceBook } from "../sources/types";
 import { referenceContext, saveBook } from "../sources/library";
+import { newNote, saveNote } from "../sources/notes";
 import * as tree from "../tree";
 import { adoptCanonCorrection, MISSING_OPENING_SEED, openingBaseline, type CanonCorrectionPreview } from "./assist";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
@@ -209,5 +210,49 @@ describe("按原著纠错的请求 (D182)", () => {
     expect(user).toContain("院长宣布入门比试分为实战与理论两项");
     expect(user).toContain("【这是一个问题】");
     expect(plan.reference.passages.some((p) => p.section === 13 && user.includes(p.text))).toBe(true);
+  });
+
+  it("auto mode finds later chapters and notes even when position is 0 and the clue sits in the middle of a long turn", async () => {
+    const platform = await createMemoryPlatform();
+    const plans: Record<string, unknown>[] = [];
+    platform.execution = {
+      agent: async () => null, settle: async () => null, list: async () => [], stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }), resume: async () => {},
+      start: async (plan) => { plans.push(plan as Record<string, unknown>); return "run-auto"; },
+      snapshot: async (id) => ({ id, worldId: "", status: "failed", budget: { modelRequests: 0, toolCalls: 0, corrections: 0, activeMs: 0 }, draft: null, result: null, error: "测试停止", events: [] }),
+    };
+    const game = await Game.open(platform, { slot: "main", url: "https://x/v1/chat/completions", model: "m", includeUsage: true, contextTokens: 12_000 });
+    const sections = Array.from({ length: 25 }, (_, i) => ({
+      title: `第${i + 1}章`,
+      text: i === 18
+        ? "沈沧海在翠微楼取出玄铁令，当众宣布废除旧约，改由林晚照掌管药库。"
+        : `第${i + 1}日，众人照常核对人物关系与世界规则，城中并无大事发生。`,
+    }));
+    const book: SourceBook = { id: crypto.randomUUID(), title: "长卷", format: "txt", createdAt: new Date().toISOString(), sections };
+    await saveBook(game.repo, book);
+    const source = newBinding(book.id, true); // position = 0, plot = "rewrite"
+    const lateNote = {
+      ...newNote(book.id, "plot", { from: 15, to: 24 }, "后半卷主线"),
+      status: "done" as const,
+      content: "第19章：沈沧海在翠微楼亮出玄铁令，将药库交给林晚照。",
+      refs: [18],
+    };
+    await saveNote(game.repo, lateNote);
+    const { world } = await game.repo.createWorld({ title: "长局自动纠错", eraId: "free", opening: { parentId: null, kind: "opening", narrative: "开场。", state: { ...sampleState(), source }, meta: { openingSeed: { ...sampleState(), source } } } });
+    let cursor = await tree.cursor(game.repo, world.id);
+    // Whole-turn selection where the key clue sits strictly in the middle of a long passage.
+    const fillerA = Array.from({ length: 40 }, (_, i) => `清晨街市摊贩第${i}次吆喝着热茶点心，行人络绎不绝。`).join("");
+    const fillerB = Array.from({ length: 40 }, (_, i) => `傍晚城墙鼓楼第${i}声钟响传来，灯火次第亮起。`).join("");
+    const narrative = `${fillerA}\n你在翠微楼听说沈沧海把玄铁令交给了其他人。\n${fillerB}`;
+    cursor = await tree.append(game.repo, cursor, { kind: "turn", actionMode: "do", actionText: "打听", narrative, state: { ...sampleState(), source } });
+    await game.runCanonCorrection({
+      anchor: { worldId: world.id, lineId: cursor.line.id, headId: cursor.head.id, nodeId: cursor.head.id, original: narrative },
+      range: { start: 0, end: narrative.length },
+      hint: "查阅原文，核对本段人物身份、称谓、关系、能力和事件细节；保留玩家主动改写，只纠正有依据的错误。",
+    }, () => {}).done.catch(() => {});
+    const plan = plans[0] as { messages: { content: string }[]; reference: { passages: { section: number; text: string }[] } };
+    const user = plan.messages[1].content;
+    expect(plan.reference.passages.some((p) => p.section === 18)).toBe(true);
+    expect(user).toContain("玄铁令");
+    expect(user).toContain("后半卷主线");
   });
 });

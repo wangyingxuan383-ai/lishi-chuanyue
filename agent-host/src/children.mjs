@@ -40,12 +40,30 @@ export class ReadonlyChildren {
     }, options);
     let text = "", ok = false;
     try {
+      const rootModel = this.root.options.model;
+      const useAux = typeof rootModel.auxModel === "string" && rootModel.auxModel.trim()
+        && rootModel.auxModel !== rootModel.id
+        && !(rootModel.endpointRef && rootModel.protocol === "gemini");
+      const childModel = {
+        ...rootModel,
+        ...(useAux ? { id: rootModel.auxModel } : {}),
+        auxModel: undefined,
+        thinkingMode: "off",
+      };
+      const toolNames = new Set(tools.map(tool => tool.name));
+      const activeTools = [
+        "discover_tools", "list_resources", "read_resource", "read_world",
+        "search_resources", "list_sections", "search_original", "read_original",
+        "read_canon_notes", "read_tool_result", "list_skills", "read_skill",
+        "read_provided_draft",
+      ].filter(name => toolNames.has(name));
+      const extraTools = tools.map(tool => tool.name).filter(name => !activeTools.includes(name));
       entry.host = await this.createHost({
         directory: path.join(this.root.options.directory, "children", childId),
-        // Frozen task model, never global Game.llm or a later model selection.
-        model: this.root.options.model, readonlyChild: true, nativeActor: childId,
-        systemPrompt: `你是本局的只读核对助手。只完成交给你的子任务，按需查阅正式资料；草稿只读主助手明确提供的部分。不能修改、提交、提问、执行脚本或派生助手。查不到时说明资料不足，结论要带实际出处。当前世界版本：${descriptor.worldVersion}。明确提供的草稿定位：${JSON.stringify(descriptor.providedDrafts ?? [])}。用discover_tools按需加载工具，目录：${JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description })))}。`,
-        tools, activeTools: ["discover_tools", "list_resources", "read_resource", "read_world", "read_tool_result", "list_skills", "read_skill", "read_provided_draft"],
+        // Frozen task model (or its frozen auxModel), never global Game.llm or a later model selection.
+        model: childModel, readonlyChild: true, nativeActor: childId,
+        systemPrompt: `你是本局的只读核对助手。只完成交给你的子任务，按需查阅正式资料；草稿只读主助手明确提供的部分。不能修改、提交、提问、执行脚本或派生助手。查不到时说明资料不足，结论要带实际出处。当前世界版本：${descriptor.worldVersion}。明确提供的草稿定位：${JSON.stringify(descriptor.providedDrafts ?? [])}。${extraTools.length ? `其余只读工具可按需 discover_tools 加载：${extraTools.join("、")}。` : ""}`,
+        tools, activeTools,
         taskContext: true, nativeModelHttp: this.root.options.nativeModelHttp === true,
         invokeTool: (call, options) => invoke(call.name, call.args, call.toolCallId, options),
         invokeModelHttp: (action, args, options) => invoke(`__model_http_${action}`, args, `http-${randomUUID()}`, options),

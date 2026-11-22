@@ -359,6 +359,19 @@ pub fn resolve_profile(
             wire[field] = value.clone();
         }
     }
+    if let Some(aux) = reference["auxModel"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
+    {
+        wire["auxModel"] = aux.into();
+    }
+    if let Some(mode) = reference["thinkingMode"]
+        .as_str()
+        .filter(|s| matches!(*s, "off" | "default" | "deep"))
+    {
+        wire["thinkingMode"] = mode.into();
+    }
     if reference.get("inputTokens").is_none() {
         if let Some(value) = reference.get("contextTokens").filter(|v| v.is_u64()) {
             wire["inputTokens"] = value.clone();

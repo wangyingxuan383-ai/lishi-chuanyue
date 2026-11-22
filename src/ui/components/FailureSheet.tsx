@@ -3,9 +3,11 @@
 // request went out, earlier attempts, and a copyable diagnosis without the
 // story text or any key.
 import type { Failure, Platform } from "../../platform";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { runUsage, usageLine, type UsageTotal } from "../../engine/usage";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
+import { usePrices } from "./TurnUsage";
 
 const STAGES: Record<string, string> = {
   prepare: "准备", write: "写正文", record: "整理记录", review: "原著核对", settle: "结算变化", commit: "保存", maintain: "整理设定",
@@ -85,9 +87,17 @@ export async function recentDiagnosis(sql: Pick<Platform["sql"], "query">, limit
   return lines.join("\n");
 }
 
-export function FailureSheet({ text, failure, failures = [], detail, onClose }: { text: string; failure?: Failure; failures?: Failure[]; detail?: string; onClose: () => void }) {
-  const { toast } = useApp();
+export function FailureSheet({ text, failure, failures = [], detail, runId, onOpenUsage, onClose }: { text: string; failure?: Failure; failures?: Failure[]; detail?: string; runId?: string; onOpenUsage?: () => void; onClose: () => void }) {
+  const { game, toast } = useApp();
+  const prices = usePrices();
+  const [used, setUsed] = useState<UsageTotal | null>(null);
   const [withSaid, setWithSaid] = useState(true);
+  useEffect(() => {
+    if (!runId) { setUsed(null); return; }
+    let live = true;
+    void runUsage(game.platform, runId).then((t) => { if (live) setUsed(t); }).catch(() => {});
+    return () => { live = false; };
+  }, [game, runId]);
   const earlier = failures.filter((f) => f.at !== failure?.at);
   const hasSaid = [failure, ...earlier].some((f) => f?.said?.trim());
   const copy = async () => {
@@ -95,7 +105,7 @@ export function FailureSheet({ text, failure, failures = [], detail, onClose }: 
     catch { toast("没能复制，请长按选中后复制"); }
   };
   return (
-    <Sheet title="为什么没写成" onClose={onClose}>
+    <Sheet title={failure?.kind === "cancelled" ? "这次生成明细" : "为什么没写成"} onClose={onClose}>
       <div className="stack">
         <p className="m-0">{text}</p>
         {failure ? (
@@ -105,9 +115,15 @@ export function FailureSheet({ text, failure, failures = [], detail, onClose }: 
             {failure.holder && <><dt>占用者</dt><dd>{HOLDERS[failure.holder] ?? failure.holder}</dd></>}
             {failure.said && <><dt>服务原话</dt><dd className="failure-said">{failure.said}</dd></>}
             <dt>请求</dt><dd>{SENT[failure.sent] ?? failure.sent}{failure.requests > 0 ? `，这次请求了 ${failure.requests} 次` : ""}{failure.partial ? "，已收到部分正文" : ""}</dd>
+            {used && <><dt>本次消耗</dt><dd>{usageLine(used, prices)}</dd></>}
             <dt>时间</dt><dd>{time(failure.at)}</dd>
           </dl>
-        ) : detail ? <p className="muted m-0">{detail}</p> : null}
+        ) : (
+          <>
+            {used && <dl className="facts"><dt>本次消耗</dt><dd>{usageLine(used, prices)}</dd></dl>}
+            {detail ? <p className="muted m-0">{detail}</p> : null}
+          </>
+        )}
         {earlier.length > 0 && <>
           <h3 className="settings-sub">之前的尝试</h3>
           {earlier.map((f) => (
@@ -116,7 +132,10 @@ export function FailureSheet({ text, failure, failures = [], detail, onClose }: 
         </>}
         <p className="muted m-0">{advice(failure?.kind ?? "other")}</p>
         {hasSaid && <label className="row"><input type="checkbox" className="check-20" checked={withSaid} onChange={(e) => setWithSaid(e.target.checked)} />带上服务原话（可能含一点故事内容）</label>}
-        <div className="notice-actions"><button onClick={() => void copy()}>复制诊断</button></div>
+        <div className="notice-actions">
+          <button onClick={() => void copy()}>复制诊断</button>
+          {onOpenUsage && <button className="ghost" onClick={() => { onClose(); onOpenUsage(); }}>查看本局用量</button>}
+        </div>
         <p className="field-hint m-0">复制内容包括出错步骤、请求次数、状态和时间{hasSaid && withSaid ? "，以及服务原话的前 200 字（网址和像密钥的字样会隐去）" : ""}。不含你的 Key 和发出的故事正文。</p>
       </div>
     </Sheet>

@@ -33,6 +33,36 @@ function ownMessage(message) {
     && message.details?.owner === "native-task-context";
 }
 
+function userBlocks(content) {
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  if (Array.isArray(content)) return content;
+  return [{ type: "text", text: String(content ?? "") }];
+}
+
+/** Merge consecutive user turns in the outgoing request projection only so
+ * Anthropic/Gemini never reject a resumed session whose tail was a user turn. */
+export function coalesceConsecutiveUsers(messages) {
+  let hasAdjacent = false;
+  for (let i = 1; i < messages.length; i++) {
+    if (messages[i]?.role === "user" && messages[i - 1]?.role === "user") {
+      hasAdjacent = true;
+      break;
+    }
+  }
+  if (!hasAdjacent) return messages;
+  const out = [];
+  for (const message of messages) {
+    const prev = out.at(-1);
+    if (message?.role === "user" && prev?.role === "user") {
+      const merged = [...userBlocks(prev.content), { type: "text", text: "\n\n" }, ...userBlocks(message.content)];
+      out[out.length - 1] = { ...prev, content: merged, timestamp: message.timestamp ?? prev.timestamp };
+    } else {
+      out.push(message);
+    }
+  }
+  return out;
+}
+
 export class TaskContext {
   constructor({ getTaskId, getTaskState, onError = () => {} }) {
     if (typeof getTaskId !== "function" || typeof getTaskState !== "function") throw unavailable();
@@ -40,6 +70,10 @@ export class TaskContext {
     this.getTaskState = getTaskState;
     this.onError = onError;
     this.lastError = null;
+    this.lastTaskId = null;
+    this.lastSnapshotJson = null;
+    this.lastTimestamp = null;
+    this.lastMessageCount = 0;
     this.factory = api => {
       api.on("context", (event, context) => this.prepare(event, context));
       api.on("session_before_compact", (event, context) => this.prepareCompaction(event, context));
@@ -51,21 +85,43 @@ export class TaskContext {
     this.onError(error);
   }
 
-  async prepare(event, context = {}) {
+  async prepare(event, context = {}, options = {}) {
     // Pi creates the session before its native task is attached. No read is
     // made during that phase, and a different task's snapshot is never reused.
-    if (!this.getTaskId()) return undefined;
-    const messages = event.messages.filter(message => !ownMessage(message));
+    const taskId = this.getTaskId();
+    if (!taskId) return undefined;
+    const messages = coalesceConsecutiveUsers(event.messages.filter(message => !ownMessage(message)));
     try {
       if (context.signal?.aborted) throw unavailable(true);
       const result = await this.getTaskState({ signal: context.signal });
       if (context.signal?.aborted) throw unavailable(true);
       const snapshot = snapshotOf(result);
-      const content = `本次任务实时约束 ${TASK_CONTEXT_VERSION}。以下是程序重新读取的任务要求、已生效补充及真实进度；对话摘要不能替代这些内容，草稿不是正式剧情。\n${JSON.stringify(snapshot)}`;
+      const snapshotJson = JSON.stringify(snapshot);
+      const unchanged = !options.forceFull
+        && this.lastTaskId === taskId
+        && this.lastSnapshotJson === snapshotJson;
+      const timestamp = unchanged && this.lastTimestamp !== null ? this.lastTimestamp : Date.now();
+      const compactUnchanged = unchanged && messages.length > this.lastMessageCount;
+      const body = compactUnchanged
+        ? JSON.stringify({
+            unchanged: true,
+            intentRevision: snapshot.intentRevision,
+            consumedIntentRevision: snapshot.consumedIntentRevision,
+            ...(Object.hasOwn(snapshot, "storyVersion") ? { storyVersion: snapshot.storyVersion } : {}),
+            ...(Object.hasOwn(snapshot, "status") ? { status: snapshot.status } : {}),
+          })
+        : snapshotJson;
+      const content = `本次任务实时约束 ${TASK_CONTEXT_VERSION}。以下是程序重新读取的任务要求、已生效补充及真实进度；对话摘要不能替代这些内容，草稿不是正式剧情。\n${body}`;
+      if (options.recordCache !== false) {
+        this.lastTaskId = taskId;
+        this.lastSnapshotJson = snapshotJson;
+        this.lastTimestamp = timestamp;
+        this.lastMessageCount = messages.length;
+      }
       this.setError(null);
       return { messages: [...messages, {
         role: "custom", customType: TASK_CONTEXT_TYPE, display: false, content,
-        details: { owner: "native-task-context", version: TASK_CONTEXT_VERSION, ephemeral: true }, timestamp: Date.now(),
+        details: { owner: "native-task-context", version: TASK_CONTEXT_VERSION, ephemeral: true, ...(compactUnchanged ? { unchanged: true } : {}) }, timestamp,
       }] };
     } catch (error) {
       this.setError(["task_context_cancelled","progress_saved"].includes(error?.code) ? error : unavailable(context.signal?.aborted));
@@ -89,7 +145,7 @@ export class TaskContext {
     }
     const projected = await this.prepare({ messages: preparation.messagesToSummarize }, {
       signal: event.signal ?? context.signal,
-    });
+    }, { forceFull: true, recordCache: false });
     if (this.lastError) return { cancel: true };
     if (!projected) return undefined;
     // Pi passes this request-only preparation to its own summary generator.

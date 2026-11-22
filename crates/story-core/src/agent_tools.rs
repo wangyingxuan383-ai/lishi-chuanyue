@@ -23,13 +23,14 @@ fn string() -> Value {
 pub(crate) fn catalog() -> Vec<ToolDefinition> {
     let mut result=vec![
         definition("list_resources","查看本局资料分类与定位，默认只列少量最近项目。可按kind、query、offset、limit分页，不发送整段历史。",json!({"kind":string(),"query":string(),"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":40}}),&[],true),
-        definition("discover_tools","按系统目录选择本步需要的工具参数说明；下一次模型请求会提供这些schema。需要换一组能力时再次选择，所有能力已内置或由玩家配置，不会安装。",json!({"names":{"type":"array"}}),&["names"],true),
+        definition("discover_tools","按系统目录选择本步需要的工具参数说明；下一次模型请求会提供这些schema。需要换一组能力时再次选择，所有能力已内置或由玩家配置，不会安装。",json!({"names":{"type":"array"},"includeCatalog":{"type":"boolean"}}),&["names"],true),
         definition("read_resource","按需读取本局资料或本次草稿。kind可为world/settings/state/protagonist/people/places/cards/goals/facts/node/line/pin/chapter/book；path使用JSON Pointer，node正文为/narrative，记录为/record。返回value是实际对象或标量（脚本用r.value.age等），text是文字页，paths是较大对象的字段定位；按nextOffset分页，不把外层当实际资料。",json!({"kind":string(),"id":string(),"path":string(),"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":24000}}),&["kind"],true),
         definition("read_tool_result","按需读取本次工具调用保留的完整结果。callId取大结果提示中的标识，path为JSON Pointer；文字和数组支持offset/limit分页。",json!({"callId":string(),"path":string(),"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":24000}}),&["callId"],true),
         definition("read_player_choices","查本路线真实玩家输入和幕后要求，不把AI正文/设定卡当成玩家主动改写。query按原始文字检索，可用beforeSeq向前追溯，offset/limit分页。返回id可用于原著核对findings.playerRefs。",json!({"query":string(),"beforeSeq":{"type":"integer","minimum":0},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20}}),&[],true),
         definition("discard_draft","撤回本任务尚未采用的指定资源草稿，或all=true撤回整批后重新准备。正式本局和累计用量不变，外部操作不受影响。撤回后旧核对报告作废；不会重放已完成脚本或工具。",json!({"kind":string(),"id":string(),"all":{"type":"boolean"}}),&[],false),
         definition("search_resources","搜索本局剧情、人物和设定，返回定位与片段。kind支持node/line/pin/chapter/settings/people/places/cards/goals/facts/book；node可按回合序号查询，book只搜书名定位，原文用search_original；世界字段用read_resource。",json!({"query":string(),"kind":string(),"limit":{"type":"integer","minimum":1,"maximum":30}}),&["query"],true),
         definition("stage_edit","暂存本局任意内容修改。kind与read_resource相同。path为JSON Pointer，省略表示整个资料。operation=set/merge/remove/append/replace_text；replace_text须提供find和replace。修改node正文后须同步核对并stage其record，提交会重算后续。可用routeId指定本局其他路线，共享祖先默认只修当前路线。book正文只修改/data/sections。内部归属由核心维护。",json!({"kind":string(),"id":string(),"routeId":string(),"path":string(),"operation":{"type":"string","enum":["set","merge","remove","append","replace_text"]},"value":{},"find":string(),"replace":string(),"summary":string()}),&["kind","operation","summary"],false),
+        definition("stage_edits","一次原子暂存多项本局修改（1–30项），减少工具轮次；每项参数与stage_edit相同。任一项校验失败则整批回滚，不留半批草稿。",json!({"edits":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"object","properties":{"kind":string(),"id":string(),"routeId":string(),"path":string(),"operation":{"type":"string","enum":["set","merge","remove","append","replace_text"]},"value":{},"find":string(),"replace":string(),"summary":string()},"required":["operation","summary"],"additionalProperties":false}}}),&["edits"],false),
         definition("stage_story_turn","只有需要把新写内容放入正式剧情时调用。narrative是正文、record是本段实际状态变化，time为经过时长、money为增减。Agent讨论、说明和工具记录不得写入正文。",json!({"narrative":string(),"record":{"type":"object"},"choices":{"type":"array"},"summary":string()}),&["narrative","record","summary"],false),
         definition("stage_route","从本局指定回合创建路线草稿，可选择采用时切换。返回routeId，可在stage_edit中指定该路线再修订共享历史。",json!({"name":string(),"headId":string(),"activate":{"type":"boolean"},"summary":string()}),&["name","summary"],false),
         definition("finish_task","按已选策略采用实际修改。玩家要求修正时，不能用梳理说明冒充已改；必须有stage后的正式差异。确实无需修改或资料不足，明确outcome=no_changes_needed/blocked、reason及实际evidenceCallIds；blocked保留草稿而不采用半批。查询只答复，不产生剧情。",json!({"summary":string(),"outcome":{"type":"string","enum":["completed","no_changes_needed","blocked"]},"reason":string(),"evidenceCallIds":{"type":"array","items":string()}}),&["summary"],false),
@@ -58,7 +59,7 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
     ]);
     result.extend(crate::agent_clock::catalog());
     for mut tool in tools::catalog() {
-        if ["search_original", "read_original", "read_canon_facts", "locate_original_event", "prepare_reference_check", "preview_turn_record"].contains(&tool.name) {
+        if ["list_sections", "search_original", "read_original", "read_canon_notes", "read_canon_facts", "locate_original_event", "prepare_reference_check", "preview_turn_record"].contains(&tool.name) {
             tool.parameters["properties"]["bookId"] = string();
             result.push(tool)
         }

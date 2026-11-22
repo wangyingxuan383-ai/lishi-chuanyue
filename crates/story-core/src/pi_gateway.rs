@@ -25,6 +25,9 @@ impl TaskPermit {
 
 impl StoryToolGateway {
     pub fn new(store: Store) -> Self {
+        if let Ok(db) = store.lock() {
+            ws::install_hooks(&db);
+        }
         Self(PiStore(store))
     }
 
@@ -247,7 +250,8 @@ impl StoryToolGateway {
         let metadata=ws::parse(ws::text(&task,"metadata_json"));
         let workspace=ws::parse(ws::text(&task,"workspace_json"));
         let review=crate::pi_progress::prepare(&db,&task)?;
-        Ok(json!({"reviewRequest":review,"runtimeGuidance":metadata["runtimeGuidance"],"target":metadata["target"],"goal":task["text"],"corrections":corrections,"plan":ws::parse(ws::text(&task,"plan_json")),"question":ws::parse(ws::text(&task,"question_json")),"draftRefs":ws::changes(&workspace),"skillRefs":metadata["skillReads"],"requestedSkills":metadata["skills"],"intentRevision":task["intent_revision"],"consumedIntentRevision":task["consumed_intent_revision"],"storyVersion":task["base_world_version"],"status":task["status"],"receipt":crate::pi_closeout::receipt_summary(&ws::parse(ws::text(&task,"result_json"))),"resource":{"worldId":task["world_id"],"lineId":task["line_id"]},"warning":"这些是程序保存的当前任务要求和实际状态，摘要或对话印象不能代替它们；修改草稿不是正式剧情。"}))
+        let skill_refs:Vec<Value>=metadata["skillReads"].as_array().into_iter().flatten().map(|s|json!({"id":s["id"],"name":s["name"],"version":s["version"],"bodyRead":s["bodyRead"],"actor":s["actor"]})).collect();
+        Ok(json!({"reviewRequest":review,"runtimeGuidance":metadata["runtimeGuidance"],"target":metadata["target"],"goal":task["text"],"corrections":corrections,"plan":ws::parse(ws::text(&task,"plan_json")),"question":ws::parse(ws::text(&task,"question_json")),"draftRefs":ws::compact_changes(&workspace),"skillRefs":skill_refs,"requestedSkills":metadata["skills"],"intentRevision":task["intent_revision"],"consumedIntentRevision":task["consumed_intent_revision"],"storyVersion":task["base_world_version"],"status":task["status"],"receipt":crate::pi_closeout::receipt_summary(&ws::parse(ws::text(&task,"result_json"))),"resource":{"worldId":task["world_id"],"lineId":task["line_id"]},"warning":"这些是程序保存的当前任务要求和实际状态，摘要或对话印象不能代替它们；修改草稿不是正式剧情。"}))
     }
 
     pub(crate) fn progress_decision(&self,permit:&TaskPermit,args:&Value)->Result<Value>{
@@ -408,7 +412,7 @@ impl StoryToolGateway {
         crate::tools::validate_with(&catalog, &request.tool, &request.args)?;
         let modifying = matches!(
             request.tool.as_str(),
-            "stage_edit" | "stage_story_turn" | "stage_route" | "discard_draft" | "stage_clock" | "draft_skill"
+            "stage_edit" | "stage_edits" | "stage_story_turn" | "stage_route" | "discard_draft" | "stage_clock" | "draft_skill"
         );
         if task["read_only"] == 1 && modifying {
             return Err(Error::Invalid("本次仅作只读分析，不能暂存修改".into()));
@@ -420,7 +424,7 @@ impl StoryToolGateway {
         if modifying {
             args["_agentCall"] = request.call_id.clone().into();
         }
-        let cacheable=matches!(request.tool.as_str(),"read_resource"|"read_timeline"|"search_resources"|"search_original"|"read_original"|"read_canon_facts");
+        let cacheable=matches!(request.tool.as_str(),"read_resource"|"read_timeline"|"search_resources"|"list_sections"|"search_original"|"read_original"|"read_canon_notes"|"read_canon_facts");
         let cache_key=pi_store::arguments_hash(&json!([request.world_version,task["workspace_json"],plan.meta["agent"]["referenceScope"],child.map(|c|c.id.as_str()).unwrap_or(""),request.tool,args]));
         let cached:Option<String>=if cacheable{tx.query_row("SELECT data_json FROM pi_read_cache WHERE task_id=? AND cache_key=?",params![request.task_id,cache_key],|r|r.get(0)).optional()?}else{None};
         let mut data = if let Some(raw)=cached {serde_json::from_str(&raw)?}else{match request.tool.as_str() {
@@ -432,6 +436,22 @@ impl StoryToolGateway {
             "read_provided_draft"=>crate::pi_children::provided(&tx,child.ok_or_else(||Error::Invalid("该草稿只提供给特定子助手".into()))?,&args)?,
             "discover_tools" if child.is_some()=>crate::pi_children::discover(&args)?,
             "stage_edit" => ws::stage(&tx, &plan, &request.task_id, &args)?,
+            "stage_edits" => {
+                let edits = args["edits"].as_array().ok_or_else(|| Error::Invalid("edits必须为非空数组".into()))?;
+                if edits.is_empty() || edits.len() > 30 {
+                    return Err(Error::Invalid("批量暂存仅支持1至30项修改".into()));
+                }
+                let mut results = Vec::with_capacity(edits.len());
+                for (idx, item) in edits.iter().enumerate() {
+                    let resolved = crate::pi_resources::resolve(&tx, &task, &plan, "stage_edit", item)?;
+                    let mut item_args = ws::scoped_resource_args(&tx, &plan, &request.task_id, &resolved)?;
+                    item_args["_agentCall"] = format!("{}:{idx}", request.call_id).into();
+                    let staged = ws::stage(&tx, &plan, &request.task_id, &item_args)?;
+                    results.push(json!({"index": idx, "kind": item_args["kind"], "id": item_args["id"], "summary": item_args["summary"], "changes": staged["changes"]}));
+                }
+                let w = ws::workspace(&tx, &request.task_id)?;
+                json!({"staged": results.len(), "results": results, "changesCount": ws::changes(&w).len()})
+            }
             "stage_story_turn" => ws::stage_story(&tx, &request.task_id, &args)?,
             "stage_route" => ws::stage_route(&tx, &plan, &request.task_id, &args)?,
             "discard_draft" => ws::discard_draft(&tx, &request.task_id, &args)?,
@@ -588,10 +608,19 @@ impl StoryToolGateway {
         }
         if !ws::changes(&ws::workspace(&tx, &permit.task_id)?).is_empty()
             || tx.query_row("SELECT EXISTS(SELECT 1 FROM pi_children WHERE task_id=? AND status IN ('prepared','running'))", [&permit.task_id], |r| r.get::<_, bool>(0))?
-            || crate::pi_goal_report::requires_canon(&tx, &task)?
             || task["intent_revision"].as_i64().unwrap_or(0) != task["consumed_intent_revision"].as_i64().unwrap_or(0)
             || tx.query_row("SELECT EXISTS(SELECT 1 FROM pi_inputs WHERE task_id=? AND status='pending' AND delivery IN ('steer','answer'))", [&permit.task_id], |r| r.get::<_, bool>(0))? {
             return Ok(false);
+        }
+        // Read-only canon questions may finish directly once at least one
+        // confirmed original passage was delivered; unread canon tasks still block.
+        if crate::pi_goal_report::requires_canon(&tx, &task)? {
+            let confirmed_original = crate::pi_receipts::pages(&tx, &task)?
+                .as_array()
+                .is_some_and(|items| items.iter().any(|p| p["sourceKind"] == "original" && p["deliveryConfirmed"] == true));
+            if !confirmed_original {
+                return Ok(false);
+            }
         }
         // Same rule as finish_task: an explicitly chosen skill must have been read in full first.
         let metadata = ws::parse(ws::text(&task, "metadata_json"));

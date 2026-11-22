@@ -86,7 +86,7 @@ async function dispatch(record) {
     } else {
       if (!host) throw new Error("Create a session first");
       switch (method) {
-        case "prompt": data = await host.prompt(params.text, params.taskId); break;
+        case "prompt": data = await host.prompt(params.text, params.taskId, { resume: params.resume === true }); break;
         case "steer": await host.steer(params.text); break;
         case "followUp": await host.followUp(params.text); break;
         case "abort": await host.abort(); break;

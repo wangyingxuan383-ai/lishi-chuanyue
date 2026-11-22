@@ -80,7 +80,7 @@ fn clauses_of(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn meaningless(pair: &str) -> bool {
+pub(crate) fn meaningless(pair: &str) -> bool {
     const FUNCTION: &str = "的了是在着和与把被也都就还又这那之其而以于所为从对向给让将得地个们有没不";
     pair.chars().any(|c| "什么谁哪何吗呢".contains(c)) || pair.chars().all(|c| FUNCTION.contains(c))
 }

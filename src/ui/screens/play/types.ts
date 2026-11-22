@@ -6,6 +6,7 @@ export type WritingSettings = World["settings"] & { mode?: "history" | "free"; c
 export interface Gen {
   minHeight?: number;
   phase: "starting" | "thinking" | "writing" | "organizing";
+  detail?: string;
   text: string;
   action: { mode: ActionMode; text: string } | null;
   variant: boolean;

@@ -1,4 +1,5 @@
-.agent-conversation .agent-messages { min-height: 0; }
+.agent-conversation { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.agent-conversation .agent-messages { min-height: 0; min-width: 0; }
 .agent-reading { position: relative; flex: 1; min-height: 0; display: flex; }
 .agent-turn { padding: 10px 0 14px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .agent-message { padding: 6px 0; }
@@ -28,13 +29,17 @@
 .agent-task-actions { flex-wrap: wrap; gap: 8px; }
 .agent-task-actions:empty { display: none; }
 .agent-task-actions button { font-size: 14px; }
-.agent-toolbar { display: flex; gap: 4px; align-items: center; min-height: 36px; }
-.agent-toolbar > .ghost { font-size: 13px; padding: 4px 8px; }
-.agent-toolbar > .icon-btn { padding: 4px 8px; }
-.agent-toolbar > .agent-model-button { min-width: 0; flex: 1 1 0; display: flex; align-items: center; gap: 4px; }
+.agent-toolbar { display: flex; gap: 2px; align-items: center; min-height: 36px; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.agent-toolbar::-webkit-scrollbar { display: none; }
+.agent-toolbar > .ghost { flex-shrink: 0; font-size: 12.5px; padding: 4px 6px; white-space: nowrap; }
+.agent-toolbar > .icon-btn { flex-shrink: 0; padding: 4px 5px; }
+.agent-toolbar > .agent-model-button { min-width: 58px; flex: 1 1 0; display: flex; align-items: center; gap: 3px; }
+.agent-cost-line { margin: 4px 0 2px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.agent-field-diff { display: grid; gap: 6px; }
+.agent-field-diff .diff-counts { font-size: 12px; }
 .agent-model-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-model-button > .icon { flex-shrink: 0; transform: rotate(90deg); }
-.agent-dock { padding-top: 3px; }
+.agent-dock { padding-top: 3px; min-width: 0; max-width: 100%; }
 .agent-conversation .inputbar { align-items: flex-end; }
 .agent-conversation .inputbar textarea { max-height: 20dvh; min-height: 44px; line-height: 1.5; resize: none; }
 .agent-queue summary { font-size: 13px; color: var(--muted); }

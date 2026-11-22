@@ -6,14 +6,11 @@ mod agent_network;
 mod agent_documents;
 #[path = "../../crates/agent-model.rs"]
 mod agent_model;
-use crate::{
-    credentials::Credentials,
-    stream::{StreamEvent, Streams, Timeouts},
-};
+use crate::credentials::Credentials;
 use serde_json::Value;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use story_core::{
-    chat::{Accumulator, BoxFuture, Completion, Model, TextSink},
+    chat::{BoxFuture, Completion, Model, TextSink},
     runtime::Engine,
     Error, ModelConfig, RunPlan, RunSnapshot, RunStopReceipt,
 };
@@ -22,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 
 pub struct NativeModel {
     pub credentials: Arc<Credentials>,
-    pub streams: Arc<Streams>,
 }
 
 fn model_start_error(error: crate::error::PlatformError) -> Error {
@@ -37,15 +33,6 @@ fn model_start_error(error: crate::error::PlatformError) -> Error {
         _ => return Error::Invalid(error.message.into()),
     };
     Error::Provider { kind: kind.into(), status: None, message: error.message.into(), partial: false }
-}
-
-// A dropped completion future must stop the independent native stream, even
-// when its caller was aborted rather than explicitly cancelling the token.
-struct CancelOnDrop(CancellationToken);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
 }
 
 impl NativeModel {
@@ -84,98 +71,38 @@ impl Model for NativeModel {
         text: TextSink,
     ) -> BoxFuture<story_core::Result<Completion>> {
         let credentials = self.credentials.clone();
-        let streams = self.streams.clone();
         Box::pin(async move {
-            if config.protocol() != "chat-completions" {
-                let key=credentials.authorize(&config.slot,&config.url)
-                    .map_err(model_start_error)?;
-                let client=crate::stream::client().map_err(|_|Error::fail(story_core::failure::FailKind::Network,"无法初始化模型连接，请检查网络设置"))?;
-                return agent_model::complete(client,config,body,key.expose_secret().to_owned(),cancel,text).await;
-            }
-            let body=story_core::chat::wire_chat_body(body);
-            let tools=body["tools"].as_array().cloned().unwrap_or_default();
-            let started = Instant::now();
-            let cancel_on_drop = CancelOnDrop(cancel.clone());
-            let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-            let id = streams
-                .start_request(
-                    credentials,
-                    config.slot,
-                    config.url,
-                    body,
-                    // No total cap on a reply that keeps coming (R30, D167): a model
-                    // that thinks first may need minutes before and while writing.
-                    Timeouts {
-                        first_byte_ms: story_core::chat::FIRST_BYTE_MS,
-                        idle_ms: story_core::chat::IDLE_MS,
-                        total_ms: story_core::chat::REQUEST_BACKSTOP_MS,
-                    },
-                    Arc::new(move |event| {
-                        let _ = send.send(event);
-                    }),
-                )
-                .await
-                // Refused before sending: a missing or unbound key is a setup problem.
+            // Route all protocols (including chat-completions) through in-memory
+            // agent_model::complete so native runs avoid per-token .jsonl disk writes
+            // and double SSE parsing while sharing the pooled HTTP client (R31-P3).
+            let key = credentials
+                .authorize(&config.slot, &config.url)
                 .map_err(model_start_error)?;
-            // Dropping the request future must cancel its native network work too.
-            let drop_cancel = cancel.clone();
-            let drop_streams = streams.clone();
-            let drop_id = id.clone();
-            let cleanup = tokio::spawn(async move {
-                drop_cancel.cancelled().await;
-                // ack first cancels/waits for the stream, then removes its
-                // temporary transcript. The durable run owns reusable output.
-                let _ = drop_streams.ack(drop_id).await;
-            });
-            let mut accumulator = Accumulator::default();
-            let result = loop {
-                let event = tokio::select! {_ = cancel.cancelled()=>break Err(Error::Cancelled),event=receive.recv()=>event};
-                match event {
-                    Some(StreamEvent::Data { data }) => {
-                        if accumulator.push(&data).is_some() {
-                            accumulator
-                                .result
-                                .first_token_ms
-                                .get_or_insert(started.elapsed().as_millis() as u64);
-                            text(accumulator.result.text.clone());
-                        }
-                    }
-                    Some(StreamEvent::Done) => {
-                        accumulator.result.total_ms = started.elapsed().as_millis() as u64;
-                        break accumulator.finish_with_tools(&tools);
-                    }
-                    Some(StreamEvent::Error {
-                        kind,
-                        status,
-                        message,
-                    }) => {
-                        break Err(if kind == "cancelled" {
-                            Error::Cancelled
-                        } else if kind == "storage" {
-                            Error::fail(story_core::failure::FailKind::Storage, "生成的临时进度无法保存")
-                        } else if kind == "http" && story_core::chat::provider_context_rejected(status, message.as_deref().unwrap_or("")) {
-                            Error::ContextWindow
-                        } else {
-                            Error::Provider {
-                                kind,
-                                status,
-                                message: message.unwrap_or_default(),
-                                partial: accumulator.has_content(),
-                            }
-                        })
-                    }
-                    Some(StreamEvent::Open { .. }) => {}
-                    None => break Err(Error::Provider { kind: "network".into(), status: None, message: "模型连接已经结束".into(), partial: accumulator.has_content() }),
-                }
-            };
-            drop(cancel_on_drop);
-            let _ = cleanup.await;
-            result
+            let client = crate::stream::client().map_err(|_| {
+                Error::fail(
+                    story_core::failure::FailKind::Network,
+                    "无法初始化模型连接，请检查网络设置",
+                )
+            })?;
+            agent_model::complete(
+                client,
+                config,
+                body,
+                key.expose_secret().to_owned(),
+                cancel,
+                text,
+            )
+            .await
         })
     }
 }
 fn message(error: story_core::Error) -> Value {
     serde_json::json!({"code":"execution","message":error.to_string(),"failure":story_core::failure::refused_at_start(&error)})
+}
+async fn blocking_exec<T: Send + 'static>(work: impl FnOnce() -> Result<T, Value> + Send + 'static) -> Result<T, Value> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| serde_json::json!({"code":"execution","message":"本地执行任务中断"}))?
 }
 
 #[tauri::command]
@@ -183,7 +110,8 @@ pub async fn execution_start(
     engine: State<'_, Arc<Engine>>,
     plan: RunPlan,
 ) -> Result<String, Value> {
-    engine.start(plan).map_err(message)
+    let engine = engine.inner().clone();
+    blocking_exec(move || engine.start(plan).map_err(message)).await
 }
 #[tauri::command]
 pub async fn execution_snapshot(
@@ -191,36 +119,51 @@ pub async fn execution_snapshot(
     id: String,
     after: u64,
 ) -> Result<RunSnapshot, Value> {
-    engine.snapshot(&id, after).map_err(|error| match error {
-        Error::Sql(rusqlite::Error::QueryReturnedNoRows) =>
-            serde_json::json!({"code":"execution_missing","message":"找不到这次运行"}),
-        other => message(other),
+    let engine = engine.inner().clone();
+    blocking_exec(move || {
+        engine.snapshot(&id, after).map_err(|error| match error {
+            Error::Sql(rusqlite::Error::QueryReturnedNoRows) => {
+                serde_json::json!({"code":"execution_missing","message":"找不到这次运行"})
+            }
+            other => message(other),
+        })
     })
+    .await
 }
 #[tauri::command]
 pub async fn execution_list(engine: State<'_, Arc<Engine>>) -> Result<Value, Value> {
-    engine.store.list().map_err(message)
+    let engine = engine.inner().clone();
+    blocking_exec(move || engine.store.list().map_err(message)).await
 }
 #[tauri::command]
 pub async fn execution_stop(engine: State<'_, Arc<Engine>>, id: String, execution_id: Option<String>) -> Result<RunStopReceipt, Value> {
-    match execution_id {
-        Some(execution_id) => engine.stop_execution(&id, &execution_id),
-        None => engine.stop(&id),
-    }.map_err(message)
+    let engine = engine.inner().clone();
+    blocking_exec(move || {
+        match execution_id {
+            Some(execution_id) => engine.stop_execution(&id, &execution_id),
+            None => engine.stop(&id),
+        }
+        .map_err(message)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn execution_resume(engine: State<'_, Arc<Engine>>, id: String) -> Result<(), Value> {
-    engine.resume(&id).map_err(message)
+    let engine = engine.inner().clone();
+    blocking_exec(move || engine.resume(&id).map_err(message)).await
 }
 
 #[tauri::command]
 pub async fn execution_settle(state: Value, record: Value, options: Value) -> Result<Value, Value> {
-    story_core::rules::apply_record(&state, &record, &options)
-        .map_err(Error::Invalid)
-        .map_err(message)
+    blocking_exec(move || {
+        story_core::rules::apply_record(&state, &record, &options)
+            .map_err(Error::Invalid)
+            .map_err(message)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn execution_context(input: Value) -> Result<Value, Value> {
-    story_core::writing_context::build(&input).map_err(message)
+    blocking_exec(move || story_core::writing_context::build(&input).map_err(message)).await
 }

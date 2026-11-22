@@ -32,12 +32,55 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
   let observationFailures = 0;
   let currentAttempt: string | null | undefined, stopAttempt: string | null | undefined;
   let stopSending = false, stopAcknowledged = false, stopRetryAt = 0;
+  let unsubscribe: (() => void) | null = null;
+  let liveSubscribed = false, lastLiveTextLen = 0;
   let settle!: (snapshot: ExecutionSnapshot) => void, fail!: (error: unknown) => void;
   const done = new Promise<ExecutionSnapshot>((resolve, reject) => { settle = resolve; fail = reject; });
   const registered = (async () => {
     if (!execution) throw new Error("当前运行环境没有原生执行核心，请启动本机开发宿主或使用应用");
     return existingId ?? execution.start(asJson(plan));
   })();
+  const cleanupLive = () => {
+    unsubscribe?.();
+    unsubscribe = null;
+    liveSubscribed = false;
+  };
+  const deliver = (seq: number, raw: unknown) => {
+    if (!attached || !raw || typeof raw !== "object" || Array.isArray(raw)) return;
+    const event = raw as Record<string, unknown>;
+    if (seq > 0) {
+      if (seq <= processed) return;
+      processed = seq;
+      if (event.type === "text" && typeof event.full === "string") {
+        if (event.full.length < lastLiveTextLen) return;
+        lastLiveTextLen = event.full.length;
+      } else if (event.type === "thinking" || event.type === "step") {
+        lastLiveTextLen = 0;
+      }
+      onEvent(event);
+      return;
+    }
+    // seq === 0: ephemeral live frame pushed before SQLite checkpoint.
+    if (event.type === "text" && typeof event.full === "string") {
+      if (event.full.length <= lastLiveTextLen) return;
+      lastLiveTextLen = event.full.length;
+      onEvent(event);
+    }
+  };
+  const ensureLive = (id: string) => {
+    if (liveSubscribed || terminal || !execution?.subscribe) return;
+    liveSubscribed = true;
+    unsubscribe = execution.subscribe(id, ({ seq, event }) => {
+      if (terminal) return;
+      const numericSeq = typeof seq === "number" ? seq : 0;
+      deliver(numericSeq, event);
+      const kind = event && typeof event === "object" && !Array.isArray(event) ? (event as Record<string, unknown>).type : null;
+      if (kind === "done" || kind === "failed") {
+        clearTimeout(timer);
+        void next();
+      }
+    });
+  };
   const signal = (state: string) => {
     if (attached) onEvent({ type: "execution-status", state });
   };
@@ -68,22 +111,19 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
   };
   const poll = async (id: string) => {
     if (!execution || terminal) return;
+    ensureLive(id);
     const snapshot = await execution.snapshot(id, attached ? processed : Number.MAX_SAFE_INTEGER);
     if (observationFailures > 0) signal("connected");
     observationFailures = 0;
     currentAttempt = snapshot.executionId ?? null;
     const running = ["running", "committing"].includes(snapshot.status);
     if (running && snapshot.stopRequested && (!stopped || currentAttempt === stopAttempt)) acknowledgeStop();
-    if (attached) for (const item of snapshot.events) {
-      if (item.seq <= processed) continue;
-      processed = item.seq;
-      if (item.event && typeof item.event === "object" && !Array.isArray(item.event)) onEvent(item.event as Record<string, unknown>);
-    }
-    if (!running) { terminal = true; settle(snapshot); return; }
+    if (attached) for (const item of snapshot.events) deliver(item.seq, item.event);
+    if (!running) { terminal = true; cleanupLive(); settle(snapshot); return; }
     void sendStop(id);
-    schedule(attached ? 350 : 1000);
+    schedule(attached ? (liveSubscribed ? 1500 : 350) : 1000);
   };
-  const terminate = (error: unknown) => { terminal = true; clearTimeout(timer); fail(error); };
+  const terminate = (error: unknown) => { terminal = true; clearTimeout(timer); cleanupLive(); fail(error); };
   const lostObservation = (error: unknown) => {
     if (error instanceof PlatformError && error.code === "execution_missing") { terminate(error); return; }
     if (observationFailures++ === 0) signal("reconnecting");

@@ -92,12 +92,14 @@ fn model_snapshot(model: &Value) -> Value {
         "slot",
         "id",
         "model",
+        "auxModel",
         "name",
         "protocol",
         "inputTokens",
         "contextWindowTokens",
         "maxOutputTokens",
         "reasoning",
+        "thinkingMode",
         "temperature",
         "topP",
         "endpointRef",
@@ -338,6 +340,19 @@ impl PiStore {
             if crate::pi_lifecycle::attempt(&row)==data["attemptId"].as_str().unwrap_or("") {
                 row["metadata_json"]["contextState"]=data.clone();
                 tx.execute("UPDATE pi_tasks SET metadata_json=?,updated_at=? WHERE id=?",params![row["metadata_json"].to_string(),now(),task])?;
+            }
+        }
+        let thinking=if event["event"]["type"]=="thinking_status" {Some(&event["event"])}else if event["type"]=="thinking_status"{Some(event)}else{None};
+        if let Some(status)=thinking.filter(|_| !event["childId"].is_string()&&!event["event"]["childId"].is_string()) {
+            let mut row=object_row(&tx,"pi_tasks",task)?;
+            if row["status"]=="running" && row["stop_revision"].as_i64().unwrap_or(0)==0
+                && status["attemptId"].as_str().is_none_or(|id| id.is_empty() || id == crate::pi_lifecycle::attempt(&row))
+            {
+                let next_phase = if status["active"]==true { "thinking" } else { "working" };
+                if row["metadata_json"]["executionPhase"] != next_phase {
+                    row["metadata_json"]["executionPhase"] = next_phase.into();
+                    tx.execute("UPDATE pi_tasks SET metadata_json=?,updated_at=? WHERE id=?",params![row["metadata_json"].to_string(),now(),task])?;
+                }
             }
         }
         tx.commit()?;

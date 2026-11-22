@@ -50,10 +50,12 @@ pub(crate) fn execution(db: &Connection, row: &Value) -> Result<Value> {
 fn cleanup(tx: &Transaction<'_>, row: &Value, reason: &str) -> Result<()> {
     let id = ws::text(row, "id");
     let saved = ticket(row)?;
+    let initial_meta = column(row, "metadata_json");
+    let system_timeout = initial_meta["stopReceipt"]["source"] == "system_timeout";
     let status = if ["running", "committing"].contains(&ws::text(row, "status"))
-        || row["status"] == "waiting_user" && row["stop_revision"].as_i64().unwrap_or(0) > 0
+        || row["status"] == "waiting_user" && row["stop_revision"].as_i64().unwrap_or(0) > 0 && !system_timeout
     {
-        if row["stop_revision"].as_i64().unwrap_or(0) > 0 {
+        if row["stop_revision"].as_i64().unwrap_or(0) > 0 && !system_timeout {
             "cancelled"
         } else {
             "interrupted"
@@ -79,10 +81,12 @@ fn cleanup(tx: &Transaction<'_>, row: &Value, reason: &str) -> Result<()> {
         meta["stopReceipt"]["finishedAt"] = ws::now().into();
         meta["stopReceipt"]["status"] = status.into();
     }
-    tx.execute("UPDATE pi_tasks SET status=?,metadata_json=?,question_json=CASE WHEN stop_revision>0 THEN NULL ELSE question_json END,error=CASE WHEN status IN ('running','committing','waiting_user') THEN ? ELSE error END,updated_at=? WHERE id=?",params![status,meta.to_string(),reason,ws::now(),id])?;
+    let clear_question = row["stop_revision"].as_i64().unwrap_or(0) > 0 && !system_timeout;
+    tx.execute("UPDATE pi_tasks SET status=?,metadata_json=?,question_json=CASE WHEN ? THEN NULL ELSE question_json END,error=CASE WHEN status IN ('running','committing','waiting_user') THEN ? ELSE error END,updated_at=? WHERE id=?",params![status,meta.to_string(),clear_question,reason,ws::now(),id])?;
     if lease::current(tx, &saved.world_id)?.is_some_and(|state| state.ticket == saved) {
         lease::release_tx(tx, &saved)?;
     }
+    ws::bump_pi_auth();
     Ok(())
 }
 
@@ -113,6 +117,16 @@ pub(crate) fn request_stop(
     expected: &str,
     request_id: &str,
 ) -> Result<Value> {
+    request_stop_with_source(store, id, expected, request_id, false)
+}
+
+pub(crate) fn request_stop_with_source(
+    store: &Store,
+    id: &str,
+    expected: &str,
+    request_id: &str,
+    system_timeout: bool,
+) -> Result<Value> {
     if request_id.is_empty() || request_id.len() > 128 || expected.is_empty() {
         return Err(Error::Invalid(
             "停止请求缺少执行批次或请求标识，请刷新任务后重试".into(),
@@ -132,8 +146,9 @@ pub(crate) fn request_stop(
         tx.commit()?;
         return Ok(result);
     }
-    let stopped = !ongoing(&row) && row["status"] != "waiting_user";
-    let receipt = json!({"taskId":id,"attemptId":expected,"requestId":request_id,"accepted":true,"settled":stopped,"acceptedAt":ws::now(),"status":if stopped{ws::text(&row,"status")}else{"stopping"}});
+    let stopped = !ongoing(&row) && (system_timeout || row["status"] != "waiting_user");
+    let source = if system_timeout { "system_timeout" } else { "user" };
+    let receipt = json!({"taskId":id,"attemptId":expected,"requestId":request_id,"source":source,"accepted":true,"settled":stopped,"acceptedAt":ws::now(),"status":if stopped{ws::text(&row,"status")}else{"stopping"}});
     meta["stopReceipt"] = receipt;
     meta["executionPhase"] = if stopped {
         row["status"].clone()
@@ -148,11 +163,17 @@ pub(crate) fn request_stop(
     let saved = ticket(&row)?;
     let live = lease::current(&tx, &saved.world_id)?
         .is_some_and(|state| state.ticket == saved && state.expires_at_ms > lease::now_ms());
-    if !live || row["status"] == "waiting_user" && !ongoing(&row) {
-        cleanup(&tx, &row, "玩家已停止，要求与未采用草稿保留")?;
+    if !live || (!system_timeout && row["status"] == "waiting_user" && !ongoing(&row)) {
+        let reason = if system_timeout {
+            "系统后台运行时间已到，任务已暂停，进度与草稿已保留"
+        } else {
+            "玩家已停止，要求与未采用草稿保留"
+        };
+        cleanup(&tx, &row, reason)?;
     }
     let result = ws::parse(ws::text(&task(&tx, id)?, "metadata_json"))["stopReceipt"].clone();
     tx.commit()?;
+    ws::bump_pi_auth();
     Ok(result)
 }
 
@@ -373,6 +394,26 @@ pub(crate) mod tests {
         request_stop(&store,"t",&id,"stop-question").unwrap();
         assert_eq!(gw.0.task("t").unwrap()["status"],"cancelled");
         assert!(gw.0.task("t").unwrap()["question_json"].is_null());
+    }
+    #[test]
+    fn system_timeout_stop_settles_as_interrupted_and_preserves_question() {
+        let (store, gw, id) = fixture();
+        store.lock().unwrap().execute_batch(
+            "INSERT INTO pi_model_requests VALUES('t','r-sys','model','{\"model\":\"m\"}','running',NULL,'2026-11-23T00:00:00Z',NULL);
+             UPDATE pi_tasks SET question_json='{\"id\":\"q1\",\"questions\":[]}' WHERE id='t';"
+        ).unwrap();
+        expire(&store);
+        let receipt = request_stop_with_source(&store, "t", &id, "sys-timeout-1", true).unwrap();
+        assert_eq!(receipt["source"], "system_timeout");
+        assert_eq!(receipt["settled"], true);
+        assert_eq!(receipt["status"], "interrupted");
+        let task = gw.0.task("t").unwrap();
+        assert_eq!(task["status"], "interrupted");
+        assert!(!task["question_json"].is_null(), "system timeout must keep pending question");
+        let outcome: String = store.lock().unwrap().query_row(
+            "SELECT outcome FROM usage WHERE id='pi:t:r-sys'", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(outcome, "interrupted");
     }
 }
 

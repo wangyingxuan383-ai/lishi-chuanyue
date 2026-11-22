@@ -8,19 +8,23 @@ interface PassageMenuProps {
   menuNode: StoryNode; head: StoryNode; busy: boolean;
   setMenuNode: (node: StoryNode | null) => void;
   openWriting: (kind: "rewrite" | "polish", node: StoryNode) => void;
+  setEditing: (value: { node: StoryNode; field: "narrative" | "action"; text: string }) => void;
+  onAskAbout: (node: StoryNode) => void;
   setRemember: (value: { node: StoryNode; text: string }) => void;
   goBack: (node: StoryNode) => Promise<void>;
   toast: AppValue["toast"];
   setMenuMore: (node: StoryNode | null) => void;
 }
 
-export function PassageMenu({ menuNode, head, busy, setMenuNode, openWriting, setRemember, goBack, toast, setMenuMore }: PassageMenuProps) {
+export function PassageMenu({ menuNode, head, busy, setMenuNode, openWriting, setEditing, onAskAbout, setRemember, goBack, toast, setMenuMore }: PassageMenuProps) {
   return (
     <MenuSheet
       title={`“${menuNode.narrative.replace(/\s+/g, "").slice(0, 16)}…”`}
       onClose={() => setMenuNode(null)}
       items={[
         { icon: "sparkle", label: "AI 改写", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim() || busy, onSelect: () => openWriting("rewrite", menuNode) },
+        { icon: "pen", label: "改写文字", hidden: menuNode.kind === "edit" || busy, onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
+        { icon: "search", label: "问这段里的事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => onAskAbout(menuNode) },
         { icon: "memo", label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim() || busy, onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
         { icon: "rewind", label: "回到这里", hidden: menuNode.id === head.id || busy, onSelect: () => void goBack(menuNode) },
         { icon: "copy", label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
@@ -79,7 +83,7 @@ export function MoreMenu({ mouse, busy, state, dead, watch, head, cursor, noteOp
       onClose={() => setSheet(null)}
       items={[
         { icon: "list", group: "阅读", label: "目录与搜索", onSelect: () => setSheet("toc") },
-        { icon: "search", group: "阅读", label: mouse ? "查一查（Ctrl+F）" : "查一查", hidden: busy, onSelect: () => setSheet("ask") },
+        { icon: "search", group: "阅读", label: mouse ? "查一查（Ctrl+F）" : "查一查", onSelect: () => setSheet("ask") },
         { icon: "memo", group: "阅读", label: "札记", onSelect: () => setSheet("notes") },
         { icon: "book", group: "阅读", label: "参考资料", hidden: !state.source, onSelect: () => setSheet("reference") },
         { icon: "person", group: "阅读", label: "这一世小传", onSelect: () => setSheet("life") },

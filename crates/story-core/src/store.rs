@@ -29,6 +29,7 @@ impl Store {
         self.lock()?
             .execute_batch(include_str!("agent_schema.sql"))?;
         lease::ensure_schema(&*self.lock()?)?;
+        crate::agent_workspace::install_hooks(&*self.lock()?);
         Ok(())
     }
     /// Keeps the run records small (R30, D171): a saved passage's run keeps
@@ -152,6 +153,10 @@ impl Store {
         };
         let failure = crate::failure::record(&error, crate::failure::Stage::of_purpose(phase), 0);
         Self::finish_tx(tx, id, status, Some(&error), Some(&failure))?;
+        tx.execute(
+            "UPDATE execution_steps SET status=? WHERE run_id=? AND status='running'",
+            params![status, id],
+        )?;
         crate::runtime::write_usage(tx, id, &plan.world_id, None, status)?;
         Self::append_event(tx, id, json!({"type":"failed","reason":status,"detail":error.to_string(),"failure":failure}))?;
         Ok(())
@@ -406,17 +411,107 @@ impl Store {
         })
     }
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {
+        self.snapshot_with_ticket(id, after, None)
+    }
+    /// Fast path for active runs (R31-P3): when the caller already holds the
+    /// live in-process lease ticket, avoid extracting from 100KB+ `plan_json`
+    /// and avoid deserializing `draft_json` while `running`/`committing`.
+    pub(crate) fn snapshot_with_ticket(
+        &self,
+        id: &str,
+        after: u64,
+        active_ticket: Option<&lease::LeaseTicket>,
+    ) -> Result<RunSnapshot> {
         let db = self.lock()?;
-        let row = db.query_row("SELECT world_id,status,budget_json,draft_json,result_json,error,error_kind,failure_json FROM execution_runs WHERE id=?", [id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,Option<String>>(5)?, r.get::<_,Option<String>>(6)?, r.get::<_,Option<String>>(7)?)))?;
-        let ticket: Option<String> = db.query_row(
-            "SELECT json_extract(plan_json,'$.meta.executionLease') FROM execution_runs WHERE id=?",
-            [id], |r| r.get(0),
-        )?;
-        let ticket: Option<lease::LeaseTicket> = ticket.as_deref().map(serde_json::from_str).transpose()?;
+        let (world_id, status, budget_json, draft_json, result_json, error, error_kind, failure_json, ticket) =
+            if let Some(live_ticket) = active_ticket {
+                let row = db.query_row(
+                    "SELECT world_id,status,budget_json,result_json,error,error_kind,failure_json FROM execution_runs WHERE id=?",
+                    [id],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                            r.get::<_, Option<String>>(6)?,
+                        ))
+                    },
+                )?;
+                if matches!(row.1.as_str(), "running" | "committing") {
+                    (
+                        row.0,
+                        row.1,
+                        row.2,
+                        None,
+                        row.3,
+                        row.4,
+                        row.5,
+                        row.6,
+                        Some(live_ticket.clone()),
+                    )
+                } else {
+                    let (draft, lease_raw): (String, Option<String>) = db.query_row(
+                        "SELECT draft_json,json_extract(plan_json,'$.meta.executionLease') FROM execution_runs WHERE id=?",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let ticket: Option<lease::LeaseTicket> =
+                        lease_raw.as_deref().map(serde_json::from_str).transpose()?;
+                    (
+                        row.0,
+                        row.1,
+                        row.2,
+                        Some(draft),
+                        row.3,
+                        row.4,
+                        row.5,
+                        row.6,
+                        ticket,
+                    )
+                }
+            } else {
+                let row = db.query_row(
+                    "SELECT world_id,status,budget_json,draft_json,result_json,error,error_kind,failure_json,json_extract(plan_json,'$.meta.executionLease') FROM execution_runs WHERE id=?",
+                    [id],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                            r.get::<_, Option<String>>(6)?,
+                            r.get::<_, Option<String>>(7)?,
+                            r.get::<_, Option<String>>(8)?,
+                        ))
+                    },
+                )?;
+                let ticket: Option<lease::LeaseTicket> =
+                    row.8.as_deref().map(serde_json::from_str).transpose()?;
+                (
+                    row.0,
+                    row.1,
+                    row.2,
+                    Some(row.3),
+                    row.4,
+                    row.5,
+                    row.6,
+                    row.7,
+                    ticket,
+                )
+            };
         let execution_id = ticket.as_ref().map(lease::LeaseTicket::execution_id);
-        let stop_requested = ticket.as_ref().map(|ticket| Self::stop_requested(&db, ticket)).transpose()?.unwrap_or(false);
+        let stop_requested = ticket
+            .as_ref()
+            .map(|ticket| Self::stop_requested(&db, ticket))
+            .transpose()?
+            .unwrap_or(false);
         let mut failures = vec![];
-        if !matches!(row.1.as_str(), "running" | "committing" | "committed" | "previewed") {
+        if !matches!(status.as_str(), "running" | "committing" | "committed" | "previewed") {
             let mut stmt = db.prepare("SELECT failure_json FROM execution_failures WHERE run_id=? ORDER BY seq")?;
             for text in stmt.query_map([id], |r| r.get::<_, String>(0))? {
                 failures.push(serde_json::from_str(&text?)?);
@@ -439,16 +534,19 @@ impl Store {
         }
         Ok(RunSnapshot {
             id: id.into(),
-            world_id: row.0,
-            status: row.1,
+            world_id,
+            status,
             execution_id,
             stop_requested,
-            budget: serde_json::from_str(&row.2)?,
-            draft: serde_json::from_str(&row.3)?,
-            result: row.4.map(|s| serde_json::from_str(&s)).transpose()?,
-            error: row.5,
-            error_kind: row.6,
-            failure: row.7.map(|s| serde_json::from_str(&s)).transpose()?,
+            budget: serde_json::from_str(&budget_json)?,
+            draft: match draft_json {
+                Some(raw) => serde_json::from_str(&raw)?,
+                None => json!({}),
+            },
+            result: result_json.map(|s| serde_json::from_str(&s)).transpose()?,
+            error,
+            error_kind,
+            failure: failure_json.map(|s| serde_json::from_str(&s)).transpose()?,
             failures,
             events,
         })

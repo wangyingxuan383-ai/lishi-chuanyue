@@ -776,7 +776,7 @@ async fn canon_correction_delivers_required_text_and_evidence_above_the_history_
     ]);
     let binding = json!({"bookId":"book","position":0,"through":0,"instructions":"保留玩家设定"});
     fixture.store.lock().unwrap().execute_batch("INSERT INTO source_books VALUES('book','短篇','txt','test','{}'); INSERT INTO source_sections VALUES('book',0,'第一章',NULL); INSERT INTO source_chunks VALUES('book',0,0,'纸铺一张纸售价两文。');").unwrap();
-    let required = format!("【原著用法】保留玩家设定\n【选中范围】四文纸。\n【玩家要求】{}", "保留所选段落的完整要求".repeat(440));
+    let required = format!("【原著用法】保留玩家设定\n【选中范围】四文纸。\n【玩家要求】{}", "保留所选段落的完整要求".repeat(660));
     let mut plan = fixture.plan("correction-history-target");
     plan.kind = "correction".into();
     plan.state["source"] = binding.clone();
@@ -1085,7 +1085,7 @@ async fn stopped_extraction_resumes_cached_writing_without_duplicate_settlement_
         "reused successful steps must belong to the committed node"
     );
     assert_eq!(
-        fixture.scalar("SELECT COUNT(*) FROM usage WHERE outcome='failed'"),
+        fixture.scalar("SELECT COUNT(*) FROM usage WHERE outcome='cancelled'"),
         1
     );
     fixture.engine.resume("resume").unwrap();
@@ -1958,4 +1958,32 @@ async fn an_unreadable_time_or_missing_suggestions_do_not_fail_a_written_passage
     assert_eq!(f.text("SELECT narrative FROM nodes WHERE kind='turn'"), "天亮了，你推门出去。");
     let meta: Value = serde_json::from_str(&f.text("SELECT meta_json FROM nodes WHERE kind='turn'")).unwrap();
     assert!(meta["log"].to_string().contains("无法识别"), "{meta}");
+}
+
+#[tokio::test]
+async fn model_switch_reuse_keeps_completed_writing_and_retries_extract_on_new_model() {
+    let f = Fixture::new(vec![
+        Step::Reply(prose("暮色渐沉，你在城门口拦下马车。")),
+        Step::Fail(provider("http", Some(500), false)),
+        Step::Fail(provider("http", Some(500), false)),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    f.engine.start(f.plan("switch-model")).unwrap();
+    let failed = f.settled("switch-model").await;
+    assert_eq!(failed.status, "failed");
+    assert_eq!(f.model.count(), 3, "1 writing + 2 failed extract attempts");
+    // Simulate retryRun switching model & auxModel after prose succeeded and extract failed.
+    let mut plan = f.store.plan("switch-model").unwrap();
+    plan.model.model = "new-main-model".into();
+    plan.model.aux_model = Some("new-aux-model".into());
+    plan.meta["allowModelSwitchReuse"] = true.into();
+    f.store.lock().unwrap().execute(
+        "UPDATE execution_runs SET plan_json=? WHERE id='switch-model'",
+        rusqlite::params![serde_json::to_string(&plan).unwrap()],
+    ).unwrap();
+    f.engine.resume("switch-model").unwrap();
+    let done = f.settled("switch-model").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    assert_eq!(f.model.count(), 4, "completed writing must be reused instead of re-burned after model switch");
+    assert_eq!(f.text("SELECT narrative FROM nodes WHERE kind='turn'"), "暮色渐沉，你在城门口拦下马车。");
 }

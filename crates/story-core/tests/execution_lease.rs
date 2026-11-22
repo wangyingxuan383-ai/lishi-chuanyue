@@ -196,6 +196,31 @@ fn spectator_children_share_root_ownership_without_unlocking_story() {
     .is_err());
 }
 
+#[test]
+fn dead_role_lease_expiry_reclaims_only_previous_same_role_instances_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("role-lease.sqlite");
+    let mut db = database(&path);
+    let now = lease::now_ms();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let dead_agent = lease::acquire_tx(&tx, "w-dead", "task-old", "android-agent:old-pid", now, 45_000).unwrap();
+    let live_ui = lease::acquire_tx(&tx, "w-ui", "run-ui", "ui-pid", now, 45_000).unwrap();
+    let self_agent = lease::acquire_tx(&tx, "w-self", "task-cur", "android-agent:new-pid", now, 45_000).unwrap();
+    tx.commit().unwrap();
+    let expired = lease::expire_dead_role_leases_with(&db, "android-agent", "android-agent:new-pid").unwrap();
+    assert_eq!(expired, 1);
+    assert_eq!(lease::current(&db, "w-dead").unwrap().unwrap().expires_at_ms, 0);
+    assert!(lease::current(&db, "w-ui").unwrap().unwrap().expires_at_ms > now);
+    assert!(lease::current(&db, "w-self").unwrap().unwrap().expires_at_ms > now);
+    // Reacquiring w-dead immediately succeeds and monotonically advances fence.
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let reclaimed = lease::acquire_tx(&tx, "w-dead", "task-old", "android-agent:new-pid", now, 45_000).unwrap();
+    tx.commit().unwrap();
+    assert!(reclaimed.fence > dead_agent.fence);
+    assert!(lease::guard(&db, &live_ui, now).is_ok());
+    assert!(lease::guard(&db, &self_agent, now).is_ok());
+}
+
 struct NoModel;
 impl Model for NoModel {
     fn complete(

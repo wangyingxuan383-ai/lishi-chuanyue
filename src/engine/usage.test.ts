@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
 import { Game } from "./game";
-import { fastModelsFirst, purposeLabel, speedReport, turnUsage, usageLine, worldUsage } from "./usage";
+import { fastModelsFirst, purposeLabel, recentUsage, runUsage, speedReport, turnUsage, usageLine, worldUsage } from "./usage";
 
 describe("每段用量 (R29-T004)", () => {
   it("labels native purposes by their base and sums a passage", async () => {
     expect(purposeLabel("writing:2")).toBe("写作");
     expect(purposeLabel("reference-review:0:1")).toBe("原著核对");
     expect(purposeLabel("canon-notes")).toBe("札记");
+    expect(purposeLabel("agent")).toBe("助手");
+    expect(purposeLabel("sync-facts")).toBe("改后同步");
     const platform = await createMemoryPlatform();
     await Game.open(platform, null);
     const row = (id: string, node: string | null, purpose: string, input: number | null, output: number | null, ms: number) => ({
@@ -46,5 +48,30 @@ describe("每段用量 (R29-T004)", () => {
     expect(report.auxCalls).toBe(3);
     expect(report.writingShare).toBeCloseTo(60 / 130);
     expect(fastModelsFirst(["gemini-pro", "text-embedding", "gemini-flash", "deepseek-r1", "gpt-x", "gpt-4o-mini", "gemini-x"], "gpt-x")).toEqual(["gemini-flash", "gpt-4o-mini", "gemini-x", "deepseek-r1", "gemini-pro"]);
+  });
+
+  it("runUsage and recentUsage cover interrupted runs, helper popups and mirrored agent calls", async () => {
+    const platform = await createMemoryPlatform();
+    await Game.open(platform, null);
+    const t0 = "2026-11-23T01:00:00.000Z";
+    const t1 = "2026-11-23T01:00:05.000Z";
+    const t2 = "2026-11-23T01:00:10.000Z";
+    const row = (id: string, world: string, node: string | null, purpose: string, input: number | null, output: number | null, outcome: string, at: string) => ({
+      sql: "INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+      params: [id, world, node, purpose, "m", input, output, input === null ? 1 : 0, null, 2000, outcome, at],
+    });
+    await platform.sql.batch([
+      row("run-1:model:1", "w", null, "writing:0", 1200, 300, "cancelled", t1),
+      row("run-1:model:2", "w", null, "extract", null, null, "failed", t2),
+      row("pi:t1:r1", "w", null, "agent", 2000, 400, "ok", t1),
+      row("old-ask", "w", null, "ask", 500, 100, "ok", t0),
+      row("new-ask", "w", null, "ask", 600, 200, "ok", t2),
+    ]);
+    const interrupted = (await runUsage(platform, "run-1"))!;
+    expect(interrupted).toMatchObject({ calls: 2, input: 1200, output: 300, unknown: 1 });
+    const ask = (await recentUsage(platform, "w", ["ask"], t1))!;
+    expect(ask).toMatchObject({ calls: 1, input: 600, output: 200 });
+    const world = (await worldUsage(platform, "w"))!;
+    expect(world.parts.find((p) => p.label === "助手")).toMatchObject({ calls: 1, input: 2000, output: 400 });
   });
 });

@@ -284,7 +284,7 @@ class AgentHostService : Service(), AgentNative.Sink {
         val task = activeTask
         worker.execute {
             try {
-                if (current != 0L && task != null) AgentNative.nativeDispatch(current, internalIds.getAndIncrement(), "agent", JSONObject().put("op", "stop").put("taskId", task).put("attemptId", activeAttempt).put("requestId", "system-${internalIds.getAndIncrement()}").toString())
+                if (current != 0L && task != null) AgentNative.nativeDispatch(current, internalIds.getAndIncrement(), "agent", JSONObject().put("op", "stop").put("taskId", task).put("attemptId", activeAttempt).put("requestId", "system-${internalIds.getAndIncrement()}").put("systemTimeout", true).toString())
                 else NodeRuntime.abortRuntime()
             } catch (_: Throwable) { try { NodeRuntime.abortRuntime() } catch (_: Throwable) { } }
         }

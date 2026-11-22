@@ -8,7 +8,8 @@ export const purposeBase = (purpose: string) => purpose.split(":")[0];
 const LABELS: Record<string, string> = {
   writing: "写作", turn: "写作", opening: "开场", continue: "续写", extract: "补记", "reference-review": "原著核对", "reference-review-lite": "原著快速校对",
   codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", capability: "检测工具支持", ask: "查一查", assist: "补全",
-  test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍", "canon-notes": "札记", tool: "写作", autoplay: "连播", revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步",
+  test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍", "canon-notes": "札记", tool: "写作", autoplay: "连播",
+  revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步", agent: "助手", "段落改写": "段落改写", "行动润色": "行动润色",
 };
 export const purposeLabel = (purpose: string) => LABELS[purposeBase(purpose)] ?? LABELS[purpose] ?? purpose;
 /** SQL for the base purpose, for GROUP BY. */
@@ -39,6 +40,16 @@ const sum = (parts: UsagePart[], key: "calls" | "input" | "output" | "unknown" |
 
 /** One passage: every request its run made, including background 补记 and 核对. */
 export const turnUsage = (platform: Platform, nodeId: string) => summed(platform, "u.node_id = ?", [nodeId]);
+/** One native execution run (including cancelled, paused or failed runs that never committed a node). */
+export const runUsage = (platform: Platform, runId: string) => summed(platform, "(u.id = ? OR u.id LIKE ?)", [runId, `${runId}:%`]);
+/** Recent calls for a helper popup (改写, 改后同步, 查一查, 札记) since an ISO timestamp. */
+export function recentUsage(platform: Platform, worldId: string | null, purposes: string[], sinceIso: string): Promise<UsageTotal | null> {
+  if (!purposes.length || !sinceIso) return Promise.resolve(null);
+  const clause = `${PURPOSE_SQL} IN (${IN_LIST(purposes)}) AND julianday(u.at) >= julianday(?)`;
+  return worldId
+    ? summed(platform, `u.world_id = ? AND ${clause}`, [worldId, ...purposes, sinceIso])
+    : summed(platform, clause, [...purposes, sinceIso]);
+}
 /** A whole story, including notes and tidying done for it. */
 export const worldUsage = (platform: Platform, worldId: string) => summed(platform, "u.world_id = ?", [worldId]);
 

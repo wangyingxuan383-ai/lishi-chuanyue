@@ -3,6 +3,8 @@ use crate::{rules, Error, Result};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashSet};
 
+const HISTORY_EVICT_STEP: usize = 5;
+
 fn text(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
@@ -33,18 +35,26 @@ fn head(s: &str, cap: usize) -> String {
         .collect()
 }
 fn names(v: &Value) -> Vec<&str> {
-    std::iter::once(text(&v["name"]))
-        .chain(list(&v["aliases"]).iter().filter_map(Value::as_str))
-        .filter(|s| !s.is_empty())
-        .collect()
+    let mut out = Vec::new();
+    let name = text(&v["name"]);
+    if !name.is_empty() {
+        out.push(name);
+    }
+    for alias in list(&v["aliases"]).iter().chain(list(&v["keys"]).iter()).filter_map(Value::as_str) {
+        if alias.chars().count() >= 2 {
+            out.push(alias);
+        }
+    }
+    out
 }
 fn mentioned(v: &Value, recent: &str) -> bool {
     names(v).iter().any(|name| recent.contains(name))
 }
+fn last_mention_pos(v: &Value, recent: &str) -> Option<usize> {
+    names(v).iter().filter_map(|name| recent.rfind(name)).max()
+}
 
 pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
-    let projected = crate::stage_context::state(state, recent, 3000);
-    let state = &projected;
     let me = &state["protagonist"];
     let currency = &era["currency"];
     let now = rules::calendar::now_of(
@@ -53,26 +63,30 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
     );
     let place = list(&state["places"])
         .iter()
-        .find(|p| p["id"] == state["placeId"])
+        .find(|p| !state["placeId"].is_null() && p["id"] == state["placeId"])
         .map(|p| text(&p["name"]))
         .unwrap_or("（未记录）");
-    let items = list(&me["items"])
-        .iter()
-        .map(|i| {
-            format!(
-                "{}×{}{}{}",
-                text(&i["name"]),
-                i["quantity"],
-                text(&i["unit"]),
-                if text(&i["place"]).is_empty() {
-                    String::new()
-                } else {
-                    format!("（放在{}）", text(&i["place"]))
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("、");
+    let mut items_vec = Vec::new();
+    let mut items_chars = 0usize;
+    for i in list(&me["items"]).iter().take(48) {
+        let entry = format!(
+            "{}×{}{}{}",
+            text(&i["name"]),
+            i["quantity"],
+            text(&i["unit"]),
+            if text(&i["place"]).is_empty() {
+                String::new()
+            } else {
+                format!("（放在{}）", head(text(&i["place"]), 32))
+            }
+        );
+        if !items_vec.is_empty() && items_chars + size(&entry) + 1 > 900 {
+            break;
+        }
+        items_chars += size(&entry) + 1;
+        items_vec.push(entry);
+    }
+    let items = items_vec.join("、");
     let statuses = list(&me["statuses"])
         .iter()
         .map(|s| {
@@ -82,7 +96,7 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
                 if text(&s["detail"]).is_empty() {
                     String::new()
                 } else {
-                    format!("：{}", text(&s["detail"]))
+                    format!("：{}", head(text(&s["detail"]), 80))
                 }
             )
         })
@@ -90,8 +104,11 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
         .join("；");
     let mut people = list(&state["people"]).iter().collect::<Vec<_>>();
     people.sort_by(|a, b| {
-        mentioned(b, recent)
-            .cmp(&mentioned(a, recent))
+        let ma = last_mention_pos(a, recent);
+        let mb = last_mention_pos(b, recent);
+        mb.is_some()
+            .cmp(&ma.is_some())
+            .then_with(|| mb.cmp(&ma))
             .then_with(|| {
                 b["lastSeenMinute"]
                     .as_i64()
@@ -99,58 +116,81 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
                     .cmp(&a["lastSeenMinute"].as_i64().unwrap_or(-1))
             })
     });
-    let lines = people
-        .iter()
-        .take(30)
-        .map(|p| {
-            format!(
-                "{}{}：{}，对主角{}{}{}",
-                text(&p["name"]),
-                if list(&p["aliases"]).is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "（又称{}）",
-                        list(&p["aliases"])
-                            .iter()
-                            .map(text)
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    )
-                },
-                if text(&p["role"]).is_empty() {
-                    "身份不明"
-                } else {
-                    text(&p["role"])
-                },
-                text(&p["attitude"]),
-                if p["alive"] == false { "，已死" } else { "" },
-                if mentioned(p, recent) {
-                    format!("；{}{}", text(&p["origin"]), text(&p["notes"]))
-                } else {
-                    String::new()
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let rest = people
-        .iter()
-        .skip(30)
-        .take(48)
-        .map(|p| {
-            format!(
-                "{}{}",
-                text(&p["name"]),
-                if p["alive"] == false {
-                    "（已死）"
-                } else {
-                    ""
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("、");
+    const PEOPLE_BUDGET: usize = 2400;
+    const REST_BUDGET: usize = 400;
+    let mut detailed = Vec::new();
+    let mut detailed_chars = 0usize;
+    let mut overflow_idx = 0usize;
+    for (idx, p) in people.iter().enumerate() {
+        if detailed.len() >= 30 {
+            break;
+        }
+        let is_mentioned = last_mention_pos(p, recent).is_some();
+        let extra = if is_mentioned {
+            let origin = head(text(&p["origin"]).trim(), 80);
+            let notes = head(text(&p["notes"]).trim(), 120);
+            match (origin.is_empty(), notes.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => format!("；{origin}"),
+                (true, false) => format!("；{notes}"),
+                (false, false) => format!("；{origin}；{notes}"),
+            }
+        } else {
+            String::new()
+        };
+        let line = format!(
+            "{}{}：{}，对主角{}{}{}",
+            text(&p["name"]),
+            if list(&p["aliases"]).is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "（又称{}）",
+                    list(&p["aliases"])
+                        .iter()
+                        .map(text)
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            },
+            if text(&p["role"]).is_empty() {
+                "身份不明"
+            } else {
+                text(&p["role"])
+            },
+            text(&p["attitude"]),
+            if p["alive"] == false { "，已死" } else { "" },
+            extra
+        );
+        let cost = size(&line) + 1;
+        if !detailed.is_empty() && detailed_chars + cost > PEOPLE_BUDGET {
+            break;
+        }
+        detailed_chars += cost;
+        detailed.push(line);
+        overflow_idx = idx + 1;
+    }
+    let lines = detailed.join("\n");
+    let mut rest_vec = Vec::new();
+    let mut rest_chars = 0usize;
+    for p in people.iter().skip(overflow_idx).take(48) {
+        let entry = format!(
+            "{}{}",
+            text(&p["name"]),
+            if p["alive"] == false {
+                "（已死）"
+            } else {
+                ""
+            }
+        );
+        if !rest_vec.is_empty() && rest_chars + size(&entry) + 1 > REST_BUDGET {
+            break;
+        }
+        rest_chars += size(&entry) + 1;
+        rest_vec.push(entry);
+    }
+    let rest = rest_vec.join("、");
     let goals = list(&state["goals"])
         .iter()
         .filter(|g| g["status"] == "进行中")
@@ -162,7 +202,7 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
                 if text(&g["progress"]).is_empty() {
                     String::new()
                 } else {
-                    format!("（{}）", text(&g["progress"]))
+                    format!("（{}）", head(text(&g["progress"]), 80))
                 }
             )
         })
@@ -178,8 +218,10 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
     } else {
         String::new()
     };
+    let identity = head(text(&me["identity"]), 180);
+    let origin = head(text(&me["origin"]), 180);
     let debt = me["stats"]["debt"].as_f64().unwrap_or(0.0);
-    format!("【当前】{} · {}\n主角：{}，{}{}，{}{}\n可用的钱：{}（共 {} {}）{}\n身体：健康{}，精力{}\n身上的伤病与状态：{}\n行囊：{}\n已知人物：\n{}{}\n进行中的目标：{}",text(&now["text"]),place,text(&me["name"]),text(&me["gender"]),age,text(&me["identity"]),if text(&me["origin"]).is_empty(){String::new()}else{format!("（穿越前是{}）",text(&me["origin"]))},rules::money::format_money(me["stats"]["money"].as_f64().unwrap_or(0.0),currency),me["stats"]["money"],list(&currency["units"]).last().map(|u|text(&u["name"])).unwrap_or("钱"),if debt!=0.0{format!("；欠债 {}",rules::money::format_money(debt,currency))}else{String::new()},level(me["stats"]["health"].as_f64().unwrap_or(80.0),&["康健","微恙","带伤","重伤","垂危"]),level(me["stats"]["energy"].as_f64().unwrap_or(70.0),&["充沛","尚可","疲惫","力竭"]),if statuses.is_empty(){"无"}else{&statuses},if items.is_empty(){"无"}else{&items},if lines.is_empty(){"无"}else{&lines},if rest.is_empty(){String::new()}else{format!("\n另有：{rest}")},if goals.is_empty(){"无"}else{&goals})
+    format!("【当前】{} · {}\n主角：{}，{}{}，{}{}\n可用的钱：{}（共 {} {}）{}\n身体：健康{}，精力{}\n身上的伤病与状态：{}\n行囊：{}\n已知人物：\n{}{}\n进行中的目标：{}",text(&now["text"]),place,text(&me["name"]),text(&me["gender"]),age,identity,if origin.is_empty(){String::new()}else{format!("（穿越前是{origin}）")},rules::money::format_money(me["stats"]["money"].as_f64().unwrap_or(0.0),currency),me["stats"]["money"],list(&currency["units"]).last().map(|u|text(&u["name"])).unwrap_or("钱"),if debt!=0.0{format!("；欠债 {}",rules::money::format_money(debt,currency))}else{String::new()},level(me["stats"]["health"].as_f64().unwrap_or(80.0),&["康健","微恙","带伤","重伤","垂危"]),level(me["stats"]["energy"].as_f64().unwrap_or(70.0),&["充沛","尚可","疲惫","力竭"]),if statuses.is_empty(){"无"}else{&statuses},if items.is_empty(){"无"}else{&items},if lines.is_empty(){"无"}else{&lines},if rest.is_empty(){String::new()}else{format!("\n另有：{rest}")},if goals.is_empty(){"无"}else{&goals})
 }
 
 /// Instruction wording is supplied by the existing prompt template. Selection,
@@ -190,16 +232,20 @@ pub fn build(input: &Value) -> Result<Value> {
     let template = &input["template"];
     let cap = input["budgetChars"].as_u64().unwrap_or(12000) as usize;
     let history = list(&input["history"]);
-    let recent = history
+    let mut recent_turns = history
         .iter()
         .rev()
         .filter(|n| n["kind"] != "edit")
         .take(3)
         .map(|n| format!("{}\n{}", text(&n["actionText"]), text(&n["narrative"])))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + text(&input["text"])
-        + text(&input["directorNote"]);
+        .collect::<Vec<_>>();
+    recent_turns.reverse();
+    let recent = format!(
+        "{}\n{}\n{}",
+        recent_turns.join("\n"),
+        text(&input["text"]),
+        text(&input["directorNote"])
+    );
     let mut layers: Vec<Value> = vec![];
     let mut add = |key: &str, label: &str, content: String, note: &str| {
         layers.push(
@@ -337,34 +383,52 @@ pub fn build(input: &Value) -> Result<Value> {
         .unwrap_or_else(|| match depth {
             "fast" => 128,
             "standard" => crate::tools::catalog().iter().filter(|t| ["read_canon_notes","read_history"].contains(&t.name) || (state["source"].is_object() && ["search_original","read_original"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + 128,
-            _ => crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128,
+            _ => crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["list_sections","search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128,
         });
-    // Canon notes (D162): the player's digests of the book, chosen by the
-    // caller for the current position and the names in play. Up to a fifth of
-    // the budget, in the fixed system part so the service can cache it.
+    // Canon notes (D162, R31-P3): plot/timeline notes stay in the fixed system
+    // prefix for prompt-cache stability, while per-turn matched person/setting/question
+    // notes move into the trailing user turn so changing entities never bust cache.
     let notes_room = (cap / 5).min(cap.saturating_sub(fixed + overhead + 400));
-    let mut notes = String::new();
-    // 本局札记 (D174) and 原著札记 share the room, each under its own heading.
-    let mut opened = HashSet::new();
-    for n in list(&input["canonNotes"]) {
-        let story = n["source"] == "story";
-        let header = if opened.contains(&story) { "" } else if story {
-            "\n【本局札记】（整理自本局已写的正文，可能有误；以最近的正文和当前状态为准）"
-        } else {
-            "\n【原著札记】（整理或录入的原著梗概，可能有误；本局已发生的事实优先）"
-        };
-        let block = format!("\n· {}\n{}\n", text(&n["title"]), text(&n["content"]).trim());
-        if size(&notes) + size(header) + size(&block) <= notes_room {
-            notes += header;
-            notes += &block;
-            opened.insert(story);
-        } else if notes.is_empty() && notes_room > 400 {
-            notes = format!("{header}{}\n", head(&block, notes_room - size(header) - 1));
-            opened.insert(story);
+    let mut notes_static = String::new();
+    let mut notes_dynamic = String::new();
+    let is_dynamic_note = |n: &Value| matches!(text(&n["kind"]), "person" | "setting" | "question");
+    let append_notes = |out: &mut String, items: Vec<&Value>, budget: usize| {
+        let mut opened = HashSet::new();
+        for n in items {
+            let story = n["source"] == "story";
+            let header = if opened.contains(&story) {
+                ""
+            } else if story {
+                "\n【本局札记】（整理自本局已写的正文，可能有误；以最近的正文和当前状态为准）"
+            } else {
+                "\n【原著札记】（整理或录入的原著梗概，可能有误；本局已发生的事实优先）"
+            };
+            let block = format!("\n· {}\n{}\n", text(&n["title"]), text(&n["content"]).trim());
+            if size(out) + size(header) + size(&block) <= budget {
+                *out += header;
+                *out += &block;
+                opened.insert(story);
+            } else if out.is_empty() && budget > 400 {
+                *out = format!("{header}{}\n", head(&block, budget - size(header) - 1));
+                opened.insert(story);
+            }
         }
+    };
+    let all_notes = list(&input["canonNotes"]);
+    let (dyn_list, static_list): (Vec<&Value>, Vec<&Value>) =
+        all_notes.iter().partition(|n| is_dynamic_note(n));
+    append_notes(&mut notes_static, static_list, notes_room);
+    append_notes(
+        &mut notes_dynamic,
+        dyn_list,
+        notes_room.saturating_sub(size(&notes_static)),
+    );
+    let notes_all = format!("{notes_static}{notes_dynamic}");
+    layers.push(json!({"key":"canonNotes","label":"主线札记","chars":size(&notes_static),"content":notes_static,"note":"本局与原著主线梗概，固定在系统前缀以利缓存复用"}));
+    if !notes_dynamic.is_empty() {
+        layers.push(json!({"key":"canonNotesDynamic","label":"本段相关札记","chars":size(&notes_dynamic),"content":notes_dynamic,"note":"按本段出场人物、设定或提问动态带入，置于末尾用户消息"}));
     }
-    layers.push(json!({"key":"canonNotes","label":"札记","chars":size(&notes),"content":notes,"note":"本局主线梗概、当前位置的原著主线与本段提到的人物、设定，最多五分之一预算"}));
-    let mut remaining = (cap / 4).min(cap.saturating_sub(fixed + overhead + size(&notes) + 400));
+    let mut remaining = (cap / 4).min(cap.saturating_sub(fixed + overhead + size(&notes_all) + 400));
     let mut evidence = String::new();
     let mut fitted = vec![];
     for p in list(&reference["passages"]) {
@@ -394,7 +458,7 @@ pub fn build(input: &Value) -> Result<Value> {
     if source.is_some() && evidence.is_empty() {
         evidence = if depth == "deep" {
             "\n【原著资料不足】当前未取得可核实原文，需要补查，不能声称已核对。\n".into()
-        } else if !notes.is_empty() {
+        } else if !notes_all.is_empty() {
             "\n【原著资料】本回合没有取到直接相关的原文片段，以上面的原著札记为准；札记没写到的细节不编造。\n".into()
         } else {
             "\n【原著资料】本回合没有取到直接相关的原文片段。按上文的设定与已知剧情写，不编造原著细节，也不声称已核对原文。\n".into()
@@ -410,10 +474,10 @@ pub fn build(input: &Value) -> Result<Value> {
         .into();
     }
     layers.push(json!({"key":"reference","label":"原著证据","content":evidence,"chars":size(&evidence),"note":"先保留原文，最多四分之一预算"}));
-    if reference.is_object() && !notes.is_empty() {
-        reference["notes"] = notes.clone().into();
+    if reference.is_object() && !notes_all.is_empty() {
+        reference["notes"] = notes_all.clone().into();
     }
-    let mut room = cap.saturating_sub(fixed + overhead + size(&notes) + size(&evidence));
+    let mut room = cap.saturating_sub(fixed + overhead + size(&notes_all) + size(&evidence));
     let continuity=crate::continuity::recall(&input["continuity"],&recent,1200.min(room/4));
     room=room.saturating_sub(size(&continuity));
     // 相关旧事 (D169): sentences from turns gone from the window about who and
@@ -427,7 +491,13 @@ pub fn build(input: &Value) -> Result<Value> {
     let me = text(&state["protagonist"]["name"]).trim().to_owned();
     let ability = |c: &&Value| { let n = text(&c["name"]).trim(); n == format!("{}的本事", if me.is_empty() { "主角" } else { me.as_str() }) || n == "主角的本事" };
     let mut ordered: Vec<&Value> = list(&state["cards"]).iter().filter(|c| c["kind"] != "时代" && ability(c)).collect();
-    ordered.extend(list(&state["cards"]).iter().filter(|c| c["kind"] != "时代" && !ability(c) && mentioned(c, &recent)));
+    let mut related_cards: Vec<(&Value, usize)> = list(&state["cards"])
+        .iter()
+        .filter(|c| c["kind"] != "时代" && !ability(c))
+        .filter_map(|c| last_mention_pos(c, &recent).map(|pos| (c, pos)))
+        .collect();
+    related_cards.sort_by(|a, b| b.1.cmp(&a.1));
+    ordered.extend(related_cards.into_iter().map(|(c, _)| c));
     for c in ordered {
         let line = format!(
             "\n【{}】{}：{}",
@@ -457,20 +527,47 @@ pub fn build(input: &Value) -> Result<Value> {
     // opposite of the text now (D183): those notes stay out.
     let edited: HashSet<&str> = history.iter().filter(|n| n["rewritten"] == true).filter_map(|n| n["id"].as_str())
         .chain(input["editedFactNodeIds"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
-    for f in list(&state["facts"])
+    let recent_pairs: HashSet<String> = crate::recall::pairs_of(&recent)
+        .into_iter()
+        .filter(|p| !crate::recall::meaningless(p))
+        .collect();
+    let active_entities: Vec<&str> = list(&state["people"])
         .iter()
-        .rev()
-        .filter(|f| !(f["origin"] == "ai" && f["nodeId"].as_str().is_some_and(|id| edited.contains(id))))
-        .filter(|f| {
-            text(&f["detail"])
-                .chars()
-                .filter(|c| recent.contains(*c))
-                .take(8)
-                .count()
-                >= 4
+        .chain(list(&state["cards"]).iter())
+        .chain(list(&state["places"]).iter())
+        .flat_map(|v| names(v))
+        .filter(|n| n.chars().count() >= 2 && recent.contains(n))
+        .collect();
+    let mut matched_facts: Vec<(u8, usize, usize, &Value)> = list(&state["facts"])
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !(f["origin"] == "ai" && f["nodeId"].as_str().is_some_and(|id| edited.contains(id))))
+        .filter_map(|(idx, f)| {
+            let detail = text(&f["detail"]);
+            if detail.trim().is_empty() {
+                return None;
+            }
+            let hits = crate::recall::pairs_of(detail)
+                .into_iter()
+                .filter(|p| !crate::recall::meaningless(p) && recent_pairs.contains(p))
+                .count();
+            let entity_hit = active_entities.iter().any(|n| detail.contains(n));
+            if hits < 2 && !(hits >= 1 && entity_hit) {
+                return None;
+            }
+            let origin = text(&f["origin"]);
+            let tier = if matches!(origin, "correction" | "branch" | "player") {
+                0
+            } else if origin == "ai" && recent.contains(detail) {
+                2
+            } else {
+                1
+            };
+            Some((tier, hits + usize::from(entity_hit), idx, f))
         })
-        .take(8)
-    {
+        .collect();
+    matched_facts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)).then_with(|| b.2.cmp(&a.2)));
+    for (_, _, _, f) in matched_facts.into_iter().take(8) {
         let line = format!("\n[{}]{}", text(&f["origin"]), text(&f["detail"]));
         if size(&facts) + size(&line) < 800 && size(&cards) + size(&facts) + size(&line) <= room {
             facts += &line;
@@ -513,37 +610,75 @@ pub fn build(input: &Value) -> Result<Value> {
     // The recap's room is set aside; which chapters it shows is decided once the
     // prose window is known, so a chapter still there in full is not told twice (D183).
     room = room.saturating_sub(recap_budget);
-    let mut pairs = vec![];
-    let mut kept = BTreeSet::new();
-    for n in history.iter().rev().filter(|n| n["kind"] != "edit") {
+    // Stepped history eviction (R31-P3): once history exceeds the prose budget,
+    // evict oldest turns in chunks of HISTORY_EVICT_STEP aligned on global turn index
+    // so the conversation message prefix stays byte-identical for 4-5 consecutive turns.
+    let offset = input["historyOffset"].as_u64().unwrap_or(0) as usize;
+    let story_nodes: Vec<&Value> = history.iter().filter(|n| n["kind"] != "edit").collect();
+    let total_story = story_nodes.len();
+    let mut fit_count = 0usize;
+    let mut fit_used = 0usize;
+    for n in story_nodes.iter().rev() {
         let action = if n["kind"] == "opening" {
             "（开场）"
+        } else if text(&n["actionText"]).is_empty() {
+            "（继续）"
         } else {
-            if text(&n["actionText"]).is_empty() {
+            text(&n["actionText"])
+        };
+        let cost = size(action) + size(text(&n["narrative"])) + 24;
+        if fit_used + cost > room {
+            break;
+        }
+        fit_used += cost;
+        fit_count += 1;
+    }
+    let mut pairs = vec![];
+    let mut kept = BTreeSet::new();
+    if fit_count > 0 {
+        let fit_start = total_story - fit_count;
+        let start = if fit_start == 0 {
+            0
+        } else {
+            let global_start = offset + fit_start;
+            let stepped_global =
+                ((global_start + HISTORY_EVICT_STEP - 1) / HISTORY_EVICT_STEP) * HISTORY_EVICT_STEP;
+            let stepped_start = stepped_global.saturating_sub(offset);
+            if total_story.saturating_sub(stepped_start) < fit_count.min(2) {
+                fit_start
+            } else {
+                stepped_start
+            }
+        };
+        for n in &story_nodes[start..] {
+            let action = if n["kind"] == "opening" {
+                "（开场）"
+            } else if text(&n["actionText"]).is_empty() {
                 "（继续）"
             } else {
                 text(&n["actionText"])
-            }
-        };
-        let body = text(&n["narrative"]);
-        let cost = size(action) + size(body) + 24;
-        if cost > room {
-            if pairs.is_empty() && room > 160 {
-                let body = format!(
-                    "（这一回合较早的正文已省略）\n{}",
-                    tail(body, room.saturating_sub(size(action) + 70))
-                );
-                pairs.push((history_action(n, action), body));
-                kept.insert(n["id"].clone().to_string());
-            }
-            break;
+            };
+            pairs.push((history_action(n, action), text(&n["narrative"]).to_owned()));
+            kept.insert(n["id"].clone().to_string());
         }
-        room -= cost;
-        pairs.push((history_action(n, action), body.to_owned()));
-        kept.insert(n["id"].clone().to_string());
+    } else if let Some(n) = story_nodes.last() {
+        if room > 160 {
+            let action = if n["kind"] == "opening" {
+                "（开场）"
+            } else if text(&n["actionText"]).is_empty() {
+                "（继续）"
+            } else {
+                text(&n["actionText"])
+            };
+            let body = format!(
+                "（这一回合较早的正文已省略）\n{}",
+                tail(text(&n["narrative"]), room.saturating_sub(size(action) + 70))
+            );
+            pairs.push((history_action(n, action), body));
+            kept.insert(n["id"].clone().to_string());
+        }
     }
-    pairs.reverse();
-    let recap = chapters
+    let recap_raw = chapters
         .iter()
         .rev()
         .filter(|c| !kept.contains(&c["firstNodeId"].clone().to_string()))
@@ -558,11 +693,11 @@ pub fn build(input: &Value) -> Result<Value> {
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    let recap = head(&recap, recap_budget.saturating_sub(size(&older))) + &older;
+    let recap_stable = head(&recap_raw, recap_budget.saturating_sub(size(&older)));
+    let recap = format!("{recap_stable}{older}");
     layers.push(json!({"key":"recap","label":"前情提要","chars":size(&recap),"content":recap,"note":"原文窗口以外的章节梗概"}));
     {
-        let offset = input["historyOffset"].as_u64().unwrap_or(0) as usize;
-        let older: Vec<crate::recall::Older> = history
+        let older_turns: Vec<crate::recall::Older> = history
             .iter()
             .filter(|n| n["kind"] != "edit")
             .enumerate()
@@ -570,20 +705,26 @@ pub fn build(input: &Value) -> Result<Value> {
             .map(|(i, n)| crate::recall::Older { narrative: text(&n["narrative"]), turn: offset + i })
             .collect();
         let query = if matches!(text(&input["mode"]), "continue" | "skip") { String::new() } else { format!("{}\n{}", text(&input["text"]), text(&input["directorNote"])) };
-        let old = if older_room > 0 { crate::recall::recall_block(state, &recent, &older, older_room, &query) } else { String::new() };
+        let old = if older_room > 0 { crate::recall::recall_block(state, &recent, &older_turns, older_room, &query) } else { String::new() };
         let recall = format!("{continuity}{old}");
         if !recall.is_empty() {
             layers.push(json!({"key":"recall","label":"知情与相关旧事","content":recall,"chars":size(&recall),"note":"本路线的知情与未完事项，以及原文窗口以外提到眼下人和物、或与本次行动相关的句子"}));
         }
     }
     let mut messages = vec![];
+    // Keep only turn-invariant layers in system; per-turn older chapter recall
+    // and dynamic entity/question notes go into the trailing user turn (R31-P3).
     let system = ["rules", "premise", "era", "canonNotes", "recap", "spec"]
         .iter()
         .filter_map(|key| {
-            layers
-                .iter()
-                .find(|l| l["key"] == *key)
-                .map(|l| text(&l["content"]))
+            if *key == "recap" {
+                Some(recap_stable.as_str())
+            } else {
+                layers
+                    .iter()
+                    .find(|l| l["key"] == *key)
+                    .map(|l| text(&l["content"]))
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -597,12 +738,25 @@ pub fn build(input: &Value) -> Result<Value> {
     }
     // The same order as the facade's request: what is true now, what is
     // relevant, the original, then the player's action last (D169).
-    const ORDER: [&str; 11] = ["state", "essentials", "world", "cards", "recall", "referenceRules", "reference", "directive", "modes", "notes", "action"];
+    const ORDER: [&str; 12] = ["state", "essentials", "world", "canonNotesDynamic", "cards", "recall", "referenceRules", "reference", "directive", "modes", "notes", "action"];
     let rank = |l: &&Value| ORDER.iter().position(|k| *k == text(&l["key"])).unwrap_or(ORDER.len());
     let mut ordered: Vec<&Value> = layers.iter().filter(|l| !["rules", "premise", "era", "canonNotes", "recap", "spec", "tools"].contains(&text(&l["key"]))).collect();
     ordered.sort_by_key(rank);
     let user_layers = || ordered.iter().copied();
-    let user = user_layers().map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
+    let mut user_parts: Vec<&str> = user_layers().map(|l| text(&l["content"])).collect();
+    if !older.is_empty() {
+        let insert_at = ordered
+            .iter()
+            .position(|l| text(&l["key"]) == "recall")
+            .unwrap_or_else(|| {
+                ordered
+                    .iter()
+                    .position(|l| text(&l["key"]) == "referenceRules")
+                    .unwrap_or(user_parts.len().saturating_sub(1))
+            });
+        user_parts.insert(insert_at, older.as_str());
+    }
+    let user = user_parts.join("\n");
     let compact_user = user_layers().filter(|l| !["cards", "recall"].contains(&text(&l["key"])))
         .map(|l| text(&l["content"])).collect::<Vec<_>>().join("\n");
     messages.push(json!({"role":"user","content":user,"compactContent":compact_user}));
@@ -808,6 +962,121 @@ mod tests {
         assert_eq!(head(t, 1), "");
         assert_eq!(head(t, 3), "😀甲");
         assert_eq!(tail(t, 2), "丙");
+    }
+    #[test]
+    fn project_state_retains_current_place_items_statuses_goals_and_many_people() {
+        let mut i = input();
+        i["state"]["placeId"] = "place-49".into();
+        i["state"]["places"] = json!((0..50).map(|n| json!({"id":format!("place-{n}"),"name":format!("驿站{n}"),"description":"说明".repeat(30)})).collect::<Vec<_>>());
+        i["state"]["protagonist"]["items"] = json!([{"name":"玄铁令","quantity":1,"unit":"枚","place":"袖中"}]);
+        i["state"]["protagonist"]["statuses"] = json!([{"name":"内伤","detail":"左肋隐痛"}]);
+        i["state"]["goals"] = json!([{"kind":"主线","name":"查清翠微楼内鬼","status":"进行中","progress":"已获密信"}]);
+        i["state"]["people"] = json!((0..40).map(|n| json!({"id":format!("p{n}"),"name":format!("江湖客{n}"),"aliases":[],"role":"路人","attitude":"一般","alive":true,"lastSeenMinute":n * 10,"origin":"江南","notes":"长备注".repeat(40)})).collect::<Vec<_>>());
+        let text = project_state(&i["state"], &i["era"], "江湖客5 来到驿站49");
+        assert!(text.contains("驿站49"), "{text}");
+        assert!(text.contains("玄铁令×1枚（放在袖中）"), "{text}");
+        assert!(text.contains("内伤：左肋隐痛"), "{text}");
+        assert!(text.contains("【主线】查清翠微楼内鬼（已获密信）"), "{text}");
+        assert!(text.contains("江湖客5：路人，对主角一般；江南；"), "{text}");
+        // Should retain far more than the old ~4-person JSON bottleneck.
+        assert!(text.contains("江湖客39") && text.contains("江湖客15"), "{text}");
+    }
+    #[test]
+    fn cards_match_by_keys_and_sort_by_latest_mention() {
+        let mut i = input();
+        i["history"] = json!([
+            {"id":"n1","kind":"turn","actionText":"前事","narrative":"早先听说过旧门派。"},
+            {"id":"n2","kind":"turn","actionText":"近事","narrative":"眼下最要紧的是玄铁令的下落。"}
+        ]);
+        i["state"]["cards"] = json!([
+            {"kind":"势力","name":"旧门派","keys":[],"content":"甲".repeat(800)},
+            {"kind":"物品","name":"青铜匣","keys":["玄铁令"],"content":"乙".repeat(800)}
+        ]);
+        let context = build(&i).unwrap();
+        let cards = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "cards").unwrap()["content"].as_str().unwrap();
+        assert!(cards.contains("青铜匣"), "card matched by keys and most recent mention must win 1500 budget: {cards}");
+        assert!(!cards.contains("旧门派"), "older card should yield when budget is tight");
+    }
+    #[test]
+    fn facts_filter_uses_meaningful_bigrams_not_common_single_chars() {
+        let mut i = input();
+        i["history"] = json!([{"id":"n1","kind":"turn","actionText":"出门","narrative":"你在街上买了一碗热面，顺便打听北城门的消息。"}]);
+        i["state"]["facts"] = json!([
+            {"id":"noise","origin":"ai","nodeId":"old1","detail":"你在一个雨夜见了她一面，说了几句的话"},
+            {"id":"hit","origin":"correction","nodeId":"old2","detail":"北城门守将其实是周参军，并非李校尉"}
+        ]);
+        let context = build(&i).unwrap();
+        let cards = context["layers"].as_array().unwrap().iter().find(|l| l["key"] == "cards").unwrap()["content"].as_str().unwrap();
+        assert!(cards.contains("北城门守将其实是周参军"), "{cards}");
+        assert!(!cards.contains("雨夜见了她一面"), "unrelated fact sharing only common single chars must stay out: {cards}");
+    }
+    #[test]
+    fn prefix_stays_stable_across_four_turns_and_history_evicts_in_steps() {
+        let mut system_messages = Vec::new();
+        let mut history_counts = Vec::new();
+        let make_turn = |n: usize| {
+            json!({
+                "id": format!("t{n}"),
+                "kind": "turn",
+                "actionText": format!("第{n}步行动"),
+                "narrative": format!("第{n}回合正文，发生了一段详细的驿站对话与见闻，包含不少具体情节描写。").repeat(4),
+                "summary": format!("第{n}回合摘要")
+            })
+        };
+        let mut history = vec![json!({"id":"o","kind":"opening","narrative":"开局正文。"})];
+        for n in 1..=10 {
+            history.push(make_turn(n));
+        }
+        for step in 0..4 {
+            let mut i = input();
+            i["budgetChars"] = 6000.into();
+            i["toolOverheadChars"] = 128.into();
+            i["history"] = Value::Array(history.clone());
+            i["chapters"] = json!([
+                {"id":"c1","title":"第一章","gist":"旧章稳定前情，提到青铜密信与玄铁钥匙。","firstNodeId":"o","lastNodeId":"t1"},
+                {"id":"c2","title":"第二章","gist":"渡口风波，记述码头交接。","firstNodeId":"t2","lastNodeId":"t3"},
+                {"id":"c3","title":"第三章","gist":"夜探客栈，线索暂明。","firstNodeId":"t4","lastNodeId":"t5"},
+                {"id":"c4","title":"第四章","gist":"长街偶遇，城门初启。","firstNodeId":"t6","lastNodeId":"t7"}
+            ]);
+            i["canonNotes"] = json!([
+                {"kind": "plot", "title": "主线大纲", "content": "固定的原著主线梗概。"},
+                {"kind": "person", "title": "动态人物", "content": format!("第{step}回检索到的动态片段")}
+            ]);
+            i["text"] = json!(format!("查看青铜密信与玄铁钥匙，执行第{step}步试探"));
+            let built = build(&i).unwrap();
+            let msgs = built["messages"].as_array().unwrap();
+            let sys = msgs[0]["content"].as_str().unwrap().to_string();
+            let user_tail = msgs.last().unwrap()["content"].as_str().unwrap().to_string();
+            assert!(sys.contains("固定的原著主线梗概"), "static plot canon note must live in system prefix");
+            assert!(!sys.contains(&format!("第{step}回检索到的动态片段")), "dynamic person canon note must stay out of system prefix");
+            assert!(user_tail.contains(&format!("第{step}回检索到的动态片段")), "dynamic person canon note belongs in trailing user prompt");
+            assert!(!sys.contains("较早相关章节："), "per-turn related older chapter must stay out of system prefix");
+            assert!(user_tail.contains("较早相关章节："), "per-turn related older chapter belongs in trailing user prompt");
+            system_messages.push(sys);
+            // History messages are between system (0) and trailing user (len - 1)
+            history_counts.push(msgs.len() - 2);
+            history.push(make_turn(11 + step));
+        }
+        assert!(system_messages.windows(2).all(|w| w[0] == w[1]), "system prefix must be byte-identical across 4 consecutive turns");
+        // Verify stepped eviction when budget forces dropping older history turns
+        let mut tight = input();
+        tight["budgetChars"] = 2600.into();
+        tight["toolOverheadChars"] = 128.into();
+        let mut many = vec![json!({"id":"o","kind":"opening","narrative":"开局。"})];
+        for n in 1..=14 {
+            many.push(make_turn(n));
+        }
+        tight["history"] = Value::Array(many.clone());
+        let b1 = build(&tight).unwrap();
+        let first_action_1 = b1["messages"][1]["content"].as_str().unwrap().to_string();
+        many.push(make_turn(15));
+        tight["history"] = Value::Array(many);
+        let b2 = build(&tight).unwrap();
+        let first_action_2 = b2["messages"][1]["content"].as_str().unwrap().to_string();
+        // Either the oldest retained turn didn't move (prefix preserved!) or it jumped by a step of >= 5 turns.
+        let idx = |s: &str| s.trim_start_matches('第').split("步行动").next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+        let jump = idx(&first_action_2).saturating_sub(idx(&first_action_1));
+        assert!(jump == 0 || jump >= HISTORY_EVICT_STEP, "history eviction should keep oldest anchor stable or evict in a batch step, got {first_action_1} -> {first_action_2}");
     }
 }
 

@@ -5,20 +5,21 @@
 import { useEffect, useState } from "react";
 import type { Chip } from "../../../engine/state/apply";
 import { Icon, type IconName } from "../../components/Icon";
+import type { Tab } from "../../components/Panel";
 import { Sheet } from "../../components/Sheet";
 import { motionLevel } from "../../app/motion";
 
-const GROUPS: { name: string; icon: IconName; test: RegExp }[] = [
-  { name: "原著", icon: "book", test: /^原著进度/ },
-  { name: "地点", icon: "pin", test: /^(到|来到|离开) / },
-  { name: "时间", icon: "clock", test: /^(过了|过年|快进|第.+天)/ },
-  { name: "数值", icon: "coin", test: /^(钱|健康|精力|名望|体力|声望)/ },
-  { name: "物品", icon: "seal", test: /^(得|失|用掉|丢了|丢|换|交出|收下) / },
-  { name: "人物", icon: "people", test: /^(结识|告别)|：(友善|冷淡|敌视|亲近|信任|戒备|敬重|厌恶|中立)/ },
-  { name: "目标", icon: "flag", test: /(目标|支线|主线|完成|失败|幕演完|挑战)/ },
-  { name: "状态", icon: "heart", test: /(好了|受伤|轻伤|重伤|虚脱|疲惫|垂危|中毒|生病)/ },
+const GROUPS: { name: string; icon: IconName; tab?: Tab; test: RegExp }[] = [
+  { name: "原著", icon: "book", tab: "设定", test: /^原著进度/ },
+  { name: "地点", icon: "pin", tab: "我", test: /^(到|来到|离开) / },
+  { name: "时间", icon: "clock", tab: "我", test: /^(过了|过年|快进|第.+天)/ },
+  { name: "数值", icon: "coin", tab: "我", test: /^(钱|健康|精力|名望|体力|声望)/ },
+  { name: "物品", icon: "seal", tab: "行囊", test: /^(得|失|用掉|丢了|丢|换|交出|收下) / },
+  { name: "人物", icon: "people", tab: "人物", test: /^(结识|告别)|：(友善|冷淡|敌视|亲近|信任|戒备|敬重|厌恶|中立)/ },
+  { name: "目标", icon: "flag", tab: "目标", test: /(目标|支线|主线|完成|失败|幕演完|挑战)/ },
+  { name: "状态", icon: "heart", tab: "我", test: /(好了|受伤|轻伤|重伤|虚脱|疲惫|垂危|中毒|生病)/ },
 ];
-const groupOf = (text: string) => GROUPS.find((g) => g.test.test(text)) ?? { name: "其他", icon: "info" as IconName, test: /./ };
+const groupOf = (text: string) => GROUPS.find((g) => g.test.test(text)) ?? { name: "其他", icon: "info" as IconName, tab: undefined, test: /./ };
 
 /** The label as shown: the engine's 📜 / ⚠ become words, not colour emoji (AUDIT_V4 4.6). */
 export function chipLabel(text: string): string {
@@ -46,15 +47,15 @@ function CountUp({ text }: { text: string }) {
 const SHOWN = 3;
 
 /** `extra`: an action shown in the sheet, such as 改回 for the book position (D178). */
-export function TurnChanges({ chips, onPanel, fresh, extra, notes, onNotes }: { chips: Chip[]; onPanel?: () => void; fresh?: boolean; extra?: { label: string; run: () => void };
+export function TurnChanges({ chips, onPanel, fresh, extra, notes, onNotes }: { chips: Chip[]; onPanel?: (tab?: Tab) => void; fresh?: boolean; extra?: { label: string; run: () => void };
   /** 参考了哪些札记 for this passage (R30 step 2). */ notes?: string[]; onNotes?: () => void }) {
   const [open, setOpen] = useState(false);
   if (!chips?.length) return null;
   const shown = chips.slice(0, SHOWN), rest = chips.length - shown.length;
-  const grouped = new Map<string, { icon: IconName; chips: Chip[] }>();
+  const grouped = new Map<string, { icon: IconName; tab?: Tab; chips: Chip[] }>();
   for (const chip of chips) {
     const g = groupOf(chip.text);
-    if (!grouped.has(g.name)) grouped.set(g.name, { icon: g.icon, chips: [] });
+    if (!grouped.has(g.name)) grouped.set(g.name, { icon: g.icon, tab: g.tab, chips: [] });
     grouped.get(g.name)!.chips.push(chip);
   }
   return (
@@ -69,7 +70,10 @@ export function TurnChanges({ chips, onPanel, fresh, extra, notes, onNotes }: { 
           <div className="changes-sheet">
             {[...grouped].map(([name, g]) => (
               <section key={name} className="changes-group">
-                <h3><Icon name={g.icon} size={18} />{name}</h3>
+                <div className="row between">
+                  <h3><Icon name={g.icon} size={18} />{name}</h3>
+                  {onPanel && g.tab && <button type="button" className="ghost small changes-jump" onClick={() => { setOpen(false); onPanel(g.tab); }}>去{g.tab} ›</button>}
+                </div>
                 <ul>{g.chips.map((c, i) => <li key={i} className={`change-row ${c.tone}`} style={{ ["--i" as string]: i }}>{chipLabel(c.text)}</li>)}</ul>
               </section>
             ))}
