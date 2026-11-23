@@ -40,11 +40,12 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: 
     try {
       const answer = await game.ask(worldId, q, (full) => { latest = full; update({ a: full, pending: true }); }, control.signal, scope, history);
       update({ a: answer || "没有查到。", pending: false });
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error && error.message && /[\u4e00-\u9fff]/.test(error.message) ? error.message : "";
       if (latest.trim()) {
-        update({ a: latest, pending: false, incomplete: true, note: control.signal.aborted ? "已停止，以上是已收到的部分回答。" : "连接中断，以上是已收到的部分回答。" });
+        update({ a: latest, pending: false, incomplete: true, note: control.signal.aborted ? "已停止，以上是已收到的部分回答。" : reason ? `${reason}，以上是已收到的部分回答。` : "连接中断，以上是已收到的部分回答。" });
       } else {
-        update({ a: control.signal.aborted ? "已停止。" : "这次没查到，稍后再试。", pending: false, incomplete: true });
+        update({ a: control.signal.aborted ? "已停止。" : reason || "这次没查到，稍后再试。", pending: false, incomplete: true });
       }
     } finally {
       if (running.current === control) running.current = null;
@@ -65,7 +66,7 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: 
           </div>
         ))}
         {!pending && since && <RecentUsageLine worldId={worldId} purposes={["ask"]} since={since} refreshKey={usageTick} />}
-        {source && <SourceScopeRow worldId={worldId} binding={source} value={scope} purpose="ask" disabled={pending} onChange={setScope} />}
+        <SourceScopeRow worldId={worldId} binding={source} value={scope} purpose="ask" disabled={pending} onChange={setScope} />
         <button className="ghost" onClick={() => setRecipes(true)}>常用问题 ›</button>
         {recipes && <MenuSheet title="常用问题" onClose={() => setRecipes(false)} items={AGENT_TASK_RECIPES.filter(recipe => ["recap", "characters", "canon", "continuity", "clock-ledger"].includes(recipe.id)).map(recipe => ({ label: recipe.name, onSelect: () => setQuestion(taskRecipeText(recipe, recipe.scope, question)) }))} />}
         <div className="row">

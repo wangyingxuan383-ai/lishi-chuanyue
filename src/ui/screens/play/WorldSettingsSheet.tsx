@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FORTUNE_MODES, FORTUNE_MODE_NOTE, fortuneMode } from "../../../engine/fortune";
 import type { SourceBinding } from "../../../engine/sources/types";
 import type { Intensity, Pilot, World, WorldState } from "../../../engine/types";
@@ -23,7 +23,16 @@ export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, 
   const [heroPanel, setHeroPanel] = useState(storedPanel);
   const [savingPanel, setSavingPanel] = useState(false);
   const [source, setSource] = useState(state.source ?? null), [savingSource, setSavingSource] = useState(false), [reference, setReference] = useState(false);
-  const sourceDirty = JSON.stringify(source) !== JSON.stringify(state.source ?? null);
+  const externalSourceJson = JSON.stringify(state.source ?? null);
+  const syncedSourceRef = useRef(externalSourceJson);
+  const sourceDirty = JSON.stringify(source) !== externalSourceJson;
+  useEffect(() => {
+    if (externalSourceJson !== syncedSourceRef.current) {
+      const wasClean = JSON.stringify(source) === syncedSourceRef.current;
+      syncedSourceRef.current = externalSourceJson;
+      if (wasClean) setSource(state.source ?? null);
+    }
+  }, [externalSourceJson, state.source, source]);
   const [defaults, setDefaults] = useState<PlayDefaults | null>(null);
   useEffect(() => { void loadPlayDefaults(game.repo).then(setDefaults); }, []);
   const differs = defaults ? differsFromDefaults(s, defaults) : [];

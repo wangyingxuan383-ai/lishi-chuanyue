@@ -37,6 +37,8 @@ export interface StructuredSourceAnalysis {
 }
 export interface ReferenceContext {
   bookId: string; title: string; binding: SourceBinding; passages: ReferencePassage[];
+  positionTitle?: string;
+  throughTitle?: string;
   status?: "ready" | "insufficient";
   reason?: "budget" | "no_match";
 }

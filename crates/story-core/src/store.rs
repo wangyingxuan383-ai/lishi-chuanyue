@@ -403,11 +403,18 @@ impl Store {
         Ok(result)
     }
     pub fn run_event(&self, plan: &RunPlan, event: Value) -> Result<RunEvent> {
+        Ok(self.run_event_pair(plan, event)?.0)
+    }
+    pub fn run_event_pair(&self, plan: &RunPlan, event: Value) -> Result<(RunEvent, Option<(String, u64)>)> {
         self.owned(plan, |tx| {
-            if let Some(parent) = plan.meta["parentRun"].as_str() {
-                Self::append_event(tx, parent, event.clone())?;
-            }
-            Self::append_event(tx, &plan.id, event)
+            let parent_saved = if let Some(parent) = plan.meta["parentRun"].as_str() {
+                let saved = Self::append_event(tx, parent, event.clone())?;
+                Some((parent.to_owned(), saved.seq))
+            } else {
+                None
+            };
+            let child_saved = Self::append_event(tx, &plan.id, event)?;
+            Ok((child_saved, parent_saved))
         })
     }
     pub fn snapshot(&self, id: &str, after: u64) -> Result<RunSnapshot> {

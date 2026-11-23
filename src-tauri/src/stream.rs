@@ -401,7 +401,9 @@ pub struct NetworkConfig {
 }
 
 static NETWORK: std::sync::RwLock<Option<NetworkConfig>> = std::sync::RwLock::new(None);
-static CACHED_CLIENT: std::sync::RwLock<Option<(NetworkConfig, Client)>> = std::sync::RwLock::new(None);
+static CACHED_CLIENT: std::sync::RwLock<Option<(NetworkConfig, Instant, Client)>> = std::sync::RwLock::new(None);
+const SYSTEM_PROXY_CLIENT_TTL: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Applies the player's network choice to every later request.
 pub fn set_network(config: NetworkConfig) -> Result<()> {
@@ -440,28 +442,33 @@ pub(crate) fn client() -> std::result::Result<Client, StreamEvent> {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_default();
-    if let Some((cached_cfg, cached_client)) = CACHED_CLIENT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if *cached_cfg == network {
+    if let Some((cached_cfg, built_at, cached_client)) = CACHED_CLIENT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let fresh = cached_cfg.proxy != "system" || built_at.elapsed() < SYSTEM_PROXY_CLIENT_TTL;
+        if *cached_cfg == network && fresh {
             return Ok(cached_client.clone());
         }
     }
-    let built = client_builder()?.build().map_err(|_| StreamEvent::error("network"))?;
-    *CACHED_CLIENT.write().unwrap_or_else(|e| e.into_inner()) = Some((network, built.clone()));
+    let built = client_builder_for(&network)?.build().map_err(|_| StreamEvent::error("network"))?;
+    *CACHED_CLIENT.write().unwrap_or_else(|e| e.into_inner()) = Some((network, Instant::now(), built.clone()));
     Ok(built)
 }
 pub(crate) fn client_builder()->std::result::Result<reqwest::ClientBuilder,StreamEvent> {
-    #[cfg(target_os = "android")]
-    if !crate::android_tls::is_ready() {
-        return Err(StreamEvent::Error { kind: "network".into(), status: None, message: Some("加密连接组件还没准备好，请稍后再试".into()) });
-    }
-    let builder = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never());
     let network = NETWORK
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_default();
+    client_builder_for(&network)
+}
+fn client_builder_for(network: &NetworkConfig) -> std::result::Result<reqwest::ClientBuilder, StreamEvent> {
+    #[cfg(target_os = "android")]
+    if !crate::android_tls::is_ready() {
+        return Err(StreamEvent::Error { kind: "network".into(), status: None, message: Some("加密连接组件还没准备好，请稍后再试".into()) });
+    }
+    let builder = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never());
     let builder = match network.proxy.as_str() {
         // reqwest reads the system proxy when no proxy is set explicitly.
         "system" => builder,

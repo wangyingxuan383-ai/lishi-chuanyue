@@ -6,6 +6,7 @@ import { sampleState } from "../testing/fixtures";
 import { fakeLlm } from "../testing/fakeLlm";
 import { parseBook, decodeText } from "./parse";
 import { analysisJobs, deleteBook, fitReference, getBook, referenceBlock, referenceContext, referenceEvidenceBlock, saveBook } from "./library";
+import { chapterRangeSummary, extractChapterNumbers } from "./scope";
 import { newBinding, type SourceBook } from "./types";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { buildTurnContext } from "../prompt/turn";
@@ -117,6 +118,61 @@ describe("external books", () => {
     expect(resumed.completed).toBe(2);
     expect(llm.calls).toHaveLength(3);
     expect(llm.calls[1].body.messages).toEqual(llm.calls[2].body.messages);
+  });
+
+  it("preserves multi-volume headings across TXT/DOCX/EPUB and never conflates volume numbers with chapter numbers", async () => {
+    const platform = await createMemoryPlatform();
+    const txt = await parseBook({
+      name: "多卷.txt",
+      bytes: strToU8("第一卷 海神缘\n第一章 初入学院\n第一卷第一章正文。\n第二卷 新生考核\n第一章 考核开始\n第二卷第一章正文。"),
+    }, platform);
+    expect(txt.sections.map((s) => s.title)).toEqual([
+      "第一卷 海神缘 · 第一章 初入学院",
+      "第二卷 新生考核 · 第一章 考核开始",
+    ]);
+    expect(extractChapterNumbers("第二卷 新生考核 · 第六十一章 永冻之域")).toEqual([61]);
+    expect(extractChapterNumbers("第零章 序幕")).toEqual([0]);
+    expect(extractChapterNumbers("Chapter 12 Awakening")).toEqual([12]);
+    // Identical prefix across distinct sections must not collapse into a single section summary.
+    expect(chapterRangeSummary([
+      { section: 207, title: "第一卷 超长卷名截断前缀 · 第一章", chars: 100 },
+      { section: 212, title: "第一卷 超长卷名截断前缀 · 第六章", chars: 100 },
+    ], { from: 207, to: 212 })).toContain("～");
+
+    const epub = zipSync({
+      "META-INF/container.xml": strToU8('<container><rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>'),
+      "OEBPS/book.opf": strToU8('<package><metadata><dc:title xmlns:dc="dc">多卷书</dc:title></metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="c1" href="c1.xhtml"/><item id="c2" href="c2.xhtml"/></manifest><spine toc="ncx"><itemref idref="c1"/><itemref idref="c2"/></spine></package>'),
+      "OEBPS/toc.ncx": strToU8('<ncx><navMap><navPoint id="v1"><navLabel><text>第一卷 启程</text></navLabel><content src="c1.xhtml"/><navPoint id="p1"><navLabel><text>第一章 启程</text></navLabel><content src="c1.xhtml"/></navPoint></navPoint><navPoint id="v2"><navLabel><text>第二卷 考核</text></navLabel><content src="c2.xhtml"/><navPoint id="p2"><navLabel><text>第一章 考核</text></navLabel><content src="c2.xhtml"/></navPoint></navPoint></navMap></ncx>'),
+      "OEBPS/c1.xhtml": strToU8('<html><body><h1>第一章 启程</h1><p>启程正文。</p></body></html>'),
+      "OEBPS/c2.xhtml": strToU8('<html><body><h1>第一章 考核</h1><p>考核正文。</p></body></html>'),
+    });
+    const parsedEpub = await parseBook({ name: "multi.epub", bytes: epub }, platform);
+    expect(parsedEpub.sections.map((s) => s.title)).toEqual([
+      "第一卷 启程 · 第一章 启程",
+      "第二卷 考核 · 第一章 考核",
+    ]);
+  });
+
+  it("anchors current position section, weights nearby sections higher, and prints positionTitle/throughTitle", async () => {
+    const game = await Game.open(await createMemoryPlatform());
+    const sections = Array.from({ length: 30 }, (_, i) => ({
+      title: `第${i + 1}章 ${i === 2 ? "初见" : i === 25 ? "决战" : "过渡"}`,
+      text: i === 2
+        ? "主角在新生考核现场展示魂环与武魂，裁判宣读规则。"
+        : i === 25
+          ? "全大陆高级魂师大赛决赛，新生考核早已过去多年，众人再次展示魂环。"
+          : `第${i + 1}节日常修炼内容。`,
+    }));
+    const book: SourceBook = { id: crypto.randomUUID(), title: "绝世示例", format: "txt", createdAt: new Date().toISOString(), sections };
+    await saveBook(game.repo, book);
+    const binding = { ...newBinding(book.id, true), position: 2, through: 26 };
+    const ctx = await referenceContext(game.repo, binding, "展示魂环", 3000);
+    expect(ctx?.positionTitle).toBe("第3章 初见");
+    expect(ctx?.throughTitle).toBe("第27章 过渡");
+    expect(ctx?.passages[0].section).toBe(2);
+    const rendered = referenceBlock(ctx);
+    expect(rendered).toContain("第 3 节（第3章 初见）");
+    expect(rendered).toContain("第 27 节（第27章 过渡）");
   });
 
 });

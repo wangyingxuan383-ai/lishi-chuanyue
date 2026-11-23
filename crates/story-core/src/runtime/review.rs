@@ -12,6 +12,11 @@ impl Engine {
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
         let extra_passages = shared.lock().map_err(|_| Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
         let passages = lite_review_passages(plan, &extra_passages, cap);
+        if passages.is_empty() {
+            return Ok((narrative.to_owned(), record.clone(), json!({
+                "version":"reference-review-lite-4","status":"skipped","reason":"no_passages","issues":[],"skipped":0,"unresolved":[]
+            })));
+        }
         let mut messages=lite_review_messages_with(plan, &passages, narrative);
         if let Some(message)=messages.last_mut() {
             message["content"]=format!("{}\n【本回合记录】\n{}",message["content"].as_str().unwrap_or(""),record).into();
@@ -73,7 +78,7 @@ impl Engine {
         let mut evidence=vec![];
         for p in reference["passages"].as_array().into_iter().flatten().filter(|p|p["kind"]=="original") {let cost=p.to_string().encode_utf16().count();if cost<=left{left-=cost;evidence.push(p.clone());}}
         reference["passages"]=evidence.into();
-        let mut messages=vec![json!({"role":"system","content":r#"核对尚未保存草稿中新引入的关键身份、关系、称谓、能力、物品、时间和事件。保留玩家明确分支，AI自行写错不算玩家改写。先用已提供原文，需要时批量定位具体主张，再read_original读原文与邻文，不扫描整本书。只纠正有依据的细节，不替玩家作决定，不补回已经改变的命运。缺少原文依据的具体值保留不确定性；确实影响当前关键情节且必须玩家决定时填写needsPlayer。最后只返回JSON：{"replacement":"完整核对后的本段正文","recordPatch":{仅受改稿影响的记录字段},"findings":[{"claim":"具体主张","status":"supported/branch/uncertain","playerFactId":"branch时对应的玩家事实ID","playerQuote":"当前是玩家写入正文时也可引用其准确原句；来源不明的旧事实标uncertain","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}],"unresolved":["资料不足"],"needsPlayer":"必要问题，可省略"}。没有新关键事实时findings可为空；核对说明不进入正文。"#}),json!({"role":"user","content":format!("【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【已提供原文】{}\n【待核对正文】{}\n【原回合记录】{}",plan.action,plan.reading_source(),compact,crate::stage_context::facts(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/12).min(1400)),reference,narrative,record)})];
+        let mut messages=vec![json!({"role":"system","content":r#"核对尚未保存草稿中新引入的关键身份、关系、称谓、能力、物品、时间和事件。保留玩家明确分支，AI自行写错不算玩家改写。先用已提供原文，需要时批量定位具体主张，再read_original读原文与邻文，不扫描整本书。只纠正有依据的细节，不替玩家作决定，不补回已经改变的命运。缺少原文依据的具体值保留不确定性；确实影响当前关键情节且必须玩家决定时填写needsPlayer。最后只返回JSON：{"replacement":"完整核对后的本段正文","recordPatch":{仅受改稿影响的记录字段},"findings":[{"claim":"具体主张","status":"supported/branch/uncertain","playerFactId":"branch时对应的玩家事实ID","playerQuote":"当前是玩家写入正文时也可引用其准确原句；来源不明的旧事实标uncertain","citations":[{"section":0,"chunk":0,"quote":"实际读到的原句"}]}],"unresolved":["资料不足"],"needsPlayer":"必要问题，可省略"}。没有新关键事实时findings可为空；核对说明不进入正文。"#}),json!({"role":"user","content":format!("【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【已提供原文】{}\n【待核对正文】{}\n【原回合记录】{}",plan.action,plan.reading_source(),compact,crate::stage_context::facts(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/12).min(1400)),reference,narrative,record)})];
         for round in 0..2 {
             let final_round=round==1;
             messages.push(json!({"role":"system","content":if final_round {"这是本段核对的收尾请求，不再调用工具。根据实际已读材料输出完整JSON，保留玩家分支；不能核实的项目标uncertain并写入unresolved，不能把候选或推测当原著。确实必须玩家决定的关键矛盾填needsPlayer。不延长检索，不把无法核实说成已核实。".to_owned()} else {format!("本段核对第{}轮，最多再有{}轮查证，然后必须返回JSON结论。只检查草稿新引入的具体细节；复用当前已有原句，候选够用后read_original，不再次用相同人物名泛搜；互不依赖的问题同批查证。",round+1,1-round)}}));
@@ -146,8 +151,28 @@ pub(super) fn lite_review_messages(plan:&RunPlan, narrative:&str, cap:usize)->Ve
 
 fn lite_review_messages_with(plan:&RunPlan, passages:&[&Value], narrative:&str)->Vec<Value>{
     let position=plan.reading_source()["position"].as_u64().unwrap_or(0);
+    let pos_title = plan
+        .reference
+        .as_ref()
+        .and_then(|r| r["positionTitle"].as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            passages
+                .iter()
+                .find(|p| p["section"].as_u64() == Some(position))
+                .and_then(|p| p["title"].as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or("");
+    let pos_label = if pos_title.is_empty() {
+        format!("原著第{}节前后", position + 1)
+    } else {
+        format!("原著第{}节（{pos_title}）前后", position + 1)
+    };
     let evidence=passages.iter().copied().map(lite_evidence_line).collect::<String>();
-    let notes=plan.reference.as_ref().and_then(|r|r["notes"].as_str()).unwrap_or("");
+    let notes=plan.reference.as_ref()
+        .and_then(|r| r["bookNotes"].as_str().or_else(|| r["notes"].as_str()))
+        .unwrap_or("");
     let source=plan.reading_source();
     let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
     vec![
@@ -160,7 +185,7 @@ fn lite_review_messages_with(plan:&RunPlan, passages:&[&Value], narrative:&str)-
 - recordPatch 只含受这句更正影响的回合记录字段，不受影响留空对象；数组字段提供更正后的完整列表并保留无关项目，对象字段只提供有变化的属性，不能改整局设定；按列出顺序修正记录，后项基于前项结果；正文和记录无法同步就不要提出这条更正。
 最多 5 条；没有问题返回 {\"issues\":[]}。只返回 JSON，不要加代码块或额外说明：
 {\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄\",\"problem\":\"与原著哪里不符\",\"fix\":\"改正后的这句\",\"citations\":[{\"section\":1,\"chunk\":1,\"quote\":\"下面对应原著片段中的原句，逐字照抄\"}],\"recordPatch\":{}}]}"}),
-        json!({"role":"user","content":format!("【当前位置】原著第{}节前后\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（只含当前位置及之前不远的片段）{}\n【待校对正文】\n{narrative}",position+1,source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到当前位置之前的原文）".to_owned()}else{evidence})}),
+        json!({"role":"user","content":format!("【当前位置】{pos_label}\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（含当前位置附近及本回合查阅的原文片段）{}\n【待校对正文】\n{narrative}",source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到可用的原著原文）".to_owned()}else{evidence})}),
     ]
 }
 
@@ -168,23 +193,25 @@ fn lite_review_passages<'a>(plan: &'a RunPlan, extra: &'a [Value], cap: usize) -
     let source = plan.reading_source();
     let position = source["position"].as_u64().unwrap_or(0);
     let through = source["through"].as_u64().unwrap_or(u64::MAX);
-    let last = through.min(position.saturating_add(LITE_REVIEW_AHEAD));
+    let pre_last = through.min(position.saturating_add(LITE_REVIEW_AHEAD));
     let mut left = cap / 5;
     let mut kept = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    // Combine pre-supplied passages and passages read via tools during writing (deduped).
-    let combined = plan
+    // Pre-supplied passages stay near `position`; passages explicitly read via tools during
+    // this turn are already bounded by `through` and must stay visible even if `position` lagged.
+    let pre_iter = plan
         .reference
         .as_ref()
         .and_then(|r| r["passages"].as_array())
         .into_iter()
         .flatten()
-        .chain(extra.iter());
-    for passage in combined {
+        .map(|p| (p, pre_last));
+    let extra_iter = extra.iter().rev().map(|p| (p, through));
+    for (passage, limit) in pre_iter.chain(extra_iter) {
         let Some(section) = passage["section"].as_u64() else { continue; };
         let Some(chunk) = passage["chunk"].as_u64() else { continue; };
         let Some(text) = passage["text"].as_str().filter(|t| !t.trim().is_empty()) else { continue; };
-        if passage["kind"] != "original" || section > last {
+        if passage["kind"] != "original" || section > limit {
             continue;
         }
         if !seen.insert((section, chunk, text)) {

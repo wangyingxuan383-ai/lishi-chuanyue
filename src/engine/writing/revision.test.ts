@@ -164,7 +164,7 @@ describe("按我的要求改", () => {
     expect(noBasis).toContain("读了 3 段原文");
     expect(noBasis).toContain("城门（2 次，命中 3 段）");
     expect(noBasis).toContain("按我的要求改");
-    expect(canonOutcomeText({ ...base, outcome: "not_found", reason: "out_of_range" }, 49)).toContain("截至第 50 章");
+    expect(canonOutcomeText({ ...base, outcome: "not_found", reason: "out_of_range" }, 49)).toContain("截至第 50 节");
     expect(canonOutcomeText({ ...base, outcome: "not_found", reason: "no_excerpt", read: 0 })).toContain("没有找到相关的原文");
   });
 
@@ -215,5 +215,53 @@ describe("按我的要求改", () => {
     const anchor = { worldId: world.id, lineId: line.id, headId: node.id, nodeId: node.id, original: node.narrative };
     await expect(s.game.runPlayerRevision({ anchor, range: { start: 0, end: node.narrative.length }, hint: "改身份" }, () => {}).done).rejects.toThrow(MISSING_OPENING_SEED_REVISE);
     expect(calls).toBe(0);
+  });
+
+  it("supports array removal/rename in mergeRecordPatch, guards filterCorrectionPatch, and keeps full >300-char ability/relevant cards", async () => {
+    // Array removal & rename in mergeRecordPatch
+    const merged = mergeRecordPatch(
+      {
+        people: [{ name: "张三", role: "同窗" }, { name: "李四", role: "路人" }],
+        items: [{ name: "木剑", delta: 1 }, { name: "旧符", delta: 1 }],
+        status: [{ op: "add", name: "轻伤" }],
+      } as never,
+      {
+        people: [{ oldName: "张三", name: "张师兄", role: "内院师兄" }, { name: "李四", remove: true }],
+        items: [{ name: "旧符", op: "remove" }],
+        status: [{ name: "轻伤", remove: true }],
+      },
+    );
+    expect(merged.people).toEqual([{ name: "张师兄", role: "内院师兄" }]);
+    expect(merged.items).toEqual([{ name: "木剑", delta: 1 }]);
+    expect(merged.status).toEqual([]);
+
+    // Non-object profile and cards op:"remove" blocked in filterCorrectionPatch
+    const filtered = filterCorrectionPatch({
+      profile: "非法字符串",
+      cards: [{ op: "remove", name: "林舟的本事" }, { name: "林舟的本事", content: "第三式" }],
+    });
+    expect(filtered.kept).toEqual({ cards: [{ name: "林舟的本事", content: "第三式" }] });
+    expect(filtered.dropped).toEqual(["主角资料", "删除设定卡"]);
+
+    // Full >300-char protagonist ability card & relevant card preserved in runPlayerRevision prompt
+    const s = await setup();
+    const longAbility = `${"剑法细则与内力运转说明。".repeat(25)}关键末尾标记：九霄剑诀第九层。`;
+    await s.game.editState(s.world.id, { cards: [{ op: "add", kind: "设定", name: abilityCardName("林舟"), content: longAbility }] }, "补全本事");
+    let cur = await tree.cursor(s.game.repo, s.world.id);
+    const nextState = await s.game.repo.getState(cur.head.id);
+    cur = await tree.append(s.game.repo, cur, { kind: "turn", actionMode: "do", actionText: "试剑", narrative: "你拔出木剑演练了一遍剑诀。", state: nextState });
+    const sent: string[] = [];
+    s.game.platform.llm.stream = async (req, onEvent) => {
+      sent.push(JSON.stringify(req.body));
+      onEvent({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: JSON.stringify({ replacement: "你拔出短剑演练了一遍九霄剑诀。", note: "改剑" }) }, finish_reason: "stop" }] }) });
+      onEvent({ type: "done" });
+      return "s";
+    };
+    await s.game.runPlayerRevision({
+      anchor: { worldId: s.world.id, lineId: cur.line.id, headId: cur.head.id, nodeId: cur.head.id, original: cur.head.narrative },
+      range: { start: 0, end: cur.head.narrative.length },
+      hint: "换成短剑并写明九霄剑诀",
+    }, () => {}).done;
+    expect(sent[0]).toContain("九霄剑诀第九层");
   });
 });

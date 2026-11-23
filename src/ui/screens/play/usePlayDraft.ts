@@ -47,14 +47,24 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
     if (mode === "write" || (mode === "direct" && !watch)) setModeIndex(0);
   };
   /** A failed action comes back to the box, with its way of writing and note. */
-  const restore = (r: Restore) => {
-    // Words typed meanwhile (say, after tapping a choice) are not overwritten.
-    setInput((current) => (current.trim() ? current : r.text));
-    selectMode(r.mode);
-    if (r.note) { setNote(r.note); setNoteOpen(true); }
+  const restore = (r: Restore, force = false) => {
+    // Auto-restore never overwrites words typed meanwhile; an explicit button tap always restores.
+    if (r.text.trim() || force) setInput((current) => (!force && current.trim() ? current : r.text));
+    if (r.mode !== "continue" && r.mode !== "skip") selectMode(r.mode);
+    if (r.note.trim()) { setNote((current) => (!force && current.trim() ? current : r.note)); setNoteOpen(true); }
+  };
+  /** Clears an auto-restored draft right before NoticeCard retries that exact saved run, preventing duplicates. */
+  const clearIfMatches = (r: Restore) => {
+    if (r.text.trim()) setInput((current) => (current.trim() === r.text.trim() ? "" : current));
+    if (r.note.trim()) {
+      setNote((current) => {
+        if (current.trim() === r.note.trim()) { setNoteOpen(false); return ""; }
+        return current;
+      });
+    }
   };
   /** The 幕后要求 that goes with the next passage (typed action or tapped choice alike). */
   const directorNote = () => (!watch && noteOpen && note.trim() ? note.trim() : null);
 
-  return { input, setInput, note, setNote, noteOpen, setNoteOpen, modeIndex, setModeIndex, modeList, currentMode, selectMode, clearAfterSend, restore, directorNote };
+  return { input, setInput, note, setNote, noteOpen, setNoteOpen, modeIndex, setModeIndex, modeList, currentMode, selectMode, clearAfterSend, restore, clearIfMatches, directorNote };
 }

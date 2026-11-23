@@ -39,7 +39,7 @@ import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenc
 import { sourceAnalysisMessages, sourceAnalysisResult } from "./sources/analysis";
 import { validBinding, type SourceBinding, type AnalysisJob } from "./sources/types";
 import { asJson, startRun, type RunPlan } from "./execution";
-import { assertWritingAnchor, isLatestPassage, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, MISSING_OPENING_SEED_REVISE, MISSING_OPENING_SEED_SYNC, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
+import { abilityCardName, assertWritingAnchor, isLatestPassage, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, MISSING_OPENING_SEED_REVISE, MISSING_OPENING_SEED_SYNC, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
 
 export type { ChallengeInput, ScriptInput } from "./modes";
 
@@ -147,6 +147,7 @@ export interface SavedExecution {
   id: string; status: string; error: string | null; kind: string; steps: number; total: number; hasText: boolean;
   partialText?: string;
   proseSaved?: boolean;
+  action?: { mode: ActionMode; text: string; directorNote?: string };
   failure: Failure | null;
   /** Why it stopped, when it did. */
   reason: FailReason | null;
@@ -637,9 +638,10 @@ export class Game {
     }
   }
 
-  /** The room one request gives a chosen 资料范围 (D184): a quarter of the input budget. */
-  async scopeRoom(): Promise<number> {
-    return Math.floor(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value) / 4);
+  /** The room one request gives a chosen 资料范围 (D184): a quarter of the input budget (larger for 按原著纠错). */
+  async scopeRoom(purpose?: string): Promise<number> {
+    const budget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
+    return Math.floor(purpose === "correction" ? (budget * 3) / 5 : budget / 4);
   }
 
   /**
@@ -934,7 +936,7 @@ export class Game {
   async currentExecution(worldId: string, expectedRunId?: string): Promise<SavedExecution | null> {
     if (!this.platform.execution) return null;
     const cursor = await tree.cursor(this.repo, worldId);
-    const [row] = await this.platform.sql.query(`SELECT id,status,error,error_kind,failure_json,json_extract(plan_json,'$.kind') AS kind,COALESCE(json_extract(draft_json,'$.steps'),0) AS steps,COALESCE(json_extract(plan_json,'$.meta.autoplayCount'),0) AS total,
+    const [row] = await this.platform.sql.query(`SELECT id,status,error,error_kind,failure_json,json_extract(plan_json,'$.kind') AS kind,json_extract(plan_json,'$.action') AS action_json,COALESCE(json_extract(draft_json,'$.steps'),0) AS steps,COALESCE(json_extract(plan_json,'$.meta.autoplayCount'),0) AS total,
       EXISTS(SELECT 1 FROM execution_progress e WHERE e.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END) AS has_text,
       COALESCE((SELECT json_extract(e.event_json,'$.full') FROM execution_progress e WHERE e.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END AND json_extract(e.event_json,'$.type')='text' ORDER BY e.seq DESC LIMIT 1), '') AS partial_text,
       EXISTS(SELECT 1 FROM execution_steps s WHERE s.run_id=CASE WHEN json_extract(plan_json,'$.kind')='autoplay' THEN json_extract(draft_json,'$.childId') ELSE execution_runs.id END AND s.kind LIKE 'writing:%' AND s.status='done') AS prose_done
@@ -945,8 +947,19 @@ export class Game {
     const failure = typeof row.failure_json === "string" ? JSON.parse(row.failure_json) as Failure : null;
     const status = String(row.status), error = row.error === null ? null : String(row.error);
     const partial = typeof row.partial_text === "string" && row.partial_text.trim() ? row.partial_text : undefined;
+    let action: SavedExecution["action"];
+    if (typeof row.action_json === "string" && row.action_json.trim()) {
+      try {
+        const parsed = JSON.parse(row.action_json) as { mode?: unknown; text?: unknown; directorNote?: unknown };
+        if (typeof parsed.mode === "string" && parsed.mode) {
+          const text = typeof parsed.text === "string" ? parsed.text : "";
+          const directorNote = typeof parsed.directorNote === "string" && parsed.directorNote.trim() ? parsed.directorNote.trim() : undefined;
+          action = { mode: parsed.mode as ActionMode, text, ...(directorNote ? { directorNote } : {}) };
+        }
+      } catch { /* ignore malformed legacy action */ }
+    }
     return { id: String(row.id), status, error, kind: String(row.kind), steps: Number(row.steps), total: Number(row.total), hasText: !!row.has_text,
-      ...(partial ? { partialText: partial } : {}), proseSaved: !!row.prose_done,
+      ...(partial ? { partialText: partial } : {}), ...(action ? { action } : {}), proseSaved: !!row.prose_done,
       failure, reason: ["failed", "cancelled", "paused", "interrupted"].includes(status) ? nativeFailReason(status, error, row.error_kind === null ? null : String(row.error_kind), failure) : null };
   }
 
@@ -962,7 +975,7 @@ export class Game {
     let inner: TurnHandle | null = null, stopped = false, detached = false;
     const done = (async () => {
       const [row] = await this.platform.sql.query(
-        "SELECT status,world_id,plan_json,error_kind,failure_json,json_extract(draft_json,'$.steps') AS steps,EXISTS(SELECT 1 FROM execution_steps s WHERE s.run_id=execution_runs.id AND s.status='done') AS has_done_steps FROM execution_runs WHERE id=?",
+        "SELECT status,world_id,plan_json,error_kind,failure_json,json_extract(draft_json,'$.steps') AS steps,EXISTS(SELECT 1 FROM execution_steps s WHERE s.run_id=execution_runs.id AND s.status='done') AS has_done_steps,EXISTS(SELECT 1 FROM execution_steps s WHERE s.run_id=execution_runs.id AND s.step_key LIKE 'tool:%') AS has_tool_steps FROM execution_runs WHERE id=?",
         [id],
       );
       if (!row) throw new Error("找不到这次生成");
@@ -985,19 +998,23 @@ export class Game {
       const modelOrDepthChanged = !llm || !plan.model
         || !same(modelIdentity(plan.model), modelIdentity(llm))
         || !!world && world.settings.depth !== plan.settings?.depth;
+      const depthSwitchedToFastAfterTools = !!world && depthOf(world.settings) === "fast"
+        && depthOf(plan.settings ?? {}) !== "fast" && !!row.has_tool_steps;
       const runKind = plan.kind;
       if (stopped) return;
-      if (!hardExpired && modelOrDepthChanged && !!row.has_done_steps && (runKind === "turn" || runKind === "variant" || runKind === "continue")) {
+      if (!hardExpired && modelOrDepthChanged && !!row.has_done_steps && !depthSwitchedToFastAfterTools && (runKind === "turn" || runKind === "variant" || runKind === "continue")) {
         // Preserve already-completed stages (e.g. prose done, only extract/review failed) when switching model/auxModel/depth (R31-P5).
         plan.model = llm;
         plan.fallbackModel = this.fallbackLlm ?? undefined;
         const nextMeta: Record<string, unknown> = { ...(plan.meta ?? {}), allowModelSwitchReuse: true };
         if (world) {
           plan.settings = { ...world.settings, ...(plan.settings ?? {}), depth: world.settings.depth };
-          nextMeta.depth = depthOf(world.settings);
-          if (nextMeta.settingsGuard && typeof nextMeta.settingsGuard === "object" && !Array.isArray(nextMeta.settingsGuard)) {
-            nextMeta.settingsGuard = { ...(nextMeta.settingsGuard as Record<string, unknown>), depth: world.settings.depth };
-          }
+          const nextDepth = depthOf(world.settings);
+          nextMeta.depth = nextDepth;
+          nextMeta.referenceReviewVersion = referenceReview(nextDepth, head.source ?? undefined);
+          // Match exact live worlds.settings_json so pre-depth saves without a `depth` key do not trigger Error::Stale.
+          const [liveRow] = await this.platform.sql.query("SELECT settings_json FROM worlds WHERE id=?", [worldId]);
+          if (liveRow?.settings_json) nextMeta.settingsGuard = JSON.parse(String(liveRow.settings_json));
         }
         plan.meta = nextMeta;
         await this.platform.sql.batch([{
@@ -1044,6 +1061,10 @@ export class Game {
         if (autoplay) {
           const snapshot = await execution.snapshot(id);
           for (const event of snapshot.events) if (event.event && typeof event.event === "object" && !Array.isArray(event.event) && event.event.type === "done") after = event.seq;
+        } else if (resume) {
+          // Skip stale events from the previous failed/stopped attempt when resuming into a new attempt.
+          const snapshot = await execution.snapshot(id);
+          for (const event of snapshot.events) if (event.seq > after) after = event.seq;
         }
         if (resume) await resumeWhenClosed(execution, id);
         active = startRun(this.platform, null, (event) => {
@@ -1106,16 +1127,21 @@ export class Game {
         const action = actionIn ?? { mode: target.actionMode ?? "continue", text: target.actionText ?? "", directorNote: target.directorNote };
         const state = base.id === world.head.id ? world.state : await this.repo.getState(base.id), era = eraContext(world.eraId, state);
         const fortune = luckApplies(action.mode, world.settings) ? await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果") : undefined;
-        const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, world.guard.sourceGuard, { settings: world.settings, eraId: world.eraId, state });
+        const turnSource = kind === "turn" ? world.guard.sourceGuard : (state.source ?? null);
+        const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, turnSource, { settings: world.settings, eraId: world.eraId, state });
         if (batch) input.settings = { ...input.settings, pilot: "ai" };
         const template = writingContextTemplate(input);
-        const context = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, ...nativeHistory(input), template })) as unknown as ReturnType<typeof buildTurnContext> : buildTurnContext(input);
+        const context = this.platform.execution?.context ? await this.platform.execution.context(asJson({ ...input, allTurns: undefined, ...nativeHistory(input), template })) as unknown as ReturnType<typeof buildTurnContext> & { notesUsed?: string[] } : buildTurnContext(input);
         const path = input.allTurns ?? input.history;
         const upkeepTurns: StoryNode[] = [];
         for (const node of [...path].reverse()) { if (node.kind === "opening" || node.meta.upkeep) break; if (node.kind === "turn") upkeepTurns.unshift(node); }
         const pending = this.pendingChapter(path, input.chapters ?? []);
         const chapterVersion = state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION;
         const futureTurn = { actionText: action.text, narrative: "{{NARRATIVE}}" };
+        const nativeNotesUsed = (context as unknown as { notesUsed?: unknown }).notesUsed;
+        const notesUsed = Array.isArray(nativeNotesUsed)
+          ? (nativeNotesUsed as string[])
+          : input.canonNotes?.length ? fitNotes(input.canonNotes, notesRoom(input.budgetChars)).titles : [];
         const plan: RunPlan = {
           id: newId(), worldId, lineId: world.lineId, headId: world.head.id, baseId: base.id, kind: batch ? "autoplay" : kind,
           model: this.requireLlm(), ...this.fallbackFor(),
@@ -1128,11 +1154,11 @@ export class Game {
           carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ id, record, actionText, directorNote }) => ({ id, record, actionText, directorNote }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
             ...world.guard,
-            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", world.guard.sourceGuard ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings, ...(batch ? { canonNotes: input.canonNotes ?? [] } : {}) }, ...(kind !== "turn" ? { targetId: target.id } : {}),
+            promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", turnSource ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings, ...(batch ? { canonNotes: input.canonNotes ?? [] } : {}) }, ...(kind !== "turn" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
             textGuard: textGuard(path), textGuardAt: base.id,
             // 参考了哪些札记 under the passage (R30 step 2).
-            ...(input.canonNotes?.length ? { notesUsed: fitNotes(input.canonNotes, notesRoom(input.budgetChars)).titles } : {}),
+            ...(notesUsed.length ? { notesUsed } : {}),
             ...(batch ? {
               autoplayCount: batch.turns, autoplayPilot: "temporary-ai", autoplayBudgetVersion: "per-passage-1", autoplayPauseMs: this.autoplayPauseMs, upkeepEvery: UPKEEP_EVERY,
               upkeepVersion: state.era.mode === "free" ? UPKEEP_FREE_PROMPT_VERSION : UPKEEP_PROMPT_VERSION,
@@ -1186,6 +1212,27 @@ export class Game {
     return { done, stop() { stopped = true; active?.cancel(); }, catchUp: async () => { detached = false; await active?.catchUp(); }, detach() { detached = true; active?.detach(); } };
   }
 
+  /** Format 设定集 cards for revision / fact-sync without silently truncating relevant cards to 120 chars. */
+  private formatRevisionCards(state: WorldState, relevant: string, maxChars = 6000): string {
+    const ability = abilityCardName(state.protagonist.name);
+    const nonEra = state.cards.filter((c) => c.kind !== "时代");
+    const isHit = (c: WorldState["cards"][number]) =>
+      c.name === ability || c.name === "主角的本事" || [c.name, ...c.keys].some((k) => k && relevant.includes(k));
+    const ordered = [...nonEra.filter(isHit), ...nonEra.filter((c) => !isHit(c))];
+    const lines: string[] = [];
+    let used = 0;
+    for (const c of ordered) {
+      const hit = isHit(c);
+      const cap = hit ? 2000 : 180;
+      const body = c.content.length <= cap ? c.content : `${c.content.slice(0, cap)}…（已截短，若无需修改此卡请勿放进 correctionPatch）`;
+      const line = `- ${c.kind} · ${c.name}${c.source === "AI" ? "" : "（玩家写的）"}：${body}`;
+      if (used + line.length + 1 > maxChars && lines.length > 0) break;
+      lines.push(line);
+      used += line.length + 1;
+    }
+    return lines.join("\n");
+  }
+
   /**
    * 按我的要求改 (R30 step 2): rewrites the chosen part of a passage as the player
    * asks, with the turn's record and any earlier fact it corrects; one request on
@@ -1198,14 +1245,18 @@ export class Game {
       const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
       if (!target.parentId && !isOpeningSeed(target.meta.openingSeed)) throw new WritingError(MISSING_OPENING_SEED_REVISE);
       const before = target.parentId ? await this.repo.getState(target.parentId) : target.meta.openingSeed as WorldState;
+      const targetState = await this.repo.getState(anchor.nodeId);
       const era = eraContext(world.eraId, before);
       const focus = anchor.original.slice(request.range.start, request.range.end);
       const surrounding = anchor.original.slice(Math.max(0, request.range.start - 700), request.range.start) + "\n【选中范围之后】" + anchor.original.slice(request.range.end, request.range.end + 700);
       const relevant = focus + surrounding + request.hint;
       const focused = { ...before, people: before.people.filter((p) => [p.name, ...p.aliases].some((name) => name && relevant.includes(name))) };
-      const cards = before.cards.filter((c) => c.kind !== "时代").map((c) => `- ${c.kind} · ${c.name}${c.source === "AI" ? "" : "（玩家写的）"}：${c.content.slice(0, 120)}`).join("\n");
+      const cards = this.formatRevisionCards(before, relevant);
       const selectedScope = isChosen(request.scope);
       const headSource = (await this.repo.getState(anchor.headId)).source;
+      const baseSource = headSource && targetState.source?.bookId === headSource.bookId
+        ? { ...headSource, position: Math.min(targetState.source.position, headSource.through ?? Infinity) }
+        : targetState.source ?? before.source ?? headSource;
       const revisionQuery = {
         text: focus,
         rewriteHint: request.hint,
@@ -1214,11 +1265,14 @@ export class Game {
       };
       const autoRoom = Math.max(2400, await this.scopeRoom());
       const source = selectedScope
-        ? await this.sourceBrief(anchor.worldId, headSource, revisionQuery, autoRoom, request.scope)
-        : await this.sourceBrief(anchor.worldId, headSource ?? before.source, revisionQuery, autoRoom, undefined, { allChapters: true }).catch(() => "");
+        ? await this.sourceBrief(anchor.worldId, baseSource, revisionQuery, autoRoom, request.scope)
+        : await this.sourceBrief(anchor.worldId, baseSource, revisionQuery, autoRoom, undefined, { allChapters: true }).catch(() => "");
+      const stateBlock = renderState(focused, era, new Set(focused.people.map((p) => p.id)), world.settings);
+      const coreUser = `【选中范围】\n${focus}\n【玩家要求】\n${request.hint.trim() || "让这段更通顺，事实不变"}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${stateBlock}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}`;
+      const fullUser = `【选中范围】\n${focus}\n【必要前后文】\n${surrounding}\n【玩家要求】\n${request.hint.trim() || "让这段更通顺，事实不变"}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${stateBlock}${cards ? `\n【设定集】\n${cards}` : ""}${source ? `\n【参考资料，仅供参考，以玩家要求为准】\n${source}` : ""}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}`;
       const messages: ChatMessage[] = [
         { role: "system", content: playerRevisionRules(world.settings, before, !target.parentId) },
-        { role: "user", content: `【选中范围】\n${focus}\n【必要前后文】\n${surrounding}\n【玩家要求】\n${request.hint.trim() || "让这段更通顺，事实不变"}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${renderState(focused, era, new Set(focused.people.map((p) => p.id)), world.settings)}${cards ? `\n【设定集】\n${cards}` : ""}${source ? `\n【参考资料，仅供参考，以玩家要求为准】\n${source}` : ""}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}` },
+        { role: "user", content: fullUser, compactContent: coreUser },
       ];
       let result: ChatResult;
       try {
@@ -1252,10 +1306,14 @@ export class Game {
       const era = eraContext(world.eraId, before);
       const both = `${anchor.original}\n${request.text}`;
       const focused = { ...before, people: before.people.filter((p) => [p.name, ...p.aliases].some((name) => name && both.includes(name))) };
-      const cards = before.cards.filter((c) => c.kind !== "时代").map((c) => `- ${c.kind} · ${c.name}${c.source === "AI" ? "" : "（玩家写的）"}：${c.content.slice(0, 120)}`).join("\n");
+      const cards = this.formatRevisionCards(before, both);
+      const latestHead = await isLatestPassage(this, anchor) ? "【这是最新一段】\n" : "";
+      const stateBlock = renderState(focused, era, new Set(focused.people.map((p) => p.id)), world.settings);
+      const coreUser = `${latestHead}【改前正文】\n${anchor.original}\n【改后正文（玩家定稿，不要改写）】\n${request.text}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${stateBlock}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}`;
+      const fullUser = `${latestHead}【改前正文】\n${anchor.original}\n【改后正文（玩家定稿，不要改写）】\n${request.text}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${stateBlock}${cards ? `\n【设定集】\n${cards}` : ""}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}`;
       const messages: ChatMessage[] = [
         { role: "system", content: factSyncRules(world.settings, before, !target.parentId) },
-        { role: "user", content: `${await isLatestPassage(this, anchor) ? "【这是最新一段】\n" : ""}【改前正文】\n${anchor.original}\n【改后正文（玩家定稿，不要改写）】\n${request.text}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【这一段之前的本局资料】${renderState(focused, era, new Set(focused.people.map((p) => p.id)), world.settings)}${cards ? `\n【设定集】\n${cards}` : ""}\n【原回合记录，只改受影响的字段】${JSON.stringify(target.record ?? {})}` },
+        { role: "user", content: fullUser, compactContent: coreUser },
       ];
       let result: ChatResult;
       try {
@@ -1281,8 +1339,8 @@ export class Game {
       const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
       const onEvent = (event: Record<string, unknown>) => {
         if (detached || event.type !== "text" || typeof event.full !== "string") return;
-        const value = lenientJson(event.full) as { replacement?: string; answer?: string } | null;
-        if (value?.replacement) onText(value.replacement); else if (value?.answer) onText(value.answer);
+        const value = lenientJson(event.full) as { replacement?: string } | null;
+        if (typeof value?.replacement === "string" && value.replacement) onText(value.replacement);
       };
       if (resumeRunId) {
         // 接着查 (D182): the paused run goes on with what it has read.
@@ -1306,16 +1364,17 @@ export class Game {
         const peoplePool = [...new Map([...state.people, ...(targetState.people ?? [])].map((p) => [p.id, p])).values()];
         const named = peoplePool.filter((p) => [p.name, ...p.aliases].some((name) => name && relevant.includes(name))).slice(0, 8);
         const query = { text: focus, rewriteHint: request.hint, recent: surrounding, entities: [state.protagonist, ...named].map(({ name, aliases }) => ({ name, aliases })) };
-        // 资料范围 (D184): the chosen notes or chapters only; lookups stay inside them.
-        const scoped = isChosen(request.scope) ? await scopedMaterial(this.repo, source, request.scope, query, Math.floor(budget / 4), { worldId: anchor.worldId, lookups: true }) : null;
+        // 资料范围 (D184): correction's primary job is reading original text, so allow up to 3/5 of input budget.
+        const sourceRoom = Math.floor((budget * 3) / 5);
+        const scoped = isChosen(request.scope) ? await scopedMaterial(this.repo, source, request.scope, query, sourceRoom, { worldId: anchor.worldId, lookups: true }) : null;
         const found = scoped
           ? scoped.reference ?? { bookId: source.bookId, title: "", binding: { ...source }, passages: [], status: "insufficient" as const, reason: "no_match" as const }
-          : await referenceContext(this.repo, source, query, Math.floor(budget / 4), undefined, { ignorePosition: true });
+          : await referenceContext(this.repo, source, query, sourceRoom, undefined, { ignorePosition: true });
         if (!found) throw new WritingError("参考书籍不存在，请重新绑定");
-        const reference = fitReference(found, Math.floor(budget / 4))!;
+        const reference = fitReference(found, sourceRoom)!;
         const notes = canonNotesBlock(scoped
           ? scoped.notes
-          : await notesForTurn(this.repo, source, anchor.worldId, `${focus}\n${request.hint}`, { allChapters: true }).catch(() => []), scoped ? Math.floor(budget / 4) : notesRoom(budget));
+          : await notesForTurn(this.repo, source, anchor.worldId, `${focus}\n${request.hint}`, { allChapters: true }).catch(() => []), scoped ? Math.floor(sourceRoom / 2) : notesRoom(budget));
         const focusedState = { ...state, people: state.people.filter((p) => [p.name, ...p.aliases].some((name) => name && relevant.includes(name))) };
         const question = (/[？?]|是什么|为什么|是谁|哪里|哪儿|哪个|多少|怎么回事|有没有/.test(request.hint) ? "\n【这是一个问题】玩家想知道答案；照原文回答，正文与原著一致就不用改。" : "")
           + (scoped ? scopeNote(scoped.meta) : "");
@@ -1381,7 +1440,8 @@ export class Game {
         ...(backup ? { fallback: async (messages: ChatMessage[], signal: AbortSignal) => {
           const result = await this.callOnce(messages, { configuration: backup, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
           const problem = noteReplyProblem(result);
-          await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result, problem ? "refused" : "ok", backup.auxModel || backup.model)]);
+          await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result,
+            signal.aborted ? "cancelled" : problem?.kind === "refused" || problem?.kind === "suspected_refusal" ? "refused" : problem ? "failed" : "ok", backup.auxModel || backup.model)]);
           if (problem) throw problem;
           return result.text;
         } } : {}),
@@ -1590,8 +1650,9 @@ export class Game {
     const { path, pins, chapters } = await this.repo.promptHistory(worldId, head.id);
     const prior = (history ?? []).filter((turn) => turn.q.trim() && turn.a.trim()).slice(-6);
     const baseQuestion = prior.length ? prior[0].q : question;
+    const queryText = prior.length && question.trim().length < 16 ? `${prior[prior.length - 1].q}\n${question}` : question;
     const askInput = {
-      question: baseQuestion, state, era: eraContext(world.eraId, state), settings: world.settings,
+      question: baseQuestion, recallQuery: queryText, state, era: eraContext(world.eraId, state), settings: world.settings,
       chapters, history: path, pins: pins.map((p) => p.text),
     };
     const followUps: ChatMessage[] = [];
@@ -1603,28 +1664,41 @@ export class Game {
     }
     const followUpChars = followUps.reduce((n, m) => n + m.content.length, 0);
     const askBudget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
-    const queryText = prior.length && question.trim().length < 16 ? `${prior[prior.length - 1].q}\n${question}` : question;
     const askQuery = { text: queryText, entities: [state.protagonist, ...state.people].map(({ name, aliases }) => ({ name, aliases })) };
-    // 资料范围 (D184): only the chosen notes (no lookups in the book) or chapters.
+    // 资料范围 (D184): only the chosen notes (no lookups in the book) or chapters; auto searches full allowed range + relevant notes.
     const scoped = isChosen(scope) ? await scopedMaterial(this.repo, state.source, scope, askQuery, Math.floor(askBudget / 4), { worldId }) : null;
-    let reference = scoped ? scoped.reference : await referenceContext(this.repo, state.source, askQuery, askBudget / 4);
-    // The chosen notes go in after the history is fitted (fitting rebuilds the messages), counted in the room.
-    const chosenNotes = scoped?.notes.length ? canonNotesBlock(scoped.notes, Math.floor(askBudget / 4)) : "";
+    let reference = scoped ? scoped.reference : await referenceContext(this.repo, state.source, askQuery, Math.floor(askBudget / 4), undefined, { ignorePosition: true });
+    const autoNotes = scoped ? [] : await notesForTurn(this.repo, state.source, worldId, queryText, { allChapters: true }).catch(() => []);
+    // The chosen (or auto-matched) notes go in after history fitting, counted in the budget.
+    const chosenNotes = scoped?.notes.length
+      ? canonNotesBlock(scoped.notes, Math.floor(askBudget / 4))
+      : autoNotes.length ? canonNotesBlock(autoNotes, Math.min(2400, Math.floor(askBudget / 5))) : "";
     let messages = askMessages(askInput);
     const messageChars = () => messages.reduce((n, m) => n + m.content.length, 0) + followUpChars + chosenNotes.length;
-    while (askInput.history.length > 0 && messageChars() + referenceBlock(reference).length + 60 > askBudget) {
-      askInput.history = askInput.history.slice(Math.max(1, Math.floor(askInput.history.length / 2)));
+    while (askInput.history.length > 1 && messageChars() + referenceBlock(reference).length + 60 > askBudget) {
+      // Keep the opening (`history[0]`) intact when trimming middle turns so initial debts/identities survive.
+      if (askInput.history[0]?.kind === "opening") {
+        const rest = askInput.history.slice(1);
+        askInput.history = rest.length <= 1 ? [askInput.history[0]] : [askInput.history[0], ...rest.slice(Math.max(1, Math.floor(rest.length / 2)))];
+      } else {
+        askInput.history = askInput.history.slice(Math.max(1, Math.floor(askInput.history.length / 2)));
+      }
       messages = askMessages(askInput);
     }
     if (messageChars() + referenceBlock(reference).length + 60 > askBudget) messages = compactChatMessages(messages) ?? messages;
-    reference = fitReference(reference, Math.max(0, Math.min(askBudget / 4, askBudget - messageChars() - referenceInstructionsBlock(reference).length - 60)));
+    reference = fitReference(reference, Math.max(0, Math.min(Math.floor(askBudget / 4), askBudget - messageChars() - referenceInstructionsBlock(reference).length - 60)));
     if (followUps.length) messages = [...messages, ...followUps];
     const appendReference = (suffix: string) => {
       const last = messages[messages.length - 1];
       last.content += suffix;
       if (last.compactContent !== undefined) last.compactContent += suffix;
     };
-    appendReference(chosenNotes + referenceBlock(reference) + (scoped?.meta.mode === "chapters" ? scopeNote(scoped.meta) : "") + (scoped?.meta.mode === "notes" ? "\n这次只依据上面你选的札记回答，札记里没有的写明资料不足，不得用记忆冒充。" : "\n可以主动使用遵循原著技能查阅原文再回答，不得用记忆冒充查证。"));
+    const lookupHint = scoped?.meta.mode === "notes"
+      ? "\n这次只依据上面你选的札记回答，札记里没有的写明资料不足，不得用记忆冒充。"
+      : state.source
+        ? "\n可以调用只读工具查阅本局旧事或绑定原著的原文再回答，不得用记忆冒充查证。"
+        : "\n可以调用只读工具查阅本局旧事、人物、设定和知情线索再回答，资料不足就直说。";
+    appendReference(chosenNotes + referenceBlock(reference) + (scoped?.meta.mode === "chapters" ? scopeNote(scoped.meta) : "") + lookupHint);
     const plan: RunPlan = {
       id: newId(), worldId, lineId: world.lineId, headId: head.id, baseId: head.id, kind: "ask",
       model: { ...this.requireLlm(), model: this.auxModelName() }, ...this.fallbackFor(true), messages, extractMessages: [], state, settings: world.settings,
@@ -1632,7 +1706,7 @@ export class Game {
       meta: { ...world.guard, budgetChars: askBudget, ...(scoped ? { sourceScope: scoped.meta } : {}) },
     };
     if (signal?.aborted) throw new DOMException("已停止", "AbortError");
-    const handle = startRun(this.platform, plan, (event) => { if (event.type === "text" && typeof event.full === "string" && hasChinese(event.full)) onText(event.full); });
+    const handle = startRun(this.platform, plan, (event) => { if (event.type === "text" && typeof event.full === "string" && event.full.trim()) onText(event.full); });
     const stop = () => handle.cancel();
     signal?.addEventListener("abort", stop, { once: true });
     const snapshot = await handle.done.finally(() => signal?.removeEventListener("abort", stop));

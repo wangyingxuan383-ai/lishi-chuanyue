@@ -93,8 +93,11 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const [sheet, setSheet] = useState<"more" | "reading" | "depth" | "notes" | "usage" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
   const [panel, setPanel] = useState(false);
-  const [panelTab, setPanelTab] = useState<Tab>("我");
-  const openPanel = useCallback((tab?: Tab) => { if (tab) setPanelTab(tab); setPanel(true); }, []);
+  const [panelTab, setPanelTab] = useState<{ tab: Tab; nonce: number }>({ tab: "我", nonce: 0 });
+  const openPanel = useCallback((tab?: Tab) => {
+    setPanelTab((prev) => ({ tab: tab ?? "我", nonce: prev.nonce + 1 }));
+    setPanel(true);
+  }, []);
   const [askInitial, setAskInitial] = useState("");
   const openNotes = useCallback(() => setSheet("notes"), []);
   const wide = useWide();
@@ -102,8 +105,14 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   /** Room for the long placeholders in the one-line input box. */
   const roomy = useMedia("(min-width: 520px)");
   const inputBox = useRef<HTMLTextAreaElement>(null);
-  // The box grows with what is typed; shrink it back once the action is sent.
-  useEffect(() => { if (!input && inputBox.current) inputBox.current.style.height = ""; }, [input]);
+  // The box grows with what is typed (or programmatically restored); shrink it back once emptied.
+  useEffect(() => {
+    const el = inputBox.current;
+    if (!el) return;
+    if (!input) { el.style.height = ""; return; }
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input]);
   const [atBottom, setAtBottom] = useState(true);
   const [typing, setTyping] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
@@ -230,7 +239,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const agentBusy = useAssistantBusy(game, worldId, (running) => setAgentFloor(running ? streamFloor() : undefined));
   const generation = useGeneration({
     game, worldId, autoScroll: reading.autoScroll, follow, refresh, showSaved, streamFloor,
-    restoreDraft: draft.restore, onDone: (node) => { void countTurn(); celebrate(node); }, isBusy: () => busyRef.current,
+    restoreDraft: draft.restore, clearRestoredDraft: draft.clearIfMatches, onDone: (node) => { void countTurn(); celebrate(node); }, isBusy: () => busyRef.current,
     toast, push, profileId: profile?.id, resumeRunId,
   });
   const { gen, auto, notice, setNotice, slow, waited, executionStatus } = generation;
@@ -287,7 +296,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const sourceBack = (position: number) => {
     const source = state?.source;
     if (!source) return;
-    void game.bindSource(worldId, { ...source, position }).then(() => refresh()).then(() => toast(`原著进度改回第 ${position + 1} 章`)).catch((e: Error) => toast(e.message || "没能改回"));
+    void game.bindSource(worldId, { ...source, position }).then(() => refresh()).then(() => toast(`原著进度改回第 ${position + 1} 节`)).catch((e: Error) => toast(e.message || "没能改回"));
   };
   useEffect(() => {
     setNotesTip(false);
@@ -391,6 +400,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const send = (override?: { mode: ActionMode; text: string }, overrideNote?: string | null) => {
     if (busy || !cursor) return;
     if (!game.llm) { push({ name: "setup" }); return; }
+    // If a failed turn still holds the player's original prompt and they tap bottom “继续”
+    // with an empty box, continue/retry that failed turn instead of discarding their prompt.
+    if (!override && !input.trim() && !draft.directorNote() && notice?.runId && notice.restore && notice.reason !== "cancelled") {
+      const runId = notice.runId;
+      void notifications.gate(() => generation.retryExecution(runId));
+      return;
+    }
     void notifications.gate(() => {
       const mode = override?.mode ?? (input.trim() ? currentMode.mode : "continue");
       const text = override?.text ?? (mode === "continue" ? "" : input.trim());
@@ -404,7 +420,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         action: { mode, text },
         // A failure gives the words back to the box; 再试一次 sends them again without doubling them.
         retry: () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); },
-        restore: mode === "continue" || mode === "skip" ? null : { mode, text, note: directorNote ?? "" },
+        restore: (mode === "continue" || mode === "skip") && !directorNote ? null : { mode, text, note: directorNote ?? "" },
         run: (on) => game.play(worldId, { mode, text, directorNote }, on),
       });
     });
@@ -518,15 +534,19 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const saveTextOnly = async (anchor: WritingAnchor, text: string) => {
     checkScope(anchor);
     await adoptRewrite(game, anchor, text);
+    setEditing(null);
     await refresh();
     // Things remembered word for word from the old text no longer say what the passage says.
     const pins = (await game.repo.pinsOnPath(anchor.worldId, anchor.nodeId)).filter((p) => p.originNodeId === anchor.nodeId && !text.includes(p.text.trim()));
-    toast(pins.length ? `已改写；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : "已改写，后面的剧情会按改过的文字继续", { label: "撤回", run: () => void game.repo.restoreNarrative(anchor.nodeId).then(() => game.afterTextEdit(anchor.worldId, anchor.nodeId)).then(() => refresh()) });
+    // Undo restores `anchor.original` (the text right before this edit), rather than wiping all earlier manual edits back to `meta.original`.
+    toast(pins.length ? `已改写；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : "已改写，后面的剧情会按改过的文字继续", { label: "撤回", run: () => void game.repo.updateNarrative(anchor.nodeId, anchor.original).then(() => game.afterTextEdit(anchor.worldId, anchor.nodeId)).then(() => refresh()) });
   };
   /** 事实也一起改: the passage's facts follow its edited text, as another version or a revision route. */
   const adoptFactSync = async (preview: PlayerRevisionPreview) => {
-    const latest = await isLatestPassage(game, preview.anchor);
-    const revised = await adoptPlayerRevision(game, { ...preview, anchor: { ...preview.anchor, headId: writingScope.current.headId ?? preview.anchor.headId } });
+    const liveAnchor = { ...preview.anchor, headId: writingScope.current.headId ?? preview.anchor.headId };
+    const latest = await isLatestPassage(game, liveAnchor);
+    const revised = await adoptPlayerRevision(game, { ...preview, anchor: liveAnchor });
+    setEditing(null);
     await refresh();
     toast(latest ? "已改好，事实跟着改了；原来的写法留作另一个版本" : "已改好，进入改写后的路线；原路线和后续剧情保留",
       latest ? undefined : { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, preview.anchor.lineId).then(() => refresh())) });
@@ -685,7 +705,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       : undefined;
 
   const panelProps = {
-    worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy, initialTab: panelTab,
+    worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy, initialTab: panelTab.tab, initialTabNonce: panelTab.nonce,
     onContinuitySaved: refresh, onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
     onOrganize: async (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => {
       try {
@@ -741,7 +761,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
                     <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
                   )}
                   {isHead && notesAhead && !notesTip && !pressTip && (
-                    <div className="tip">原著进度到了第 {bookPosition + 1} 章，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 章。续整理到第 {notesAhead.reach + 1} 章？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
+                    <div className="tip">原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
                   )}
                   {isHead && pressTip && (
                     <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
@@ -818,7 +838,6 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
                 }}>仅保存文字</button>
                 <button className="primary" disabled={!editing.text.trim() || editing.text === editing.node.narrative} onClick={() => {
                   const { node, text } = editing;
-                  setEditing(null);
                   void saveRewriteSync(node, text);
                 }}>保存并同步事实</button>
               </div>
@@ -883,7 +902,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {sheet === "reference" && state.source && <ReferenceSheet worldId={worldId} binding={state.source} onClose={() => setSheet(null)} />}
       {sheet === "usage" && <WorldUsageSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {usageNode && <PassageUsageSheet nodeId={usageNode} onClose={() => setUsageNode(null)} />}
-      {sheet === "notes" && <CanonNotesSheet bookId={state.source?.bookId ?? null} worldId={worldId} position={state.source?.position ?? 0} start={notesStart ?? undefined} open={notesOpen ?? undefined} onClose={() => { setSheet(null); setNotesStart(null); setNotesOpen(null); }} />}
+      {sheet === "notes" && <CanonNotesSheet bookId={state.source?.bookId ?? null} worldId={worldId} position={state.source?.position ?? 0} through={state.source?.through ?? null} start={notesStart ?? undefined} open={notesOpen ?? undefined} onClose={() => { setSheet(null); setNotesStart(null); setNotesOpen(null); }} />}
       {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
         onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
         onBookmark={(line) => void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); })} />}

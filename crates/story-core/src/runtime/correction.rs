@@ -9,7 +9,70 @@ use super::*;
 pub(super) const CORRECTION_FINAL: &str = "【查阅到此为止】不要再调用工具。依据上文已读原文直接返回 JSON：有原著依据的更正写进 corrections（引文逐字摘自已读原文）；这段与原著一致，就把 outcome 写成 verified，并在 findings 里附上引文；玩家在提问，就把 outcome 写成 answer，answer 写答案，findings 附引文；查不到依据，就把 outcome 写成 not_found，把缺什么写进 unresolved。不凭记忆补原著细节。";
 
 /// Quotes shorter than this, once punctuation and spaces are dropped, could match anywhere.
-const MIN_QUOTE: usize = 6;
+const MIN_QUOTE: usize = 4;
+
+fn sanitize_correction_patch(raw: &Value) -> Option<Value> {
+    let obj = raw.as_object()?;
+    let mut kept = serde_json::Map::new();
+    for (key, value) in obj {
+        if value.is_null() {
+            continue;
+        }
+        match key.as_str() {
+            "profile" => {
+                if let Some(map) = value.as_object() {
+                    let clean: serde_json::Map<String, Value> = map
+                        .iter()
+                        .filter(|(k, v)| {
+                            matches!(k.as_str(), "name" | "age" | "identity" | "origin") && !v.is_null()
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if !clean.is_empty() {
+                        kept.insert(key.clone(), Value::Object(clean));
+                    }
+                }
+            }
+            "cards" => {
+                if let Some(arr) = value.as_array() {
+                    let cards: Vec<Value> = arr
+                        .iter()
+                        .filter_map(|c| {
+                            let mut map = c.as_object()?.clone();
+                            if map.get("op").and_then(Value::as_str) == Some("remove") {
+                                return None;
+                            }
+                            let name = map.get("name").and_then(Value::as_str)?.trim();
+                            if name.is_empty() {
+                                return None;
+                            }
+                            map.remove("source");
+                            Some(Value::Object(map))
+                        })
+                        .collect();
+                    if !cards.is_empty() {
+                        kept.insert(key.clone(), Value::Array(cards));
+                    }
+                }
+            }
+            "people" | "places" => {
+                if let Some(arr) = value.as_array() {
+                    let items: Vec<Value> = arr.iter().filter(|v| v.is_object()).cloned().collect();
+                    if !items.is_empty() {
+                        kept.insert(key.clone(), Value::Array(items));
+                    }
+                }
+            }
+            "place" => {
+                if value.as_str().is_some_and(|s| !s.trim().is_empty()) {
+                    kept.insert(key.clone(), value.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    (!kept.is_empty()).then_some(Value::Object(kept))
+}
 
 impl Engine {
     pub(super) fn finish_correction(&self, shared: &Shared, plan: &RunPlan, result: &crate::chat::Completion) -> Result<()> {
@@ -32,52 +95,91 @@ impl Engine {
         let mut reference = plan.reference.clone().ok_or_else(|| Error::Invalid("未绑定原著资料".into()))?;
         reference["passages"] = Value::Array(passages.clone());
         let lists = |key: &str| response[key].as_array().map(|a| a.iter().filter(|v| v.as_str().is_some_and(|s| !s.trim().is_empty())).cloned().collect::<Vec<_>>()).unwrap_or_default();
-        let (unresolved, related) = (lists("unresolved"), lists("related"));
+        let (mut unresolved, related) = (lists("unresolved"), lists("related"));
         let read = passages.iter().filter(|p| p["match"] != "nearby").count();
-        let common = json!({"anchor":plan.meta["anchor"],"sourceGuard":plan.meta["sourceGuard"].to_string(),"writingVersion":plan.meta["writingVersion"],
-            "reference":reference,"searched":searched,"read":read,"unresolved":unresolved,"related":related,"baseline":plan.meta["baseline"],"range":plan.meta["correctionRange"]});
-        let stop = |code: &str, quotes: Vec<Value>| -> Result<()> {
+        let make_common = |unresolved_list: &Vec<Value>| {
+            json!({"anchor":plan.meta["anchor"],"sourceGuard":plan.meta["sourceGuard"].to_string(),"writingVersion":plan.meta["writingVersion"],
+                "reference":reference,"searched":searched,"read":read,"unresolved":unresolved_list,"related":related,"baseline":plan.meta["baseline"],"range":plan.meta["correctionRange"]})
+        };
+        let stop = |code: &str, quotes: Vec<Value>, unresolved_list: &Vec<Value>| -> Result<()> {
             let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
-            c.draft["correctionStop"] = json!({"code":code,"quotes":quotes,"unresolved":unresolved,"related":related,"searched":searched,"read":read});
+            c.draft["correctionStop"] = json!({"code":code,"quotes":quotes,"unresolved":unresolved_list,"related":related,"searched":searched,"read":read});
             Ok(())
         };
         match classify(&response, plan) {
             "changed" if passages.is_empty() => {
                 // Nothing from the book reached the model: it cannot have a basis to cite.
-                self.finish_preview(shared, merge(common, json!({"outcome":"not_found","reason":not_found_reason(&lookups, 0),"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]})))
+                self.finish_preview(shared, merge(make_common(&unresolved), json!({"outcome":"not_found","reason":not_found_reason(&lookups, 0),"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]})))
             }
             "changed" => {
                 let response = crate::writing_context::local_correction(plan, &response).map_err(check_reply_error)?;
-                let corrections = response["corrections"].as_array().filter(|a| !a.is_empty()).cloned().unwrap_or_default();
-                let (mut corrections, preserved_player_facts) = separate_correction_sources(corrections, &plan.state).map_err(check_reply_error)?;
+                let raw_corrections = response["corrections"].as_array().filter(|a| !a.is_empty()).cloned().unwrap_or_default();
+                let player_facts: Vec<_> = plan.state["facts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|f| {
+                        f["origin"] == "player"
+                            && f["id"].as_str().is_some_and(|s| !s.is_empty())
+                            && f["detail"].as_str().is_some_and(|s| !s.trim().is_empty())
+                    })
+                    .map(|f| json!({"id":f["id"],"detail":f["detail"]}))
+                    .collect();
+                let mut preserved = false;
+                let mut kept_corrections = vec![];
                 let mut missing = vec![];
-                for change in &mut corrections {
-                    let Some(citations) = change["citations"].as_array_mut().filter(|a| !a.is_empty()) else {
-                        missing.push(change["detail"].clone());
-                        continue;
-                    };
-                    for cite in citations.iter_mut() {
-                        if cite["bookId"].is_string() && cite["bookId"] != book {
-                            return Err(Error::fail(crate::failure::FailKind::Review, "改稿出处书籍不符"));
+                let mut downgraded = vec![];
+                for mut change in raw_corrections {
+                    let detail = change["detail"].as_str().unwrap_or("").trim().to_owned();
+                    let raw_cites = change["citations"].as_array().cloned().unwrap_or_default();
+                    if raw_cites.is_empty() {
+                        if (change["origin"] == "player" || detail.starts_with("保留玩家分支")) && !player_facts.is_empty() {
+                            preserved = true;
+                        } else if !detail.is_empty() {
+                            downgraded.push(Value::String(format!("未附原文出处，未采纳：{detail}")));
                         }
+                        continue;
+                    }
+                    let mut located = vec![];
+                    for cite in &raw_cites {
                         match locate_citation(&passages, cite, &book) {
-                            Some(found) => *cite = found,
-                            None => missing.push(cite["quote"].clone()),
+                            Some(found) => located.push(found),
+                            None => {
+                                if let Some(q) = cite["quote"].as_str().filter(|s| !s.trim().is_empty()) {
+                                    missing.push(Value::String(q.to_owned()));
+                                }
+                            }
                         }
                     }
+                    if located.is_empty() {
+                        if !detail.is_empty() {
+                            downgraded.push(Value::String(format!("引文未对应到已读原文，未采纳：{detail}")));
+                        }
+                    } else {
+                        change["citations"] = Value::Array(located);
+                        kept_corrections.push(change);
+                    }
                 }
-                if !missing.is_empty() {
-                    stop("quote_mismatch", missing)?;
-                    return Err(Error::fail(crate::failure::FailKind::Review, "改稿引用的原文和实际查到的对不上，没有采用"));
+                let preserved_player_facts = if preserved { player_facts } else { vec![] };
+                if kept_corrections.is_empty() {
+                    if !missing.is_empty() {
+                        stop("quote_mismatch", missing, &unresolved)?;
+                        return Err(Error::fail(crate::failure::FailKind::Review, "改稿引用的原文和实际查到的对不上，没有采用"));
+                    }
+                    unresolved.extend(downgraded);
+                    // Only notes about the player's own branch or uncited claims: nothing from the book to adopt.
+                    return self.finish_preview(shared, merge(make_common(&unresolved), json!({"outcome":"not_found","reason":"no_basis","narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[],"preservedPlayerFacts":preserved_player_facts})));
                 }
-                if corrections.is_empty() {
-                    // Only notes about the player's own branch: nothing from the book to adopt.
-                    return self.finish_preview(shared, merge(common, json!({"outcome":"not_found","reason":"no_basis","narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[],"preservedPlayerFacts":preserved_player_facts})));
-                }
+                unresolved.extend(downgraded);
                 let mut issues = vec![];
                 let record = rules::record::normalize_record(&response["record"], &mut issues)
+                    .or_else(|| rules::record::normalize_record(&plan.meta["originalRecord"], &mut issues))
                     .ok_or_else(|| Error::fail(crate::failure::FailKind::Review, "改稿尚未完成事实整理"))?;
-                self.finish_preview(shared, merge(common, json!({"outcome":"changed","narrative":response["narrative"],"replacement":response["replacement"],"range":response["range"],"record":record,"correctionPatch":response["correctionPatch"],"corrections":corrections,"preservedPlayerFacts":preserved_player_facts})))
+                let mut payload = json!({"outcome":"changed","narrative":response["narrative"],"replacement":response["replacement"],"range":response["range"],"record":record,"corrections":kept_corrections,"preservedPlayerFacts":preserved_player_facts});
+                if let Some(clean_patch) = sanitize_correction_patch(&response["correctionPatch"]) {
+                    payload["correctionPatch"] = clean_patch;
+                }
+                self.finish_preview(shared, merge(make_common(&unresolved), payload))
             }
             outcome @ ("verified" | "answer") => {
                 let mut findings = vec![];
@@ -85,12 +187,13 @@ impl Engine {
                 for finding in response["findings"].as_array().into_iter().flatten() {
                     let mut located = vec![];
                     for cite in finding["citations"].as_array().into_iter().flatten() {
-                        if cite["bookId"].is_string() && cite["bookId"] != book {
-                            continue;
-                        }
                         match locate_citation(&passages, cite, &book) {
                             Some(found) => located.push(found),
-                            None => missing.push(cite["quote"].clone()),
+                            None => {
+                                if let Some(q) = cite["quote"].as_str().filter(|s| !s.trim().is_empty()) {
+                                    missing.push(Value::String(q.to_owned()));
+                                }
+                            }
                         }
                     }
                     if !located.is_empty() {
@@ -99,15 +202,15 @@ impl Engine {
                 }
                 if findings.is_empty() {
                     if !missing.is_empty() {
-                        stop("quote_mismatch", missing)?;
+                        stop("quote_mismatch", missing, &unresolved)?;
                         return Err(Error::fail(crate::failure::FailKind::Review, "核对引用的原文和实际查到的对不上"));
                     }
-                    return self.finish_preview(shared, merge(common, json!({"outcome":"not_found","reason":not_found_reason(&lookups, read),"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]})));
+                    return self.finish_preview(shared, merge(make_common(&unresolved), json!({"outcome":"not_found","reason":not_found_reason(&lookups, read),"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]})));
                 }
                 let answer = response["answer"].as_str().map(str::trim).unwrap_or("");
-                self.finish_preview(shared, merge(common, json!({"outcome":outcome,"findings":findings,"answer":answer,"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]})))
+                self.finish_preview(shared, merge(make_common(&unresolved), json!({"outcome":outcome,"findings":findings,"answer":answer,"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]})))
             }
-            _ => self.finish_preview(shared, merge(common, json!({"outcome":"not_found","reason":not_found_reason(&lookups, read),"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]}))),
+            _ => self.finish_preview(shared, merge(make_common(&unresolved), json!({"outcome":"not_found","reason":not_found_reason(&lookups, read),"narrative":plan.meta["anchor"]["original"],"record":plan.meta["originalRecord"],"corrections":[]}))),
         }
     }
 
@@ -116,7 +219,7 @@ impl Engine {
         let query = args["query"].as_str().map(str::to_owned)
             .or_else(|| args["queries"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")))
             .or_else(|| args["claims"].as_array().map(|c| c.iter().filter_map(|v| v.as_str().or_else(|| v["claim"].as_str())).collect::<Vec<_>>().join("；")))
-            .or_else(|| args["section"].as_u64().map(|s| format!("第{}章", s + 1)))
+            .or_else(|| args["section"].as_u64().map(|s| format!("第{}节", s + 1)))
             .unwrap_or_default();
         let nested_items = output["items"].as_array();
         let hits = if let Some(items) = nested_items {
@@ -131,7 +234,7 @@ impl Engine {
         let message = output["message"].as_str().unwrap_or("");
         let entry = json!({"tool":name,"query":query,"hits":hits,"status":output["status"],
             "nearby":nearby,"beyondScope":beyond,
-            "outOfRange":output["isError"] == true && (message.contains("超出了本局允许的参考章节") || message.contains("不在本次选定的资料范围"))});
+            "outOfRange":output["isError"] == true && (message.contains("超出了本局允许的参考") || message.contains("不在本次选定的资料范围") || message.contains("这次只查"))});
         let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
         if !c.draft["lookupLog"].is_array() {
             c.draft["lookupLog"] = json!([]);
@@ -209,7 +312,7 @@ fn read_ledger(passages: &[Value], mut messages: Vec<Value>, budget: usize) -> V
     while at > 0 && messages[at - 1]["role"] == "system" {
         at -= 1;
     }
-    messages.insert(at, json!({"role":"system","content":format!("【本次已读原文】引文只能逐字摘自这里或上文的原文。{ledger}")}));
+    messages.insert(at, json!({"role":"system","ephemeralLedger":true,"content":format!("【本次已读原文】引文只能逐字摘自这里或上文的原文。{ledger}")}));
     messages
 }
 
@@ -291,7 +394,49 @@ fn merge(mut base: Value, extra: Value) -> Value {
     base
 }
 
+fn build_citation(passage: &Value, cite: &Value, book: &Value, exact: &str, utf16_offset: usize) -> Value {
+    let start = passage["start"].as_u64().unwrap_or(0) + utf16_offset as u64;
+    let end = start + exact.encode_utf16().count() as u64;
+    let mut found = cite.clone();
+    found["bookId"] = passage.get("bookId").filter(|b| b.is_string()).unwrap_or(book).clone();
+    found["section"] = passage["section"].clone();
+    found["chunk"] = passage["chunk"].clone();
+    found["quote"] = exact.into();
+    found["title"] = passage["title"].clone();
+    if passage["page"].is_number() {
+        found["page"] = passage["page"].clone();
+    } else if let Some(fields) = found.as_object_mut() {
+        fields.remove("page");
+    }
+    found["start"] = start.into();
+    found["end"] = end.into();
+    found
+}
+
+fn alnum_index(text: &str) -> Vec<(char, usize, usize, usize)> {
+    let mut kept = vec![];
+    let mut utf16 = 0usize;
+    for (byte, ch) in text.char_indices() {
+        if ch.is_alphanumeric() {
+            kept.push((ch, byte, byte + ch.len_utf8(), utf16));
+        }
+        utf16 += ch.len_utf16();
+    }
+    kept
+}
+
+fn find_exact_in_passage(passage: &Value, wanted: &[char], cite: &Value, book: &Value) -> Option<Value> {
+    let text = passage["text"].as_str()?;
+    let kept = alnum_index(text);
+    let at = kept
+        .windows(wanted.len())
+        .position(|w| w.iter().map(|k| k.0).eq(wanted.iter().copied()))?;
+    let (first, last) = (kept[at], kept[at + wanted.len() - 1]);
+    Some(build_citation(passage, cite, book, &text[first.1..last.2], first.3))
+}
+
 /// Finds a quote in what was actually read, ignoring punctuation and spaces,
+/// supporting ellipsis-shortened quotes and adjacent same-section chunk boundaries,
 /// and gives it back as the book's exact words with their place.
 pub(crate) fn locate_citation(passages: &[Value], cite: &Value, book: &Value) -> Option<Value> {
     let quote = cite["quote"].as_str().unwrap_or("");
@@ -299,38 +444,105 @@ pub(crate) fn locate_citation(passages: &[Value], cite: &Value, book: &Value) ->
     if wanted.len() < MIN_QUOTE {
         return None;
     }
-    let cited = |p: &&Value| p["section"] == cite["section"] && p["chunk"] == cite["chunk"];
-    let ordered = passages.iter().filter(cited).chain(passages.iter().filter(|p| !cited(p)));
-    for passage in ordered {
-        let Some(text) = passage["text"].as_str() else { continue };
-        // (char, byte start, byte end, utf16 start) for the letters and digits of the passage.
-        let mut kept = vec![];
-        let mut utf16 = 0usize;
-        for (byte, ch) in text.char_indices() {
-            if ch.is_alphanumeric() {
-                kept.push((ch, byte, byte + ch.len_utf8(), utf16));
+    // Nearby fallback excerpts are not matched evidence and cannot ground a correction.
+    let valid: Vec<&Value> = passages
+        .iter()
+        .filter(|p| p["kind"] == "original" && p["match"] != "nearby")
+        .collect();
+    let cited = |p: &&&Value| p["section"] == cite["section"] && p["chunk"] == cite["chunk"];
+    let ordered: Vec<&Value> = valid
+        .iter()
+        .filter(cited)
+        .chain(valid.iter().filter(|p| !cited(p)))
+        .copied()
+        .collect();
+    // 1. Exact punctuation-stripped match inside a single passage.
+    for passage in &ordered {
+        if let Some(found) = find_exact_in_passage(passage, &wanted, cite, book) {
+            return Some(found);
+        }
+    }
+    // 2. Ellipsis-shortened quote (e.g. “考核分为……实战和理论”): match all segments in order inside one passage.
+    if quote.contains('…') || quote.contains("...") {
+        let normalized_sep = quote.replace("……", "…").replace("...", "…");
+        let segs: Vec<Vec<char>> = normalized_sep
+            .split('…')
+            .map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<Vec<_>>())
+            .filter(|v| v.len() >= 3)
+            .collect();
+        if segs.len() >= 2 {
+            for passage in &ordered {
+                let Some(text) = passage["text"].as_str() else { continue };
+                let kept = alnum_index(text);
+                let mut cursor = 0usize;
+                let mut first_span: Option<(usize, usize)> = None;
+                let mut end_idx = 0usize;
+                let mut matched_all = true;
+                for seg in &segs {
+                    let found_rel = kept[cursor..]
+                        .windows(seg.len())
+                        .position(|w| w.iter().map(|k| k.0).eq(seg.iter().copied()));
+                    if let Some(rel) = found_rel {
+                        let start_i = cursor + rel;
+                        let finish_i = start_i + seg.len() - 1;
+                        if first_span.is_none() {
+                            first_span = Some((start_i, finish_i));
+                        }
+                        end_idx = finish_i;
+                        cursor = finish_i + 1;
+                    } else {
+                        matched_all = false;
+                        break;
+                    }
+                }
+                if matched_all {
+                    if let Some((start_i, seg0_end)) = first_span {
+                        let first = kept[start_i];
+                        let last = kept[end_idx];
+                        let full_exact = &text[first.1..last.2];
+                        // If the full span between ellipsis parts is reasonably tight, cite the exact continuous span;
+                        // otherwise cite the longest matched segment verbatim (always >= MIN_QUOTE or fallback to first segment).
+                        if full_exact.chars().count() <= 320 {
+                            return Some(build_citation(passage, cite, book, full_exact, first.3));
+                        }
+                        let seg0 = &text[first.1..kept[seg0_end].2];
+                        if seg0.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_QUOTE {
+                            return Some(build_citation(passage, cite, book, seg0, first.3));
+                        }
+                    }
+                }
             }
-            utf16 += ch.len_utf16();
         }
-        let Some(at) = kept.windows(wanted.len()).position(|w| w.iter().map(|k| k.0).eq(wanted.iter().copied())) else { continue };
-        let (first, last) = (kept[at], kept[at + wanted.len() - 1]);
-        let exact = &text[first.1..last.2];
-        let start = passage["start"].as_u64().unwrap_or(0) + first.3 as u64;
-        let end = start + exact.encode_utf16().count() as u64;
-        let mut found = cite.clone();
-        found["bookId"] = passage.get("bookId").filter(|b| b.is_string()).unwrap_or(book).clone();
-        found["section"] = passage["section"].clone();
-        found["chunk"] = passage["chunk"].clone();
-        found["quote"] = exact.into();
-        found["title"] = passage["title"].clone();
-        if passage["page"].is_number() {
-            found["page"] = passage["page"].clone();
-        } else if let Some(fields) = found.as_object_mut() {
-            fields.remove("page");
+    }
+    // 3. Cross-chunk boundary inside the same section (chunk c followed by chunk c + 1):
+    // match across the boundary and return the dominant chunk's exact verbatim slice so adoption stays exact.
+    for a in &ordered {
+        let (Some(sec), Some(c0), Some(t0)) = (a["section"].as_i64(), a["chunk"].as_i64(), a["text"].as_str()) else {
+            continue;
+        };
+        let Some(b) = valid.iter().copied().find(|p| p["section"].as_i64() == Some(sec) && p["chunk"].as_i64() == Some(c0 + 1)) else {
+            continue;
+        };
+        let Some(t1) = b["text"].as_str() else { continue };
+        let k0 = alnum_index(t0);
+        let k1 = alnum_index(t1);
+        let split = k0.len();
+        let combined: Vec<char> = k0.iter().chain(k1.iter()).map(|k| k.0).collect();
+        let Some(at) = combined.windows(wanted.len()).position(|w| w == wanted.as_slice()) else {
+            continue;
+        };
+        let end_pos = at + wanted.len();
+        if at < split && end_pos > split {
+            let left_len = split - at;
+            let right_len = end_pos - split;
+            if left_len >= right_len && left_len >= MIN_QUOTE {
+                let (first, last) = (k0[at], k0[split - 1]);
+                return Some(build_citation(a, cite, book, &t0[first.1..last.2], first.3));
+            } else if right_len >= MIN_QUOTE {
+                let (first, last) = (k1[0], k1[right_len - 1]);
+                return Some(build_citation(b, cite, book, &t1[first.1..last.2], first.3));
+            }
         }
-        found["start"] = start.into();
-        found["end"] = end.into();
-        return Some(found);
     }
     None
 }

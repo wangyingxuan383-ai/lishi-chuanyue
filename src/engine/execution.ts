@@ -34,6 +34,8 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
   let stopSending = false, stopAcknowledged = false, stopRetryAt = 0;
   let unsubscribe: (() => void) | null = null;
   let liveSubscribed = false, lastLiveTextLen = 0;
+  let snapshotReady = false;
+  const pendingLive: { seq: number; event: unknown }[] = [];
   let settle!: (snapshot: ExecutionSnapshot) => void, fail!: (error: unknown) => void;
   const done = new Promise<ExecutionSnapshot>((resolve, reject) => { settle = resolve; fail = reject; });
   const registered = (async () => {
@@ -65,17 +67,20 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
       if (event.full.length <= lastLiveTextLen) return;
       lastLiveTextLen = event.full.length;
       onEvent(event);
+    } else if (event.type === "thinking") {
+      onEvent(event);
     }
   };
   const ensureLive = (id: string) => {
-    if (liveSubscribed || terminal || !execution?.subscribe) return;
+    if (liveSubscribed || terminal || !attached || !execution?.subscribe) return;
     liveSubscribed = true;
     unsubscribe = execution.subscribe(id, ({ seq, event }) => {
-      if (terminal) return;
+      if (terminal || !attached) return;
       const numericSeq = typeof seq === "number" ? seq : 0;
-      deliver(numericSeq, event);
+      if (!snapshotReady) pendingLive.push({ seq: numericSeq, event });
+      else deliver(numericSeq, event);
       const kind = event && typeof event === "object" && !Array.isArray(event) ? (event as Record<string, unknown>).type : null;
-      if (kind === "done" || kind === "failed") {
+      if (kind === "done" || kind === "failed" || kind === "finished") {
         clearTimeout(timer);
         void next();
       }
@@ -118,10 +123,15 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
     currentAttempt = snapshot.executionId ?? null;
     const running = ["running", "committing"].includes(snapshot.status);
     if (running && snapshot.stopRequested && (!stopped || currentAttempt === stopAttempt)) acknowledgeStop();
-    if (attached) for (const item of snapshot.events) deliver(item.seq, item.event);
+    if (attached) {
+      for (const item of snapshot.events) deliver(item.seq, item.event);
+      snapshotReady = true;
+      for (const item of pendingLive.splice(0)) deliver(item.seq, item.event);
+    }
     if (!running) { terminal = true; cleanupLive(); settle(snapshot); return; }
     void sendStop(id);
-    schedule(attached ? (liveSubscribed ? 1500 : 350) : 1000);
+    if (!attached) return;
+    schedule(liveSubscribed ? 1500 : 350);
   };
   const terminate = (error: unknown) => { terminal = true; clearTimeout(timer); cleanupLive(); fail(error); };
   const lostObservation = (error: unknown) => {
@@ -138,7 +148,7 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
   return {
     done,
     cancel() { stopped = true; void registered.then(sendStop, () => {}); },
-    async catchUp() { attached = true; clearTimeout(timer); await next(); },
-    detach() { attached = false; },
+    async catchUp() { attached = true; snapshotReady = false; pendingLive.length = 0; clearTimeout(timer); await next(); },
+    detach() { attached = false; snapshotReady = false; pendingLive.length = 0; clearTimeout(timer); cleanupLive(); },
   };
 }

@@ -1237,8 +1237,9 @@ async fn fast_tier_writes_in_one_request_without_tools_or_review() {
 }
 
 #[tokio::test]
-async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_sentence() {
+async fn standard_tier_looks_up_twice_then_must_write_and_lite_check_fixes_one_sentence() {
     let fixture = Fixture::new(vec![
+        Step::Reply(calls(vec![("l", "list_sections", json!({"query":"纸"}))])),
         Step::Reply(calls(vec![("h", "read_history", json!({"query":"纸"}))])),
         // A service that ignores tool_choice "none" and calls again still ends the loop.
         Step::Reply(Completion { tool_calls: calls(vec![("again", "search_original", json!({"query":"纸"}))]).tool_calls, ..written() }),
@@ -1251,15 +1252,17 @@ async fn standard_tier_looks_up_once_then_must_write_and_lite_check_fixes_one_se
     let snapshot = fixture.settled("standard").await;
     assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
     let requests = fixture.model.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let offered = tool_names(&requests[0]);
-    assert!(!offered.is_empty() && offered.iter().all(|n| ["read_canon_notes", "search_original", "read_original", "read_history"].contains(&n.as_str())), "{offered:?}");
+    assert!(!offered.is_empty() && offered.iter().all(|n| ["list_sections", "read_canon_notes", "search_original", "read_original", "read_history"].contains(&n.as_str())), "{offered:?}");
+    assert!(offered.contains(&"list_sections".to_owned()));
     assert_eq!(requests[0]["tool_choice"], "auto");
-    assert_eq!(requests[1]["tool_choice"], "none");
-    assert!(requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("查阅到此为止"));
+    assert_eq!(requests[1]["tool_choice"], "auto");
+    assert_eq!(requests[2]["tool_choice"], "none");
+    assert!(requests[2]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("查阅到此为止"));
     // The lite check: helper model, no tools.
-    assert_eq!(requests[2]["model"], "helper");
-    assert!(requests[2].get("tools").is_none());
+    assert_eq!(requests[3]["model"], "helper");
+    assert!(requests[3].get("tools").is_none());
     let node = snapshot.result.as_ref().unwrap()["nodeId"].as_str().unwrap().to_owned();
     drop(requests);
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
@@ -1986,4 +1989,147 @@ async fn model_switch_reuse_keeps_completed_writing_and_retries_extract_on_new_m
     assert_eq!(done.status, "committed", "{:?}", done.error);
     assert_eq!(f.model.count(), 4, "completed writing must be reused instead of re-burned after model switch");
     assert_eq!(f.text("SELECT narrative FROM nodes WHERE kind='turn'"), "暮色渐沉，你在城门口拦下马车。");
+}
+
+#[tokio::test]
+async fn review_reference_lite_skips_with_zero_passages_and_keeps_tool_read_passages_up_to_through() {
+    // 1. Zero passages (and no notes) -> skipped honestly with 0 extra model calls.
+    let f0 = Fixture::new(vec![Step::Reply(written())]);
+    let mut p0 = bound(&f0, "lite-zero", "standard");
+    p0.reference = Some(json!({"bookId":"book","binding":p0.state["source"],"passages":[]}));
+    p0.meta["referenceReviewVersion"] = "reference-review-lite-4".into();
+    f0.engine.start(p0).unwrap();
+    let s0 = f0.settled("lite-zero").await;
+    assert_eq!(s0.status, "committed", "{:?}", s0.error);
+    assert_eq!(f0.model.count(), 1, "must not call lite review model when 0 passages exist");
+    assert_eq!(s0.draft["referenceReview"]["status"], "skipped");
+    assert_eq!(s0.draft["referenceReview"]["reason"], "no_passages");
+
+    // 2. Tool-read passage far past position+3 (but within through) is retained for lite review!
+    let f1 = Fixture::new(vec![
+        Step::Reply(calls(vec![("r1", "read_original", json!({"section":10}))])),
+        Step::Reply(written()),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"第十一节写着四文","fix":"四文","citations":[{"section":11,"chunk":11,"quote":"每张纸四文"}],"recordPatch":{"money":-4}}]}"#)),
+    ]);
+    {
+        let db = f1.store.lock().unwrap();
+        db.execute("INSERT INTO source_books VALUES('book','长篇','txt','test','{}')", []).unwrap();
+        for sec in 0..=12 {
+            db.execute(
+                "INSERT INTO source_sections(book_id,section,title,page) VALUES('book',?,?,NULL)",
+                rusqlite::params![sec, format!("第{}章", sec + 1)],
+            ).unwrap();
+            let body = if sec == 10 { "铺子规矩：每张纸四文，童叟无欺。" } else { "普通日常段落。" };
+            db.execute(
+                "INSERT INTO source_chunks(book_id,ordinal,section,text) VALUES('book',?,?,?)",
+                rusqlite::params![sec, sec, body],
+            ).unwrap();
+        }
+    }
+    let mut p1 = bound(&f1, "lite-tool-read", "standard");
+    p1.state["source"]["position"] = 0.into();
+    p1.state["source"]["through"] = 12.into();
+    p1.reference = Some(json!({"bookId":"book","binding":p1.state["source"],"passages":[]}));
+    p1.meta["referenceReviewVersion"] = "reference-review-lite-4".into();
+    f1.engine.start(p1).unwrap();
+    let s1 = f1.settled("lite-tool-read").await;
+    assert_eq!(s1.status, "committed", "{:?}", s1.error);
+    let node_id = s1.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    assert_eq!(f1.text(&format!("SELECT narrative FROM nodes WHERE id='{node_id}'")), "你付了四文，收好一张纸。");
+}
+
+#[tokio::test]
+async fn correction_accepts_partial_ellipsis_and_cross_chunk_citations_without_book_id_and_logs_purpose() {
+    let p1 = json!({"kind":"original","section":5,"chunk":0,"title":"第六章","text":"外院新生考核分为淘汰赛与循环赛，三人一组。"});
+    let p2 = json!({"kind":"original","section":5,"chunk":1,"title":"第六章","text":"考核地点设在外院大广场，由杜维伦主任亲自主持。"});
+    let reply = json!({
+        "outcome": "changed",
+        "replacement": "考核分为淘汰赛与循环赛，由杜维伦主持。",
+        "corrections": [
+            {
+                "detail": "赛制与主持人",
+                "citations": [
+                    {"section": 6, "chunk": 1, "quote": "淘汰赛……三人一组"},
+                    {"section": 6, "chunk": 1, "quote": "三人一组。考核地点设在外院大广场"}
+                ]
+            },
+            {
+                "detail": "顺手编造的细节",
+                "citations": []
+            }
+        ],
+        "unresolved": []
+    });
+    let (f, plan) = correction_fixture(vec![Step::Reply(prose(&reply.to_string()))], "partial-corr", &[p1, p2], "核对考核方式");
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("partial-corr").await;
+    assert_eq!(saved.status, "previewed", "{:?}", saved.error);
+    let result = saved.result.unwrap();
+    assert_eq!(result["outcome"], "changed");
+    assert_eq!(result["corrections"].as_array().unwrap().len(), 1);
+    assert_eq!(result["corrections"][0]["citations"].as_array().unwrap().len(), 2);
+    assert!(result["unresolved"].as_array().unwrap().iter().any(|u| u.as_str().unwrap_or("").contains("顺手编造的细节")));
+    assert_eq!(f.text("SELECT purpose FROM usage WHERE id LIKE 'partial-corr:%' LIMIT 1"), "correction");
+}
+
+#[tokio::test]
+async fn ask_uses_dedicated_rules_works_without_book_strips_record_and_logs_ask_purpose() {
+    let f = Fixture::new(vec![
+        Step::Reply(calls(vec![("h1", "read_history", json!({"query":"掌柜"}))])),
+        Step::Reply(prose("王掌柜是西市邸店掌柜。<record>{\"time\":\"一刻\"}</record>")),
+    ]);
+    let mut plan = f.plan("ask-clean");
+    plan.kind = "ask".into();
+    plan.meta["depth"] = "fast".into(); // Fast tier must NOT suppress ask lookup tools!
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("ask-clean").await;
+    assert_eq!(saved.status, "previewed", "{:?}", saved.error);
+    assert_eq!(saved.result.unwrap()["text"], "王掌柜是西市邸店掌柜。");
+    let requests = f.model.requests.lock().unwrap();
+    assert!(requests[0].to_string().contains("查一查模式"), "must inject ASK_RULES");
+    assert!(!requests[0].to_string().contains("经典模式"), "must not inject CLASSIC_RULES");
+    let offered = tool_names(&requests[0]);
+    assert!(offered.contains(&"read_history".to_owned()), "story tools must work without bound book: {offered:?}");
+    assert!(!offered.contains(&"search_original".to_owned()), "book tools omitted when no book bound: {offered:?}");
+    drop(requests);
+    assert_eq!(f.text("SELECT purpose FROM usage WHERE id LIKE 'ask-clean:%' LIMIT 1"), "ask");
+}
+
+#[tokio::test]
+async fn organizing_stage_never_emits_thinking_events_and_autoplay_parent_live_seq_monotonic() {
+    let live_events = Arc::new(Mutex::new(Vec::<(String, u64, Value)>::new()));
+    let sink_log = live_events.clone();
+    // 1. Auxiliary extract must not emit {"type":"thinking"} after {"type":"organizing","phase":"extract"}.
+    let f = Fixture::new(vec![
+        Step::Reply(prose("暮色渐沉，你在城门口停步。")),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    f.engine.on_live_event(Arc::new(move |id, seq, ev| {
+        sink_log.lock().unwrap().push((id.to_owned(), seq, ev.clone()));
+    }));
+    f.engine.start(f.plan("org-clean")).unwrap();
+    let done = f.settled("org-clean").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    let types: Vec<String> = done.events.iter().filter_map(|e| e.event["type"].as_str().map(str::to_owned)).collect();
+    let org_idx = types.iter().position(|t| t == "organizing").expect("organizing event");
+    assert!(!types[org_idx + 1..].iter().any(|t| t == "thinking"), "no thinking after organizing: {types:?}");
+
+    // 2. Autoplay parent live events use monotonically increasing parent seq across 2 steps.
+    let parent_seqs = Arc::new(Mutex::new(Vec::<(u64, String)>::new()));
+    let parent_log = parent_seqs.clone();
+    let f2 = Fixture::new(vec![Step::Reply(written()), Step::Reply(written())]);
+    f2.engine.on_live_event(Arc::new(move |id, seq, ev| {
+        if id == "auto-seq" && seq > 0 {
+            parent_log.lock().unwrap().push((seq, ev["type"].as_str().unwrap_or("").to_owned()));
+        }
+    }));
+    let mut plan = f2.plan("auto-seq");
+    plan.kind = "autoplay".into();
+    plan.meta = json!({"autoplayCount":2,"autoplayPauseMs":0,"autoplayPilot":"temporary-ai"});
+    f2.engine.start(plan).unwrap();
+    assert_eq!(f2.settled("auto-seq").await.status, "committed");
+    let seqs = parent_seqs.lock().unwrap();
+    assert!(seqs.iter().any(|(_, t)| t == "step"), "parent must receive live step events: {seqs:?}");
+    assert!(seqs.iter().any(|(_, t)| t == "finished"), "parent must receive live finished event: {seqs:?}");
+    assert!(seqs.windows(2).all(|w| w[1].0 > w[0].0), "parent live seq must strictly increase: {seqs:?}");
 }

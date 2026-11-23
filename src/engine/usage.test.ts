@@ -73,5 +73,14 @@ describe("每段用量 (R29-T004)", () => {
     expect(ask).toMatchObject({ calls: 1, input: 600, output: 200 });
     const world = (await worldUsage(platform, "w"))!;
     expect(world.parts.find((p) => p.label === "助手")).toMatchObject({ calls: 1, input: 2000, output: 400 });
+    expect(purposeLabel("correction")).toBe("按原著纠错");
+    // Mixed "+00:00" and "Z" timestamps are ordered accurately by julianday in speedReport.
+    await platform.sql.batch([
+      row("tz-old", "w", "n1", "writing:0", 100, 50, "ok", "2026-11-23T02:00:00+00:00"),
+      row("tz-new", "w", "n2", "writing:0", 200, 80, "ok", "2026-11-23T02:00:05.000Z"),
+    ]);
+    const speed = (await speedReport(platform, 1))!;
+    expect(speed.passages).toBe(1);
+    expect(speed.since).toBe("2026-11-23T02:00:05.000Z");
   });
 });

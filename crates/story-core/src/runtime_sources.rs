@@ -87,13 +87,16 @@ pub(crate) fn parse_chapter_numeral(raw: &str) -> Option<u64> {
         .trim()
         .trim_start_matches('第')
         .trim()
-        .trim_end_matches(['章', '回', '节', '卷', '集', '部', '篇'])
+        .trim_end_matches(['章', '回', '节', '卷', '集', '部', '篇', '话', '幕', '折'])
         .trim();
     if trimmed.is_empty() {
         return None;
     }
     if trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return trimmed.parse::<u64>().ok().filter(|n| *n > 0);
+        return trimmed.parse::<u64>().ok();
+    }
+    if matches!(trimmed, "零" | "〇") {
+        return Some(0);
     }
     let mut total = 0u64;
     let mut section = 0u64;
@@ -147,9 +150,17 @@ pub(crate) fn parse_chapter_numeral(raw: &str) -> Option<u64> {
 
 fn extract_chapter_numbers(title: &str) -> Vec<u64> {
     static CHAPTER_RE: OnceLock<Regex> = OnceLock::new();
+    static EN_CHAPTER_RE: OnceLock<Regex> = OnceLock::new();
+    static VOLUME_RE: OnceLock<Regex> = OnceLock::new();
     static LEADING_RE: OnceLock<Regex> = OnceLock::new();
     let chapter_re = CHAPTER_RE.get_or_init(|| {
-        Regex::new(r"第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[章回节卷集部篇]").unwrap()
+        Regex::new(r"第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[章回节话幕折]").unwrap()
+    });
+    let en_chapter_re = EN_CHAPTER_RE.get_or_init(|| {
+        Regex::new(r"(?i)\bchapter\s+(\d{1,5})\b").unwrap()
+    });
+    let volume_re = VOLUME_RE.get_or_init(|| {
+        Regex::new(r"第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[卷集部篇]").unwrap()
     });
     let leading_re = LEADING_RE.get_or_init(|| Regex::new(r"^\s*(\d{1,5})(?:[.、\s\-—:：]|$)").unwrap());
     let mut nums = BTreeSet::new();
@@ -158,13 +169,24 @@ fn extract_chapter_numbers(title: &str) -> Vec<u64> {
             nums.insert(n);
         }
     }
-    if let Some(n) = leading_re
-        .captures(title)
-        .and_then(|cap| cap.get(1))
-        .and_then(|m| m.as_str().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-    {
-        nums.insert(n);
+    for cap in en_chapter_re.captures_iter(title) {
+        if let Some(n) = cap.get(1).and_then(|m| m.as_str().parse::<u64>().ok()) {
+            nums.insert(n);
+        }
+    }
+    if nums.is_empty() {
+        for cap in volume_re.captures_iter(title) {
+            if let Some(n) = cap.get(1).and_then(|m| parse_chapter_numeral(m.as_str())) {
+                nums.insert(n);
+            }
+        }
+        if let Some(n) = leading_re
+            .captures(title)
+            .and_then(|cap| cap.get(1))
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+        {
+            nums.insert(n);
+        }
     }
     nums.into_iter().collect()
 }
@@ -325,7 +347,7 @@ fn chosen_notes(plan: &RunPlan) -> Option<HashSet<String>> {
     (scope["mode"] == "notes").then(|| strings(&scope["noteIds"]).into_iter().map(str::to_owned).collect())
 }
 fn scope_words(range: Option<(i64, i64)>) -> String {
-    range.map(|(from, to)| if from == to { format!("第 {} 章", from + 1) } else { format!("第 {}～{} 章", from + 1, to + 1) }).unwrap_or_default()
+    range.map(|(from, to)| if from == to { format!("第 {} 节", from + 1) } else { format!("第 {}～{} 节", from + 1, to + 1) }).unwrap_or_default()
 }
 
 fn query_keys(plan: &RunPlan, args: &Value) -> Keys {
@@ -723,6 +745,13 @@ fn budget(plan: &RunPlan) -> usize {
         ((base / 4).min(8000)) as usize
     }
 }
+fn read_budget(plan: &RunPlan, name: &str) -> usize {
+    if name == "read_original" {
+        let base = plan.meta["budgetChars"].as_u64().unwrap_or(12000);
+        return ((base / 2).min(12000)) as usize;
+    }
+    budget(plan)
+}
 fn cost(value: &Value) -> usize {
     units(&value.to_string()) + 1
 }
@@ -810,7 +839,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         return list_sections(db, plan, args);
     }
     if scope_range(plan).is_some() && ["locate_original_event","prepare_reference_check"].contains(&name) {
-        return Err(Error::Invalid(format!("这次只查{}，请用 search_original 在这几章里检索", scope_words(scope_range(plan)))));
+        return Err(Error::Invalid(format!("这次只查{}，请用 search_original 在这几节里检索", scope_words(scope_range(plan)))));
     }
     if ["locate_original_event","prepare_reference_check"].contains(&name) { return crate::reference_lookup::read(db,plan,name,args); }
     if name=="preview_turn_record" { return crate::reference_lookup::preview_record(plan,args); }
@@ -848,13 +877,13 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     if name == "search_original" {
         if let Some(arg_from) = args["from"].as_i64() {
             if arg_from > max_through {
-                return Err(Error::Invalid(if range.is_some() { format!("这次只查{}，起始章节超出范围", scope_words(range)) } else { "起始章节超出了本局允许的参考章节".into() }));
+                return Err(Error::Invalid(if range.is_some() { format!("这次只查{}，起始节号超出范围", scope_words(range)) } else { "起始节号超出了本局允许的参考范围".into() }));
             }
             from = from.max(arg_from);
         }
         if let Some(arg_to) = args["to"].as_i64() {
             if arg_to < min_from {
-                return Err(Error::Invalid("结束章节不在允许范围内".into()));
+                return Err(Error::Invalid("结束节号不在允许范围内".into()));
             }
             through = through.min(arg_to);
         }
@@ -1040,9 +1069,9 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     } else {
         let section = args["section"]
             .as_i64()
-            .ok_or_else(|| Error::Invalid("请指定要读的章节 section（从 0 开始）".into()))?;
+            .ok_or_else(|| Error::Invalid("请指定要读的节号 section（从 0 开始）".into()))?;
         if section < 0 || section > through || section < from {
-            return Err(Error::Invalid(if range.is_some() { format!("这次只查{}，这段原文不在范围里", scope_words(range)) } else { "这段原文超出了本局允许的参考章节".into() }));
+            return Err(Error::Invalid(if range.is_some() { format!("这次只查{}，这段原文不在范围里", scope_words(range)) } else { "这段原文超出了本局允许的参考范围".into() }));
         }
         if let Some(value) = args.get("chunk") {
             let chunk = value
@@ -1073,6 +1102,13 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             for id in ids.into_iter().take(3) {
                 scores.insert(id, 1.0);
             }
+        }
+    }
+    // On ordinary turns (not whole-book lookups or explicit chapter ranges), favor passages near the current book position.
+    if name == "search_original" && !ignore_position && range.is_none() {
+        for (id, score) in scores.iter_mut() {
+            let dist = scope.get(id).map_or(0, |s| s.abs_diff(position)) as f64;
+            *score *= 1.0 + 0.9 / (1.0 + dist / 6.0);
         }
     }
     let mut ranked: Vec<_> = scores.into_iter().collect();
@@ -1108,7 +1144,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     let wanted = query_terms.len();
     let beyond_scope = name == "search_original" && wanted > 0
         && best(&outside) >= 2.max((wanted * 6).div_ceil(10)) && best(&outside) > best(&inside);
-    let mut remaining = budget(plan);
+    let mut remaining = read_budget(plan, name);
     let mut excerpts = vec![];
     let mut analysis = vec![];
     let mut budget_limited = false;
@@ -1209,7 +1245,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         output["scopeNote"] = if range.is_some() {
             format!("查询词在{}以外的原文里更集中，超出了这次选的资料范围。", scope_words(Some((from, through))))
         } else {
-            format!("查询词在第 {} 章之后的原文里更集中，超出了本局允许的参考范围。", through + 1)
+            format!("查询词在第 {} 节之后的原文里更集中，超出了本局允许的参考范围。", through + 1)
         }.into();
     }
     Ok(output)
@@ -1571,8 +1607,8 @@ mod tests {
         let db = store.lock().unwrap();
         let binding = |position: i64, plot: &str| json!({"bookId":"book","fanfic":true,"plot":plot,"position":position,"through":null});
         let passage = |i: usize| format!("他走在路上看见风雪，忽然想起{}。", marks[i]);
-        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(7)).unwrap(), Some(7));
-        assert_eq!(follow_position(&db, &binding(0, "canon"), &passage(9)).unwrap(), Some(5), "five chapters at a time");
+        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(7)).unwrap(), Some(5), "at most two sections at a time");
+        assert_eq!(follow_position(&db, &binding(0, "canon"), &passage(9)).unwrap(), Some(2), "at most two sections at a time");
         assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(2)).unwrap(), None, "never backwards");
         assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(3)).unwrap(), None, "still in the same chapter");
         assert_eq!(follow_position(&db, &binding(3, "rewrite"), &passage(7)).unwrap(), None, "a rewritten plot is left alone");
@@ -1599,7 +1635,7 @@ mod tests {
         assert!(!sections.is_empty() && sections.iter().all(|s| (4..=6).contains(s)), "{found}");
         assert_eq!(found["through"], 6);
         let outside = read_db(&db, &plan, "read_original", &json!({"section":2})).unwrap_err().to_string();
-        assert!(outside.contains("第 5～7 章"), "{outside}");
+        assert!(outside.contains("第 5～7 节"), "{outside}");
         assert!(read_db(&db, &plan, "read_original", &json!({"section":5})).is_ok());
         let facts = read_db(&db, &plan, "read_canon_facts", &json!({"query":""})).unwrap();
         let subjects: Vec<&str> = facts["facts"].as_array().unwrap().iter().map(|f| f["subject"].as_str().unwrap()).collect();
@@ -1700,7 +1736,7 @@ mod tests {
         let db = store.lock().unwrap();
         let result = read_db(&db, &plan, "search_original", &json!({"query":"入门比试实战理论"})).unwrap();
         assert_eq!(result["beyondScope"], true, "{result}");
-        assert!(result["scopeNote"].as_str().unwrap().contains("第 11 章之后"));
+        assert!(result["scopeNote"].as_str().unwrap().contains("第 11 节之后"));
         assert!(!result.to_string().contains("院长宣布"));
     }
 
@@ -1781,10 +1817,10 @@ pub(crate) fn follow_position(db: &rusqlite::Connection, binding: &Value, narrat
     if position >= through {
         return Ok(None);
     }
-    // Look a little behind (the passage may still be in the current chapter) and some way ahead.
-    let (from, to) = ((position - 1).max(0), (position + 30).min(through));
-    let mut stmt = db.prepare("SELECT ordinal,section FROM source_chunks WHERE book_id=? AND section BETWEEN ? AND ?")?;
-    let window: HashMap<i64, i64> = stmt.query_map(params![book, from, to], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?;
+    // Look a little behind (the passage may still be in the current section) and moderately ahead.
+    let (from, to) = ((position - 2).max(0), (position + 12).min(through));
+    let mut stmt = db.prepare("SELECT ordinal,section,LENGTH(text) FROM source_chunks WHERE book_id=? AND section BETWEEN ? AND ?")?;
+    let window: HashMap<i64, (i64, i64)> = stmt.query_map(params![book, from, to], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect::<std::result::Result<_, _>>()?;
     if window.is_empty() {
         return Ok(None);
     }
@@ -1799,28 +1835,36 @@ pub(crate) fn follow_position(db: &rusqlite::Connection, binding: &Value, narrat
     values.extend(keys.iter().cloned());
     let mut stmt = db.prepare(&format!("SELECT postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"))?;
     let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| r.get::<_, String>(0))?;
-    let mut chunk_scores = HashMap::<i64, f64>::new();
+    let mut chunk_scores = HashMap::<i64, (f64, usize)>::new();
+    let max_df = (total * 0.03).clamp(3.0, 40.0);
     for raw in rows {
         let postings = serde_json::from_str::<Vec<i64>>(&raw?).unwrap_or_default();
         let df = postings.len() as f64;
         // Words found all over the book (names, common phrases) say nothing about where we are.
-        if df == 0.0 || df > (total * 0.08).max(3.0) {
+        if df == 0.0 || df > max_df {
             continue;
         }
         let weight = (total / df).ln();
         for chunk in postings.into_iter().filter(|c| window.contains_key(c)) {
-            *chunk_scores.entry(chunk).or_default() += weight;
+            let entry = chunk_scores.entry(chunk).or_insert((0.0, 0));
+            entry.0 += weight;
+            entry.1 += 1;
         }
     }
-    let mut sections = HashMap::<i64, f64>::new();
-    for (chunk, score) in chunk_scores {
-        let entry = sections.entry(window[&chunk]).or_default();
-        *entry = entry.max(score);
+    let mut sections = HashMap::<i64, (f64, usize)>::new();
+    for (chunk, (raw_score, hits)) in chunk_scores {
+        let (sec, len) = window[&chunk];
+        let norm = ((len.max(600) as f64) / 1200.0).sqrt().max(1.0);
+        let score = raw_score / norm;
+        let entry = sections.entry(sec).or_insert((0.0, 0));
+        if score > entry.0 {
+            *entry = (score, hits);
+        }
     }
-    let Some((&best, &top)) = sections.iter().max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0))) else { return Ok(None) };
-    let runner_up = sections.iter().filter(|(s, _)| s.abs_diff(best) > 1).map(|(_, v)| *v).fold(0.0, f64::max);
-    if best <= position || top < 12.0 || top < runner_up * 1.4 {
+    let Some((&best, &(top, top_hits))) = sections.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0).then(b.0.cmp(a.0))) else { return Ok(None) };
+    let runner_up = sections.iter().filter(|(s, _)| s.abs_diff(best) > 1).map(|(_, (v, _))| *v).fold(0.0, f64::max);
+    if best <= position || top_hits < 3 || top < 12.0 || top < runner_up * 1.4 {
         return Ok(None);
     }
-    Ok(Some(best.min(position + 5)))
+    Ok(Some(best.min(position + 2)))
 }

@@ -264,6 +264,15 @@ describe("改后同步：事实也一起改 (D183)", () => {
     await expect(s.game.runFactSync({ anchor, text: "改过的旧开场。" }).done).rejects.toThrow(MISSING_OPENING_SEED_SYNC);
     expect(calls).toBe(0);
   });
+
+  it("treats an empty-change reply with unchanged:false as unchanged instead of an empty fork", async () => {
+    const s = await story();
+    s.reply({ unchanged: false, note: "只是润色" });
+    const preview = await s.game.runFactSync(request(s, s.two, "你在酒肆遇见了王掌柜。")).done;
+    expect(preview.unchanged).toBe(true);
+    expect(preview.recordChanges).toEqual([]);
+    expect(preview.correctionPatch).toBeUndefined();
+  });
 });
 
 describe("改过正文后的下一段请求 (D183)", () => {

@@ -17,6 +17,8 @@ const short = (text: string, max: number) => (text.length > max ? `${text.slice(
 
 export interface AskInput {
   question: string;
+  /** Latest follow-up question used for older-turn recall when asking follow-ups. */
+  recallQuery?: string;
   state: WorldState;
   era: EraContext;
   settings: WorldSettings;
@@ -47,7 +49,7 @@ export function askMessages(input: AskInput): ChatMessage[] {
   const recent = picked.map((n) => `${n.actionText ? `【玩家】${n.actionText}\n` : ""}${n.narrative.trim()}`);
   const inPicked = new Set(picked.map((n) => n.id));
   const older = story.map((node, turn) => ({ node, turn })).filter(({ node }) => node !== opening && !inPicked.has(node.id));
-  const recall = recallBlock(state, input.question, older);
+  const recall = recallBlock(state, input.recallQuery ?? input.question, older);
   const since = timeRows(input.era.clock, state.time.elapsedMinutes).find((r) => r.label === "开局")?.value;
   const essentials = [...input.settings.essentials.split(/\n+/), ...input.pins].map((l) => l.trim()).filter(Boolean);
   const section = (title: string, lines: string[]) => (lines.length ? `\n\n【${title}】\n${lines.join("\n")}` : "");

@@ -228,18 +228,18 @@ function StatusTidySheet({ worldId, onClose, onSave }: { worldId: string; onClos
   );
 }
 
-export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false, initialTab }: {
+export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false, initialTab, initialTabNonce }: {
   worldId: string; headId: string; chapterEvery: number;
   onContinuitySaved?: () => void | Promise<void>;
   settings?: WorldSettings;
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
   initialTab?: Tab;
+  initialTabNonce?: number;
   state: WorldState; era: EraContext; onClose: () => void; onSave: Save;
   onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => Promise<boolean>; busy: boolean;
 }) {
   const [tab, setTab] = useState<Tab>(initialTab ?? "我");
-  useEffect(() => { if (initialTab) setTab(initialTab); }, [initialTab]);
   const [draft, setDraft] = useState<WorldState | null>(null);
   // What the draft started from: beside a docked panel a turn can be played while editing, and saving keeps what it did.
   const [base, setBase] = useState<WorldState | null>(null);
@@ -249,6 +249,9 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   const [item, setItem] = useState<{ item: Item | null } | null>(null);
   const [tidy, setTidy] = useState(false);
   const editing = draft !== null;
+  const editingRef = useRef(false);
+  editingRef.current = editing;
+  useEffect(() => { if (initialTab && !editingRef.current) setTab(initialTab); }, [initialTab, initialTabNonce]);
   const change = (fn: (s: WorldState) => void) => setDraft((s) => { const next = structuredClone(s!); fn(next); return next; });
   // Closing slides the panel back out to the right before it is removed (R28).
   const [leaving, setLeaving] = useState(false);

@@ -39,6 +39,8 @@ export const NOTE_KIND_LABEL = Object.fromEntries(NOTE_KINDS.map(([k, l]) => [k,
 /** `staleFrom` (本局札记): the earliest turn whose text was edited after the note was made (D183). */
 export interface NoteScope {
   from?: number; to?: number; subject?: string; aliases?: string[]; question?: string; auto?: boolean; toNode?: string; staleFrom?: number;
+  /** Book reading ceiling when this note was created from a scoped world (prevents spoiling past `binding.through`). */
+  through?: number | null;
   /** How far 上一版 (previousContent) reached, so 恢复上一版 brings back its reach too. */
   previous?: { to?: number; toNode?: string; refs?: number[] };
 }
@@ -167,11 +169,42 @@ export function newNote(bookId: string, kind: NoteKind, scope: NoteScope, title:
   return { id: newId(), bookId, worldId, kind, title: title.trim() || NOTE_KIND_LABEL[kind], scope, content: "", refs: [], model: "", status: "paused", active: true, progress: { parts: [], total: 0 }, createdAt: now, updatedAt: now };
 }
 
+const NOTE_CN_DIGITS: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const NOTE_CN_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
+
+function parseNoteChapterNum(raw: string): number | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+  let total = 0, section = 0, current = 0, hasDigit = false;
+  for (const ch of s) {
+    if (ch in NOTE_CN_DIGITS) { current = NOTE_CN_DIGITS[ch]; hasDigit = true; }
+    else if (ch in NOTE_CN_UNITS) {
+      const unit = NOTE_CN_UNITS[ch];
+      if (unit === 10000) { section = (section + current) * unit; total += section; section = 0; current = 0; }
+      else { section += (current === 0 && unit === 10 ? 1 : current) * unit; current = 0; }
+      hasDigit = true;
+    } else return null;
+  }
+  const value = total + section + current;
+  return hasDigit && value > 0 ? value : null;
+}
+
 /** Chapter labels describe the supplied text, not verified original passages. */
 function mentionedChapters(text: string): number[] {
-  return [...text.matchAll(/第\s*(\d+)\s*(?:[～~—–至-]\s*(?:第\s*)?(\d+)\s*)?章/g)]
-    .flatMap((match) => [Number(match[1]) - 1, ...(match[2] ? [Number(match[2]) - 1] : [])])
-    .filter((section) => Number.isSafeInteger(section) && section >= 0);
+  const found: number[] = [];
+  for (const match of text.matchAll(/第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*(?:[～~—–至-]\s*(?:第\s*)?([0-9零〇一二两三四五六七八九十百千万]+)\s*)?[章回节]/g)) {
+    const a = parseNoteChapterNum(match[1]);
+    if (a !== null) found.push(a - 1);
+    if (match[2]) {
+      const b = parseNoteChapterNum(match[2]);
+      if (b !== null) found.push(b - 1);
+    }
+  }
+  return found.filter((section) => Number.isSafeInteger(section) && section >= 0);
 }
 
 export function localNoteContent(text: string): string {
@@ -279,28 +312,44 @@ export async function noteMaterials(repo: Repo, note: Pick<CanonNote, "bookId" |
   }
   const sections = new Map((await repo.platform.sql.query("SELECT section,title FROM source_sections WHERE book_id=?", [note.bookId])).map((r) => [Number(r.section), String(r.title)]));
   if (!sections.size) return [];
-  const last = Math.max(...sections.keys());
+  const bookLast = Math.max(...sections.keys());
+  const ceiling = typeof note.scope.through === "number" && Number.isInteger(note.scope.through) && note.scope.through >= 0
+    ? Math.min(bookLast, note.scope.through)
+    : bookLast;
   let rows: Record<string, unknown>[];
   if (note.kind === "plot" || note.kind === "timeline") {
-    const from = Math.max(0, note.scope.from ?? 0), to = Math.min(last, note.scope.to ?? last);
+    const from = Math.max(0, note.scope.from ?? 0), to = Math.min(ceiling, note.scope.to ?? ceiling);
     rows = await repo.platform.sql.query("SELECT ordinal,section,text FROM source_chunks WHERE book_id=? AND section BETWEEN ? AND ? ORDER BY ordinal", [note.bookId, from, to]);
   } else {
     const query = note.kind === "question" ? note.scope.question ?? "" : [note.scope.subject ?? "", ...(note.scope.aliases ?? [])].join("\n");
     const keys = terms(query);
-    if (!keys.length) return [];
-    const scores = new Map<number, number>();
-    for (const row of await repo.platform.sql.query(`SELECT term,postings FROM source_terms WHERE book_id=? AND term IN (${keys.map(() => "?").join(",")})`, [note.bookId, ...keys])) {
-      const postings = JSON.parse(String(row.postings)) as number[];
-      for (const ordinal of postings) scores.set(ordinal, (scores.get(ordinal) ?? 0) + 1 / Math.sqrt(postings.length));
+    const allowedOrdinals = ceiling < bookLast
+      ? new Set((await repo.platform.sql.query("SELECT ordinal FROM source_chunks WHERE book_id=? AND section <= ?", [note.bookId, ceiling])).map((r) => Number(r.ordinal)))
+      : null;
+    if (!keys.length) {
+      // Allow 1-character character/setting names to match verbatim within the allowed ceiling.
+      const single = note.kind === "question" ? "" : (note.scope.subject ?? "").trim();
+      if (!single) return [];
+      rows = await repo.platform.sql.query(
+        "SELECT ordinal,section,text FROM source_chunks WHERE book_id=? AND section <= ? AND instr(text, ?) > 0 ORDER BY ordinal LIMIT ?",
+        [note.bookId, ceiling, single, SEARCH_LIMIT],
+      );
+    } else {
+      const scores = new Map<number, number>();
+      for (const row of await repo.platform.sql.query(`SELECT term,postings FROM source_terms WHERE book_id=? AND term IN (${keys.map(() => "?").join(",")})`, [note.bookId, ...keys])) {
+        const postings = (JSON.parse(String(row.postings)) as number[]).filter((o) => !allowedOrdinals || allowedOrdinals.has(o));
+        if (!postings.length) continue;
+        for (const ordinal of postings) scores.set(ordinal, (scores.get(ordinal) ?? 0) + 1 / Math.sqrt(postings.length));
+      }
+      // A name of two characters is one bigram: insist on the whole name where one was given.
+      const whole = note.kind === "question" ? [] : [note.scope.subject ?? "", ...(note.scope.aliases ?? [])].map((s) => s.trim()).filter(Boolean);
+      const ranked = [...scores].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, SEARCH_LIMIT * 3).map(([ordinal]) => ordinal);
+      if (!ranked.length) return [];
+      rows = await repo.platform.sql.query(`SELECT ordinal,section,text FROM source_chunks WHERE book_id=? AND section <= ? AND ordinal IN (${ranked.map(() => "?").join(",")})`, [note.bookId, ceiling, ...ranked]);
+      if (whole.length) rows = rows.filter((r) => whole.some((name) => String(r.text).includes(name)));
+      const order = new Map(ranked.map((o, i) => [o, i]));
+      rows = rows.sort((a, b) => order.get(Number(a.ordinal))! - order.get(Number(b.ordinal))!).slice(0, SEARCH_LIMIT).sort((a, b) => Number(a.ordinal) - Number(b.ordinal));
     }
-    // A name of two characters is one bigram: insist on the whole name where one was given.
-    const whole = note.kind === "question" ? [] : [note.scope.subject ?? "", ...(note.scope.aliases ?? [])].map((s) => s.trim()).filter(Boolean);
-    const ranked = [...scores].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, SEARCH_LIMIT * 3).map(([ordinal]) => ordinal);
-    if (!ranked.length) return [];
-    rows = await repo.platform.sql.query(`SELECT ordinal,section,text FROM source_chunks WHERE book_id=? AND ordinal IN (${ranked.map(() => "?").join(",")})`, [note.bookId, ...ranked]);
-    if (whole.length) rows = rows.filter((r) => whole.some((name) => String(r.text).includes(name)));
-    const order = new Map(ranked.map((o, i) => [o, i]));
-    rows = rows.sort((a, b) => order.get(Number(a.ordinal))! - order.get(Number(b.ordinal))!).slice(0, SEARCH_LIMIT).sort((a, b) => Number(a.ordinal) - Number(b.ordinal));
   }
   // An earlier 通读整理 already digested these chunks: its summaries cost far less to read.
   const digests = new Map<number, string>();
@@ -403,12 +452,14 @@ async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"
   }
   let picked: number[];
   if (note.kind === "question") {
-    const keys = terms(note.scope.question ?? "").slice(0, 24);
-    if (!keys.length) return [];
-    picked = inRange.map((index) => ({ index, score: keys.filter((key) => path[index].narrative.includes(key)).length }))
-      .filter(({ score }) => score >= 2).sort((a, b) => b.score - a.score || a.index - b.index).slice(0, SEARCH_LIMIT).map(({ index }) => index);
+    const keys = terms(withoutRequestWords(note.scope.question ?? "")).slice(0, 24);
+    const activeKeys = keys.length ? keys : terms(note.scope.question ?? "").slice(0, 24);
+    if (!activeKeys.length) return [];
+    const minHits = Math.min(2, activeKeys.length);
+    picked = inRange.map((index) => ({ index, score: activeKeys.filter((key) => path[index].narrative.includes(key)).length }))
+      .filter(({ score }) => score >= minHits).sort((a, b) => b.score - a.score || a.index - b.index).slice(0, SEARCH_LIMIT).map(({ index }) => index);
   } else {
-    const names = [note.scope.subject ?? "", ...(note.scope.aliases ?? [])].map((s) => s.trim()).filter((s) => s.length >= 2);
+    const names = [note.scope.subject ?? "", ...(note.scope.aliases ?? [])].map((s) => s.trim()).filter((s) => s.length >= 1);
     if (!names.length) return [];
     const hits = inRange.filter((index) => names.some((name) => path[index].narrative.includes(name) || (path[index].actionText ?? "").includes(name)));
     // Where it first appeared matters, and what happened lately matters most.
@@ -778,6 +829,8 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
             const half = Math.ceil(size / 2);
             batchSizes.splice(index, 1, half, size - half);
             parts.splice(index, 1, "", "");
+            merges.length = 0;
+            mergeBasis = "";
             for (let j = 0; j < gaps.length; j++) {
               if (gaps[j].batch > index) gaps[j] = { ...gaps[j], batch: gaps[j].batch + 1 };
             }
@@ -889,10 +942,20 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
       const messages = noteUpdateMessages(bookTitle, note, update.base, content);
       try { content = await call(messages); }
       catch (error) {
-        if (signal.aborted || !blockedReply(error)) throw error;
-        const unblocked = await unblockWith([{ ...messages[0], content: NEUTRAL + messages[0].content }, ...messages.slice(1)]);
-        if (unblocked === null) throw new NoteReplyError("refused", "把新内容合进原札记时服务一直不肯处理，换个整理模型或配个备用服务后再试；原札记没有改动。");
-        content = unblocked;
+        if (signal.aborted) throw error;
+        if (blockedReply(error)) {
+          const unblocked = await unblockWith([{ ...messages[0], content: NEUTRAL + messages[0].content }, ...messages.slice(1)]);
+          if (unblocked === null) throw new NoteReplyError("refused", "把新内容合进原札记时服务一直不肯处理，换个整理模型或配个备用服务后再试；原札记没有改动。");
+          content = unblocked;
+        } else if (retryableReply(error)) {
+          const compactMsg: ChatMessage[] = [
+            { ...messages[0], content: `${messages[0].content} 用简洁要点保留关键事实，不超过 ${NOTE_MAX} 字。` },
+            ...messages.slice(1),
+          ];
+          content = await call(compactMsg);
+        } else {
+          throw error;
+        }
       }
     }
     if (gaps.length) {
@@ -902,13 +965,14 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     const reached = coveredTo !== undefined ? { ...note.scope, to: coveredTo, toNode: routeNode }
       : update ? { ...note.scope, to: update.to } : note.scope;
     // A retried gap finishes the same update again: its reach was already moved on, and
-    // 上一版 is still the one recorded the first time.
+    // 上一版 preserves the previous saved text so any manual edits remain restorable.
     const applied = !!update && !!note.scope.previous && (note.scope.to ?? -1) >= update.from;
     const scope = update ? { ...reached, previous: applied ? note.scope.previous : { to: note.scope.to, toNode: note.scope.toNode, refs: note.refs } } : reached;
     // With gaps the parts stay, so a later retry of a gap merges again (and re-applies an update).
     const settled: NoteProgress = gaps.length ? progress() : { parts: [], total: current.progress.total };
     const updatedRefs = update && !isStory(note) ? [...new Set([...note.refs, ...refs])].sort((a, b) => a - b) : current.refs;
-    await save({ content, status: "done", scope, refs: updatedRefs, ...(update ? { previousContent: update.base } : {}), progress: settled });
+    const prevSnapshot = update ? (applied && note.content.trim() ? note.content : update.base) : undefined;
+    await save({ content, status: "done", scope, refs: updatedRefs, ...(prevSnapshot !== undefined ? { previousContent: prevSnapshot } : {}), progress: settled });
   } catch (error) {
     const failure = noteFailure(error);
     const detail = [step, failure.detail].filter(Boolean).join(" ");
@@ -926,6 +990,10 @@ export function noteWithinScope(note: Pick<CanonNote, "kind" | "scope" | "refs">
   if (through === null) return true;
   if (note.refs.some((section) => !Number.isInteger(section) || section < 0 || section > through)) return false;
   if (note.kind === "plot" || note.kind === "timeline") return Number.isInteger(note.scope.to) && note.scope.to! <= through;
+  // A note explicitly scoped to a reading ceiling `scope.through <= through` (including manual notes without literal chapter numbers) is safe.
+  if (typeof note.scope.through === "number" && Number.isInteger(note.scope.through) && note.scope.through >= 0 && note.scope.through <= through) {
+    return note.refs.length < 400;
+  }
   // Older notes truncated references at 400; their complete scope is unknown.
   // An answer this story saved (question) was asked within its reading limit even when it cites no chapter.
   return (note.refs.length > 0 || (note.kind === "question" && sameWorld)) && note.refs.length < 400;
@@ -975,8 +1043,10 @@ export interface NoteBrief { title: string; kind: NoteKind; content: string; sou
 export function askedAbout(question: string, recent: string): boolean {
   const pieces = new Set<string>();
   for (const run of withoutRequestWords(question).split(/[^\p{L}\p{N}]+/u)) for (let i = 0; i + 2 <= run.length; i++) pieces.add(run.slice(i, i + 2));
+  if (!pieces.size) return false;
+  const need = Math.min(2, pieces.size);
   let found = 0;
-  for (const piece of pieces) if (recent.includes(piece) && ++found >= 2) return true;
+  for (const piece of pieces) if (recent.includes(piece) && ++found >= need) return true;
   return false;
 }
 

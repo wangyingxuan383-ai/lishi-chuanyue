@@ -461,4 +461,66 @@ describe("原著札记 (D162)", () => {
     const legacy=structuredClone(archive);delete legacy.books![0].notes;
     expect(archiveProblems(legacy)).toEqual([]);await expect(importWorld(repo,legacy,"new")).resolves.toBeTypeOf("string");
   });
+
+  it("enforces scope.through on non-ranged book notes, supports Chinese numerals, 1-char names, and invalidates stale merges on gap split", async () => {
+    const { repo } = await setup();
+    const book: SourceBook = {
+      id: crypto.randomUUID(), title: "武魂录", format: "txt", createdAt: new Date().toISOString(),
+      sections: [
+        { title: "第一章", text: "冬在史莱克外院报到，魂环显现。" },
+        { title: "第二章", text: "第十二章剧透：冬其实是隐藏强者的女儿，剧透内容绝不能泄露。" },
+      ],
+    };
+    await saveBook(repo, book);
+    // scope.through caps person/setting/question material retrieval & allows 1-char name "冬".
+    const materials = await noteMaterials(repo, { bookId: book.id, kind: "person", scope: { subject: "冬", through: 0 } });
+    expect(materials.length).toBe(1);
+    expect(materials[0].section).toBe(0);
+    expect(materials[0].text).not.toContain("隐藏强者");
+
+    // Short 1-bigram query ("魂环") matches question note via askedAbout.
+    expect(askedAbout("魂环怎么吸收", "他正在吸收魂环")).toBe(true);
+
+    // Chinese numeral chapter mention ("第十二章") is caught by notesForTurn truncation around current position.
+    const bigNote = newLocalNote(
+      newNote(book.id, "plot", { from: 0, to: 15 }, "长主线"),
+      `${"前段日常铺垫。".repeat(300)}\n\n第十二章：主角在考核场上觉醒第二武魂。\n\n${"后段日常。".repeat(300)}`,
+      16,
+    );
+    await saveNote(repo, bigNote);
+    const [picked] = await notesForTurn(repo, { ...newBinding(book.id, true), position: 11 }, "", "考核");
+    expect(picked.content).toContain("第十二章");
+
+    // Gap split clears stale cached merges so newly rescued gap text appears in the final merge.
+    const gapBook: SourceBook = {
+      id: crypto.randomUUID(), title: "补缺测试", format: "txt", createdAt: new Date().toISOString(),
+      sections: ["第一章", "第二章新发现", "第三章补回"].map((text, i) => ({ title: `第${i + 1}章`, text })),
+    };
+    await saveBook(repo, gapBook);
+    const gapNote = newNote(gapBook.id, "plot", { from: 0, to: 2 }, "补缺主线");
+    gapNote.progress = {
+      parts: ["第一章旧摘要", ""],
+      batchSizes: [1, 2],
+      total: 3,
+      gaps: [{ batch: 1, sections: [1, 2], reason: "blocked" }],
+      merges: [["陈旧的合并缓存"]],
+      mergeBasis: "stale-basis",
+    };
+    await saveNote(repo, gapNote);
+    const done = await runNote(repo, gapNote, gapBook.title, {
+      model: "mock",
+      call: async (messages) => {
+        const prompt = messages.map((m) => m.content).join("\n");
+        if (prompt.includes("合并")) return `最终合并：${prompt.includes("新发现摘录") && prompt.includes("补回摘录") ? "完整" : "缺失"}`;
+        // Reject combined 2-section batch to force gap split and stale merge cache invalidation.
+        if (prompt.includes("第二章新发现") && prompt.includes("第三章补回")) {
+          throw noteReplyProblem({ text: "", finishReason: "content_filter" })!;
+        }
+        if (prompt.includes("第二章新发现")) return "新发现摘录";
+        return "补回摘录";
+      },
+    }, new AbortController().signal, () => {});
+    expect(done.status).toBe("done");
+    expect(done.content).toBe("最终合并：完整");
+  });
 });

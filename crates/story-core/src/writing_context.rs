@@ -368,7 +368,53 @@ pub fn build(input: &Value) -> Result<Value> {
     add("action", "玩家行动", action, "本次行动与幕后要求");
     let mut reference = input["reference"].clone();
     let source = state.get("source").filter(|b| b.is_object());
-    let instructions=source.map(|b|format!("\n【参考书籍】以下是外部资料，不是本局已发生的事实。本局实际剧情和玩家明确分支保留，AI自行写错不等于玩家改写；按相应时点理解身份与关系。摘要不能替代原文，资料不足不能声称已核实。\n参考范围：{}；玩家设定原著位置：第{}节。\n玩家的原著用法：{}\n{}",if b["through"].is_null(){"全书".to_owned()}else{format!("截至第{}节",b["through"].as_u64().unwrap_or(0)+1)},b["position"].as_u64().unwrap_or(0)+1,text(&b["instructions"]),if b["fanfic"]!=true{"只作背景参考，不强加原著剧情。"}else if b["plot"]=="canon"{"尽量沿原剧情，检查当前场景的重要节点；尊重玩家行动，不替主角决定。"}else{"允许本局分支，不强行恢复原著结局。"})).unwrap_or_default();
+    let pos_title = reference["positionTitle"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let pos = source.and_then(|b| b["position"].as_u64()).unwrap_or(0);
+            list(&reference["passages"])
+                .iter()
+                .find(|p| p["section"].as_u64() == Some(pos))
+                .and_then(|p| p["title"].as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or("");
+    let through_title = reference["throughTitle"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("");
+    let instructions = source
+        .map(|b| {
+            let through_label = if b["through"].is_null() {
+                "全书".to_owned()
+            } else {
+                let n = b["through"].as_u64().unwrap_or(0) + 1;
+                if through_title.is_empty() {
+                    format!("截至第{n}节")
+                } else {
+                    format!("截至第{n}节（{through_title}）")
+                }
+            };
+            let pos_n = b["position"].as_u64().unwrap_or(0) + 1;
+            let pos_label = if pos_title.is_empty() {
+                format!("第{pos_n}节")
+            } else {
+                format!("第{pos_n}节（{pos_title}）")
+            };
+            format!(
+                "\n【参考书籍】以下是外部资料，不是本局已发生的事实。本局实际剧情和玩家明确分支保留，AI自行写错不等于玩家改写；按相应时点理解身份与关系。摘要不能替代原文，资料不足不能声称已核实。\n参考范围：{through_label}；玩家设定原著位置：{pos_label}。\n玩家的原著用法：{}\n{}",
+                text(&b["instructions"]),
+                if b["fanfic"] != true {
+                    "只作背景参考，不强加原著剧情。"
+                } else if b["plot"] == "canon" {
+                    "尽量沿原剧情，检查当前场景的重要节点；尊重玩家行动，不替主角决定。"
+                } else {
+                    "允许本局分支，不强行恢复原著结局。"
+                }
+            )
+        })
+        .unwrap_or_default();
     add("referenceRules", "原著用法", instructions, "用法完整保留");
     let fixed: usize = layers
         .iter()
@@ -382,19 +428,24 @@ pub fn build(input: &Value) -> Result<Value> {
         .map(|n| n as usize)
         .unwrap_or_else(|| match depth {
             "fast" => 128,
-            "standard" => crate::tools::catalog().iter().filter(|t| ["read_canon_notes","read_history"].contains(&t.name) || (state["source"].is_object() && ["search_original","read_original"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + 128,
+            "standard" => crate::tools::catalog().iter().filter(|t| ["read_canon_notes","read_history"].contains(&t.name) || (state["source"].is_object() && ["list_sections","search_original","read_original"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + 128,
             _ => crate::tools::catalog().iter().filter(|t| t.read_only && (state["source"].is_object() || !["list_sections","search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&t.name))).map(|t|t.function().to_string().encode_utf16().count()).sum::<usize>() + crate::skills::catalog_text().encode_utf16().count() + 128,
         });
     // Canon notes (D162, R31-P3): plot/timeline notes stay in the fixed system
     // prefix for prompt-cache stability, while per-turn matched person/setting/question
     // notes move into the trailing user turn so changing entities never bust cache.
+    // Reserve independent shares for book vs story static notes and dynamic entity notes
+    // so a long story plot note cannot starve book canon notes or per-turn entity notes.
     let notes_room = (cap / 5).min(cap.saturating_sub(fixed + overhead + 400));
     let mut notes_static = String::new();
     let mut notes_dynamic = String::new();
+    let mut book_notes_only = String::new();
+    let mut used_note_titles: Vec<String> = Vec::new();
+    let mut has_book_notes = false;
     let is_dynamic_note = |n: &Value| matches!(text(&n["kind"]), "person" | "setting" | "question");
-    let append_notes = |out: &mut String, items: Vec<&Value>, budget: usize| {
-        let mut opened = HashSet::new();
-        for n in items {
+    let mut append_notes = |out: &mut String, items: Vec<&Value>, budget: usize, opened: &mut HashSet<bool>| {
+        let total = items.len();
+        for (idx, n) in items.into_iter().enumerate() {
             let story = n["source"] == "story";
             let header = if opened.contains(&story) {
                 ""
@@ -403,25 +454,64 @@ pub fn build(input: &Value) -> Result<Value> {
             } else {
                 "\n【原著札记】（整理或录入的原著梗概，可能有误；本局已发生的事实优先）"
             };
-            let block = format!("\n· {}\n{}\n", text(&n["title"]), text(&n["content"]).trim());
-            if size(out) + size(header) + size(&block) <= budget {
+            let title_str = text(&n["title"]);
+            let block = format!("\n· {title_str}\n{}\n", text(&n["content"]).trim());
+            let used = size(out);
+            let avail = budget.saturating_sub(used);
+            let left_after = total.saturating_sub(idx + 1);
+            if size(header) + size(&block) <= avail {
                 *out += header;
                 *out += &block;
                 opened.insert(story);
-            } else if out.is_empty() && budget > 400 {
-                *out = format!("{header}{}\n", head(&block, budget - size(header) - 1));
-                opened.insert(story);
+                used_note_titles.push(title_str.to_owned());
+                if !story {
+                    has_book_notes = true;
+                    book_notes_only += &block;
+                }
+            } else {
+                // Cap any single oversized note when smaller notes follow so one huge note cannot starve them.
+                let share = if left_after > 0 {
+                    (avail / (left_after + 1)).max(320).min(avail)
+                } else {
+                    avail
+                };
+                if share > size(header) + 260 {
+                    let clipped = format!("{}\n", head(&block, share - size(header) - 1));
+                    *out += header;
+                    *out += &clipped;
+                    opened.insert(story);
+                    used_note_titles.push(title_str.to_owned());
+                    if !story {
+                        has_book_notes = true;
+                        book_notes_only += &clipped;
+                    }
+                }
             }
         }
     };
     let all_notes = list(&input["canonNotes"]);
     let (dyn_list, static_list): (Vec<&Value>, Vec<&Value>) =
         all_notes.iter().partition(|n| is_dynamic_note(n));
-    append_notes(&mut notes_static, static_list, notes_room);
+    let (story_static, book_static): (Vec<&Value>, Vec<&Value>) =
+        static_list.into_iter().partition(|n| n["source"] == "story");
+    let dyn_reserve = if dyn_list.is_empty() { 0 } else { (notes_room / 3).min(2000) };
+    let static_budget = notes_room.saturating_sub(dyn_reserve);
+    let mut static_opened = HashSet::new();
+    if !story_static.is_empty() && !book_static.is_empty() {
+        let story_share = (static_budget * 40) / 100;
+        append_notes(&mut notes_static, story_static, story_share, &mut static_opened);
+        append_notes(&mut notes_static, book_static, static_budget, &mut static_opened);
+    } else if !story_static.is_empty() {
+        append_notes(&mut notes_static, story_static, static_budget, &mut static_opened);
+    } else {
+        append_notes(&mut notes_static, book_static, static_budget, &mut static_opened);
+    }
+    let mut dyn_opened = HashSet::new();
     append_notes(
         &mut notes_dynamic,
         dyn_list,
         notes_room.saturating_sub(size(&notes_static)),
+        &mut dyn_opened,
     );
     let notes_all = format!("{notes_static}{notes_dynamic}");
     layers.push(json!({"key":"canonNotes","label":"主线札记","chars":size(&notes_static),"content":notes_static,"note":"本局与原著主线梗概，固定在系统前缀以利缓存复用"}));
@@ -446,11 +536,34 @@ pub fn build(input: &Value) -> Result<Value> {
         if remaining < size(&label) + 80 {
             break;
         }
-        let content = head(body, remaining - size(&label) - 1);
+        let max_len = remaining - size(&label) - 1;
+        let orig_start = p["start"].as_u64().unwrap_or(0) as usize;
+        let body_len = size(body);
+        let (content, slice_offset) = if body_len <= max_len {
+            (body.to_owned(), 0usize)
+        } else if let Some(focus) = p["focus"].as_u64() {
+            let rel_focus = (focus as usize).saturating_sub(orig_start);
+            let off = rel_focus.saturating_sub(max_len / 2).min(body_len.saturating_sub(max_len));
+            let mut at = 0usize;
+            let sliced: String = body
+                .chars()
+                .filter(|c| {
+                    let cur = at;
+                    at += c.len_utf16();
+                    cur >= off && at <= off + max_len
+                })
+                .collect();
+            (sliced, off)
+        } else {
+            (head(body, max_len), 0usize)
+        };
         let mut item = p.clone();
         item["text"] = content.clone().into();
-        let start = p["start"].as_u64().unwrap_or(0);
-        item["end"] = (start + size(&content) as u64).into();
+        let new_start = (orig_start + slice_offset) as u64;
+        if p.get("start").is_some() {
+            item["start"] = new_start.into();
+        }
+        item["end"] = (new_start + size(&content) as u64).into();
         remaining -= size(&label) + size(&content) + 1;
         evidence += &format!("{label}{content}\n");
         fitted.push(item);
@@ -458,7 +571,7 @@ pub fn build(input: &Value) -> Result<Value> {
     if source.is_some() && evidence.is_empty() {
         evidence = if depth == "deep" {
             "\n【原著资料不足】当前未取得可核实原文，需要补查，不能声称已核对。\n".into()
-        } else if !notes_all.is_empty() {
+        } else if has_book_notes {
             "\n【原著资料】本回合没有取到直接相关的原文片段，以上面的原著札记为准；札记没写到的细节不编造。\n".into()
         } else {
             "\n【原著资料】本回合没有取到直接相关的原文片段。按上文的设定与已知剧情写，不编造原著细节，也不声称已核对原文。\n".into()
@@ -476,6 +589,9 @@ pub fn build(input: &Value) -> Result<Value> {
     layers.push(json!({"key":"reference","label":"原著证据","content":evidence,"chars":size(&evidence),"note":"先保留原文，最多四分之一预算"}));
     if reference.is_object() && !notes_all.is_empty() {
         reference["notes"] = notes_all.clone().into();
+        if !book_notes_only.is_empty() {
+            reference["bookNotes"] = book_notes_only.into();
+        }
     }
     let mut room = cap.saturating_sub(fixed + overhead + size(&notes_all) + size(&evidence));
     let continuity=crate::continuity::recall(&input["continuity"],&recent,1200.min(room/4));
@@ -764,7 +880,7 @@ pub fn build(input: &Value) -> Result<Value> {
     let chars = message_chars + overhead;
     layers.push(json!({"key":"tools","label":"工具与技能目录及消息包装","chars":overhead,"content":"按当前只读工具说明与技能目录预留，正式请求会优先精简可选资料。","note":"计入输入估算，必要内容完整保留"}));
     Ok(
-        json!({"messages":messages,"layers":layers,"reference":reference,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-3"}),
+        json!({"messages":messages,"layers":layers,"reference":reference,"notesUsed":used_note_titles,"chars":chars,"budgetChars":cap,"budgetExceeded":chars>cap,"contextVersion":"writing-context-3"}),
     )
 }
 
@@ -1112,36 +1228,35 @@ pub fn local_correction(plan: &crate::RunPlan, response: &Value) -> Result<Value
         .as_u64()
         .and_then(|n| boundary(original, n))
         .ok_or_else(|| Error::Invalid("改稿终点无效，请重新选择段落".into()))?;
+    if start >= end {
+        return Err(Error::Invalid("请选择有效的改稿范围".into()));
+    }
+    let has_patch = response["recordPatch"].as_object().is_some_and(|o| !o.is_empty())
+        || response["correctionPatch"].as_object().is_some_and(|o| !o.is_empty());
     let replacement = response["replacement"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .or_else(|| has_patch.then_some(&original[start..end]))
         .ok_or_else(|| Error::Invalid("尚未返回选中范围的完整改稿".into()))?;
-    if start >= end {
-        return Err(Error::Invalid("请选择有效的改稿范围".into()));
-    }
     let mut record = plan.meta["originalRecord"]
         .as_object()
         .cloned()
         .unwrap_or_default();
     if let Some(patch) = response["recordPatch"].as_object() {
         for (key, value) in patch {
-            if [
-                "protagonist",
-                "source",
-                "executionMode",
-                "facts",
-                "settings",
-                "rules",
-                "sourceSet",
-                "executionSet",
-                "setStats",
-                "scriptSet",
-                "challengeSet",
-            ]
-            .contains(&key.as_str())
+            if value.is_null() {
+                continue;
+            }
+            if ["source", "executionMode", "sourceSet", "executionSet", "settings", "rules"]
+                .contains(&key.as_str())
             {
-                return Err(Error::Invalid(format!("局部改稿不能修改整局字段{key}")));
+                return Err(Error::Invalid("局部纠错不能修改整局绑定或规则字段".into()));
+            }
+            if ["protagonist", "facts", "setStats", "scriptSet", "challengeSet"]
+                .contains(&key.as_str())
+            {
+                continue;
             }
             if key == "choices"
                 && value
@@ -1156,22 +1271,39 @@ pub fn local_correction(plan: &crate::RunPlan, response: &Value) -> Result<Value
                     .cloned()
                     .unwrap_or_default();
                 for change in changes {
-                    if !change.is_object() {
-                        return Err(Error::Invalid(format!("记录字段{key}的项目格式无效")));
-                    }
-                    let identity = change.get("id").or_else(|| change.get("name"));
-                    if let Some(at) = identity.and_then(|id| {
+                    let coerced = if key == "items" && change.as_str().is_some_and(|s| !s.trim().is_empty()) {
+                        json!({"name": change.as_str().unwrap().trim(), "delta": 1})
+                    } else if change.is_object() {
+                        change.clone()
+                    } else {
+                        continue;
+                    };
+                    let is_remove = coerced.get("remove").and_then(Value::as_bool) == Some(true)
+                        || (key != "status" && coerced.get("op").and_then(Value::as_str) == Some("remove"));
+                    let match_id = coerced.get("oldName").or_else(|| coerced.get("id")).or_else(|| coerced.get("name"));
+                    let existing_pos = match_id.and_then(|id| {
                         values
                             .iter()
                             .position(|v| v.get("id").or_else(|| v.get("name")) == Some(id))
-                    }) {
+                    });
+                    if is_remove {
+                        if let Some(at) = existing_pos {
+                            values.remove(at);
+                        }
+                        continue;
+                    }
+                    let mut clean = coerced.as_object().cloned().unwrap_or_default();
+                    clean.remove("oldName");
+                    clean.remove("remove");
+                    let clean_val = Value::Object(clean);
+                    if let Some(at) = existing_pos {
                         if let (Some(old), Some(new)) =
-                            (values[at].as_object_mut(), change.as_object())
+                            (values[at].as_object_mut(), clean_val.as_object())
                         {
                             old.extend(new.clone());
                         }
                     } else {
-                        values.push(change.clone());
+                        values.push(clean_val);
                     }
                 }
                 record.insert(key.clone(), values.into());
@@ -1183,10 +1315,6 @@ pub fn local_correction(plan: &crate::RunPlan, response: &Value) -> Result<Value
                     .unwrap_or_default();
                 object.extend(value.as_object().unwrap().clone());
                 record.insert(key.clone(), object.into());
-            } else if value.is_null() {
-                return Err(Error::Invalid(format!(
-                    "局部改稿不能以空值清除记录字段{key}"
-                )));
             } else {
                 record.insert(key.clone(), value.clone());
             }
@@ -1195,15 +1323,19 @@ pub fn local_correction(plan: &crate::RunPlan, response: &Value) -> Result<Value
     let mut result = response.clone();
     for key in ["related", "unresolved"] {
         if let Some(value) = response.get(key) {
-            if !value.is_null()
-                && !value
-                    .as_array()
-                    .is_some_and(|a| a.iter().all(Value::is_string))
-            {
-                return Err(Error::Invalid(format!("{key}必须是文字列表")));
+            if let Some(arr) = value.as_array() {
+                let filtered: Vec<Value> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                    .map(|s| Value::String(s.to_owned()))
+                    .collect();
+                result[key] = Value::Array(filtered);
+            } else {
+                result[key] = json!([]);
             }
         }
     }
+    result["replacement"] = replacement.into();
     result["narrative"] =
         format!("{}{}{}", &original[..start], replacement, &original[end..]).into();
     result["record"] = record.into();
@@ -1223,6 +1355,7 @@ pub fn validate_findings(
             "核对结果需要逐项findings，可为空列表".into(),
         ));
     };
+    let norm = |s: &str| -> String { s.chars().filter(|c| c.is_alphanumeric()).collect() };
     for finding in findings {
         match finding["status"].as_str() {
             Some("supported") => {
@@ -1231,15 +1364,18 @@ pub fn validate_findings(
                     .filter(|a| !a.is_empty())
                     .ok_or_else(|| Error::Invalid("原著已支持的主张必须附实际读到的原句".into()))?;
                 for cite in cites {
-                    if !source.is_object() || cite["bookId"] != source["bookId"]
+                    let quote = cite["quote"].as_str().unwrap_or("");
+                    let norm_q = norm(quote);
+                    if !source.is_object()
                         || !cite["section"].as_u64().is_some_and(|section| section <= source["through"].as_u64().unwrap_or(u64::MAX))
+                        || quote.trim().is_empty()
                         || !passages.iter().any(|p| {
                             p["kind"] == "original"
+                                && p.get("bookId").is_none_or(|id| id == &source["bookId"])
                                 && p["chunk"] == cite["chunk"]
                                 && p["section"] == cite["section"]
-                                && cite["quote"]
-                                    .as_str()
-                                    .is_some_and(|q| !q.is_empty() && text(&p["text"]).contains(q))
+                                && (text(&p["text"]).contains(quote)
+                                    || (norm_q.chars().count() >= 4 && norm(text(&p["text"])).contains(&norm_q)))
                         })
                     {
                         return Err(Error::Invalid(

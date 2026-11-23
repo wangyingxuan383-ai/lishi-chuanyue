@@ -14,16 +14,37 @@ export function decodeText(bytes: Uint8Array, encoding: TextEncoding = "auto"): 
   }
   return clean(new TextDecoder(chosen, { fatal: true }).decode(bytes).replace(/^\uFEFF/, ""));
 }
+const VOLUME_HEADING_RE = /^(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇](?!.*第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折])[^\n]{0,65}|part\s+[\divxlc]+[^\n]{0,65})$/i;
+const CHAPTER_HEADING_RE = /^(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折][^\n]{0,65}|chapter\s+[\divxlc]+[^\n]{0,65})$/i;
+const SECTION_LINE_RE = /^\s*(?![^\n]*。$)(?:第[零〇一二三四五六七八九十百千万两\d]+[卷章节回部篇话幕折][^\n]{0,65}|(?:序章|序言|楔子|尾声|后记|前言|引子)|(?:chapter|part)\s+[\divxlc]+[^\n]{0,65})\s*$/i;
+const HAS_VOLUME_MARKER_RE = /(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇]|\bpart\s+[\divxlc]+\b)/i;
+
+function isVolumeHeading(line: string): boolean {
+  return VOLUME_HEADING_RE.test(line.trim());
+}
+
+function withVolume(volume: string, heading: string): string {
+  const cleanHeading = heading.trim();
+  const cleanVolume = volume.trim();
+  if (!cleanVolume || !cleanHeading || !CHAPTER_HEADING_RE.test(cleanHeading)) return cleanHeading;
+  if (cleanHeading.includes(cleanVolume) || HAS_VOLUME_MARKER_RE.test(cleanHeading)) return cleanHeading;
+  return `${cleanVolume} · ${cleanHeading}`;
+}
+
 export async function textSections(text: string, signal?: AbortSignal): Promise<BookSection[]> {
   const sections: BookSection[] = [];
-  let title = "正文", lines: string[] = [];
+  let title = "正文", volume = "", lines: string[] = [];
   const flush = () => { const body = clean(lines.join("\n")); if (body) sections.push({ title, text: body }); lines = []; };
   const source = text.split("\n");
   for (let i = 0; i < source.length; i++) {
     if (i % 2000 === 0) { await tick(); checkCancelled(signal); }
     const line = source[i];
-    if (/^\s*(?:第[零〇一二三四五六七八九十百千万两\d]+[卷章节回部篇][^\n]{0,65}|(?:序章|序言|楔子|尾声|后记|前言|引子)|(?:chapter|part)\s+[\divxlc]+[^\n]{0,65})\s*$/i.test(line)) { flush(); title = line.trim(); }
-    else lines.push(line);
+    if (SECTION_LINE_RE.test(line)) {
+      flush();
+      const trimmed = line.trim();
+      if (isVolumeHeading(trimmed)) { volume = trimmed; title = trimmed; }
+      else title = withVolume(volume, trimmed);
+    } else lines.push(line);
   }
   flush();
   return sections;
@@ -106,13 +127,18 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
       // Paragraph styles/headings delimit sections; tables remain in document order.
       const blocks = doc.match(/<w:(p|tbl)(?:\s[^>]*)?>[\s\S]*?<\/w:\1>/g) ?? [];
       let current: BookSection = { title: "正文", text: "" };
+      let volume = "";
       for (const [i, block] of blocks.entries()) {
         if (i % 256 === 0) await tick();
         checkCancelled(signal);
         const body = textOf(`<root xmlns:w="w">${block}</root>`, true);
         const style = /<w:pStyle[^>]+w:val=["']([^"']+)["']/i.exec(block)?.[1];
         const heading = style !== undefined && headingStyles.has(style) || /<w:outlineLvl[^>]+w:val=["'][0-8]["']/.test(block);
-        if (heading && body) { if (current.text) sections.push(current); current = { title: body, text: "" }; }
+        if (heading && body) {
+          if (current.text) sections.push(current);
+          if (isVolumeHeading(body)) { volume = body; current = { title: body, text: "" }; }
+          else current = { title: withVolume(volume, body), text: "" };
+        }
         else if (body) current.text += (current.text ? "\n\n" : "") + body;
       }
       if (current.text) sections.push(current);
@@ -145,11 +171,26 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         const ncx = manifest.get(pkg?.spine?.["@_toc"]) ?? [...manifest.values()].find((item) => item["@_media-type"] === "application/x-dtbncx+xml");
         if (ncx) {
           const ncxPath = resolvePath(ncx["@_href"]);
-          const walk = (points: any) => { for (const point of list<any>(points)) { const href = point.content?.["@_src"], label = point.navLabel?.text; if (typeof href === "string" && typeof label === "string") { const path = resolvePath(href, ncxPath); if (!toc.has(path)) toc.set(path, label); } walk(point.navPoint); } };
+          const walk = (points: any, parentVolume = "") => {
+            for (const point of list<any>(points)) {
+              const href = point.content?.["@_src"], rawLabel = point.navLabel?.text;
+              const label = typeof rawLabel === "string" ? rawLabel.trim() : "";
+              const nextVolume = label && isVolumeHeading(label) ? label : parentVolume;
+              if (typeof href === "string" && label) {
+                const path = resolvePath(href, ncxPath);
+                const prev = toc.get(path);
+                if (!prev || (isVolumeHeading(prev) && !isVolumeHeading(label))) {
+                  toc.set(path, withVolume(parentVolume, label));
+                }
+              }
+              walk(point.navPoint, nextVolume);
+            }
+          };
           walk(parser.parse(xml(ncxPath)).ncx?.navMap?.navPoint);
         }
       }
       const spine = list<any>(pkg?.spine?.itemref);
+      let epubVolume = "";
       for (const itemref of spine) {
         checkCancelled(signal); await tick();
         const item = manifest.get(itemref["@_idref"]);
@@ -157,7 +198,16 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         const path = resolvePath(item["@_href"]);
         const value = xml(path), text = textOf(value);
         const heading = /<h[1-6](?:\s[^>]*)?>([\s\S]*?)<\/h[1-6]>/i.exec(value)?.[1];
-        if (text) sections.push({ title: toc.get(path) || (heading ? textOf(`<root>${heading}</root>`) : `第 ${sections.length + 1} 节`), text });
+        const rawTitle = (toc.get(path) || (heading ? textOf(`<root>${heading}</root>`) : "")).trim();
+        if (rawTitle && isVolumeHeading(rawTitle)) {
+          epubVolume = rawTitle;
+          // Skip bare volume cover pages whose text only repeats the volume heading.
+          if (!text || text === rawTitle) continue;
+        }
+        if (text) {
+          const secTitle = rawTitle ? withVolume(epubVolume, rawTitle) : `第 ${sections.length + 1} 节`;
+          sections.push({ title: secTitle, text });
+        }
         progress(`正在读取章节…${sections.length}`);
       }
     } else throw new Error("不支持这种压缩文件，请选择 EPUB 或 DOCX");

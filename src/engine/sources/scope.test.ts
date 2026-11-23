@@ -40,15 +40,15 @@ async function setup(sectionText = (i: number) => `第${i + 1}章：青铜钥匙
 describe("资料范围的取材 (D184)", () => {
   it("names the choice in the row, and an empty choice of notes is 自动", () => {
     expect(scopeLabel({ mode: "auto" })).toBe("自动");
-    expect(scopeLabel({ mode: "chapters", from: 2, to: 4 })).toBe("第 3～5 章");
-    expect(scopeLabel({ mode: "chapters", from: 2, to: 2 })).toBe("第 3 章");
+    expect(scopeLabel({ mode: "chapters", from: 2, to: 4 })).toBe("第 3～5 节");
+    expect(scopeLabel({ mode: "chapters", from: 2, to: 2 })).toBe("第 3 节");
     expect(scopeLabel({ mode: "notes", noteIds: ["a", "b"] })).toBe("2 份札记");
     expect(isChosen({ mode: "notes", noteIds: [] })).toBe(false);
     // A title that already says which chapter it is is not numbered twice.
     expect(chapterLabel(2, "第3章 渡口")).toBe("第3章 渡口");
     expect(chapterLabel(2, "第三章 渡口")).toBe("第三章 渡口");
-    expect(chapterLabel(2, "渡口")).toBe("第 3 章 · 渡口");
-    expect(chapterLabel(2)).toBe("第 3 章");
+    expect(chapterLabel(2, "渡口")).toBe("第 3 节 · 渡口");
+    expect(chapterLabel(2)).toBe("第 3 节");
   });
 
   it("lists only the chapters the story may read, with their length", async () => {
@@ -139,7 +139,7 @@ describe("各功能按范围发送 (D184)", () => {
     expect(plan.meta.sourceScope).toEqual({ mode: "chapters", from: 2, to: 3 });
     expect(plan.reference.passages.map((p) => p.section)).toEqual([2, 3]);
     expect(plan.messages[1].content).toContain(s.book.sections[2].text);
-    expect(plan.messages[1].content).toContain("【资料范围】这次只用原著第 3～4 章，查原文也只在这几章里。");
+    expect(plan.messages[1].content).toContain("【资料范围】这次只用原著第 3～4 节，查原文也只在这几节里。");
     await s.game.runCanonCorrection(request, () => {}).done.catch(() => {});
     expect((s.plans[1] as { meta: Record<string, unknown> }).meta.sourceScope).toBeUndefined();
   });

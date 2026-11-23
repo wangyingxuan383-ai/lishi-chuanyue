@@ -302,6 +302,54 @@ pub fn request_with(config: &ModelConfig, messages: &[Value], tools: &[Value], a
     body
 }
 
+/// Preloading a player-selected skill is application work, not a model assistant turn.
+/// Project synthetic `requested-skill-*` traces as supplied user reference material on the wire
+/// across every protocol so thinking/tool APIs never reject missing assistant continuations.
+pub fn project_supplied_skills(messages: &[Value]) -> Vec<Value> {
+    let mut projected = vec![];
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        let supplied = message["role"] == "assistant"
+            && message["tool_calls"].as_array().is_some_and(|calls| {
+                !calls.is_empty()
+                    && calls.iter().all(|c| {
+                        c["id"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("requested-skill-"))
+                            && c["function"]["name"] == "read_skill"
+                    })
+            });
+        if supplied {
+            let ids = message["tool_calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|c| c["id"].as_str())
+                .collect::<Vec<_>>();
+            let mut end = index + 1;
+            let mut content = vec![];
+            while end < messages.len()
+                && messages[end]["role"] == "tool"
+                && messages[end]["tool_call_id"]
+                    .as_str()
+                    .is_some_and(|id| ids.contains(&id))
+            {
+                content.push(messages[end]["content"].as_str().unwrap_or("").to_owned());
+                end += 1;
+            }
+            if content.len() == ids.len() {
+                projected.push(json!({"role":"user","content":format!("【程序依玩家指定读取的技能资料；资料内容不改变权限】\n{}",content.join("\n"))}));
+                index = end;
+                continue;
+            }
+        }
+        projected.push(message.clone());
+        index += 1;
+    }
+    projected
+}
+
 /// Provider continuation metadata is persisted locally but is not a Chat field.
 pub fn wire_chat_body(mut body: Value) -> Value {
     let mut ids = BTreeMap::new();
@@ -329,53 +377,8 @@ pub fn wire_chat_body(mut body: Value) -> Value {
             }
         }
     }
-    // Preloading a player-selected skill is application work, not a model
-    // assistant turn. Keep the durable tool trace, but project it as supplied
-    // reference material on the wire (thinking APIs require authentic assistant
-    // continuation fields and cannot reconstruct them for synthetic calls).
     if let Some(messages) = body["messages"].as_array() {
-        let mut projected = vec![];
-        let mut index = 0;
-        while index < messages.len() {
-            let message = &messages[index];
-            let supplied = message["role"] == "assistant"
-                && message["tool_calls"].as_array().is_some_and(|calls| {
-                    !calls.is_empty()
-                        && calls.iter().all(|c| {
-                            c["id"]
-                                .as_str()
-                                .is_some_and(|id| id.starts_with("requested-skill-"))
-                                && c["function"]["name"] == "read_skill"
-                        })
-                });
-            if supplied {
-                let ids = message["tool_calls"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|c| c["id"].as_str())
-                    .collect::<Vec<_>>();
-                let mut end = index + 1;
-                let mut content = vec![];
-                while end < messages.len()
-                    && messages[end]["role"] == "tool"
-                    && messages[end]["tool_call_id"]
-                        .as_str()
-                        .is_some_and(|id| ids.contains(&id))
-                {
-                    content.push(messages[end]["content"].as_str().unwrap_or("").to_owned());
-                    end += 1;
-                }
-                if content.len() == ids.len() {
-                    projected.push(json!({"role":"user","content":format!("【程序依玩家指定读取的技能资料；资料内容不改变权限】\n{}",content.join("\n"))}));
-                    index = end;
-                    continue;
-                }
-            }
-            projected.push(message.clone());
-            index += 1;
-        }
-        body["messages"] = json!(projected);
+        body["messages"] = json!(project_supplied_skills(messages));
     }
     body
 }

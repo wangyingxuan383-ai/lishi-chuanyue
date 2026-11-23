@@ -14,8 +14,22 @@ import { buzz } from "../../app/motion";
 import type { Gen } from "./types";
 
 export type Restore = { mode: ActionMode; text: string; note: string };
-export type Notice = { text: string; actions: { label: string; run: () => void }[]; runId?: string; failure?: Failure; failures?: Failure[]; reason?: FailReason; detail?: string; partialText?: string; proseSaved?: boolean };
+export type Notice = { text: string; actions: { label: string; run: () => void }[]; runId?: string; failure?: Failure; failures?: Failure[]; reason?: FailReason; detail?: string; partialText?: string; proseSaved?: boolean; restore?: Restore };
 type SavedRun = Pick<SavedExecution, "id" | "status" | "error"> & Partial<SavedExecution>;
+
+function hasRestoreWords(r?: Restore | null): r is Restore {
+  return !!r && !!(r.text.trim() || r.note.trim());
+}
+
+function restoreFromSaved(run?: SavedRun): Restore | null {
+  const a = run?.action;
+  if (!a) return null;
+  const text = a.text?.trim() ? a.text : "";
+  const note = a.directorNote?.trim() ? a.directorNote : "";
+  if (!text && !note) return null;
+  if ((a.mode === "continue" || a.mode === "skip") && !note) return null;
+  return { mode: a.mode, text, note };
+}
 
 function toolProgressLabel(tool: string): string {
   if (/original|section|reference/i.test(tool)) return "正在翻查原著…";
@@ -76,7 +90,9 @@ export interface GenerationDeps {
   /** Height to keep while the dock folds away (null when it cannot be measured). */
   streamFloor: () => number | undefined;
   /** Gives a failed action back to the input box. */
-  restoreDraft: (restore: Restore) => void;
+  restoreDraft: (restore: Restore, force?: boolean) => void;
+  /** Clears an auto-restored draft right before NoticeCard retries that exact saved run. */
+  clearRestoredDraft?: (restore: Restore) => void;
   /** A passage was written. */
   onDone: (node: StoryNode) => void;
   /** Anything else holding the story (the assistant, a request in flight). */
@@ -107,6 +123,7 @@ export function useGeneration(d: GenerationDeps) {
   const lastWords = useRef(0);
   const streamedText = useRef("");
   const reachedOrganizing = useRef(false);
+  const savedActions = useRef<Map<string, Restore>>(new Map());
   const screenActive = useRef(true);
   const recoveryNoticeVersion = useRef(0);
   const deps = useRef(d);
@@ -192,22 +209,30 @@ export function useGeneration(d: GenerationDeps) {
     } else if (e.type === "failed") {
       const partialText = streamedText.current.trim() || undefined;
       const proseSaved = reachedOrganizing.current;
+      const keptRestore = hasRestoreWords(restore)
+        ? restore
+        : (e.runId ? savedActions.current.get(e.runId) ?? null : null);
+      if (e.runId && keptRestore) savedActions.current.set(e.runId, keptRestore);
       streamedText.current = "";
       reachedOrganizing.current = false;
       resumedAutoplay.current = false;
       setAuto(null);
       handle.current = null;
       setGen(null);
-      // A paused or stopped run still holds the action; giving it back would invite sending it twice.
       setExecutionStatus("");
-      if (restore && !e.runId) deps.current.restoreDraft(restore);
+      // Restore the player's prompt back into an empty input box whenever the turn errored before
+      // prose was saved (or cannot resume in place), so tapping 发送/继续 never loses their input.
+      const nonResumable = ["setup", "auth", "unsupported", "stale", "context"].includes(e.reason);
+      if (keptRestore && (!e.runId || nonResumable || (!proseSaved && e.reason !== "cancelled"))) {
+        deps.current.restoreDraft(keptRestore, false);
+      }
       if (e.reason !== "cancelled" && e.reason !== "limit") { failures.current++; buzz(game.platform); }
-      setNotice(failureNotice({ reason: e.reason, status: e.status, detail: e.detail, runId: e.runId, failure: e.failure, failures: e.failures, partialText, proseSaved }));
+      setNotice(failureNotice({ reason: e.reason, status: e.status, detail: e.detail, runId: e.runId, failure: e.failure, failures: e.failures, partialText, proseSaved, restore: keptRestore ?? undefined }));
     }
   };
 
   /** The notice for a stopped passage: one sentence, its main action, and the record behind “查看原因”. */
-  const failureNotice = (f: { reason: FailReason; status?: number; detail?: string; runId?: string; failure?: Failure; failures?: Failure[]; saved?: SavedRun; partialText?: string; proseSaved?: boolean }): Notice => {
+  const failureNotice = (f: { reason: FailReason; status?: number; detail?: string; runId?: string; failure?: Failure; failures?: Failure[]; saved?: SavedRun; partialText?: string; proseSaved?: boolean; restore?: Restore }): Notice => {
     const { push, profileId } = deps.current;
     const plan = failurePlan(f.reason, !!f.runId);
     const actions: Notice["actions"] = [];
@@ -230,6 +255,8 @@ export function useGeneration(d: GenerationDeps) {
       if (f.runId) { const id = f.runId; actions.push({ label: plan.label, run: () => retryExecution(id) }); }
       else if (again) actions.push({ label: plan.label, run: again });
     }
+    const kept = hasRestoreWords(f.restore) ? f.restore : null;
+    if (kept) actions.push({ label: "放回输入框", run: () => { deps.current.restoreDraft(kept, true); deps.current.toast("已放回输入框"); } });
     if (plan.switchService || failures.current >= 2) actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
     // The HTTP status lives in the failure record: 500 and 400 read differently.
     const partialText = f.partialText?.trim() || undefined;
@@ -242,7 +269,8 @@ export function useGeneration(d: GenerationDeps) {
       ...(f.detail ? { detail: f.detail } : {}),
       ...(f.failure ? { failure: f.failure } : {}),
       ...(f.failures?.length ? { failures: f.failures } : {}),
-      ...(partialText ? { partialText, proseSaved } : {}),
+      ...(partialText ? { partialText, proseSaved } : proseSaved ? { proseSaved } : {}),
+      ...(kept ? { restore: kept } : {}),
     };
   };
 
@@ -254,21 +282,40 @@ export function useGeneration(d: GenerationDeps) {
   };
 
   /** Follows a run still being written (also one started before the page opened). */
-  const resumeExecution = (id: string, resume = false) => {
+  const resumeExecution = (id: string, resume = false, saved?: SavedRun) => {
     if (!screenActive.current || handle.current || deps.current.isBusy()) return;
     recoveryNoticeVersion.current++;
-    start({ action: null, retry: () => retryExecution(id), run: (on) => deps.current.game.followExecution(id, on, resume) });
+    const kept = restoreFromSaved(saved) ?? savedActions.current.get(id) ?? null;
+    if (kept) savedActions.current.set(id, kept);
+    start({
+      action: kept?.text.trim() ? { mode: kept.mode, text: kept.text } : null,
+      restore: kept,
+      retry: () => retryExecution(id),
+      run: (on) => deps.current.game.followExecution(id, on, resume),
+    });
   };
   /** Tries a stopped run again: continued, asked again from the failed stage, or rebuilt (D166). */
   const retryExecution = (id: string) => {
     if (!screenActive.current || handle.current || deps.current.isBusy()) return;
     recoveryNoticeVersion.current++;
-    start({ action: null, retry: () => retryExecution(id), run: (on) => deps.current.game.retryRun(id, on) });
+    const kept = savedActions.current.get(id) ?? null;
+    if (kept) deps.current.clearRestoredDraft?.(kept);
+    start({
+      action: kept?.text.trim() ? { mode: kept.mode, text: kept.text } : null,
+      restore: kept,
+      retry: () => retryExecution(id),
+      run: (on) => deps.current.game.retryRun(id, on),
+    });
   };
   /** Reopening the story after a stop: the same notice the failure gave, never a request by itself. */
   const showSavedExecution = (run: SavedRun) => {
     const reason = run.reason ?? (run.status === "paused" ? "limit" : run.status === "cancelled" ? "cancelled" : run.status === "interrupted" ? "interrupted" : "other");
-    setNotice(failureNotice({ reason, detail: run.error ?? undefined, runId: run.id, failure: run.failure ?? undefined, saved: run, partialText: run.partialText, proseSaved: run.proseSaved }));
+    const kept = restoreFromSaved(run);
+    if (kept) {
+      savedActions.current.set(run.id, kept);
+      if (run.status === "failed" && !run.proseSaved) deps.current.restoreDraft(kept, false);
+    }
+    setNotice(failureNotice({ reason, detail: run.error ?? undefined, runId: run.id, failure: run.failure ?? undefined, saved: run, partialText: run.partialText, proseSaved: run.proseSaved, restore: kept ?? undefined }));
   };
 
   // Opening the story: show it, then follow a run still being written (also one
@@ -283,7 +330,7 @@ export function useGeneration(d: GenerationDeps) {
       if (disposed || !run || handle.current || deps.current.isBusy()) return;
       // A passage still being written is followed; an interrupted one costs a
       // request to continue, so the player decides (R30).
-      if (["running", "committing"].includes(run.status)) resumeExecution(run.id);
+      if (["running", "committing"].includes(run.status)) resumeExecution(run.id, false, run);
       else if (["cancelled", "failed", "paused", "interrupted"].includes(run.status)) showSavedExecution(run);
     })().catch(() => {
       if (!disposed) setNotice({ text: "暂时没能读取上次生成的进度，请稍后重新打开故事。", actions: [] });
@@ -308,7 +355,7 @@ export function useGeneration(d: GenerationDeps) {
       if (disposed || recoveryNoticeVersion.current !== version || handle.current || autoHandle.current || deps.current.isBusy()) return;
       // Already finished, retried or cleaned up: the story itself shows where things stand.
       if (!run) return;
-      if (["running", "committing"].includes(run.status)) resumeExecution(run.id);
+      if (["running", "committing"].includes(run.status)) resumeExecution(run.id, false, run);
       else showSavedExecution(run);
     }).catch(() => {
       if (!disposed && recoveryNoticeVersion.current === version) setNotice({ text: "暂时没能读取那段的进度。故事里看得到的内容都已保存；没写完的话可以点“续写”或重说。", actions: [] });

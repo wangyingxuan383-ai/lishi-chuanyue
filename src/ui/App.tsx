@@ -133,9 +133,9 @@ export default function App() {
       game.llm = llmFor(active);
       await applyFallback(game, active);
       const r = normalizeReading(await game.repo.getSetting<Partial<Reading>>("reading", {}));
-      // The network choice applies to every request from the start.
+      // The network choice applies to every request from the start, including recovery.
       const network = await game.repo.getSetting<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>("network", { proxy: "none" });
-      void platform.llm.setNetwork(network).catch(() => {});
+      await platform.llm.setNetwork(network).catch(() => {});
       void sweepDraftKey(platform, game.repo).catch(() => {});
       applyReading(r);
       setReadingState(r);

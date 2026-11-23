@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CanonNotesSheet } from "./CanonNotes";
 import { BUILTIN_SOURCE_USAGES } from "../../content/writingPresets";
 import { useApp } from "../app/context";
@@ -9,25 +9,147 @@ import { Icon } from "./Icon";
 import { readBudget } from "./budgetMath";
 import { parseBook, type TextEncoding } from "../../engine/sources/parse";
 import { analysisJobs, chunksOf, deleteBook, getBook, listBooks, referenceContext, saveBook } from "../../engine/sources/library";
+import { chapterLabel, chapterQueryRank, chapterRowMeta, type BookChapter } from "../../engine/sources/scope";
 import { newBinding, type AnalysisJob, type SourceBinding, type SourceBook } from "../../engine/sources/types";
 import "./writing.css";
+
+const TOC_PAGE = 120;
+const charAmount = (chars: number) => chars >= 10000 ? `${(chars / 10000).toFixed(1).replace(/\.0$/, "")} 万字` : `${chars.toLocaleString()} 字`;
+
+/** Searchable reader-style chapter picker for 原著位置 / 截至章节 (replaces raw 1000+ option <select>). */
+function ChapterPickSheet({ title, book, maxSection, value, onSelect, onClose }: {
+  title: string; book: SourceBook; maxSection?: number; value: number; onSelect: (section: number) => void; onClose: () => void;
+}) {
+  const chapters = useMemo<BookChapter[]>(() => {
+    const limit = maxSection ?? book.sections.length - 1;
+    return book.sections.slice(0, limit + 1).map((s, section) => ({ section, title: s.title, chars: s.text.length }));
+  }, [book, maxSection]);
+  const [query, setQuery] = useState("");
+  const [jumpInput, setJumpInput] = useState(String(value + 1));
+  const initialIdx = Math.max(0, chapters.findIndex((c) => c.section === value));
+  const [offset, setOffset] = useState(() => initialIdx > TOC_PAGE / 2 ? Math.max(0, initialIdx - Math.floor(TOC_PAGE / 3)) : 0);
+  const [limit, setLimit] = useState(TOC_PAGE);
+  const listRef = useRef<HTMLDivElement>(null);
+  const scrolled = useRef(false);
+  const filtered = useMemo(() => {
+    if (!query.trim()) return chapters;
+    return chapters
+      .map((c) => ({ c, rank: chapterQueryRank(c, query) }))
+      .filter((x) => x.rank > 0)
+      .sort((a, b) => b.rank - a.rank || a.c.section - b.c.section)
+      .map((x) => x.c);
+  }, [chapters, query]);
+  const searching = !!query.trim();
+  const visible = searching ? filtered.slice(0, limit) : filtered.slice(offset, offset + limit);
+  const hasEarlier = !searching && offset > 0;
+  const hasLater = searching ? filtered.length > limit : offset + limit < filtered.length;
+  const hasShift = useMemo(() => chapters.some((c) => chapterRowMeta(c).shifted), [chapters]);
+
+  useEffect(() => {
+    if (scrolled.current) return;
+    scrolled.current = true;
+    requestAnimationFrame(() => {
+      listRef.current?.querySelector<HTMLElement>(`[data-section="${value}"]`)?.scrollIntoView({ block: "center" });
+    });
+  }, [value]);
+
+  const jumpTo = (sec: number) => {
+    const clamped = Math.max(0, Math.min(chapters.length - 1, sec));
+    setQuery("");
+    if (clamped < offset || clamped >= offset + limit) {
+      setOffset(Math.max(0, clamped - Math.floor(TOC_PAGE / 3)));
+      setLimit(TOC_PAGE);
+    }
+    requestAnimationFrame(() => {
+      listRef.current?.querySelector<HTMLElement>(`[data-section="${clamped}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  };
+
+  const applyJump = () => {
+    const n = Math.trunc(Number(jumpInput.trim()));
+    if (!Number.isSafeInteger(n) || n < 1) return;
+    const clamped = Math.max(0, Math.min(chapters.length - 1, n - 1));
+    onSelect(clamped);
+    onClose();
+  };
+
+  return <Sheet title={title} onClose={onClose}>
+    <div className="stack gap-2 scope-chapter-picker">
+      <div className="scope-toc-bar">
+        <input type="search" aria-label={`搜索${title}`} value={query}
+          onChange={(e) => { setQuery(e.target.value); setLimit(TOC_PAGE); }}
+          placeholder="搜章名或章号，如 61、六十一、永冻之域" />
+      </div>
+      <div className="row">
+        <label className="row grow gap-2">
+          <span className="muted">直达第</span>
+          <input type="text" inputMode="numeric" pattern="[0-9]*" aria-label="书内顺序节号" style={{ width: "5.5em" }} value={jumpInput}
+            onChange={(e) => setJumpInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") applyJump(); }} />
+          <span className="muted">节（共 {chapters.length} 节）</span>
+        </label>
+        <button type="button" className="ghost small" onClick={applyJump}>确定</button>
+        <button type="button" className="ghost small" onClick={() => jumpTo(value)}>跳到当前</button>
+      </div>
+      {hasShift && <small className="muted m-0">本书含序章、简介或分卷，目录按原著真实标题显示，下方“第 N 节”为书内顺序编号。</small>}
+      <div className="scope-toc" ref={listRef} role="listbox" aria-label={title}>
+        {hasEarlier && (
+          <button type="button" className="ghost scope-toc-more" onClick={() => setOffset((o) => Math.max(0, o - TOC_PAGE))}>
+            显示更早章节（前 {offset} 节）
+          </button>
+        )}
+        {visible.length === 0 ? (
+          <p className="muted scope-toc-empty">目录里没有匹配「{query.trim()}」的章节，换个关键词或章号试试。</p>
+        ) : visible.map((c) => {
+          const { primary, shifted } = chapterRowMeta(c);
+          const selected = c.section === value;
+          return (
+            <button key={c.section} type="button" role="option" aria-selected={selected} data-section={c.section}
+              className={`scope-toc-item${selected ? " selected edge" : ""}`}
+              onClick={() => { onSelect(c.section); onClose(); }}>
+              <span className="scope-toc-main">
+                <b>{primary}</b>
+                <small>第 {c.section + 1} 节{shifted ? "（书内顺序）" : ""} · 约 {charAmount(c.chars)}</small>
+              </span>
+              {selected && <span className="scope-toc-tags"><span className="scope-badge picked">当前</span></span>}
+            </button>
+          );
+        })}
+        {hasLater && (
+          <button type="button" className="ghost scope-toc-more" onClick={() => setLimit((n) => n + TOC_PAGE)}>
+            显示更多章节（还有 {searching ? filtered.length - limit : filtered.length - offset - limit} 节）
+          </button>
+        )}
+      </div>
+    </div>
+  </Sheet>;
+}
 
 /** A collapsed summary reads book metadata, never the full imported text. */
 export function SourceSummary({ value, label = "参考书籍" }: { value: SourceBinding | null | undefined; label?: string }) {
   const { game } = useApp();
   const [book, setBook] = useState<{ id: string; title: string } | null>(null);
+  const [posTitle, setPosTitle] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let live = true;
-    setBook(null); setLoaded(false);
-    if (value) void listBooks(game.repo).then((books) => {
-      if (live) { setBook(books.find((b) => b.id === value.bookId) ?? null); setLoaded(true); }
+    setBook(null); setPosTitle(""); setLoaded(false);
+    if (value) void Promise.all([
+      listBooks(game.repo),
+      game.repo.platform.sql.query("SELECT title FROM source_sections WHERE book_id=? AND section=?", [value.bookId, value.position]).catch(() => []),
+    ]).then(([books, rows]) => {
+      if (live) {
+        setBook(books.find((b) => b.id === value.bookId) ?? null);
+        setPosTitle(rows[0] ? String(rows[0].title) : "");
+        setLoaded(true);
+      }
     }).catch(() => { if (live) setLoaded(true); });
     return () => { live = false; };
-  }, [game, value?.bookId]);
+  }, [game, value?.bookId, value?.position]);
   const selected = book?.id === value?.bookId ? book : null;
+  const posText = value ? `第 ${value.position + 1} 节${posTitle ? `（${posTitle.slice(0, 16)}）` : ""}` : "";
   return <span className="source-name">{label}{value && <small className="muted" style={{ display: "block", lineHeight: 1.6 }}>
-    {selected?.title ?? (loaded ? "书籍暂不可读，请重新选择" : "正在读取书名…")} · {value.through === null ? "全书" : `截至第 ${value.through + 1} 节`} · {!value.fanfic ? "只作资料" : value.plot === "canon" ? "尽量沿原剧情" : "允许改写原著"} · {value.method === "analysis" ? "通读整理与原文" : "直接检索引用"}
+    {selected?.title ?? (loaded ? "书籍暂不可读，请重新选择" : "正在读取书名…")} · 位置 {posText} · {value.through === null ? "全书" : `截至第 ${value.through + 1} 节`} · {!value.fanfic ? "只作资料" : value.plot === "canon" ? "尽量沿原剧情" : "允许改写原著"} · {value.method === "analysis" ? "通读整理与原文" : "直接检索引用"}
   </small>}</span>;
 }
 
@@ -173,26 +295,46 @@ export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSe
 export function SourceSetup({ value, onChange, disabled = false, fanfic = false }: { value: SourceBinding | null | undefined; onChange: (b: SourceBinding | null) => void; disabled?: boolean; fanfic?: boolean }) {
   const { game, toast } = useApp();
   const [library, setLibrary] = useState(false), [book, setBook] = useState<SourceBook | null>(null), [analysis, setAnalysis] = useState(false), [browse, setBrowse] = useState(false), [notes, setNotes] = useState(false);
+  const [picking, setPicking] = useState<"position" | "through" | null>(null);
   useEffect(() => { let live = true; setBook(null); if (value) void getBook(game.repo, value.bookId).then((b) => { if (live) setBook(b); }); return () => { live = false; }; }, [game, value?.bookId]);
   useEffect(() => { if (!value) void game.repo.getSetting<SourceBinding | null>("source:pending", null).then(async (pending) => { if (pending) { onChange(pending); await game.repo.setSetting("source:pending", null); } }); }, []);
   const set = (patch: Partial<SourceBinding>) => { if (value) onChange({ ...value, ...patch }); };
+  const sectionText = (sec: number) => {
+    const raw = book?.sections[sec]?.title;
+    const label = chapterLabel(sec, raw);
+    return raw ? `${label}（第 ${sec + 1} 节）` : label;
+  };
   return <div className="stack">
     <div className="row"><button disabled={disabled} onClick={() => setLibrary(true)}>{book ? `参考书籍：${book.title}` : "选择或导入参考书籍"}</button>{value && <button className="ghost" disabled={disabled} onClick={() => onChange(null)}>解除绑定</button>}</div>
     {value && <p className="field-hint m-0">这里是当前表单中的选择，随开局或本局设置一起保存。</p>}
     {value && !book && <p className="muted">正在读取书籍，若已删除请重新选择。</p>}
     {value && book && <>
-      <label className="field">原著位置<select aria-label="原著位置" disabled={disabled} value={value.position} onChange={(e) => set({ position: Number(e.target.value) })}>{book.sections.map((s, i) => value.through !== null && i > value.through ? null : <option value={i} key={i}>{i + 1}. {s.title}</option>)}</select></label>
-      {value.fanfic && value.plot === "canon" && <p className="field-hint m-0">沿原剧情时，每段写完会按内容自动往后跟（一次至多 5 章，不花请求）；跟错了在这一段的变化里点“改回”，或在这里改。</p>}
+      <button type="button" className="settings-entry scope-row" aria-label="原著位置" disabled={disabled} onClick={() => setPicking("position")}>
+        <span><b>原著位置</b><small>{sectionText(value.position)}</small></span>
+        <span aria-hidden="true">第 {value.position + 1} 节 ›</span>
+      </button>
+      {value.fanfic && value.plot === "canon" && <p className="field-hint m-0">沿原剧情时，每段写完会按内容自动往后跟（一次至多 2 节，不花请求）；跟错了在这一段的变化里点“改回”，或在这里改。</p>}
       <span className="muted">剧情关系</span><div className="segmented">{([["reference", "只作资料"], ["rewrite", "允许改写原著"], ["canon", "尽量沿原剧情"]] as const).map(([v, label]) => <button disabled={disabled} key={v} aria-pressed={v === "reference" ? !value.fanfic : value.fanfic && value.plot === v} onClick={() => set({ fanfic: v !== "reference", ...(v === "reference" ? {} : { plot: v }) })}>{label}</button>)}</div>
-      <span className="muted">参考范围</span><div className="segmented"><button disabled={disabled} aria-pressed={value.through === null} onClick={() => set({ through: null })}>全书</button><button disabled={disabled} aria-pressed={value.through !== null} onClick={() => set({ through: value.position, analysisId: undefined })}>截至指定章节</button></div>
-      {value.through !== null && <label className="field">截至章节<select aria-label="截至章节" disabled={disabled} value={value.through} onChange={(e) => set({ through: Number(e.target.value), position: Math.min(value.position, Number(e.target.value)), analysisId: undefined })}>{book.sections.map((s, i) => <option key={i} value={i}>{i + 1}. {s.title}</option>)}</select></label>}
+      <span className="muted">参考范围</span><div className="segmented"><button disabled={disabled} aria-pressed={value.through === null} onClick={() => set({ through: null })}>全书</button><button disabled={disabled} aria-pressed={value.through !== null} onClick={() => {
+        const nextThrough = value.through ?? (value.position > 0 ? value.position : Math.max(0, book.sections.length - 1));
+        set({ through: nextThrough, analysisId: undefined });
+        setPicking("through");
+      }}>截至指定章节</button></div>
+      {value.through !== null && (
+        <button type="button" className="settings-entry scope-row" aria-label="截至章节" disabled={disabled} onClick={() => setPicking("through")}>
+          <span><b>截至章节</b><small>{sectionText(value.through)}</small></span>
+          <span aria-hidden="true">第 {value.through + 1} 节 ›</span>
+        </button>
+      )}
+      {picking === "position" && <ChapterPickSheet title="选择原著位置" book={book} maxSection={value.through ?? undefined} value={value.position} onSelect={(section) => set({ position: section })} onClose={() => setPicking(null)} />}
+      {picking === "through" && <ChapterPickSheet title="选择截至章节" book={book} value={value.through ?? Math.max(0, book.sections.length - 1)} onSelect={(section) => set({ through: section, position: Math.min(value.position, section), analysisId: undefined })} onClose={() => setPicking(null)} />}
       <SourcePresets key={value.bookId} disabled={disabled} value={value.instructions} onChange={(instructions) => { if (!disabled) set({ instructions }); }} />
       <label className="field">原著怎么用<textarea rows={4} maxLength={12000} disabled={disabled} aria-label="原著怎么用" value={value.instructions} onChange={(e) => set({ instructions: e.target.value })} /></label>
       <span className="muted">理解方式</span><div className="segmented"><button disabled={disabled} aria-pressed={value.method === "search"} onClick={() => set({ method: "search" })}>直接检索引用</button><button disabled={disabled} aria-pressed={value.method === "analysis"} onClick={() => set({ method: "analysis" })}>先让 AI 通读整理</button></div>
       <p className="muted m-0">直接检索无需预先调用 AI。未整理也可以先直接使用，以后再整理。修改用法不会自动重新整理，也不会自动产生费用。</p>
       <div className="row wrap"><button onClick={() => setBrowse(true)}>目录与正文</button><button onClick={() => setNotes(true)}>原著札记</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
       <p className="muted m-0">原著札记：让 AI 先整理一段主线、一个人物或一个设定，写作时带上，比每段都翻原文更快更省。</p>
-      {notes && <CanonNotesSheet bookId={value.bookId} worldId={null} position={value.position} onClose={() => setNotes(false)} />}
+      {notes && <CanonNotesSheet bookId={value.bookId} worldId={null} position={value.position} through={value.through} onClose={() => setNotes(false)} />}
     </>}
     {library && <SourceLibrary onClose={() => setLibrary(false)} onSelect={(b, use) => { onChange(newBinding(b.id, use === "fanfic" || fanfic || value?.fanfic)); toast("已选入，保存设置后生效"); }} />}
     {browse && book && <Sheet title={book.title} onClose={() => setBrowse(false)}><BookPreview book={book} through={value?.through} /></Sheet>}

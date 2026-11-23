@@ -92,9 +92,10 @@ AND (${patterns.map(() => "(f.subject LIKE ? OR f.aliases_json LIKE ? OR f.state
       subject: String(row.subject), aliases, statement: String(row.statement), quote,
       ...(row.valid_from !== null ? { validFrom: Number(row.valid_from) } : {}), ...(row.valid_through !== null ? { validThrough: Number(row.valid_through) } : {}) };
     const identity = [fact.subject, ...aliases].join("\n").toLowerCase(), statement = fact.statement.toLowerCase();
-    const score = [...keys].reduce((n, [key, weight]) => n + (identity.includes(key) ? weight * 4 : statement.includes(key) ? weight : 0), 0);
+    const baseScore = [...keys].reduce((n, [key, weight]) => n + (identity.includes(key) ? weight * 4 : statement.includes(key) ? weight : 0), 0);
+    const score = opts.ignorePosition ? baseScore : baseScore * (1 + 0.8 / (1 + Math.abs(fact.section - position) / 6));
     const fingerprint = JSON.stringify([fact.section, fact.chunk, kind, fact.subject, fact.statement, quote]);
-    if (!score || seen.has(fingerprint)) continue;
+    if (!baseScore || seen.has(fingerprint)) continue;
     seen.add(fingerprint); scored.push({ fact, score });
   }
   return scored.sort((a, b) => b.score - a.score || Math.abs(a.fact.section - position) - Math.abs(b.fact.section - position) || a.fact.chunk - b.fact.chunk).slice(0, 16).map(({ fact }) => fact);

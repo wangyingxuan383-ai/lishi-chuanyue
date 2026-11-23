@@ -79,7 +79,7 @@ export function Composer(p: ComposerProps) {
         <div className="mode-chips" role="group" aria-label="快速切换输入方式">
           {modeList.map((m, i) => (
             <button key={m.mode} type="button" className="mode-chip" aria-pressed={i === modeIndex}
-              onMouseDown={(e) => e.preventDefault()} onClick={() => p.setModeIndex(i)}>{m.label}</button>
+              onPointerDown={(e) => e.preventDefault()} onClick={() => p.setModeIndex(i)}>{m.label}</button>
           ))}
         </div>
       )}
@@ -116,9 +116,9 @@ export function Composer(p: ComposerProps) {
           {/* The writing tools come up with the keyboard or with words in the box. */}
           {!dead && (typing || typed) && (
             <span className="composer-tools">
-              {!watch && <button className="icon-btn" aria-label="润色行动" title="润色行动" disabled={busy || !typed} onMouseDown={(e) => e.preventDefault()} onClick={p.onPolish}><Icon name="sparkle" size={20} /></button>}
-              <button className="icon-btn" aria-label="展开输入" title="展开输入" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={p.onDesk}><Icon name="expand" size={20} /></button>
-              {typed && <button className="icon-btn" aria-label="清空输入" title="清空输入" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => { p.setInput(""); if (inputBox.current) { inputBox.current.style.height = "auto"; inputBox.current.focus(); } }}><Icon name="close" size={20} /></button>}
+              {!watch && <button className="icon-btn" aria-label="润色行动" title="润色行动" disabled={busy || !typed} onPointerDown={(e) => e.preventDefault()} onClick={p.onPolish}><Icon name="sparkle" size={20} /></button>}
+              <button className="icon-btn" aria-label="展开输入" title="展开输入" disabled={busy} onPointerDown={(e) => e.preventDefault()} onClick={p.onDesk}><Icon name="expand" size={20} /></button>
+              {typed && <button className="icon-btn" aria-label="清空输入" title="清空输入" disabled={busy} onPointerDown={(e) => e.preventDefault()} onClick={() => { p.setInput(""); if (inputBox.current) { inputBox.current.style.height = "auto"; inputBox.current.focus(); } }}><Icon name="close" size={20} /></button>}
             </span>
           )}
         </div>

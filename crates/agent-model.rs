@@ -108,9 +108,11 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
     if p == Protocol::Chat {
         return Ok(chat::wire_chat_body(body.clone()));
     }
-    let messages = body["messages"]
+    let raw_messages = body["messages"]
         .as_array()
         .ok_or_else(|| invalid("模型消息列表无效"))?;
+    let projected = chat::project_supplied_skills(raw_messages);
+    let messages = projected.as_slice();
     let ids = call_ids(messages, p);
     let tools: Vec<_> = items(&body["tools"])
         .iter()
@@ -180,7 +182,10 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
                 let role = text(&message["role"]);
                 let calls = items(&message["tool_calls"]);
                 if role == "system" || role == "developer" {
-                    system.push(json!({"type":"text","text":text(&message["content"])}));
+                    let body_text = text(&message["content"]);
+                    if !body_text.is_empty() {
+                        system.push(json!({"type":"text","text":body_text}));
+                    }
                     continue;
                 }
                 let mut blocks = vec![];
@@ -204,7 +209,10 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
                     }
                     "assistant"
                 } else {
-                    blocks.push(json!({"type":"text","text":text(&message["content"])}));
+                    let body_text = text(&message["content"]);
+                    if !body_text.is_empty() {
+                        blocks.push(json!({"type":"text","text":body_text}));
+                    }
                     "user"
                 };
                 append_message(&mut history, target, blocks);
@@ -858,7 +866,23 @@ pub async fn complete(
     let mut response = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(story_core::chat::FIRST_BYTE_MS),request.send())=>r.map_err(|_|provider("timeout_first",None,"等待模型响应超时",false))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),false))?};
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let detail = response.text().await.unwrap_or_default().replace(&key, "***");
+        let mut raw_err = Vec::new();
+        let err_deadline = Instant::now() + Duration::from_secs(15);
+        while raw_err.len() < 64 * 1024 {
+            let Some(remain) = err_deadline.checked_duration_since(Instant::now()) else { break };
+            let next = tokio::select! {
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
+                r = tokio::time::timeout(remain, response.chunk()) => r,
+            };
+            match next {
+                Ok(Ok(Some(chunk))) => {
+                    let take = (64 * 1024 - raw_err.len()).min(chunk.len());
+                    raw_err.extend_from_slice(&chunk[..take]);
+                }
+                _ => break,
+            }
+        }
+        let detail = String::from_utf8_lossy(&raw_err).replace(&key, "***");
         if story_core::chat::provider_context_rejected(Some(status), &detail) {
             return Err(Error::ContextWindow);
         }
@@ -895,10 +919,20 @@ pub async fn complete(
             let line = std::str::from_utf8(&bytes)
                 .map_err(|_| invalid("模型响应编码无效"))?
                 .trim_end_matches(['\r', '\n']);
+            let mut should_flush = false;
             if line.is_empty() {
-                if data.is_empty() {
-                    continue;
+                should_flush = !data.is_empty();
+            } else if let Some(payload) = line.strip_prefix("data:") {
+                data.push_str(payload.strip_prefix(' ').unwrap_or(payload));
+                data.push('\n');
+                let trimmed = data.trim();
+                if trimmed == "[DONE]"
+                    || serde_json::from_str::<serde::de::IgnoredAny>(trimmed).is_ok()
+                {
+                    should_flush = true;
                 }
+            }
+            if should_flush {
                 let payload = data.trim_end_matches('\n');
                 if payload.contains(&key) {
                     return Err(invalid("模型意外返回认证信息，已停止并隐藏"));
@@ -918,9 +952,6 @@ pub async fn complete(
                     buffer.clear();
                     break 'read;
                 }
-            } else if let Some(payload) = line.strip_prefix("data:") {
-                data.push_str(payload.strip_prefix(' ').unwrap_or(payload));
-                data.push('\n');
             }
         }
     }
@@ -1313,5 +1344,58 @@ mod tests {
         assert_eq!(thinking_count, 1, "expected sentinel once, got {events:?}");
         assert_eq!(events[0], "\0phase:thinking");
         assert!(events.iter().any(|e| e == "雨停了。"));
+    }
+
+    #[tokio::test]
+    async fn sse_without_blank_lines_and_anthropic_empty_text_and_skill_projection_work() {
+        // 1. Anthropic skips empty text blocks and projects synthetic requested-skill-* traces across protocols.
+        let anthropic = config("anthropic");
+        let messages = vec![
+            json!({"role":"system","content":""}),
+            json!({"role":"system","content":"系统规则"}),
+            json!({"role":"assistant","content":null,"tool_calls":[{"id":"requested-skill-canon-0","type":"function","function":{"name":"read_skill","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"requested-skill-canon-0","content":"{\"body\":\"原著技能正文\"}"}),
+            json!({"role":"user","content":""}),
+            json!({"role":"user","content":"开始写作"}),
+        ];
+        let req = chat::request(&anthropic, &messages, &[], false);
+        let wire = prepare(&anthropic, &req, Protocol::Anthropic).unwrap();
+        assert_eq!(wire["system"].as_array().unwrap().len(), 1);
+        let wire_msgs = wire["messages"].as_array().unwrap();
+        assert_eq!(wire_msgs.len(), 1, "adjacent projected user messages merge cleanly without empty text blocks");
+        let blocks = wire_msgs[0]["content"].as_array().unwrap();
+        assert!(blocks.iter().all(|b| b["type"] != "text" || !b["text"].as_str().unwrap_or("").is_empty()));
+        assert!(blocks[0]["text"].as_str().unwrap().contains("原著技能正文"));
+
+        // 2. Chat SSE stream with NO blank lines between data: frames still parses every chunk.
+        let compact_sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"世界\"},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n"
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let output = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{compact_sse}", compact_sse.len());
+            socket.write_all(output.as_bytes()).unwrap();
+        });
+        let mut cfg = config("chat-completions");
+        cfg.url = format!("http://{address}/v1/chat/completions");
+        let client = Client::builder().no_proxy().build().unwrap();
+        let result = complete(
+            client,
+            cfg.clone(),
+            body(&cfg),
+            "fixture-key".into(),
+            CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.text, "你好世界");
     }
 }

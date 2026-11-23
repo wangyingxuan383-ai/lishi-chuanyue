@@ -9,7 +9,7 @@ const LABELS: Record<string, string> = {
   writing: "写作", turn: "写作", opening: "开场", continue: "续写", extract: "补记", "reference-review": "原著核对", "reference-review-lite": "原著快速校对",
   codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", capability: "检测工具支持", ask: "查一查", assist: "补全",
   test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍", "canon-notes": "札记", tool: "写作", autoplay: "连播",
-  revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步", agent: "助手", "段落改写": "段落改写", "行动润色": "行动润色",
+  revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步", correction: "按原著纠错", agent: "助手", "段落改写": "段落改写", "行动润色": "行动润色",
 };
 export const purposeLabel = (purpose: string) => LABELS[purposeBase(purpose)] ?? LABELS[purpose] ?? purpose;
 /** SQL for the base purpose, for GROUP BY. */
@@ -91,8 +91,8 @@ export async function speedReport(platform: Platform, passages = 20, since?: str
   let from = since;
   let count = 0;
   if (!from) {
-    const recent = await platform.sql.query(`SELECT u.node_id, MIN(u.at) AS at FROM usage u WHERE u.node_id IS NOT NULL AND ${PURPOSE_SQL} IN (${IN_LIST(WRITING)})
-      GROUP BY u.node_id ORDER BY at DESC LIMIT ?`, [...WRITING, passages]);
+    const recent = await platform.sql.query(`SELECT u.node_id, MIN(u.at) AS at, MIN(julianday(u.at)) AS ts FROM usage u WHERE u.node_id IS NOT NULL AND ${PURPOSE_SQL} IN (${IN_LIST(WRITING)})
+      GROUP BY u.node_id ORDER BY ts DESC LIMIT ?`, [...WRITING, passages]);
     if (!recent.length) return null;
     count = recent.length;
     from = String(recent[recent.length - 1].at);
@@ -102,7 +102,7 @@ export async function speedReport(platform: Platform, passages = 20, since?: str
       COALESCE(SUM(u.total_ms), 0) AS ms,
       COALESCE(SUM(CASE WHEN u.prompt_tokens >= 0 THEN u.prompt_tokens ELSE 0 END), 0) + COALESCE(SUM(CASE WHEN u.completion_tokens >= 0 THEN u.completion_tokens ELSE 0 END), 0) AS tokens,
       SUM(CASE WHEN u.first_token_ms > 0 THEN 1 ELSE 0 END) AS timed
-    FROM usage u WHERE u.at >= ? GROUP BY purpose`, [from]);
+    FROM usage u WHERE julianday(u.at) >= julianday(?) GROUP BY purpose`, [from]);
   if (!rows.length) return null;
   const merged = new Map<string, SpeedPart & { timed: number; firstSum: number }>();
   for (const r of rows) {

@@ -82,7 +82,10 @@ fn groups(messages: &[Value]) -> Result<Vec<Group>> {
 }
 
 fn protected(plan: &RunPlan, messages: &[Value], groups: &[Group]) -> Vec<bool> {
-    let mut fixed: Vec<_> = messages.iter().map(|m| m["role"] == "system").collect();
+    let mut fixed: Vec<_> = messages
+        .iter()
+        .map(|m| m["role"] == "system" && m["ephemeralLedger"] != true)
+        .collect();
     if let Some(last) = messages.iter().rposition(|m| m["role"] == "user") {
         fixed[last] = true;
         // continueMessages adds an interrupted assistant and one final user
@@ -354,7 +357,11 @@ fn compact_support(messages: &mut [Value]) {
 /// Keep the tool names, schemas and protocol groups intact.
 pub(crate) fn recover_writing_request(plan: &RunPlan, messages: &[Value], tools: &[Value]) -> Result<Option<(Vec<Value>, Vec<Value>)>> {
     let previous = request_size(messages, tools);
-    let mut compact = messages.to_vec();
+    let mut compact: Vec<Value> = messages
+        .iter()
+        .filter(|m| m["ephemeralLedger"] != true)
+        .cloned()
+        .collect();
     compact_support(&mut compact);
     let mut definitions = tools.to_vec();
     for tool in &mut definitions {
@@ -370,6 +377,7 @@ fn fit_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value], writing: b
     let message_groups = groups(&messages)?;
     let fixed = protected(plan, &messages, &message_groups);
     let mut removed = vec![false; messages.len()];
+    let source_allowance = if plan.kind == "correction" { (budget * 3) / 5 } else { budget / 4 };
     let current = |removed: &[bool], messages: &[Value]| {
         let mut retained = messages
             .iter()
@@ -379,7 +387,7 @@ fn fit_context(plan: &RunPlan, messages: Vec<Value>, tools: &[Value], writing: b
             .collect::<Vec<_>>();
         // Re-fit from the full trace after removing groups. Otherwise an
         // inline quote could stay marked duplicate after its tool copy went.
-        let evidence = bound_sources(plan, &mut retained, budget / 4);
+        let evidence = bound_sources(plan, &mut retained, source_allowance);
         (retained, evidence)
     };
     // Old prose goes before old tool rounds. Never split an action/prose pair.

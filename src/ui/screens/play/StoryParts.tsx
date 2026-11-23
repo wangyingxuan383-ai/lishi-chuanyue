@@ -128,6 +128,13 @@ export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; 
   const icon: IconName = tone === "bad" ? "alert" : tone === "pause" ? "hourglass" : "info";
   // A stopped or failed run keeps its cause and usage behind 查看明细 / 查看原因 (R31-P4).
   const explained = !!(notice.reason && (notice.failure || notice.detail || notice.runId));
+  const promptBrief = (() => {
+    const r = notice.restore;
+    if (!r) return "";
+    const parts = [r.text.trim(), r.note.trim() ? `幕后：${r.note.trim()}` : ""].filter(Boolean);
+    const full = parts.join(" · ");
+    return full.length > 64 ? `${full.slice(0, 64)}…` : full;
+  })();
   return (
     <>
       {notice.partialText && (
@@ -143,6 +150,7 @@ export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; 
         <span className="notice-icon"><Icon name={icon} size={20} /></span>
         <div className="notice-body">
           <p>{notice.text}</p>
+          {promptBrief && <p className="muted m-0">原输入：{promptBrief}</p>}
           <RunUsageLine runId={notice.runId} />
           {(notice.actions.length > 0 || explained) && <div className="notice-actions">
             {notice.actions.map((a, i) => <button key={a.label} className={i === 0 ? "primary" : ""} onClick={() => onAction(a.run)}>{a.label}</button>)}

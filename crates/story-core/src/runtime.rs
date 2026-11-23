@@ -152,8 +152,13 @@ impl Engine {
         }
     }
     pub(crate) fn emit_run_event(&self, plan: &RunPlan, event: Value) -> Result<crate::RunEvent> {
-        let saved = self.store.run_event(plan, event)?;
-        self.push_live_event(plan, saved.seq, &saved.event);
+        let (saved, parent) = self.store.run_event_pair(plan, event)?;
+        if let Some(sink) = self.live_events.lock().ok().and_then(|s| s.clone()) {
+            if let Some((parent_id, parent_seq)) = parent {
+                sink(&parent_id, parent_seq, &saved.event);
+            }
+            sink(&plan.id, saved.seq, &saved.event);
+        }
         Ok(saved)
     }
     fn observer(&self) -> Option<RunObserver> {
@@ -507,10 +512,23 @@ impl Engine {
                 old.retain(|m|!m["content"].as_str().unwrap_or("").starts_with("【本次执行剩余额度】"));
                 old==messages && input["request"]["tools"].as_array().map(Vec::as_slice).unwrap_or(&[])==tools.as_slice()
             };
+            let messages_only_match = || {
+                let mut old = input["request"]["messages"].as_array().cloned().unwrap_or_default();
+                old.retain(|m| !m["content"].as_str().unwrap_or("").starts_with("【本次执行剩余额度】"));
+                old == messages
+            };
             let allow_switch_reuse = plan.meta["allowModelSwitchReuse"] == true
-                && (purpose.starts_with("writing:") || purpose == "capability");
+                && purpose.starts_with("writing:");
+            let cached_prose_no_tools = || {
+                serde_json::from_str::<Completion>(&cached)
+                    .ok()
+                    .is_some_and(|c| c.tool_calls.is_empty() && !c.text.trim().is_empty())
+            };
             let same = input["fingerprint"] == fingerprint
-                || (allow_switch_reuse && (input["inputFingerprint"] == input_fingerprint || (input.get("inputFingerprint").is_none() && messages_match())))
+                || (allow_switch_reuse
+                    && (input["inputFingerprint"] == input_fingerprint
+                        || (input.get("inputFingerprint").is_none() && messages_match())
+                        || (messages_only_match() && cached_prose_no_tools())))
                 || (input.get("fingerprint").is_none() && messages_match());
             if same {
                 let result = serde_json::from_str(&cached)?;
@@ -570,7 +588,14 @@ impl Engine {
         // Pin already-read correction passages AFTER context trimming so omitted earlier reads stay quotable
         // without fighting `bound_sources` or duplicating still-visible JSON-escaped tool results.
         if plan.kind == "correction" && purpose.starts_with("writing:") {
-            messages = correction::with_read_ledger(shared, messages, target as usize)?;
+            let used = crate::context::request_size(&messages, &tools);
+            let headroom = (target as usize).saturating_sub(used);
+            let ledger_budget = if headroom > 400 {
+                (headroom * 4).min(target as usize)
+            } else {
+                (target as usize / 2).min(4000)
+            };
+            messages = correction::with_read_ledger(shared, messages, ledger_budget)?;
         }
         let mut tools = tools;
         let mut retried = false;
@@ -608,7 +633,12 @@ impl Engine {
                 tx.execute("INSERT INTO execution_steps(run_id,step_key,kind,status,input_json) VALUES(?,?,?,'running',?)", params![plan.id,key,purpose,json!({"fingerprint":fingerprint,"inputFingerprint":input_fingerprint,"model":if aux {plan.model.aux_model.as_ref().unwrap_or(&plan.model.model)} else {&plan.model.model},"purpose":purpose,"request":body}).to_string()])?;
                 Ok(())
             })?;
-            self.emit_run_event(&plan, json!({"type":"thinking"}))?;
+            let show_text = purpose.starts_with("writing:")
+                || purpose.starts_with("tool:compose_draft")
+                || purpose.starts_with("tool:check_draft");
+            if show_text {
+                self.emit_run_event(&plan, json!({"type":"thinking"}))?;
+            }
             self.signal_phase(&plan, signal_phase(purpose), 0);
             let store = self.store.clone();
             let progress_plan = plan.clone();
@@ -618,9 +648,6 @@ impl Engine {
             } else {
                 String::new()
             };
-            let show_text = purpose.starts_with("writing:")
-                || purpose.starts_with("tool:compose_draft")
-                || purpose.starts_with("tool:check_draft");
             let progress = self.observer().filter(|_| show_text).map(|observer| {
                 let (run_id, execution_id)=notification_target(&plan);
                 let (world_id,title)=(plan.world_id.clone(),self.signal_title(&plan));
@@ -646,7 +673,8 @@ impl Engine {
             let held_in = held.clone();
             let sink: TextSink = Arc::new(move |text| {
                 if text == "\0phase:thinking" {
-                    if !record_seen.load(std::sync::atomic::Ordering::Relaxed)
+                    if show_text
+                        && !record_seen.load(std::sync::atomic::Ordering::Relaxed)
                         && last_visible_len.load(std::sync::atomic::Ordering::Relaxed) == 0
                     {
                         let event = json!({"type":"thinking","deep":true});
@@ -879,16 +907,16 @@ impl Engine {
             let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
             if !passages.is_empty() {
                 c.draft["originalRead"] = true.into();
-                let saved = c.draft["originalPassages"]
+                // Keep chronological order (oldest first, newest last) so `read_ledger` (.rev()) pins newest reads first.
+                let mut combined = c.draft["originalPassages"]
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
-                for passage in saved {
-                    if !passages.contains(&passage) {
-                        passages.push(passage);
-                    }
+                for passage in passages {
+                    combined.retain(|p| p != &passage);
+                    combined.push(passage);
                 }
-                c.draft["originalPassages"] = Value::Array(passages);
+                c.draft["originalPassages"] = Value::Array(combined);
             }
             if skill {
                 c.draft["canonSkillRead"] = true.into();
@@ -944,6 +972,8 @@ impl Engine {
             }
         } else if plan.kind == "correction" {
             CORRECTION_RULES.to_owned()
+        } else if plan.kind == "ask" {
+            ASK_RULES.to_owned()
         } else {
             format!("{}\n{}", crate::skills::catalog_text(), CLASSIC_RULES)
         };
@@ -969,8 +999,8 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"));
-        let support = if tier == Tier::Fast {
+        let modern=plan.kind=="ask"||plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"));
+        let support = if tier == Tier::Fast && plan.kind != "ask" {
             false
         } else if modern {
             self.cached_tool_support(&plan.model)?.unwrap_or(true)
@@ -993,6 +1023,8 @@ impl Engine {
                     let name = t["function"]["name"].as_str().unwrap_or("");
                     if plan.kind == "correction" {
                         CORRECTION_TOOLS.contains(&name)
+                    } else if plan.kind == "ask" {
+                        ASK_TOOLS.contains(&name)
                     } else {
                         tier != Tier::Standard || STANDARD_TOOLS.contains(&name)
                     }
@@ -1018,9 +1050,11 @@ impl Engine {
         let mut round = shared.lock().map_err(|_| Error::Cancelled)?.draft["round"]
             .as_u64()
             .unwrap_or(0);
+        // When resuming a paused lookup run (接着查), grant a fresh batch of lookup rounds from `round`.
+        let resume_round_base = if plan.meta["resumeBudgetBase"].is_object() { round } else { 0 };
         let result = loop {
             self.check(&shared)?;
-            let final_only = !active_tools.is_empty() && tool_rounds.is_some_and(|n| round >= n);
+            let final_only = !active_tools.is_empty() && tool_rounds.is_some_and(|n| round >= resume_round_base.saturating_add(n));
             let attempt=self.complete_with(&shared,&format!("writing:{round}"),messages.clone(),active_tools.clone(),false,final_only).await;
             let response=match attempt {
                 Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{
@@ -1087,10 +1121,11 @@ impl Engine {
         };
         self.check(&shared)?;
         if plan.kind == "ask" {
-            if refused(&result, &result.text, false) {
+            let clean = narrative_part(&result.text).trim().to_owned();
+            if refused(&result, &clean, false) {
                 return Err(Error::Refused("AI 服务拒绝了这次查阅".into()));
             }
-            self.finish_preview(&shared, json!({"text":result.text}))?;
+            self.finish_preview(&shared, json!({"text":clean}))?;
             return Ok(());
         }
         if plan.kind == "correction" {
@@ -1513,11 +1548,33 @@ impl Engine {
         if matches!(plan.kind.as_str(), "turn" | "variant" | "continue") && state["source"].is_object() {
             if let Ok(Some(next)) = crate::runtime_sources::follow_position(&tx, &state["source"], narrative) {
                 let from = state["source"]["position"].as_i64().unwrap_or(0);
+                let book_id = state["source"]["bookId"].as_str().unwrap_or("");
+                let section_title = |sec: i64| -> Option<String> {
+                    tx.query_row(
+                        "SELECT title FROM source_sections WHERE book_id=? AND section=?",
+                        params![book_id, sec],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                };
+                let from_title = section_title(from);
+                let to_title = section_title(next);
                 state["source"]["position"] = next.into();
-                meta["sourceAdvanced"] = json!({"from": from, "to": next});
+                let mut adv = json!({"from": from, "to": next});
+                if let Some(ref t) = from_title { adv["fromTitle"] = t.clone().into(); }
+                if let Some(ref t) = to_title { adv["toTitle"] = t.clone().into(); }
+                meta["sourceAdvanced"] = adv;
                 if !meta["chips"].is_array() { meta["chips"] = json!([]); }
                 if let Some(chips) = meta["chips"].as_array_mut() {
-                    chips.push(json!({"text": format!("原著进度 → 第 {} 章", next + 1), "tone": "info"}));
+                    let chip_text = match to_title {
+                        Some(t) => format!("原著进度 → 第 {} 节（{}）", next + 1, t.chars().take(18).collect::<String>()),
+                        None => format!("原著进度 → 第 {} 节", next + 1),
+                    };
+                    chips.push(json!({"text": chip_text, "tone": "info"}));
                 }
             }
         }
@@ -1833,6 +1890,7 @@ fn is_read_tool(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn separate_correction_sources(
     changes: Vec<Value>,
     state: &Value,
@@ -2122,6 +2180,14 @@ pub(crate) fn write_usage(
     node: Option<&str>,
     outcome: &str,
 ) -> Result<()> {
+    let plan_kind: Option<String> = tx
+        .query_row(
+            "SELECT json_extract(plan_json, '$.kind') FROM execution_runs WHERE id=?",
+            [run],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
     let mut stmt=tx.prepare("SELECT step_key,input_json,output_json,status FROM execution_steps WHERE run_id=? AND step_key LIKE 'model:%'")?;
     let steps = stmt
         .query_map([run], |r| {
@@ -2149,13 +2215,30 @@ pub(crate) fn write_usage(
             "interrupted" => "interrupted",
             _ => "failed",
         };
-        tx.execute("INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET node_id=COALESCE(excluded.node_id,usage.node_id),total_ms=COALESCE(excluded.total_ms,usage.total_ms),outcome=CASE WHEN excluded.outcome IN ('ok','no_record') THEN excluded.outcome ELSE usage.outcome END",params![format!("{run}:{key}"),world,node,input["purpose"].as_str().unwrap_or("turn"),input["model"].as_str().unwrap_or(""),prompt,completion,prompt.is_none()||completion.is_none(),output["firstTokenMs"].as_i64(),output["totalMs"].as_i64(),request_outcome,Utc::now().to_rfc3339()])?;
-        if status == "done" {
+        let raw_purpose = input["purpose"].as_str().unwrap_or("turn");
+        let stored_purpose = if raw_purpose.starts_with("writing:") {
+            match plan_kind.as_deref() {
+                Some("ask") => "ask",
+                Some("correction") => "correction",
+                _ => raw_purpose,
+            }
+        } else {
+            raw_purpose
+        };
+        let usage_id = format!("{run}:{key}");
+        let existed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM usage WHERE id=?)", [&usage_id], |r| r.get(0))?;
+        tx.execute("INSERT INTO usage(id,world_id,node_id,purpose,model,prompt_tokens,completion_tokens,estimated,first_token_ms,total_ms,outcome,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET node_id=COALESCE(excluded.node_id,usage.node_id),total_ms=COALESCE(excluded.total_ms,usage.total_ms),outcome=CASE WHEN excluded.outcome IN ('ok','no_record') THEN excluded.outcome ELSE usage.outcome END",params![usage_id,world,node,stored_purpose,input["model"].as_str().unwrap_or(""),prompt,completion,prompt.is_none()||completion.is_none(),output["firstTokenMs"].as_i64(),output["totalMs"].as_i64(),request_outcome,Utc::now().to_rfc3339()])?;
+        if !existed && status == "done" {
             if let Some(prompt_tokens) = prompt.filter(|&p| p > 200) {
                 let model_name = input["model"].as_str().unwrap_or("");
-                let msg_chars = input["request"].get("messages").map(|m| crate::stage_context::units(&m.to_string())).unwrap_or(0);
-                let tool_chars = input["request"].get("tools").map(|t| crate::stage_context::units(&t.to_string())).unwrap_or(0);
-                let req_chars = msg_chars + tool_chars;
+                let req_chars: usize = input["request"]["messages"]
+                    .as_array()
+                    .map(|msgs| {
+                        msgs.iter()
+                            .map(|m| m["content"].as_str().map(|s| s.chars().count()).unwrap_or(0))
+                            .sum()
+                    })
+                    .unwrap_or(0);
                 if !model_name.is_empty() && req_chars >= 200 {
                     update_token_ratio(tx, model_name, prompt_tokens as f64, req_chars as f64)?;
                 }
@@ -2183,6 +2266,19 @@ pub(crate) fn update_token_ratio(tx: &Transaction<'_>, model: &str, prompt_token
     Ok(())
 }
 
+fn narrative_contains_taboo(narrative: &str, term: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = narrative[start..].find(term) {
+        let end = start + offset + term.len();
+        if term == "小时" && narrative[end..].starts_with('候') {
+            start = end;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 /// Scan narrative against the era card's "不要出现：" line (historical mode only).
 /// Returns [{term, instead}] hits so the next turn receives tabooReminder and devMode shows chips.
 pub(crate) fn scan_taboos(state: &Value, narrative: &str) -> Vec<Value> {
@@ -2207,7 +2303,7 @@ pub(crate) fn scan_taboos(state: &Value, narrative: &str) -> Vec<Value> {
     let mut hits = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for raw_item in raw_line.split(['；', ';']) {
-        let item = raw_item.trim();
+        let item = raw_item.trim().trim_end_matches(['。', '！', '？', '.', '!', '?']).trim();
         if item.is_empty() {
             continue;
         }
@@ -2241,12 +2337,12 @@ pub(crate) fn scan_taboos(state: &Value, narrative: &str) -> Vec<Value> {
             continue;
         }
         for raw_term in terms_part.split(['、', '，', ',']) {
-            let term = raw_term.trim();
+            let term = raw_term.trim().trim_end_matches(['。', '！', '？', '.', '!', '?']).trim();
             let len = term.chars().count();
             if !(2..=6).contains(&len) {
                 continue;
             }
-            if narrative.contains(term) && seen.insert(term.to_owned()) {
+            if narrative_contains_taboo(narrative, term) && seen.insert(term.to_owned()) {
                 hits.push(json!({"term": term, "instead": instead}));
                 if hits.len() >= 6 {
                     return hits;
@@ -2264,13 +2360,13 @@ impl Tier {
         match plan.meta["depth"].as_str() { Some("fast") => Tier::Fast, Some("standard") => Tier::Standard, _ => Tier::Deep }
     }
     fn tool_rounds(self) -> Option<u64> {
-        match self { Tier::Fast => Some(0), Tier::Standard => Some(1), Tier::Deep => Some(4) }
+        match self { Tier::Fast => Some(0), Tier::Standard => Some(2), Tier::Deep => Some(4) }
     }
 }
 /// Lookup rounds for 按原著纠错 and 查一查 before they must answer; each round may read several things.
 const LOOKUP_ROUNDS: u64 = 6;
-/// The standard tier's lookups: notes first, then the original and the story so far.
-const STANDARD_TOOLS: [&str; 4] = ["read_canon_notes", "search_original", "read_original", "read_history"];
+/// The standard tier's lookups: catalog, notes, search/read original, and the story so far.
+const STANDARD_TOOLS: [&str; 5] = ["list_sections", "read_canon_notes", "search_original", "read_original", "read_history"];
 /// Focused read tools for 按原著纠错: omits unused world/skill/resource schemas to save ~2.5k chars per round.
 const CORRECTION_TOOLS: [&str; 9] = [
     "list_sections",
@@ -2284,8 +2380,21 @@ const CORRECTION_TOOLS: [&str; 9] = [
     "read_characters",
 ];
 const CORRECTION_RULES: &str = "按原著纠错模式：遵循原著技能与本局资料已附在上下文中，不必读取 read_world 或技能目录。先看已提供的原文与札记，不够再用 list_sections 查章节目录、search_original（可翻页或限定章节）和 read_original 核对原句，最后只返回要求的 JSON 对象，不要输出 <record> 块或调用写入工具。";
+/// Focused read tools for 查一查: covers book lookup + story history/resources/continuity without writing or skill clutter.
+const ASK_TOOLS: [&str; 9] = [
+    "list_sections",
+    "search_original",
+    "read_original",
+    "read_canon_notes",
+    "read_canon_facts",
+    "read_history",
+    "read_characters",
+    "read_story_resources",
+    "read_continuity",
+];
+const ASK_RULES: &str = "查一查模式：只回答玩家问题，不推进剧情，不输出 <record> 块，不调用写入工具。先看上下文里已给的本局资料、札记和原文片段；不够时可调用只读工具补查本局旧事、人物、设定、知情线索或绑定原著原文，查清后简明作答，资料不足就直说。";
 const ORDINARY_RULES_FAST:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料都已在上下文中，直接写本回合正文及<record>。";
-const ORDINARY_RULES_STANDARD:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料已在上下文中，直接写本回合正文及<record>。只有上下文确实缺少某个具体的原著细节或旧事时才查阅，需要查的几项在同一批里一起查，查完就写；不要例行检查，不要调用写入工具。";
+const ORDINARY_RULES_STANDARD:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料已在上下文中，信息够用就直接写本回合正文及<record>。若涉及原著具体规则、考核方式、人物身份、招式能力、地点细节而上下文里的原文没有覆盖，先用 list_sections / search_original / read_original 查清再写，不要凭印象编造；需要查的几项在同一批里一起查，查完就写；不要调用写入工具。";
 const ORDINARY_RULES:&str="普通回合：本回合所需的世界、规则、人物和旧事已在上下文中，直接写本回合正文及<record>。只有在需要核实上下文里没有的具体人物、设定或原著细节时才调用只读工具，不要为了例行检查读取技能或世界资料；不要调用写入工具。";
 const CLASSIC_RULES:&str="经典模式：生成和整理顺序由程序安排。你可以读取技能并调用只读工具核实资料。绑定参考书且任务需要原著细节时，按遵循原著技能读取原文，不用模型记忆补齐事实。最后返回本回合正文及<record>；不要调用写入工具。";
 
@@ -2344,6 +2453,16 @@ mod correction_notes_tests {
         // Free mode never emits historical taboo hits.
         let free_state = json!({"era": {"mode": "free"}, "cards": state["cards"]});
         assert!(scan_taboos(&free_state, "银两 客栈 烟草").is_empty());
+        // "小时" must not false-positive on "小时候", and trailing periods on taboo items are trimmed.
+        let clock_state = json!({
+            "era": {"mode": "history"},
+            "cards": [{"kind":"时代","name":"唐","content":"不要出现：小时（时辰）；玻璃。"}]
+        });
+        let hits2 = scan_taboos(&clock_state, "他小时候住在长安，从未见过玻璃。");
+        let terms2: Vec<&str> = hits2.iter().filter_map(|h| h["term"].as_str()).collect();
+        assert_eq!(terms2, vec!["玻璃"]);
+        let hits3 = scan_taboos(&clock_state, "等了两个小时。");
+        assert_eq!(hits3.iter().filter_map(|h| h["term"].as_str()).collect::<Vec<_>>(), vec!["小时"]);
     }
     #[test]
     fn update_token_ratio_learns_and_smooths_within_bounds() {

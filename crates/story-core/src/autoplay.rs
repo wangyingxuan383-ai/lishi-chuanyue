@@ -141,7 +141,7 @@ impl Engine {
                         tx.execute("UPDATE execution_steps SET status='stale' WHERE run_id=? AND status='done'", [&child_id])?;
                         Ok(())
                     })?;
-                    self.store.run_event(&plan, json!({"type":"text","delta":"","full":""}))?;
+                    self.emit_run_event(&plan, json!({"type":"text","delta":"","full":""}))?;
                 }
                 self.store.resume(&child_id)?;
                 (self.store.plan(&child_id)?, if changed { json!({}) } else { saved.draft }, saved.budget)
@@ -162,8 +162,7 @@ impl Engine {
                 (parent.budget(), parent.cancel.child_token())
             };
             self.checkpoint(&shared)?;
-            self.store
-                .event(&plan.id, json!({"type":"step","index":index,"total":total}))?;
+            self.emit_run_event(&plan, json!({"type":"step","index":index,"total":total}))?;
             let child = Arc::new(Mutex::new(Context::new(child_plan.clone(), budget, child_draft, cancel)));
             // Boxing is intentional: execute dispatches autoplay back here.
             let outcome = Box::pin(self.execute(child.clone())).await;
@@ -385,10 +384,11 @@ impl Engine {
         let _ = tx.execute("DELETE FROM settings WHERE key=?", [format!("autoplayNote:{}", c.plan.id)]);
         tx.commit()?;
         drop(db);
-        self.store.event(
+        let finished = self.store.event(
             &c.plan.id,
             json!({"type":"finished","steps":result["steps"],"reason":reason}),
         )?;
+        self.push_live_event(&c.plan, finished.seq, &finished.event);
         let completion = c.draft["lastNodeId"]
             .as_str()
             .filter(|id| !id.is_empty() && result["steps"].as_u64().unwrap_or(0) > 0)
@@ -498,7 +498,30 @@ fn clip_note_content(content: &str, cap: usize) -> String {
     if content.chars().count() <= cap {
         return content.to_owned();
     }
-    content.chars().take(cap).collect()
+    // Keep complete lines up to `cap` instead of slicing mid-sentence.
+    let mut out = String::new();
+    let mut used = 0usize;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let len = trimmed.chars().count();
+        let sep = if out.is_empty() { 0 } else { 1 };
+        if used + sep + len <= cap {
+            if sep > 0 {
+                out.push('\n');
+            }
+            out.push_str(trimmed);
+            used += sep + len;
+        } else if out.is_empty() {
+            out = trimmed.chars().take(cap).collect();
+            break;
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 /// Refresh active story & book canon notes per autoplay step instead of keeping
@@ -663,12 +686,9 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     let mut reference=Value::Null;
     let note_str = director_note.unwrap_or("").trim();
     if plan.state["source"].is_object() {
-        let mut query=history.iter().rev().filter_map(|n|n["narrative"].as_str()).take(3).collect::<Vec<_>>().join("\n");
-        if !note_str.is_empty() {
-            query.push('\n');
-            query.push_str(note_str);
-        }
-        let original=crate::runtime_sources::read(store,plan,"search_original",&json!({"query":query}))?;
+        // Keep query focused on director note (if any) so search_original ranks by active entities,
+        // place, instructions and current book position instead of drowning in 3 full narratives.
+        let original=crate::runtime_sources::read(store,plan,"search_original",&json!({"query":note_str}))?;
         reference=json!({"bookId":original["bookId"],"title":original["title"],"binding":plan.state["source"],"status":original["status"],"passages":original["excerpts"].as_array().cloned().unwrap_or_default()});
     }
     let saved=&plan.meta["writingContext"];

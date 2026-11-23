@@ -49,10 +49,13 @@ export function DiffView({ before, after }: { before: string; after: string }) {
 
 /** What the turn's record and the earlier settings will change to; shared by every preview that changes facts. */
 export function RecordChanges({ changes, patch, dropped }: { changes: { name: string; before: string; after: string }[]; patch?: TurnRecord; dropped?: string[] }) {
-  return <details><summary>本回合记录{changes.length ? ` · ${changes.length}项调整` : "保持原样"}{patch ? " · 之前的设定一起改正" : ""}</summary>
+  const hasPatch = !!patch && (!!patch.cards?.length || !!patch.people?.length || !!patch.places?.length || !!patch.place || (!!patch.profile && Object.values(patch.profile).some(Boolean)));
+  return <details><summary>本回合记录{changes.length ? ` · ${changes.length}项调整` : "保持原样"}{hasPatch ? " · 之前的设定一起改正" : ""}</summary>
     <dl>{changes.map((c, i) => <div key={i}><dt>{c.name}</dt><dd>原：{c.before}</dd><dd>改：{c.after}</dd></div>)}</dl>
     {patch?.cards?.map((c, i) => <p key={`c${i}`} className="muted">设定集“{c.name}”：{c.content}</p>)}
     {patch?.people?.map((p, i) => <p key={`p${i}`} className="muted">人物“{p.name}”{p.role ? `：${p.role}` : ""}{p.note ? `；${p.note}` : ""}</p>)}
+    {patch?.place && <p className="muted">当前地点：{patch.place}</p>}
+    {patch?.places?.map((p, i) => <p key={`pl${i}`} className="muted">地点“{p.name}”{p.description ? `：${p.description}` : ""}</p>)}
     {patch?.profile && <p className="muted">主角：{Object.values(patch.profile).filter(Boolean).join("、")}</p>}
     {!!dropped?.length && <p className="field-hint warn">这些没有改：{dropped.join("、")}。钱物统计、玩法设置要在设定里改。</p>}
   </details>;
@@ -174,8 +177,8 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
         <label className="writing-option all"><input type="radio" name="writing-range" aria-label="整段" checked={isWhole} disabled={pending || saving} onChange={() => choose(whole)} /><span>整段一起改</span></label>
         {ranges.map((r, i) => <label key={r.start} className="writing-option"><input type="radio" name="writing-range" aria-label={`第 ${i + 1} 段：${brief(draft.text.slice(r.start, r.end))}`} checked={range.start === r.start && range.end === r.end} disabled={pending || saving} onChange={() => choose(r)} /><span>{draft.text.slice(r.start, r.end)}</span></label>)}
       </div> : <p className="writing-original">{original}</p>}
-      <label>希望怎么改<input value={hint} disabled={pending || saving} onChange={(e) => { setHint(e.target.value); setReady(false); }} placeholder={PLACEHOLDER[mode]} /></label>
-      {rewrite && (canon || (mode === "revise" && !!draft.source)) && <SourceScopeRow worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose={canon ? "correction" : "revise"} anchorPosition={targetPosition} disabled={pending || saving} onChange={(next) => { choose(range); setScope(next); }} />}
+      <label>希望怎么改<input value={hint} disabled={pending || saving} onChange={(e) => { setHint(e.target.value); setReady(false); setPreview(""); setCorrection(null); setRevision(null); setError(""); setPausedRun(null); }} placeholder={PLACEHOLDER[mode]} /></label>
+      {rewrite && (canon || mode === "revise") && <SourceScopeRow worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose={canon ? "correction" : "revise"} anchorPosition={targetPosition} disabled={pending || saving} onChange={(next) => { choose(range); setScope(next); }} />}
       <button className="ghost" disabled={pending || saving} onClick={() => setPresetsOpen(true)}>常用改稿要求</button>
       {presetsOpen && <MenuSheet title="常用改稿要求" onClose={() => setPresetsOpen(false)} items={WRITING_REQUIREMENT_PRESETS.filter(item => (item.mode === "polish" || rewrite) && (item.mode !== "canon" || !!draft.source)).map(item => ({ label: item.name, onSelect: () => { choose(range); setHint(item.hint); if (rewrite) setMode(item.mode); } }))} />}
       {(preview || pending) && (

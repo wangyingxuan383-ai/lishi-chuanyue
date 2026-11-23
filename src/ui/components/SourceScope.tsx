@@ -41,7 +41,7 @@ export function SourceScopeRow({ worldId, binding, value, onChange, purpose, dis
       const bySection = new Map(rows.map((r) => [Number(r.section), String(r.title)]));
       const a = chapterLabel(value.from, bySection.get(value.from));
       const b = chapterLabel(value.to, bySection.get(value.to));
-      setChapterSummary(value.from === value.to || a === b ? a : `${a} ～ ${b}`);
+      setChapterSummary(value.from === value.to ? a : a === b ? `${a}（第 ${value.from + 1} 节） ～ ${b}（第 ${value.to + 1} 节）` : `${a} ～ ${b}`);
     }).catch(() => { if (live) setChapterSummary(""); });
     return () => { live = false; };
   }, [game, binding?.bookId, value]);
@@ -82,7 +82,7 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
   useEffect(() => {
     let live = true;
     void (async () => {
-      const [c, n, r] = await Promise.all([binding ? bookChapters(game.repo, binding) : Promise.resolve([]), choosableNotes(game.repo, binding, worldId), game.scopeRoom()]);
+      const [c, n, r] = await Promise.all([binding ? bookChapters(game.repo, binding) : Promise.resolve([]), choosableNotes(game.repo, binding, worldId), game.scopeRoom(purpose)]);
       if (!live) return;
       setChapters(c); setNotes(n); setRoom(r);
       const lastSection = c.length ? c[c.length - 1].section : 0;
@@ -118,7 +118,11 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
   const hasLater = searching ? filtered.length > tocLimit : tocOffset + tocLimit < filtered.length;
 
   useEffect(() => {
-    if (mode !== "chapters" || !chapters?.length || scrolledOnce.current) return;
+    if (mode !== "chapters") {
+      scrolledOnce.current = false;
+      return;
+    }
+    if (!chapters?.length || scrolledOnce.current) return;
     scrolledOnce.current = true;
     requestAnimationFrame(() => {
       const target = tocListRef.current?.querySelector<HTMLElement>(`[data-section="${from}"]`);
@@ -276,8 +280,8 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
             )}
           </div>
           <RangeInputs last={last} from={from} to={to}
-            setFrom={(n) => { setFrom(n); setRangeAnchor(null); if (n !== to) setPickMode("range"); }}
-            setTo={(n) => { setTo(n); setRangeAnchor(null); if (n !== from) setPickMode("range"); }}
+            setFrom={(n) => { setFrom(n); setRangeAnchor(null); }}
+            setTo={(n) => { setTo(n); setRangeAnchor(null); }}
             describe={describeSection}
             total={binding?.through != null ? `本局可参考到第 ${binding.through + 1} 节（共 ${chapters.length} 节）` : `全书共 ${chapters.length} 节`} />
           <p className={whole ? "m-0" : "field-hint m-0"} aria-live="polite">{chapterWords(range)}{rangeSummary && rangeSummary !== chapterWords(range) ? `（${rangeSummary}）` : ""}约 {amount(chars)}，{whole

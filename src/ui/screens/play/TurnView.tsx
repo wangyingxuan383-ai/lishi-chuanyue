@@ -14,10 +14,13 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
   const { devMode } = useApp();
   // Developer mode: era words the local check found (R07-T002).
   const taboos = devMode ? ((node.meta.taboos as { term: string; instead: string | null }[] | undefined) ?? []) : [];
-  const advanced = node.meta.sourceAdvanced as { from?: number; to?: number } | undefined;
-  const sourceBack = onSourceBack && typeof advanced?.from === "number" ? { label: `原著进度改回第 ${advanced.from + 1} 章`, run: () => onSourceBack(advanced.from!) } : undefined;
+  const advanced = node.meta.sourceAdvanced as { from?: number; to?: number; fromTitle?: string; toTitle?: string } | undefined;
+  const sourceBack = onSourceBack && typeof advanced?.from === "number"
+    ? { label: `原著进度改回第 ${advanced.from + 1} 节`, run: () => onSourceBack(advanced.from!) }
+    : undefined;
   const referenceReview = node.meta.referenceReview as {
     status?: string;
+    reason?: string;
     findings?: { claim: string; status: string }[];
     issues?: { quote?: string; problem?: string; fix?: string }[];
     unresolved?: string[];
@@ -25,6 +28,8 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
   const reviewFindings = referenceReview?.findings ?? [];
   const reviewIssues = referenceReview?.issues ?? [];
   const reviewUnresolved = referenceReview?.unresolved ?? [];
+  const reviewSkipped = referenceReview?.status === "skipped";
+  const reviewPartial = referenceReview?.status === "partial";
   const reviewEmpty = reviewFindings.length === 0 && reviewIssues.length === 0 && reviewUnresolved.length === 0;
   // A summary already in the player's words (“你修改了剧本”) is shown as it is.
   if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" || node.actionText?.startsWith("你") ? node.actionText : `你修改了：${node.actionText}`}</div>;
@@ -46,11 +51,15 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
         <details className="ref-review">
           <summary>
             <span>原著核对</span>
-            {reviewUnresolved.length
-              ? <span className="ref-pill warn">{reviewUnresolved.length} 项待查</span>
-              : reviewIssues.length
-                ? <span className="ref-pill ok">{reviewIssues.length} 处已校对</span>
-                : <span className="ref-pill ok">已核对</span>}
+            {reviewSkipped
+              ? <span className="ref-pill warn">未核对</span>
+              : reviewUnresolved.length
+                ? <span className="ref-pill warn">{reviewUnresolved.length} 项待查</span>
+                : reviewPartial
+                  ? <span className="ref-pill warn">部分核对</span>
+                  : reviewIssues.length
+                    ? <span className="ref-pill ok">{reviewIssues.length} 处已校对</span>
+                    : <span className="ref-pill ok">已核对</span>}
           </summary>
           <div className="ref-review-body">
             {reviewIssues.map((item, i) => (
@@ -77,7 +86,13 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
               </p>
             ))}
             {reviewEmpty && (
-              <p className="ref-row muted">已核对，未发现与原著冲突。</p>
+              <p className="ref-row muted">
+                {reviewSkipped
+                  ? referenceReview?.reason === "no_passages"
+                    ? "本回合未取到可用的原著原文，未做原著核对。可在长按菜单里用“按原著纠错”指定章节核对。"
+                    : "本次原著核对未完成，正文保留原稿。"
+                  : "已核对，未发现与原著冲突。"}
+              </p>
             )}
           </div>
         </details>

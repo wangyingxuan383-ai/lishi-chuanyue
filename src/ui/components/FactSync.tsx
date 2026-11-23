@@ -65,8 +65,10 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
         </div>
       </>}
       {step === "syncing" && <p className="m-0" role="status"><span className="cursor-blink">AI 正在对照改动整理记录</span></p>}
-      {step === "preview" && preview && <>
-        {preview.unchanged
+      {step === "preview" && preview && (() => {
+        const noFactChange = preview.unchanged || (preview.recordChanges.length === 0 && !preview.correctionPatch);
+        return <>
+        {noFactChange
           ? <p className="m-0">看下来只是措辞变了，事实不用改。</p>
           : <>
             {preview.note && <p className="m-0">{preview.note}</p>}
@@ -75,14 +77,14 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
           </>}
         <div className="writing-actions">
           <button disabled={saving} onClick={onClose}>取消，不保存</button>
-          {preview.unchanged
+          {noFactChange
             ? <button className="primary" disabled={saving} onClick={() => void run(onTextOnly)}>保存文字</button>
             : <>
               <button disabled={saving} onClick={() => void run(onTextOnly)}>只改文字</button>
               <button className="primary" disabled={saving} onClick={() => void run(() => onAdopt({ ...preview, anchor: { ...preview.anchor, headId: ask.anchor.headId } }))}>采用</button>
             </>}
         </div>
-      </>}
+      </>; })()}
       {step !== "syncing" && since && <RecentUsageLine worldId={ask.anchor.worldId} purposes={["sync-facts"]} since={since} refreshKey={usageTick} />}
       {error && <p role="alert" className="field-hint warn m-0">{error}</p>}
     </div>

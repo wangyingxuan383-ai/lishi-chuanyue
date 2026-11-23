@@ -31,7 +31,7 @@ export function canonCorrectionRules(settings: WorldSettings, state: WorldState,
 - answer：玩家在提问（比如“城门几时关？”“他俩是什么关系？”）。answer 写答案，findings 附原文出处；不改正文。
 - not_found：读过的原文里没有这件事的依据（比如它是本局自己的设定或玩家的分支）。把缺什么写进 unresolved，不要凭记忆补原著细节。
 跨回合问题放 related。引文只能逐字摘自已读原文；玩家分支不是原著证据，不放进 corrections，也不伪造引文。
-最后只返回一个 JSON 对象（不要加代码块或额外说明）：{"outcome":"changed/verified/answer/not_found","replacement":"changed 时为选中范围的替换正文","recordPatch":{},"correctionPatch":{},"corrections":[{"detail":"有原著依据的更正说明","citations":[{"bookId":"书籍ID","section":0,"chunk":0,"quote":"实际读到的原句"}]}],"findings":[{"detail":"核对结果或答案要点","citations":[同上]}],"answer":"answer 时的答案","related":["关联问题"],"unresolved":["待核对问题"]}。recordPatch 只记录本回合实际变化，不返回 read_world 的 WorldState，不包含 protagonist/source/facts/executionMode/setStats 等整局字段。time 写本回合经过多久，money 写增减，choices 为文字数组。字段沿用正常回合：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
+最后只返回一个 JSON 对象（不要加代码块或额外说明）：{"outcome":"changed/verified/answer/not_found","replacement":"changed 时为选中范围的替换正文","recordPatch":{},"correctionPatch":{},"corrections":[{"detail":"有原著依据的更正说明","citations":[{"section":0,"chunk":0,"quote":"实际读到的原句"}]}],"findings":[{"detail":"核对结果或答案要点","citations":[{"section":0,"chunk":0,"quote":"实际读到的原句"}]}],"answer":"answer 时的答案","related":["关联问题"],"unresolved":["待核对问题"]}。recordPatch 只记录本回合实际变化，不返回 read_world 的 WorldState，不包含 protagonist/source/facts/executionMode/setStats 等整局字段；需要删除本回合误记的 items/people/goals 项目时写 {"name":"原名","remove":true}，替换名称时写 {"oldName":"原名","name":"新名",...}。time 写本回合经过多久，money 写增减，choices 为文字数组。字段沿用正常回合：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
 }
 export interface WritingAnchor { worldId: string; lineId: string; headId: string; nodeId: string; original: string }
 export interface TextRange { start: number; end: number }
@@ -291,7 +291,7 @@ export function canonOutcomeText(preview: CanonCorrectionPreview, through?: numb
     case "verified": return "核对过了，这段和原著对得上，不用改。";
     case "answer": return preview.answer?.trim() || "查到了原文，见下面的出处。";
     case "not_found":
-      if (preview.reason === "out_of_range") return `相关内容可能在你设的参考范围${through != null ? `（截至第 ${through + 1} 章）` : ""}之后，没有读到。可以在本局设置里放宽参考范围再查。${looked}`;
+      if (preview.reason === "out_of_range") return `相关内容可能在你设的参考范围${through != null ? `（截至第 ${through + 1} 节）` : ""}之后，没有读到。可以在本局设置里放宽参考范围再查。${looked}`;
       if (preview.reason === "no_excerpt") return `在允许的范围里没有找到相关的原文。${looked}换个说法再查，或者${CANON_NOT_FOUND.slice(CANON_NOT_FOUND.indexOf("如果"))}`;
       return `读了 ${preview.read ?? 0} 段原文，没有找到要改的依据。${looked}${CANON_NOT_FOUND.slice(CANON_NOT_FOUND.indexOf("如果"))}`;
   }
@@ -393,15 +393,20 @@ export function filterCorrectionPatch(raw: unknown): { kept?: TurnRecord; droppe
   for (const [key, value] of Object.entries(structuredClone(raw) as Record<string, unknown>)) {
     if (value == null) continue;
     if (!allowed.includes(key)) { dropped.push(PATCH_NAMES[key] ?? key); continue; }
-    if (key === "profile" && typeof value === "object" && !Array.isArray(value)) {
+    if (key === "profile") {
+      if (typeof value !== "object" || Array.isArray(value)) { dropped.push("主角资料"); continue; }
       const profile = Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([k]) => ["name", "age", "identity", "origin"].includes(k)));
       for (const k of Object.keys(value as object)) if (!(k in profile)) dropped.push(PATCH_NAMES[k] ?? k);
       if (Object.keys(profile).length) kept.profile = profile;
       continue;
     }
-    if (key === "cards" && Array.isArray(value)) {
-      // Kind and owner are settled against the 设定集 when it is applied (resolveCorrectionCards).
-      const cards = value.filter((c) => c && typeof c.name === "string" && c.name.trim()).map(({ source: _source, ...c }) => c);
+    if (key === "cards") {
+      if (!Array.isArray(value)) continue;
+      if (value.some((c) => c && typeof c === "object" && !Array.isArray(c) && (c as Record<string, unknown>).op === "remove")) {
+        dropped.push("删除设定卡");
+      }
+      // Kind and owner are settled against the 设定集 when it is applied (resolveCorrectionCards); never delete cards via correctionPatch.
+      const cards = value.filter((c) => c && typeof c === "object" && !Array.isArray(c) && (c as Record<string, unknown>).op !== "remove" && typeof (c as Record<string, unknown>).name === "string" && String((c as Record<string, unknown>).name).trim()).map(({ source: _source, ...c }) => c);
       if (cards.length) kept.cards = cards;
       continue;
     }
@@ -427,7 +432,7 @@ import { abilityCardName } from "../memory/cards";
 
 export function playerRevisionRules(settings: WorldSettings, state: WorldState, opening = false): string {
   return `按玩家的要求修改互动小说里选中的这段正文。玩家的要求就是依据：要求改的事实（人物、身份、数字、等级、年限、能力、物品、关系、时间、地点等）照改，选中范围里与之矛盾的说法一并改顺；没要求改的内容和写法尽量保持原样。只改选中范围，不续写其后的剧情，范围外的正文由程序原样保留。
-- recordPatch：改动影响本回合记录时，只对受影响的字段返回最小 recordPatch（字段同正常回合，数组只给受影响的项目）；改动涉及剧情变化时按改后正文重写 log；改的是较早段落而非最新一段时不要改 choices；不返回 protagonist/source/facts/executionMode/setStats 等整局字段；无影响就省略。
+- recordPatch：改动影响本回合记录时，只对受影响的字段返回最小 recordPatch（字段同正常回合，数组只给受影响的项目；删除本回合误记的 items/people/goals 项目写 {"name":"原名","remove":true}，改名替换写 {"oldName":"原名","name":"新名",...}）；改动涉及剧情变化时按改后正文重写 log；改的是较早段落而非最新一段时不要改 choices；不返回 protagonist/source/facts/executionMode/setStats 等整局字段；无影响就省略。
 - correctionPatch：玩家改的如果是这一段之前就已成立的事实（主角已有的能力或修为、身份、人物的关系或来历、地点、设定），用它把之前的资料也一起改正，只能用 profile、people、place、places、cards：profile 只改 name、age、identity、origin；cards 用 {"name":"卡片名","kind":"原卡片的种类，新卡写设定","content":"改正后的全文"}，主角自己的本事写在“${abilityCardName(state.protagonist.name)}”这张卡里（没有就新建）。
 不需要原著引文。最后只返回一个 JSON 对象（不要加代码块或额外说明）：{"replacement":"选中范围改好的正文","recordPatch":{},"correctionPatch":{},"note":"一句话说明改了什么"}。
 记录字段：\n${recordFields(settings, state)}\n${opening ? openingExtra(settings) : ""}`;
@@ -445,10 +450,17 @@ export function mergeRecordPatch(original: TurnRecord | null, patch: unknown): T
       const list = Array.isArray(record[key]) ? [...(record[key] as Record<string, unknown>[])] : [];
       for (const change of value) {
         if (!change || typeof change !== "object" || Array.isArray(change)) continue;
-        const id = (change as Record<string, unknown>).id ?? (change as Record<string, unknown>).name;
-        const at = id === undefined ? -1 : list.findIndex((v) => (v?.id ?? v?.name) === id);
-        if (at >= 0) list[at] = { ...list[at], ...(change as Record<string, unknown>) };
-        else list.push(change as Record<string, unknown>);
+        const entry = change as Record<string, unknown>;
+        const isRemove = entry.remove === true || (key !== "status" && entry.op === "remove");
+        const lookupId = entry.oldName ?? entry.id ?? entry.name;
+        const at = lookupId === undefined ? -1 : list.findIndex((v) => (v?.id ?? v?.name) === lookupId);
+        if (isRemove) {
+          if (at >= 0) list.splice(at, 1);
+          continue;
+        }
+        const { oldName: _old, remove: _rm, ...clean } = entry;
+        if (at >= 0) list[at] = { ...list[at], ...clean };
+        else list.push(clean);
       }
       record[key] = list;
     } else if (typeof value === "object") record[key] = { ...((record[key] as Record<string, unknown>) ?? {}), ...(value as Record<string, unknown>) };
@@ -465,7 +477,7 @@ export interface FactSyncRequest { anchor: WritingAnchor; text: string }
 export function factSyncRules(settings: WorldSettings, state: WorldState, opening = false): string {
   return `玩家亲手改了互动小说里的一段正文，现在要让这段的记录和之前的资料跟上改后的正文。改后的正文是定稿，不要改写它。
 对照【改前正文】和【改后正文】找出事实上的变化（人物、身份、关系、数字、等级、能力、物品、钱、伤病、时间、地点、发生了什么），只就这些变化：
-- recordPatch：只返回受影响的本回合记录字段（数组只给受影响的项目），不返回 protagonist/source/facts/executionMode/setStats 等整局字段；log 一定按改后正文重写一句；标明【这是最新一段】时，choices 按改后正文重新给，否则不给 choices。
+- recordPatch：只返回受影响的本回合记录字段（数组只给受影响的项目；删除本回合误记的 items/people/goals 项目写 {"name":"原名","remove":true}，改名替换写 {"oldName":"原名","name":"新名",...}），不返回 protagonist/source/facts/executionMode/setStats 等整局字段；log 一定按改后正文重写一句；标明【这是最新一段】时，choices 按改后正文重新给，否则不给 choices。
 - correctionPatch：改的如果是这一段之前就成立的事实（主角已有的本事、身份、人物的关系或来历、地点、设定），用它一并改正，只能用 profile、people、place、places、cards：profile 只改 name、age、identity、origin；cards 用 {"name":"卡片名","kind":"原卡片的种类，新卡写设定","content":"改正后的全文"}，主角自己的本事写在“${abilityCardName(state.protagonist.name)}”这张卡里。
 - 只是措辞、语气的改动，没有事实变化：unchanged 写 true，其他都省略。
 最后只返回一个 JSON 对象（不要加代码块或额外说明）：{"unchanged":false,"recordPatch":{},"correctionPatch":{},"note":"一句话说明事实变了什么"}。
@@ -476,14 +488,16 @@ export function factSyncRules(settings: WorldSettings, state: WorldState, openin
 export function parseFactSync(text: string, request: FactSyncRequest, original: TurnRecord | null): (PlayerRevisionPreview & { unchanged: boolean }) | null {
   const value = completeJson(text) as Record<string, unknown> | null;
   if (!value || typeof value !== "object") return null;
-  const unchanged = value.unchanged === true;
-  const record = mergeRecordPatch(original, unchanged ? null : value.recordPatch);
-  const { kept: correctionPatch, dropped } = unchanged ? { kept: undefined, dropped: [] as string[] } : filterCorrectionPatch(value.correctionPatch);
+  const rawUnchanged = value.unchanged === true;
+  const record = mergeRecordPatch(original, rawUnchanged ? null : value.recordPatch);
+  const { kept: correctionPatch, dropped } = rawUnchanged ? { kept: undefined, dropped: [] as string[] } : filterCorrectionPatch(value.correctionPatch);
+  const recordChanges = correctionRecordChanges(original, record);
+  const unchanged = rawUnchanged || (recordChanges.length === 0 && !correctionPatch);
   const whole = { start: 0, end: request.anchor.original.length };
   return {
     kind: "factSync", unchanged, anchor: request.anchor, range: whole, hint: "", replacement: request.text,
     narrative: replaceRange(request.anchor.original, whole, request.text), record,
-    recordChanges: correctionRecordChanges(original, record), ...(correctionPatch ? { correctionPatch } : {}), ...(dropped.length ? { droppedCorrections: dropped } : {}),
+    recordChanges, ...(correctionPatch ? { correctionPatch } : {}), ...(dropped.length ? { droppedCorrections: dropped } : {}),
     note: typeof value.note === "string" ? value.note.trim().slice(0, 200) : "", writingVersion: FACT_SYNC_PROMPT_VERSION,
   };
 }

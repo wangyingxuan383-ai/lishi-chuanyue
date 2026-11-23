@@ -164,4 +164,87 @@ describe("auxiliary request accounting", () => {
     expect((await rows(s.platform))[0]).toMatchObject({ prompt_tokens: 100, completion_tokens: null, estimated: 1 });
     expect(await monthSpend(s.platform, PRICES)).toMatchObject({ calls: 1, unknown: 1, knownCost: null });
   });
+
+  it("buffers pre-snapshot live events, forwards seq=0 thinking, and tears down listeners on detach", async () => {
+    let emitLive: ((e: { seq: number; event: unknown }) => void) | null = null;
+    let unsubscribed = false;
+    let resolveSnap!: (s: ExecutionSnapshot) => void;
+    const snapPromise = new Promise<ExecutionSnapshot>((resolve) => { resolveSnap = resolve; });
+    const delivered: Record<string, unknown>[] = [];
+    const platform = {
+      execution: {
+        start: async () => "run-live",
+        resume: async () => {},
+        stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }),
+        subscribe: (_id: string, cb: (e: { seq: number; event: unknown }) => void) => {
+          emitLive = cb;
+          return () => { unsubscribed = true; };
+        },
+        snapshot: () => snapPromise,
+      },
+    } as unknown as Platform;
+    const handle = startRun(platform, { id: "run-live" } as RunPlan, (ev) => delivered.push(ev));
+    await new Promise((r) => setTimeout(r, 0));
+    // Live events arriving before the first snapshot resolves must be buffered, not skip seq=1.
+    emitLive!({ seq: 0, event: { type: "thinking", deep: true } });
+    emitLive!({ seq: 2, event: { type: "text", full: "第二帧" } });
+    expect(delivered).toEqual([]);
+    resolveSnap({
+      id: "run-live", worldId: "w", executionId: "e1", stopRequested: false, status: "running",
+      budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 },
+      draft: null, result: null, error: null,
+      events: [{ seq: 1, event: { type: "tool", tool: "search_original" } }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(delivered).toEqual([
+      { type: "tool", tool: "search_original" },
+      { type: "thinking", deep: true },
+      { type: "text", full: "第二帧" },
+    ]);
+    handle.detach();
+    expect(unsubscribed).toBe(true);
+  });
+
+  it("currentExecution exposes saved action so failed prompts survive retry and reopen, and retryRun preserves pre-depth settingsGuard", async () => {
+    const s = await seed();
+    const plans: Record<string, unknown>[] = [];
+    const resumed: string[] = [];
+    s.platform.execution = {
+      agent: async () => null, settle: async () => null, list: async () => [],
+      stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }),
+      resume: async (id) => { resumed.push(id); },
+      start: async (plan) => { plans.push(plan as Record<string, unknown>); return `new-${plans.length}`; },
+      snapshot: async (id) => ({ id, worldId: s.world.id, status: "failed", budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 }, draft: null, result: null, error: "模拟失败", events: [{ seq: 5, event: { type: "failed", reason: "http" } }] }),
+    };
+    const head = (await tree.cursor(s.game.repo, s.world.id)).head;
+    const line = (await tree.cursor(s.game.repo, s.world.id)).line;
+    // Simulate a legacy pre-depth settings_json (no "depth" key in worlds.settings_json).
+    const liveSettings = JSON.parse(String((await s.platform.sql.query("SELECT settings_json FROM worlds WHERE id=?", [s.world.id]))[0].settings_json));
+    delete liveSettings.depth;
+    await s.platform.sql.batch([
+      { sql: "UPDATE worlds SET settings_json=? WHERE id=?", params: [JSON.stringify(liveSettings), s.world.id] },
+      {
+        sql: "INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        params: [
+          "failed-run", s.world.id, line.id, head.id, "failed",
+          JSON.stringify({
+            id: "failed-run", worldId: s.world.id, lineId: line.id, headId: head.id, baseId: head.id, kind: "turn",
+            model: { ...LLM, model: "old-model" },
+            settings: liveSettings,
+            action: { mode: "do", text: "去外院广场参加新生考核", directorNote: "重点写魂环展示" },
+            meta: { settingsGuard: liveSettings, sourceGuard: null },
+          }),
+          "{}", "{}", "HTTP 500", new Date().toISOString(), new Date().toISOString(),
+        ],
+      },
+      { sql: "INSERT INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES('failed-run','model:1','writing:0','done','{}','{\"text\":\"ok\"}')", params: [] },
+    ]);
+    const saved = await s.game.currentExecution(s.world.id);
+    expect(saved?.action).toEqual({ mode: "do", text: "去外院广场参加新生考核", directorNote: "重点写魂环展示" });
+    // Retry with new model on a pre-depth world: settingsGuard stays aligned with live settings_json (no injected depth key).
+    await s.game.retryRun("failed-run", () => {}).done;
+    expect(resumed).toEqual(["failed-run"]);
+    const updatedPlan = JSON.parse(String((await s.platform.sql.query("SELECT plan_json FROM execution_runs WHERE id='failed-run'"))[0].plan_json));
+    expect("depth" in updatedPlan.meta.settingsGuard).toBe(false);
+  });
 });
