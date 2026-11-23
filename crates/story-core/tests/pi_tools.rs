@@ -531,3 +531,145 @@ fn requested_large_skill_requires_complete_body_delivery_from_its_pinned_version
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM nodes"), 1);
 }
+
+#[test]
+fn preview_turn_record_hydrates_live_state_and_check_draft_exposes_turn_route_conflicts_and_world_evidence() {
+    let f = Fixture::new(Value::Null);
+    let task = f.start("tools-b53", json!({}), false);
+
+    // 1) preview_turn_record uses real protagonist money (10 in fixture) + staged state edits instead of empty {}
+    let preview = f.call(
+        &task,
+        "prev-1",
+        "preview_turn_record",
+        json!({"record": {"money": -4, "time": 15}}),
+    );
+    assert_eq!(preview["after"]["stats"]["money"].as_f64(), Some(6.0));
+    assert_eq!(preview["after"]["time"]["elapsedMinutes"].as_f64(), Some(15.0));
+
+    // 2) read_evidence schema & filter accept sourceKind = "world" and "player"
+    let choices = f.call(&task, "read-choices", "read_player_choices", json!({}));
+    assert!(!choices["references"].as_array().unwrap().is_empty());
+    // Confirm model delivery so receipt enters pages()
+    let req_adm = f.gateway.reserve_model_request(&task.permit, "model-ev1", "main", &json!({"id":"m"})).unwrap();
+    assert_eq!(req_adm["admitted"], true);
+    {
+        let mut db = f.store.lock().unwrap();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        let hash: String = tx
+            .query_row(
+                "SELECT delivery_hash FROM pi_tool_deliveries WHERE task_id=? AND call_id='read-choices'",
+                [&task.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        tx.execute(
+            "INSERT OR IGNORE INTO pi_context_deliveries(task_id,request_id,actor_id,call_id,delivery_hash,world_version,intent_revision,status) VALUES(?,?,'','read-choices',?,?,0,'accepted')",
+            params![task.id, "model-ev1", hash, task.version],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let world_ev = f.call(&task, "ev-world", "read_evidence", json!({"sourceKind": "world"}));
+    assert!(!world_ev["value"].as_array().unwrap().is_empty());
+    let player_ev = f.call(&task, "ev-player", "read_evidence", json!({"sourceKind": "player"}));
+    assert!(!player_ev["value"].as_array().unwrap().is_empty());
+
+    // 3) check_draft surfaces turns & routes rebaseConflicts in both top-level and constraints
+    f.call(&task, "st-turn", "stage_story_turn", json!({"narrative":"一段新剧情","record":{},"summary":"新剧情"}));
+    f.call(&task, "st-route", "stage_route", json!({"name":"支线","summary":"开支线"}));
+    {
+        let db = f.store.lock().unwrap();
+        let raw: String = db.query_row("SELECT workspace_json FROM pi_tasks WHERE id=?", [&task.id], |r| r.get(0)).unwrap();
+        let mut w: Value = serde_json::from_str(&raw).unwrap();
+        w["turns"][0]["rebaseConflicts"] = json!([{"path":"/headId","reason":"story_advanced"}]);
+        w["routes"][0]["needsRelocation"] = true.into();
+        w["routes"][0]["rebaseConflicts"] = json!([{"path":"/headId","reason":"target_missing"}]);
+        db.execute("UPDATE pi_tasks SET workspace_json=? WHERE id=?", params![w.to_string(), task.id]).unwrap();
+    }
+    let checked = f.call(&task, "chk-1", "check_draft", json!({}));
+    let conflicts = checked["constraints"]["rebaseConflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 2);
+    assert!(conflicts.iter().any(|c| c["collection"] == "turns"));
+    assert!(conflicts.iter().any(|c| c["collection"] == "routes" && c["needsRelocation"] == true));
+}
+
+#[test]
+fn stage_edits_supports_empty_path_dash_append_and_collection_element_ref_append() {
+    let f = Fixture::new(Value::Null);
+    let task = f.start("tools-f34", json!({}), false);
+
+    // 1) Explicit empty path `""` and JSON Patch `/-` append both pass validation and push cleanly
+    f.call(
+        &task,
+        "card-empty-path",
+        "stage_edit",
+        json!({
+            "kind": "cards",
+            "path": "",
+            "operation": "append",
+            "value": {"id": "card-1", "kind": "faction", "title": "玄鸟司", "body": "北梁暗卫机构"},
+            "summary": "新增玄鸟司"
+        }),
+    );
+    f.call(
+        &task,
+        "item-dash-path",
+        "stage_edit",
+        json!({
+            "kind": "protagonist",
+            "path": "/items/-",
+            "operation": "append",
+            "value": "北柴胡护心散",
+            "summary": "行囊新增北柴胡护心散"
+        }),
+    );
+
+    // 2) Reusing an existing element `ref` from `read_resource` when appending new cards in `stage_edits`
+    let first_card = f.call(&task, "read-card-0", "read_resource", json!({"kind": "cards", "path": "/0"}));
+    let card_ref = first_card["ref"].clone();
+    assert_eq!(card_ref["entityId"], "card-1");
+    assert_eq!(card_ref["path"], "/0");
+
+    f.call(
+        &task,
+        "batch-append-with-ref",
+        "stage_edits",
+        json!({
+            "edits": [
+                {
+                    "ref": card_ref.clone(),
+                    "operation": "append",
+                    "value": {"id": "card-2", "kind": "faction", "title": "寒鸦队", "body": "斥候精锐"},
+                    "summary": "新增寒鸦队"
+                },
+                {
+                    "ref": card_ref,
+                    "path": "/-",
+                    "operation": "append",
+                    "value": {"id": "card-3", "kind": "custom", "title": "回云纹", "body": "靖安侯府暗记"},
+                    "summary": "新增回云纹"
+                },
+                {
+                    "kind": "cards",
+                    "path": "/0/body",
+                    "operation": "replace_text",
+                    "find": "机构",
+                    "replace": "",
+                    "summary": "精简玄鸟司说明"
+                }
+            ]
+        }),
+    );
+
+    let cards = f.call(&task, "read-cards", "read_resource", json!({"kind": "cards"}));
+    let arr = cards["value"].as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["title"], "玄鸟司");
+    assert_eq!(arr[0]["body"], "北梁暗卫");
+    assert_eq!(arr[1]["title"], "寒鸦队");
+    assert_eq!(arr[2]["title"], "回云纹");
+
+    let prot = f.call(&task, "read-prot", "read_resource", json!({"kind": "protagonist"}));
+    assert_eq!(prot["value"]["items"], json!(["北柴胡护心散"]));
+}

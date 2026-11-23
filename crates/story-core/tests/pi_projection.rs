@@ -507,3 +507,61 @@ fn long_dialogue_is_bounded_and_other_task_events_do_not_enter_it() {
         .unwrap()
         .contains("SECRET"));
 }
+
+#[test]
+fn stage_edits_batch_projects_changes_list_and_draft_outcome_cleanly() {
+    let start = json!({
+        "seq": 1,
+        "event": {
+            "taskId": "task",
+            "event": {
+                "type": "tool_execution_start",
+                "toolCallId": "batch-1",
+                "toolName": "stage_edits",
+                "args": {
+                    "edits": [
+                        {"kind": "cards", "operation": "append", "summary": "新增设定卡甲"},
+                        {"kind": "cards", "operation": "append", "summary": "新增设定卡乙"}
+                    ]
+                }
+            }
+        }
+    });
+    let end = json!({
+        "seq": 2,
+        "event": {
+            "taskId": "task",
+            "event": {
+                "type": "tool_execution_end",
+                "toolCallId": "batch-1",
+                "toolName": "stage_edits",
+                "isError": false,
+                "durationMs": 12,
+                "result": {
+                    "details": {
+                        "ok": true,
+                        "data": {
+                            "staged": 2,
+                            "changesCount": 2,
+                            "changes": [
+                                {"kind": "cards", "id": "", "path": "", "operation": "append", "summary": "新增设定卡甲"},
+                                {"kind": "cards", "id": "", "path": "", "operation": "append", "summary": "新增设定卡乙"}
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let clean_start = persistable_event(&start).unwrap();
+    let clean_end = persistable_event(&end).unwrap();
+    let details = &clean_end["event"]["event"]["result"]["details"]["data"];
+    assert_eq!(details["staged"], 2);
+    assert_eq!(details["changes"].as_array().unwrap().len(), 2);
+    assert_eq!(details["changes"][0]["summary"], "新增设定卡甲");
+    let rows = steps(&[clean_start, clean_end], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"], "draft");
+    assert_eq!(rows[0]["object"], "新增设定卡甲等2项");
+    assert_eq!(rows[0]["resultText"], "已准备2项修改草稿，尚未采用");
+}

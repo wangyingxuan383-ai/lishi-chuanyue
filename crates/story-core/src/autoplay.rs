@@ -129,7 +129,7 @@ impl Engine {
                 if changed {
                     let existing_note = previous.action["directorNote"].as_str().map(str::to_owned);
                     let pending_note = take_pending_director_note(&self.store, &plan.id)?.or(existing_note);
-                    let mut fresh = self.autoplay_plan(&plan, live, index, pending_note)?;
+                    let mut fresh = self.autoplay_plan(&plan, live, index, total, pending_note)?;
                     if let Some(base) = previous.meta.get("stepBudgetBase") {
                         fresh.meta["stepBudgetBase"] = base.clone();
                     }
@@ -147,7 +147,7 @@ impl Engine {
                 (self.store.plan(&child_id)?, if changed { json!({}) } else { saved.draft }, saved.budget)
             } else {
                 let pending_note = take_pending_director_note(&self.store, &plan.id)?;
-                let mut child = self.autoplay_plan(&plan, live, index, pending_note)?;
+                let mut child = self.autoplay_plan(&plan, live, index, total, pending_note)?;
                 if plan.meta["autoplayBudgetVersion"]=="per-passage-1"{child.meta["stepBudgetBase"]=serde_json::to_value(shared.lock().map_err(|_|Error::Cancelled)?.budget())?;}
                 self.store.register(&child)?;
                 (child, json!({}), RunBudget::default())
@@ -162,7 +162,8 @@ impl Engine {
                 (parent.budget(), parent.cancel.child_token())
             };
             self.checkpoint(&shared)?;
-            self.emit_run_event(&plan, json!({"type":"step","index":index,"total":total}))?;
+            let step_note = child_plan.action.get("directorNote").cloned().unwrap_or(Value::Null);
+            self.emit_run_event(&plan, json!({"type":"step","index":index,"total":total,"directorNote":step_note}))?;
             let child = Arc::new(Mutex::new(Context::new(child_plan.clone(), budget, child_draft, cancel)));
             // Boxing is intentional: execute dispatches autoplay back here.
             let outcome = Box::pin(self.execute(child.clone())).await;
@@ -276,13 +277,25 @@ impl Engine {
         })
     }
 
-    fn autoplay_plan(&self, parent: &RunPlan, live: Live, index: u64, director_note: Option<String>) -> Result<RunPlan> {
+    fn autoplay_plan(&self, parent: &RunPlan, live: Live, index: u64, total: u64, director_note: Option<String>) -> Result<RunPlan> {
         let mut plan = parent.clone();
+        let true_spectator = parent.meta["autoplayPilot"] != "temporary-ai"
+            && live
+                .raw_settings
+                .get("pilot")
+                .and_then(Value::as_str)
+                .or_else(|| parent.settings.get("pilot").and_then(Value::as_str))
+                == Some("ai");
+        let player_choices_on_exit = !true_spectator && index >= total;
         plan.id = format!("{}:step:{index}", parent.id);
         plan.kind = "turn".into();
         plan.base_id = Some(parent.head_id.clone());
         plan.state = live.state;
         plan.settings = live.settings;
+        if index < total {
+            // Intermediate autoplay steps continue immediately; never trigger a fallback extract call just for unused choices.
+            plan.settings["choiceCount"] = 0.into();
+        }
         let director_note = director_note.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
         plan.action = match &director_note {
             Some(note) => json!({"mode":"continue","text":"","directorNote":note}),
@@ -311,7 +324,24 @@ impl Engine {
         plan.meta["sourceGuard"] = plan.state.get("source").cloned().unwrap_or(Value::Null);
         plan.options["mode"] = "continue".into();
         plan.options["difficulty"] = plan.settings["difficulty"].clone();
-        plan.options["fortune"] = Value::Null;
+        let fortune_mode = effective_fortune_mode(&plan.settings, &plan.state).to_owned();
+        let rolled_fortune = if fortune_mode == "off" {
+            None
+        } else if index == 1 && parent.options["fortune"].as_str().is_some_and(|s| !s.is_empty()) {
+            parent.options["fortune"].as_str().map(str::to_owned)
+        } else {
+            Some(roll_step_fortune(
+                plan.settings["difficulty"].as_str().unwrap_or("标准"),
+                &parent.id,
+                index,
+                &plan.head_id,
+            ))
+        };
+        plan.options["fortune"] = if fortune_mode == "on" {
+            rolled_fortune.clone().map(Value::String).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
         plan.options["asked"] = Value::Null;
         if plan.state["era"]["currency"]["units"]
             .as_array()
@@ -323,6 +353,7 @@ impl Engine {
         for (key, source) in [
             ("mode", &plan.state["era"]["mode"]),
             ("clockStyle", &plan.state["era"]["clockStyle"]),
+            ("timeStyle", &plan.state["era"]["timeStyle"]),
             ("date", &plan.state["time"]["date"]),
             ("hour", &plan.state["time"]["startHour"]),
             ("rules", &plan.state["era"]["calendar"]),
@@ -332,8 +363,22 @@ impl Engine {
                 clock[key] = source.clone();
             }
         }
+        for key in ["anchor", "elapsedAnchor"] {
+            if let Some(val) = plan.state["time"].get(key) {
+                clock[key] = val.clone();
+            }
+        }
         plan.options["clock"] = clock;
-        prepare_messages(&self.store, &mut plan, &live.history, &live.chapters, director_note.as_deref())?;
+        prepare_messages(
+            &self.store,
+            &mut plan,
+            &live.history,
+            &live.chapters,
+            director_note.as_deref(),
+            rolled_fortune.as_deref(),
+            &fortune_mode,
+            player_choices_on_exit,
+        )?;
         prepare_organization(&mut plan, &live.history, &live.chapters);
         Ok(plan)
     }
@@ -370,8 +415,8 @@ impl Engine {
 
     fn finish_autoplay(&self, shared: &Shared, reason: &str) -> Result<()> {
         self.checkpoint(shared)?;
-        let c = shared.lock().map_err(|_| Error::Cancelled)?;
-        let result = json!({"steps":c.draft["steps"].as_u64().unwrap_or(0),"reason":reason,"nodeId":c.draft["lastNodeId"]});
+        let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+        let mut result = json!({"steps":c.draft["steps"].as_u64().unwrap_or(0),"reason":reason,"nodeId":c.draft["lastNodeId"]});
         let mut db = self.store.lock()?;
         let tx = db.transaction()?;
         let mut route = c.plan.clone();
@@ -380,14 +425,33 @@ impl Engine {
             .as_object_mut()
             .map(|m| m.remove("settingsGuard"));
         Store::guard(&tx, &route)?;
-        tx.execute("UPDATE execution_runs SET status='committed',result_json=?,updated_at=? WHERE id=? AND status='running'",params![result.to_string(),Utc::now().to_rfc3339(),c.plan.id])?;
-        let _ = tx.execute("DELETE FROM settings WHERE key=?", [format!("autoplayNote:{}", c.plan.id)]);
+        let note_key = format!("autoplayNote:{}", c.plan.id);
+        let unused_note: Option<String> = tx
+            .query_row("SELECT value FROM settings WHERE key=?", [&note_key], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|v| serde_json::from_str::<String>(&v).ok().or(Some(v)))
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        let _ = tx.execute("DELETE FROM settings WHERE key=?", [&note_key]);
+        if let Some(note) = &unused_note {
+            c.draft["unusedDirectorNote"] = json!(note);
+            result["unusedDirectorNote"] = json!(note);
+            let _ = tx.execute(
+                "INSERT INTO settings(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![format!("autoplayUnusedNote:{}", c.plan.world_id), serde_json::to_string(note)?],
+            );
+        }
+        tx.execute(
+            "UPDATE execution_runs SET status='committed',draft_json=?,result_json=?,updated_at=? WHERE id=? AND status='running'",
+            params![c.draft.to_string(), result.to_string(), Utc::now().to_rfc3339(), c.plan.id],
+        )?;
         tx.commit()?;
         drop(db);
-        let finished = self.store.event(
-            &c.plan.id,
-            json!({"type":"finished","steps":result["steps"],"reason":reason}),
-        )?;
+        let mut fin_event = json!({"type":"finished","steps":result["steps"],"reason":reason});
+        if let Some(note) = &unused_note {
+            fin_event["unusedDirectorNote"] = json!(note);
+        }
+        let finished = self.store.event(&c.plan.id, fin_event)?;
         self.push_live_event(&c.plan, finished.seq, &finished.event);
         let completion = c.draft["lastNodeId"]
             .as_str()
@@ -468,6 +532,9 @@ fn note_within_scope(kind: &str, scope: &Value, refs: &[i64], through: Option<i6
     }
     if matches!(kind, "plot" | "timeline") {
         return scope["to"].as_i64().is_some_and(|to| to <= limit);
+    }
+    if scope["through"].as_i64().is_some_and(|t| t >= 0 && t <= limit) {
+        return refs.len() < 400;
     }
     (!refs.is_empty() || (kind == "question" && same_world)) && refs.len() < 400
 }
@@ -566,31 +633,33 @@ fn dynamic_canon_notes(store: &Store, plan: &RunPlan, history: &[Value], directo
     for (kind, title, scope_raw, content, progress_raw, origin_world_id, origin_title) in story_rows {
         let scope: Value = serde_json::from_str(&scope_raw).unwrap_or_default();
         let progress: Value = serde_json::from_str(&progress_raw).unwrap_or_default();
+        let carried = origin_world_id.is_some();
         let route_anchor = scope["toNode"].as_str().or_else(|| progress["routeNode"].as_str());
-        if let Some(anchor) = route_anchor {
-            let ids = route_ids.get_or_insert_with(|| {
-                let mut set = std::collections::HashSet::new();
-                if let Ok(mut q) = db.prepare(
-                    "WITH RECURSIVE route(id) AS (
-                        SELECT id FROM nodes WHERE world_id=?1 AND id=?2
-                        UNION ALL
-                        SELECT n.parent_id FROM nodes n JOIN route r ON n.id=r.id
-                        WHERE n.world_id=?1 AND n.parent_id IS NOT NULL
-                    ) SELECT id FROM route",
-                ) {
-                    if let Ok(rows) = q.query_map(params![&plan.world_id, &plan.head_id], |r| r.get::<_, String>(0)) {
-                        for id in rows.flatten() {
-                            set.insert(id);
+        if !carried {
+            if let Some(anchor) = route_anchor {
+                let ids = route_ids.get_or_insert_with(|| {
+                    let mut set = std::collections::HashSet::new();
+                    if let Ok(mut q) = db.prepare(
+                        "WITH RECURSIVE route(id) AS (
+                            SELECT id FROM nodes WHERE world_id=?1 AND id=?2
+                            UNION ALL
+                            SELECT n.parent_id FROM nodes n JOIN route r ON n.id=r.id
+                            WHERE n.world_id=?1 AND n.parent_id IS NOT NULL
+                        ) SELECT id FROM route",
+                    ) {
+                        if let Ok(rows) = q.query_map(params![&plan.world_id, &plan.head_id], |r| r.get::<_, String>(0)) {
+                            for id in rows.flatten() {
+                                set.insert(id);
+                            }
                         }
                     }
+                    set
+                });
+                if !ids.contains(anchor) {
+                    continue;
                 }
-                set
-            });
-            if !ids.contains(anchor) {
-                continue;
             }
         }
-        let carried = origin_world_id.is_some();
         let brief_title = if let Some(origin) = origin_title.as_deref().filter(|s| !s.is_empty()) {
             format!("{title}（前作《{origin}》）")
         } else {
@@ -681,7 +750,176 @@ fn dynamic_canon_notes(store: &Store, plan: &RunPlan, history: &[Value], directo
     Ok(ranked.into_iter().map(|(_, item)| item).collect())
 }
 
-fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapters: &[Value], director_note: Option<&str>) -> Result<()> {
+fn effective_fortune_mode<'a>(settings: &'a Value, state: &Value) -> &'a str {
+    match settings["fortune"].as_str() {
+        Some("on") => "on",
+        Some("hint") => "hint",
+        Some("off") => "off",
+        _ if state["challenge"]["status"] == "active" => "on",
+        _ => "off",
+    }
+}
+
+fn roll_step_fortune(difficulty: &str, run_id: &str, index: u64, head_id: &str) -> String {
+    const FORTUNES: [&str; 5] = ["大顺", "顺", "平", "不顺", "大不顺"];
+    let weights: [u32; 5] = match difficulty {
+        "宽松" => [12, 35, 38, 12, 3],
+        "残酷" => [4, 16, 35, 33, 12],
+        _ => [5, 25, 45, 20, 5],
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(run_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(index.to_le_bytes());
+    hasher.update(b":");
+    hasher.update(head_id.as_bytes());
+    let digest = hasher.finalize();
+    let sample = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]) % weights.iter().sum::<u32>();
+    let mut acc = 0u32;
+    for (i, w) in weights.iter().enumerate() {
+        acc += w;
+        if sample < acc {
+            return FORTUNES[i].to_owned();
+        }
+    }
+    "平".to_owned()
+}
+
+fn fortune_prompt_note(fortune: Option<&str>, mode: &str) -> String {
+    let Some(f) = fortune.filter(|_| mode != "off") else {
+        return String::new();
+    };
+    const PLAUSIBLE: &str = "成败先看情理：局面悬殊的（人多势众、实力或准备远胜对方，或者本来就容易、本来就办不到的事），按情理写，运势最多影响代价和细节，不翻转结果。要合情合理，不写荒唐的倒霉，也不写荒唐的走运。没有风险的日常行动不受运势影响，也不要在正文里提运势。";
+    if mode == "on" {
+        let detail = match f {
+            "大顺" => "大顺——玩家这次的行动若有风险、胜负难料，结果顺利，还可能有意外之喜。",
+            "顺" => "顺——玩家这次的行动若有风险、胜负难料，结果多半顺利，最多小有波折。",
+            "不顺" => "不顺——玩家这次的行动若有风险、胜负难料，结果多半受阻，或要付出代价。",
+            "大不顺" => "大不顺——玩家这次的行动若有风险、胜负难料，结果失败，还可能节外生枝。",
+            _ => "平——玩家这次的行动若有风险，按情理决定成败。",
+        };
+        format!("\n【本回合运势（玩家看不到）】{detail}{PLAUSIBLE}")
+    } else {
+        let detail = match f {
+            "大顺" => "大顺——胜负难料时偏向顺利，可以有点小惊喜。",
+            "顺" => "顺——胜负难料时稍稍偏向顺利。",
+            "不顺" => "不顺——胜负难料时稍稍偏向受阻，或多些波折、小代价。",
+            "大不顺" => "大不顺——胜负难料时偏向失手；占上风的事也可能出点小岔子，但不推翻明摆着的结果。",
+            _ => "平——完全按情理。",
+        };
+        format!("\n【本回合运势（玩家看不到，只作参考）】{detail}运势只是一点倾向，只在胜负确实难料（双方相当、全凭运气）时起作用，顺就多些顺手，不顺就多些波折。{PLAUSIBLE}")
+    }
+}
+
+fn era_taboo_line(plan: &RunPlan) -> Option<String> {
+    if plan.settings["mode"] == "free" || plan.state["era"]["mode"] == "free" {
+        return None;
+    }
+    let from_cards = plan.state["cards"]
+        .as_array()
+        .and_then(|cards| cards.iter().find(|c| c["kind"] == "时代"))
+        .and_then(|c| c["content"].as_str());
+    let from_template = plan.meta["writingContext"]["template"]["era"].as_str();
+    for source in [from_cards, from_template].into_iter().flatten() {
+        for line in source.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("不要出现") {
+                if let Some(items) = rest.trim_start().strip_prefix(['：', ':']) {
+                    let trimmed = items.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn taboo_reminder_for_last_turn(plan: &RunPlan, history: &[Value]) -> String {
+    if plan.settings["mode"] == "free"
+        || plan.state["era"]["mode"] == "free"
+        || plan.settings["tabooHints"] == false
+    {
+        return String::new();
+    }
+    let Some(last_text) = history
+        .iter()
+        .rev()
+        .find(|n| n["kind"] != "edit")
+        .and_then(|n| n["narrative"].as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return String::new();
+    };
+    let Some(raw_line) = era_taboo_line(plan) else {
+        return String::new();
+    };
+    let mut hits = Vec::new();
+    for item in raw_line.split(['；', ';', '、']).map(str::trim).filter(|s| !s.is_empty()) {
+        let (term_part, instead) = if let Some((head, tail)) = item.split_once(['（', '(']) {
+            let hint = tail.trim_end_matches(['）', ')']).trim();
+            (head.trim(), (!hint.is_empty()).then_some(hint))
+        } else {
+            (item, None)
+        };
+        for term in term_part.split('/').map(str::trim).filter(|t| t.chars().count() >= 2) {
+            if last_text.contains(term) {
+                hits.push(match instead {
+                    Some(ins) => format!("“{term}”（该用：{ins}）"),
+                    None => format!("“{term}”"),
+                });
+                break;
+            }
+        }
+    }
+    if hits.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n【用词提醒】上一段用了这个时代不该有的说法：{}。之后不要再用，已经写出的不必解释。",
+            hits.join("、")
+        )
+    }
+}
+
+fn apply_protagonist_exit_choices(template: &mut Value, extract_sys: &mut String, choice_count: i64) {
+    if choice_count <= 0 {
+        return;
+    }
+    let spec_dir = " \"choices\":[\"接下来的一种走向\",\"另一种走向\"]}";
+    let spec_act = " \"choices\":[\"建议行动1\",\"建议行动2\",\"建议行动3\"]}";
+    if let Some(spec) = template["spec"].as_str() {
+        template["spec"] = spec.replace(spec_dir, spec_act).into();
+    }
+    let spectator_rule = "记录里给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字），写成事件或局面走向、不以主角作主语（如“旧识带来一个坏消息”“让日子先平静几天”），供玩家在幕后挑选";
+    let player_rule = format!("记录里给 {choice_count} 个简短、不同的建议行动（各不超过二十字），由玩家选择");
+    if let Some(rules) = template["rules"].as_str() {
+        if rules.contains(spectator_rule) {
+            template["rules"] = rules.replace(spectator_rule, &player_rule).into();
+        } else {
+            template["rules"] = format!("{rules}\n- 本段结束后将交还玩家扮演主角：{player_rule}。").into();
+        }
+    }
+    *extract_sys = extract_sys.replace(spec_dir, spec_act);
+    let extract_spectator = "choices 给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字，写成事件或局面走向、不以主角作主语）。";
+    let extract_player = format!("choices 给 {choice_count} 个简短、不同的建议行动（各不超过二十字）。");
+    if extract_sys.contains(extract_spectator) {
+        *extract_sys = extract_sys.replace(extract_spectator, &extract_player);
+    } else if !extract_sys.contains("建议行动") {
+        extract_sys.push_str(&format!("\n{extract_player}"));
+    }
+}
+
+fn prepare_messages(
+    store: &Store,
+    plan: &mut RunPlan,
+    history: &[Value],
+    chapters: &[Value],
+    director_note: Option<&str>,
+    fortune: Option<&str>,
+    fortune_mode: &str,
+    player_choices_on_exit: bool,
+) -> Result<()> {
     let cap=plan.meta["budgetChars"].as_u64().unwrap_or(24000);
     let mut reference=Value::Null;
     let note_str = director_note.unwrap_or("").trim();
@@ -695,12 +933,34 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     let mut template=if saved["template"].is_object(){saved["template"].clone()}else{
         json!({"rules":plan.meta["autoplayTurnSystem"].as_str().or_else(||plan.messages.first().and_then(|m|m["content"].as_str())).unwrap_or(""),"era":"","spec":"","notes":"","action":""})
     };
-    template["action"] = if note_str.is_empty() {
-        "".into()
-    } else {
-        format!("【幕后要求，照做但不要在正文中提及】{note_str}").into()
-    };
-    template["notes"]=history.last().and_then(|n|n["meta"]["notes"].as_array()).map(|a|a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；")).unwrap_or_default().into();
+    // Keep action empty so writing_context::build emits the standard 【继续】 header + directorNote + <record> reminder (B17).
+    template["action"] = "".into();
+    let ledger_notes = history
+        .iter()
+        .rev()
+        .find(|n| n["kind"] != "edit")
+        .and_then(|n| n["meta"]["notes"].as_array())
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>())
+        .filter(|v| !v.is_empty())
+        .map(|v| format!("\n【上回合的实际结果，请在叙述中自然体现】\n- {}", v.join("\n- ")))
+        .unwrap_or_default();
+    let taboo_note = taboo_reminder_for_last_turn(plan, history);
+    let luck_note = fortune_prompt_note(fortune, fortune_mode);
+    template["notes"] = format!("{ledger_notes}{taboo_note}{luck_note}").into();
+    let mut extract_sys = plan.meta["autoplayExtractSystem"]
+        .as_str()
+        .or_else(|| {
+            plan.extract_messages
+                .first()
+                .and_then(|m| m["content"].as_str())
+        })
+        .unwrap_or("")
+        .to_owned();
+    if player_choices_on_exit {
+        let choice_count = plan.settings["choiceCount"].as_i64().unwrap_or(3);
+        apply_protagonist_exit_choices(&mut template, &mut extract_sys, choice_count);
+    }
+    extract_sys = crate::stage_context::enrich_extract_system(&extract_sys, &plan.state);
     let era=json!({"currency":plan.options["currency"],"clock":plan.options["clock"]});
     // 相关旧事 numbers passages from the opening; history holds the last 200.
     let total: i64 = store.lock()?.query_row("WITH RECURSIVE path AS (SELECT id,parent_id,kind FROM nodes WHERE id=? UNION ALL SELECT n.id,n.parent_id,n.kind FROM nodes n JOIN path p ON n.id=p.parent_id) SELECT COUNT(*) FROM path WHERE kind<>'edit'", [&plan.head_id], |r| r.get(0))?;
@@ -727,17 +987,15 @@ fn prepare_messages(store: &Store, plan: &mut RunPlan, history: &[Value], chapte
     plan.messages=context["messages"].as_array().cloned().unwrap_or_default();
     plan.reference=context.get("reference").filter(|v|v.is_object()).cloned();
     plan.meta["contextUsage"]=json!({"chars":context["chars"],"budgetChars":cap,"layers":context["layers"],"version":context["contextVersion"]});
-    let extract = plan.meta["autoplayExtractSystem"]
-        .as_str()
-        .or_else(|| {
-            plan.extract_messages
-                .first()
-                .and_then(|m| m["content"].as_str())
-        })
-        .unwrap_or("");
+    let modes_prompt = crate::stage_context::active_modes_prompt(&plan.state);
+    let action_desc = if note_str.is_empty() {
+        "继续".to_owned()
+    } else {
+        format!("继续（幕后要求：{note_str}）")
+    };
     plan.extract_messages = vec![
-        json!({"role":"system","content":extract}),
-        json!({"role":"user","content":format!("【当前状态】{}\n【本回合行动】继续\n【本回合正文】\n{{{{NARRATIVE}}}}",crate::stage_context::state(&plan.state,"",(cap as usize/5).min(3000)))}),
+        json!({"role":"system","content":extract_sys}),
+        json!({"role":"user","content":format!("【当前状态】{}{}\n【本回合行动】{action_desc}\n【本回合正文】\n{{{{NARRATIVE}}}}",crate::stage_context::state(&plan.state,"",(cap as usize/5).min(3000)),modes_prompt)}),
     ];
     Ok(())
 }
@@ -759,7 +1017,13 @@ fn prepare_organization(plan: &mut RunPlan, history: &[Value], chapters: &[Value
                 .map(|n| n["narrative"].as_str().unwrap_or(""))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            plan.meta["upkeepMessages"] = json!([{"role":"system","content":system},{"role":"user","content":format!("【故事设定】{}\n【当前资料、人物、主角状态及玩家删去的项目】{}\n【最近剧情】{}\n{{{{NARRATIVE}}}}",plan.settings["premise"],crate::stage_context::state(&plan.state,&turns,3000),crate::stage_context::excerpt(&turns,"",4500))}]);
+            let taboos = era_taboo_line(plan);
+            let prefix = crate::stage_context::upkeep_roster_prefix(&plan.state, &plan.settings, taboos.as_deref());
+            let raw_messages = vec![
+                json!({"role":"system","content":system}),
+                json!({"role":"user","content":format!("{prefix}\n\n【最近的剧情】\n{turns}\n\n{{{{NARRATIVE}}}}")}),
+            ];
+            plan.meta["upkeepMessages"] = json!(crate::stage_context::organization(plan, &raw_messages, "{{NARRATIVE}}"));
         }
     }
     let last = chapters.last().map(|c| c["lastNodeId"].clone());
@@ -879,5 +1143,72 @@ mod tests {
         assert!(titles.contains(&"李白札记"), "got {titles:?}");
         assert!(!titles.contains(&"支线笔记"), "off-route note leaked: {titles:?}");
         assert!(!titles.contains(&"后期剧透"), "spoiler note leaked: {titles:?}");
+    }
+
+    #[test]
+    fn dynamic_canon_notes_retains_carried_sequel_story_notes_across_steps() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&mut conn, None).unwrap();
+        conn.execute_batch(
+            "INSERT INTO worlds(id,title,era_id,created_at,updated_at,played_at) VALUES('w2','续作','free','t','t','t');
+             INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,meta_json,created_at) VALUES
+               ('new-1','w2',NULL,0,'opening','新世界开场。','{}','t'),
+               ('new-2','w2','new-1',1,'turn','阿青再次现身。','{}','t');
+             INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,progress_json,origin_world_id,origin_title,active,status,created_at,updated_at) VALUES
+               ('carried-plot','w2','plot','前作终局','{\"toNode\":\"old-world-node-99\"}','前作大结局梗概','{\"routeNode\":\"old-world-node-99\"}','w1','旧长安',1,'done','t','2026-01-02'),
+               ('carried-person','w2','person','阿青','{\"subject\":\"阿青\",\"toNode\":\"old-world-node-50\"}','前作剑客','{}','w1','旧长安',1,'done','t','2026-01-03');",
+        )
+        .unwrap();
+        let store = Store(Arc::new(Mutex::new(conn)));
+        let plan: RunPlan = serde_json::from_value(json!({
+            "id": "r2", "worldId": "w2", "lineId": "l2", "headId": "new-2", "baseId": "new-2", "kind": "turn",
+            "model": {"slot":"s","url":"http://127.0.0.1","model":"m","auxModel":null,"includeUsage":true,"maxTokens":null,"extra":{}},
+            "messages": [], "extractMessages": [], "state": {}, "settings": {}, "options": {}, "action": {}, "meta": {}
+        }))
+        .unwrap();
+        let history = vec![json!({"kind": "turn", "narrative": "阿青拔剑相助。"})];
+        let notes = dynamic_canon_notes(&store, &plan, &history, "").unwrap();
+        let titles: Vec<&str> = notes.iter().filter_map(|v| v["title"].as_str()).collect();
+        assert!(titles.contains(&"前作终局（前作《旧长安》）"), "carried plot note dropped: {titles:?}");
+        assert!(titles.contains(&"阿青（前作《旧长安》）"), "carried person note dropped: {titles:?}");
+    }
+
+    #[tokio::test]
+    async fn finish_autoplay_preserves_unconsumed_director_note() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&mut conn, None).unwrap();
+        conn.execute_batch(
+            "INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w','测试','free','l','{}','t','t','t');
+             INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('h','w',0,'opening','开场','t');
+             INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l','w','主线','h','t');
+             INSERT INTO states VALUES('h','{\"version\":2,\"protagonist\":{\"stats\":{\"health\":80}}}');
+             INSERT INTO settings(key, value) VALUES('autoplayNote:run-fin', '\"留给下一段的提示\"');",
+        ).unwrap();
+        let store = Store(Arc::new(Mutex::new(conn)));
+        store.initialize().unwrap();
+        struct DummyModel;
+        impl crate::chat::Model for DummyModel {
+            fn complete(&self, _: crate::ModelConfig, _: Value, _: tokio_util::sync::CancellationToken, _: crate::chat::TextSink) -> crate::chat::BoxFuture<Result<crate::chat::Completion>> {
+                Box::pin(async { unreachable!() })
+            }
+        }
+        let engine = Arc::new(Engine::new(store.clone(), Arc::new(DummyModel), Arc::new(|_| Box::new(())), Arc::new(|_| {})));
+        let plan: RunPlan = serde_json::from_value(json!({
+            "id": "run-fin", "worldId": "w", "lineId": "l", "headId": "h", "baseId": "h", "kind": "autoplay",
+            "model": {"slot":"s","url":"http://127.0.0.1","model":"m","auxModel":null,"includeUsage":false,"maxTokens":null,"extra":{}},
+            "messages": [], "extractMessages": [], "state": {}, "settings": {}, "options": {}, "action": {},
+            "meta": {"autoplayCount": 0}
+        })).unwrap();
+        engine.start(plan).unwrap();
+        let settled = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let s = engine.snapshot("run-fin", 0).unwrap();
+                if s.status != "running" { break s; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(settled.status, "committed");
+        assert_eq!(settled.result.as_ref().unwrap()["unusedDirectorNote"], "留给下一段的提示");
+        assert_eq!(settled.draft["unusedDirectorNote"], "留给下一段的提示");
     }
 }

@@ -2,7 +2,7 @@
 // local edits, context previews and auxiliary writing jobs.
 import { depthBudget, depthOf, referenceReview } from "./depth";
 import { isChosen, scopeNote, scopedMaterial, type SourceScope } from "./sources/scope";
-import { carryNotes, getNote, listStoryNotes, markNotesStale, newNote, newStoryNote, noteOffRoute, noteReplyProblem, notesForTurn, restartOnRoute, runNote, saveNote, startNoteUpdate, type CanonNote, type NoteBrief } from "./sources/notes";
+import { carryNotes, getNote, listStoryNotes, markNotesStale, newLocalNote, newNote, newStoryNote, noteOffRoute, noteReplyProblem, notesForTurn, restartOnRoute, runNote, saveNote, startNoteUpdate, type CanonNote, type NoteBrief } from "./sources/notes";
 import { parseReviseEntry, parseReviseRules, reviseEntryMessages, reviseRulesMessages, type ReviseContext, type ReviseEntry, type ReviseEntryResult, type ReviseRules } from "./prompt/revise";
 import { validateContinuity, readContinuity } from "./continuity";
 import { formatDate } from "./calendar/date";
@@ -39,7 +39,7 @@ import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenc
 import { sourceAnalysisMessages, sourceAnalysisResult } from "./sources/analysis";
 import { validBinding, type SourceBinding, type AnalysisJob } from "./sources/types";
 import { asJson, startRun, type RunPlan } from "./execution";
-import { abilityCardName, assertWritingAnchor, isLatestPassage, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, MISSING_OPENING_SEED, MISSING_OPENING_SEED_REVISE, MISSING_OPENING_SEED_SYNC, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
+import { abilityCardName, assertWritingAnchor, isLatestPassage, resolveRevisionSource, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, recoverOpeningSeed, MISSING_OPENING_SEED, MISSING_OPENING_SEED_REVISE, MISSING_OPENING_SEED_SYNC, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
 
 export type { ChallengeInput, ScriptInput } from "./modes";
 
@@ -293,6 +293,10 @@ const CODEX_TIMEOUT = DEFAULT_TIMEOUTS;
 /** A note reads up to 16 000 characters and writes up to 3 000. */
 const NOTE_TIMEOUT = DEFAULT_TIMEOUTS;
 const NOTE_OUTPUT_TOKENS = 8192;
+const noteOutputBudget = (contextWindowTokens?: number) =>
+  contextWindowTokens && contextWindowTokens > 0
+    ? Math.min(NOTE_OUTPUT_TOKENS, Math.max(1200, Math.floor(contextWindowTokens / 4)))
+    : NOTE_OUTPUT_TOKENS;
 
 /** Lines of an apply log that say what happened, not what was refused. */
 const INFO_LOG = /^新人物：|只记录不提醒|按不限时处理/;
@@ -381,6 +385,17 @@ export class Game {
   /** Resolves once tracked background work has finished; before a restore, and for tests and evals. */
   async settled(): Promise<void> {
     while (this.background.size) await Promise.allSettled([...this.background]);
+  }
+
+  /** Cancels in-flight note/source jobs and waits for background work to drain before backup restore (W01). */
+  async prepareForRestore(): Promise<void> {
+    for (const c of this.noteRuns.values()) c.abort();
+    for (const c of this.sourceRuns.values()) c.abort();
+    await this.settled();
+    const deadline = Date.now() + 3000;
+    while ((this.noteRuns.size > 0 || this.sourceRuns.size > 0) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 40));
+    }
   }
 
   /**
@@ -766,7 +781,7 @@ export class Game {
         name: p.name, aliases: [], age: p.age, gender: p.gender, identity: p.identity,
         origin: input.arrival === "不穿越" ? "" : input.origin, cheat: "",
         ...(settings.heroPanel !== undefined ? { panel: settings.heroPanel } : {}),
-        stats: { money: 0, debt: 0, health: 80, energy: 70, fame: 10 }, statuses: [], items: [],
+        stats: { money: pack?.startMoney ?? 0, debt: 0, health: 80, energy: 70, fame: 10 }, statuses: [], items: [],
       },
       people: [], places: preset.places, cards: preset.cards, goals: [], deviations: [],
       era: {
@@ -822,6 +837,7 @@ export class Game {
         promptVersion: PROMPT_VERSION, titlePolicy, depth, referenceReviewVersion: scoped?.meta.mode === "notes" ? undefined : referenceReview(depth, initial.source), budgetChars: inputBudget, startMoney: pack?.startMoney ?? 0,
         ...(scoped ? { sourceScope: scoped.meta } : {}),
         playerWritten: input.opening.mode === "player", ...(input.opening.mode === "player" ? { playerNarrative: input.opening.text.trim() } : {}),
+        ...(input.carry?.ids.length ? { carry: input.carry } : {}),
         setup: { arrival: input.arrival, hint: input.opening.mode === "ai" ? input.opening.hint : "", organize: !pack && input.organize === true && !initial.source },
         ...(pack ? { openingTimeline: packTimeline(pack.timeline, era.clock).map((e) => ({ id: newId(), ...e })) } : {}),
         ...(!pack && input.organize === true && !initial.source ? { codexMessages: codexMessages({ mode: initial.era.mode, premise: settings.premise, protagonist: p, arrival: input.arrival }) } : {}),
@@ -834,11 +850,55 @@ export class Game {
       const result = snapshot.result as { nodeId?: string };
       const node = result.nodeId ? await this.repo.getNode(result.nodeId) : null;
       if (!node) throw new Error("开场提交结果不完整");
-      // The world exists now: the carried notes join it (they already informed the opening).
-      if (input.carry?.ids.length) await carryNotes(this.repo, input.carry.ids, worldId, { worldId: input.carry.fromWorldId, title: input.carry.fromTitle }).catch(() => 0);
+      await this.finalizeOpeningCommit(worldId, input.carry);
       onEvent({ type: "done", cursor: await tree.cursor(this.repo, worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
       return worldId;
     } catch (error) { onEvent(thrownFailure(error, false, "开场未能完成")); return null; }
+  }
+
+  /** Idempotently attaches carried notes, clears newgameDraft, and notifies shelf listeners when an opening commits (B04). */
+  private async finalizeOpeningCommit(worldId: string, carry?: NewWorld["carry"] | null): Promise<void> {
+    if (carry?.ids.length) {
+      const doneKey = `carriedDone:${worldId}`;
+      if (!(await this.repo.getSetting<boolean>(doneKey, false))) {
+        await this.repo.setSetting(doneKey, true);
+        await carryNotes(this.repo, carry.ids, worldId, { worldId: carry.fromWorldId, title: carry.fromTitle }).catch(() => 0);
+      }
+    }
+    await this.repo.setSetting("newgameDraft", null).catch(() => {});
+    for (const fn of this.listeners) fn(worldId);
+  }
+
+  /** Inspects a running or stopped opening run whose world row has not committed yet (B04). */
+  async unfinishedOpening(expectedRunId?: string): Promise<(SavedExecution & { worldId: string }) | null> {
+    if (!this.platform.execution) return null;
+    const [row] = await this.platform.sql.query(
+      `SELECT id,world_id,status,error,error_kind,failure_json,
+        (EXISTS(SELECT 1 FROM execution_progress e WHERE e.run_id=execution_runs.id)
+          OR COALESCE(json_extract(draft_json,'$.completedStages.prose.text'), json_extract(draft_json,'$.prose'), '') <> '') AS has_text,
+        COALESCE(
+          (SELECT json_extract(e.event_json,'$.full') FROM execution_progress e WHERE e.run_id=execution_runs.id AND json_extract(e.event_json,'$.type')='text' ORDER BY e.seq DESC LIMIT 1),
+          json_extract(draft_json,'$.completedStages.prose.text'),
+          json_extract(draft_json,'$.prose'),
+          ''
+        ) AS partial_text,
+        EXISTS(SELECT 1 FROM execution_steps s WHERE s.run_id=execution_runs.id AND s.kind LIKE 'writing:%' AND s.status='done') AS prose_done
+        FROM execution_runs WHERE json_extract(plan_json,'$.kind')='opening'
+          AND status NOT IN ('committed','previewed','stale')
+          AND NOT EXISTS(SELECT 1 FROM worlds w WHERE w.id=execution_runs.world_id)
+          AND (? IS NULL OR id=?)
+        ORDER BY created_at DESC LIMIT 1`,
+      [expectedRunId ?? null, expectedRunId ?? null],
+    );
+    if (!row) return null;
+    const failure = typeof row.failure_json === "string" ? JSON.parse(row.failure_json) as Failure : null;
+    const status = String(row.status), error = row.error === null ? null : String(row.error);
+    const partial = typeof row.partial_text === "string" && row.partial_text.trim() ? row.partial_text : undefined;
+    return {
+      id: String(row.id), worldId: String(row.world_id), status, error, kind: "opening", steps: 0, total: 0,
+      hasText: !!row.has_text, ...(partial ? { partialText: partial } : {}), proseSaved: !!row.prose_done,
+      failure, reason: ["failed", "cancelled", "paused", "interrupted"].includes(status) ? nativeFailReason(status, error, row.error_kind === null ? null : String(row.error_kind), failure) : null,
+    };
   }
 
   /** The notes a new story brings along, as the opening reads them (前作 background). */
@@ -980,27 +1040,65 @@ export class Game {
       );
       if (!row) throw new Error("找不到这次生成");
       const plan = JSON.parse(String(row.plan_json)) as Partial<RunPlan> & { meta?: Record<string, unknown> };
-      const worldId = String(row.world_id), world = await this.repo.getWorld(worldId), cursor = await tree.cursor(this.repo, worldId);
+      const worldId = String(row.world_id), world = await this.repo.getWorld(worldId);
+      const runKind = plan.kind;
       const failure = typeof row.failure_json === "string" ? JSON.parse(row.failure_json) as Failure : null;
       const kind = failure?.kind ?? (row.error_kind === null ? null : String(row.error_kind));
       const same = (a: unknown, b: unknown) => stableJson(a) === stableJson(b);
-      const withoutDepth = (s?: Partial<WorldSettings>) => (s ? { ...s, depth: undefined } : s);
       const llm = this.llm;
+      if (runKind === "opening") {
+        if (world) {
+          const c = await tree.cursor(this.repo, worldId);
+          onEvent({ type: "done", cursor: c, node: c.head, chips: (c.head.meta.chips as Chip[]) ?? [] });
+          return;
+        }
+        const modelChanged = !llm || !plan.model || !same(modelIdentity(plan.model), modelIdentity(llm));
+        if (stopped) return;
+        if (modelChanged && llm && !!row.has_done_steps) {
+          plan.model = llm;
+          plan.fallbackModel = this.fallbackLlm ?? undefined;
+          plan.meta = { ...(plan.meta ?? {}), allowModelSwitchReuse: true };
+          await this.platform.sql.batch([{
+            sql: "UPDATE execution_runs SET plan_json=? WHERE id=? AND status NOT IN ('running','committing','committed','previewed')",
+            params: [JSON.stringify(plan), id],
+          }]);
+        } else if (modelChanged && llm && !row.has_done_steps) {
+          plan.model = llm;
+          plan.fallbackModel = this.fallbackLlm ?? undefined;
+          await this.platform.sql.batch([{
+            sql: "UPDATE execution_runs SET plan_json=? WHERE id=? AND status NOT IN ('running','committing','committed','previewed')",
+            params: [JSON.stringify(plan), id],
+          }]);
+        }
+        inner = this.followExecution(id, onEvent, true);
+        if (detached) inner.detach?.();
+        await inner.done;
+        return;
+      }
+      const cursor = await tree.cursor(this.repo, worldId);
+      const coreSettings = (s?: Partial<WorldSettings>) => s ? {
+        premise: s.premise ?? "",
+        essentials: s.essentials ?? "",
+        rules: s.rules ?? "",
+        difficulty: s.difficulty ?? "标准",
+        mode: s.mode ?? "history",
+      } : s;
+      const withoutDepth = (s?: Partial<WorldSettings>) => (s ? { ...s, depth: undefined } : s);
       const head = await this.repo.getState(cursor.head.id);
+      const settingsMismatch = !!world && (row.has_done_steps ? !same(coreSettings(plan.settings), coreSettings(world.settings)) : !same(withoutDepth(plan.settings), withoutDepth(world.settings)));
       const hardExpired = row.status === "stale" || kind === "stale" || plan.headId !== cursor.head.id
         || plan.lineId !== cursor.line.id
         || !llm || !plan.model
-        || !!world && !same(withoutDepth(plan.settings), withoutDepth(world.settings))
+        || settingsMismatch
         || plan.meta?.sourceGuard !== undefined && !same(plan.meta.sourceGuard, head.source ?? null)
         // A passage it read was edited since: the stored request still has the old text (D183).
         // Checked at the node it was taken: a 连播's saved plan moves its base on with every passage.
         || typeof plan.meta?.textGuard === "string" && plan.meta.textGuard !== textGuard(await this.repo.path(String(plan.meta.textGuardAt ?? plan.baseId ?? cursor.head.id)));
       const modelOrDepthChanged = !llm || !plan.model
         || !same(modelIdentity(plan.model), modelIdentity(llm))
-        || !!world && world.settings.depth !== plan.settings?.depth;
+        || !!world && !same(plan.settings, world.settings);
       const depthSwitchedToFastAfterTools = !!world && depthOf(world.settings) === "fast"
         && depthOf(plan.settings ?? {}) !== "fast" && !!row.has_tool_steps;
-      const runKind = plan.kind;
       if (stopped) return;
       if (!hardExpired && modelOrDepthChanged && !!row.has_done_steps && !depthSwitchedToFastAfterTools && (runKind === "turn" || runKind === "variant" || runKind === "continue")) {
         // Preserve already-completed stages (e.g. prose done, only extract/review failed) when switching model/auxModel/depth (R31-P5).
@@ -1055,8 +1153,10 @@ export class Game {
       try {
         const execution = this.platform.execution;
         if (!execution) throw new Error("当前环境未连接原生执行核心");
-        const [run] = await this.platform.sql.query("SELECT json_extract(plan_json,'$.kind') AS kind FROM execution_runs WHERE id=?", [id]);
+        const [run] = await this.platform.sql.query("SELECT json_extract(plan_json,'$.kind') AS kind, json_extract(plan_json,'$.meta.carry') AS carry_json FROM execution_runs WHERE id=?", [id]);
         const autoplay = run?.kind === "autoplay";
+        const isOpening = run?.kind === "opening";
+        const openingCarry = isOpening && typeof run?.carry_json === "string" ? JSON.parse(run.carry_json) as NewWorld["carry"] : undefined;
         let after = 0;
         if (autoplay) {
           const snapshot = await execution.snapshot(id);
@@ -1091,9 +1191,10 @@ export class Game {
           if (!detached) onEvent({ type: "finished", steps: result.steps, reason: result.reason });
         } else {
           if (!node) throw new Error("生成提交结果不完整");
+          if (isOpening) await this.finalizeOpeningCommit(snapshot.worldId, openingCarry);
           if (!detached) onEvent({ type: "done", cursor: await tree.cursor(this.repo, snapshot.worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
         }
-        for (const fn of this.listeners) fn(snapshot.worldId);
+        if (!isOpening) for (const fn of this.listeners) fn(snapshot.worldId);
       } catch (error) { if (!detached) onEvent(thrownFailure(error, stopped, "暂时不能恢复这次生成")); }
     })();
     return { done, stop() { stopped = true; active?.cancel(); }, async catchUp() { detached = false; await active?.catchUp(); }, detach() { detached = true; active?.detach(); } };
@@ -1243,9 +1344,10 @@ export class Game {
     const done = (async (): Promise<PlayerRevisionPreview> => {
       const anchor = await assertWritingAnchor(this, request.anchor);
       const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
-      if (!target.parentId && !isOpeningSeed(target.meta.openingSeed)) throw new WritingError(MISSING_OPENING_SEED_REVISE);
-      const before = target.parentId ? await this.repo.getState(target.parentId) : target.meta.openingSeed as WorldState;
       const targetState = await this.repo.getState(anchor.nodeId);
+      const recoveredSeed = !target.parentId ? recoverOpeningSeed(target, targetState, world.eraId) : null;
+      if (!target.parentId && !isOpeningSeed(recoveredSeed)) throw new WritingError(MISSING_OPENING_SEED_REVISE);
+      const before = target.parentId ? await this.repo.getState(target.parentId) : recoveredSeed!;
       const era = eraContext(world.eraId, before);
       const focus = anchor.original.slice(request.range.start, request.range.end);
       const surrounding = anchor.original.slice(Math.max(0, request.range.start - 700), request.range.start) + "\n【选中范围之后】" + anchor.original.slice(request.range.end, request.range.end + 700);
@@ -1301,8 +1403,10 @@ export class Game {
     const done = (async () => {
       const anchor = await assertWritingAnchor(this, request.anchor);
       const world = (await this.repo.getWorld(anchor.worldId))!, target = (await this.repo.getNode(anchor.nodeId))!;
-      if (!target.parentId && !isOpeningSeed(target.meta.openingSeed)) throw new WritingError(MISSING_OPENING_SEED_SYNC);
-      const before = target.parentId ? await this.repo.getState(target.parentId) : target.meta.openingSeed as WorldState;
+      const targetState = !target.parentId ? await this.repo.getState(anchor.nodeId).catch(() => null) : null;
+      const recoveredSeed = !target.parentId ? recoverOpeningSeed(target, targetState, world.eraId) : null;
+      if (!target.parentId && !isOpeningSeed(recoveredSeed)) throw new WritingError(MISSING_OPENING_SEED_SYNC);
+      const before = target.parentId ? await this.repo.getState(target.parentId) : recoveredSeed!;
       const era = eraContext(world.eraId, before);
       const both = `${anchor.original}\n${request.text}`;
       const focused = { ...before, people: before.people.filter((p) => [p.name, ...p.aliases].some((name) => name && both.includes(name))) };
@@ -1343,18 +1447,21 @@ export class Game {
         if (typeof value?.replacement === "string" && value.replacement) onText(value.replacement);
       };
       if (resumeRunId) {
-        // 接着查 (D182): the paused run goes on with what it has read.
+        // 接着查 (D182, B10): the paused run goes on with what it has read, subscribing only to new events after max(seq).
         const execution = this.platform.execution;
         if (!execution) throw new Error("当前环境未连接原生执行核心");
+        const [seqRow] = await this.platform.sql.query("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM execution_events WHERE run_id=?", [resumeRunId]);
+        const afterSeq = Number(seqRow?.max_seq ?? 0);
         await resumeWhenClosed(execution, resumeRunId);
-        active = startRun(this.platform, null, onEvent, resumeRunId);
+        active = startRun(this.platform, null, onEvent, resumeRunId, afterSeq);
       } else {
         const current = await this.repo.getState(anchor.headId), targetState = await this.repo.getState(anchor.nodeId);
         if (!validBinding(current.source)) throw new WritingError("先在本局设置绑定参考书籍");
-        const baseline = target.parentId ? await this.repo.getState(target.parentId) : target.meta.openingSeed ?? request.baseline;
+        const baseline = target.parentId ? await this.repo.getState(target.parentId) : recoverOpeningSeed(target, targetState, world.eraId) ?? request.baseline;
         if (!target.parentId && !isOpeningSeed(baseline)) throw new WritingError(MISSING_OPENING_SEED);
         if (!baseline || typeof baseline !== "object") throw new WritingError("找不到修订前的状态");
-        const source = { ...current.source, ...(targetState.source?.bookId === current.source.bookId ? { position: Math.min(targetState.source.position, current.source.through ?? Infinity) } : {}) };
+        const latest = await isLatestPassage(this, anchor);
+        const source = resolveRevisionSource(targetState, current, latest)!;
         const state = { ...(structuredClone(baseline) as WorldState), source }, era = eraContext(world.eraId, state);
         const budget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
         const focus = anchor.original.slice(request.range.start, request.range.end);
@@ -1438,7 +1545,7 @@ export class Game {
         model, configuration,
         // 备用服务 (D179): a batch the main service will not take is tried there before it becomes a gap.
         ...(backup ? { fallback: async (messages: ChatMessage[], signal: AbortSignal) => {
-          const result = await this.callOnce(messages, { configuration: backup, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
+          const result = await this.callOnce(messages, { configuration: backup, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: noteOutputBudget(backup.contextWindowTokens) });
           const problem = noteReplyProblem(result);
           await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result,
             signal.aborted ? "cancelled" : problem?.kind === "refused" || problem?.kind === "suspected_refusal" ? "refused" : problem ? "failed" : "ok", backup.auxModel || backup.model)]);
@@ -1447,7 +1554,7 @@ export class Game {
         } } : {}),
         call: async (messages, signal) => {
           if (!config) throw new ChatError("no_secret");
-          const result = await this.call(messages, { configuration: config, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
+          const result = await this.call(messages, { configuration: config, aux: true, signal, usage: { worldId: note.worldId, nodeId: null, purpose: "canon-notes" }, timeouts: NOTE_TIMEOUT, outputTokens: noteOutputBudget(config.contextWindowTokens) });
           const problem = noteReplyProblem(result);
           await this.platform.sql.batch([this.usage(note.worldId, null, "canon-notes", result,
             signal.aborted ? "cancelled" : problem?.kind === "refused" || problem?.kind === "suspected_refusal" ? "refused" : problem ? "failed" : "ok", model)]);
@@ -1459,9 +1566,13 @@ export class Game {
   }
   pauseCanonNote(id: string) { this.noteRuns.get(id)?.abort(); }
   canonNoteRunning(id: string) { return this.noteRuns.has(id); }
-  /** 查一查 → 存为札记: the answer becomes a note of this story only. */
-  async saveAnswerAsNote(worldId: string, bookId: string, question: string, answer: string): Promise<CanonNote> {
-    const note = { ...newNote(bookId, "question", { question }, question.slice(0, 24), worldId), content: answer.trim().slice(0, 3000), status: "done" as const, model: this.auxModelName() };
+  /** 查一查 → 存为札记: the answer becomes a note of this story only, preserving reading ceiling `through` and chapter refs (B08). */
+  async saveAnswerAsNote(worldId: string, bookId: string, question: string, answer: string, through: number | null = null): Promise<CanonNote> {
+    const countRows = await this.platform.sql.query("SELECT COUNT(*) AS n FROM source_sections WHERE book_id=?", [bookId]);
+    const totalSections = Number(countRows[0]?.n ?? 0);
+    const base = newNote(bookId, "question", { question, ...(through !== null ? { through } : {}) }, question.slice(0, 24), worldId);
+    const local = newLocalNote(base, answer.trim().slice(0, 3000), totalSections);
+    const note = { ...local, model: this.auxModelName() };
     await saveNote(this.repo, note);
     return note;
   }
@@ -1527,7 +1638,7 @@ export class Game {
   private async appendEdit(worldId: string, patch: TurnRecord, summary: string, meta: Record<string, unknown> = {}, expectedHeadId?: string, expected?: { lineId: string; settingsJson: string }): Promise<tree.Cursor | { rejected: string }> {
     const c = await tree.cursor(this.repo, worldId);
     if (expected && (c.line.id !== expected.lineId || c.head.id !== expectedHeadId)) return { rejected: "故事已变化，请重新整理设定集。" };
-    if (expectedHeadId && c.head.id !== expectedHeadId) throw new Error("故事已变化，请重新打开时间设置。");
+    if (expectedHeadId && c.head.id !== expectedHeadId) throw new Error("故事已变化，请重新打开后再保存。");
     const state = await this.repo.getState(c.head.id);
     const world = (await this.repo.getWorld(worldId))!;
     const era = eraContext(world.eraId, state);

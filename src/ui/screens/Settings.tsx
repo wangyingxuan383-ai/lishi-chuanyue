@@ -180,7 +180,17 @@ function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged:
       <div className="list">
         {profiles.map((p) => (
           <div key={p.id} className={`card service-card${p.id === profile?.id ? " selected" : ""}`}>
-            <button className="service-main" onClick={() => { if (p.id !== profile?.id) { setProfile(p); toast(`已改用“${p.name}”`); } }}>
+            <button className="service-main" onClick={() => {
+              if (p.id !== profile?.id) {
+                if (p.id === fallbackId) {
+                  setFallbackId("");
+                  game.fallbackLlm = null;
+                  void game.repo.setSetting("fallbackProfile", null);
+                }
+                setProfile(p);
+                toast(`已改用“${p.name}”`);
+              }
+            }}>
               <h3>{p.name}{p.id === profile?.id ? <span className="tag">正在用</span> : p.id === fallbackId && <span className="tag">备用</span>}</h3>
               <p>{p.mainModel}{p.auxModel ? ` · 整理用 ${p.auxModel}` : ""}</p>
             </button>
@@ -198,7 +208,15 @@ function ServicesPage({ profiles, onChanged }: { profiles: Profile[]; onChanged:
                 await deleteProfile(game.repo, p);
                 if (p.id === fallbackId) { setFallbackId(""); await game.repo.setSetting("fallbackProfile", null); game.fallbackLlm = null; }
                 const rest = profiles.filter((x) => x.id !== p.id);
-                if (p.id === profile?.id) setProfile(rest[0] ?? null);
+                if (p.id === profile?.id) {
+                  const next = rest[0] ?? null;
+                  if (next && next.id === fallbackId) {
+                    setFallbackId("");
+                    await game.repo.setSetting("fallbackProfile", null);
+                    game.fallbackLlm = null;
+                  }
+                  setProfile(next);
+                }
                 onChanged();
                 toast("已删除");
               }}>删除</button>

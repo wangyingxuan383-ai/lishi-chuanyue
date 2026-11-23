@@ -208,7 +208,22 @@ fn safe_usage(usage: &Value) -> Value {
             result[key] = value.into();
         }
     }
+    if let Some(status) = usage["httpStatus"].as_u64().filter(|c| (100..=599).contains(c)) {
+        result["httpStatus"] = status.into();
+    }
     result
+}
+
+fn is_user_stop(db: &Connection, task: &str) -> Result<bool> {
+    let (stop_rev, stop_source): (i64, Option<String>) = db
+        .query_row(
+            "SELECT stop_revision, json_extract(metadata_json, '$.stopReceipt.source') FROM pi_tasks WHERE id=?",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, None));
+    Ok(stop_rev > 0 && stop_source.as_deref() != Some("system_timeout"))
 }
 /// Mirror one Pi model request into the unified `usage` ledger (`purpose = 'agent'`)
 /// so agent calls count in 本局用量, 用量与花费 and 本月预算 across all outcomes (R31-P4).
@@ -299,28 +314,58 @@ pub(crate) fn finish_model(
     status: &str,
 ) -> Result<Value> {
     transaction(db)?;
-    if !["success", "failed", "unknown"].contains(&status) {
+    if !["success", "failed", "cancelled", "unknown"].contains(&status) {
         return Err(invalid("模型调用结果状态无效"));
     }
     let usage = safe_usage(usage);
+    let has_tokens = usage["input"].as_u64().is_some() && usage["output"].as_u64().is_some();
     let (old, previous): (String, Option<String>) = db.query_row(
         "SELECT status,usage_json FROM pi_model_requests WHERE task_id=? AND request_id=?",
         params![task, id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if !["running", "awaiting_usage"].contains(&old.as_str()) {
-        if old != status
-            || previous
-                .as_deref()
-                .and_then(|v| serde_json::from_str::<Value>(v).ok())
-                != Some(usage)
-        {
+    let prev_val = previous
+        .as_deref()
+        .and_then(|v| serde_json::from_str::<Value>(v).ok());
+    let prev_has_tokens = prev_val
+        .as_ref()
+        .is_some_and(|v| v["input"].as_u64().is_some() && v["output"].as_u64().is_some());
+    let can_upgrade_unknown = old == "unknown" && !prev_has_tokens && has_tokens && status != "unknown";
+    let can_enrich_partial = matches!(old.as_str(), "cancelled" | "failed")
+        && matches!(status, "cancelled" | "failed")
+        && has_tokens
+        && prev_val.as_ref().is_some_and(|prev| {
+            usage["input"].as_u64().unwrap_or(0) >= prev["input"].as_u64().unwrap_or(0)
+                && usage["output"].as_u64().unwrap_or(0) >= prev["output"].as_u64().unwrap_or(0)
+        });
+    if !["running", "awaiting_usage"].contains(&old.as_str())
+        && !can_upgrade_unknown
+        && !can_enrich_partial
+    {
+        if old != status || prev_val != Some(usage) {
             return Err(invalid("已确认的模型用量不能被替换"));
         }
     } else {
-        db.execute("UPDATE pi_model_requests SET status=?,usage_json=?,finished_at=? WHERE task_id=? AND request_id=? AND status IN ('running','awaiting_usage')",params![status,usage.to_string(),chrono::Utc::now().to_rfc3339(),task,id])?;
-        let outcome = match status {
+        let user_stop = is_user_stop(db, task)?;
+        let effective_status = if status == "failed" && user_stop && has_tokens && usage["httpStatus"].is_null() {
+            "cancelled"
+        } else {
+            status
+        };
+        db.execute(
+            "UPDATE pi_model_requests SET status=?,usage_json=?,finished_at=? WHERE task_id=? AND request_id=?",
+            params![
+                effective_status,
+                usage.to_string(),
+                chrono::Utc::now().to_rfc3339(),
+                task,
+                id
+            ],
+        )?;
+        let outcome = match effective_status {
             "success" => "ok",
+            "cancelled" => "cancelled",
+            "unknown" if user_stop => "cancelled",
             "unknown" => "interrupted",
             _ => "failed",
         };
@@ -330,31 +375,31 @@ pub(crate) fn finish_model(
 }
 pub(crate) fn interrupt_models(db: &Connection, task: &str) -> Result<()> {
     transaction(db)?;
-    let (stop_rev, stop_source): (i64, Option<String>) = db
-        .query_row(
-            "SELECT stop_revision, json_extract(metadata_json, '$.stopReceipt.source') FROM pi_tasks WHERE id=?",
-            [task],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?
-        .unwrap_or((0, None));
+    let user_stop = is_user_stop(db, task)?;
     let mut stmt = db.prepare(
-        "SELECT request_id FROM pi_model_requests WHERE task_id=? AND status IN ('running','awaiting_usage')",
+        "SELECT request_id, usage_json FROM pi_model_requests WHERE task_id=? AND status IN ('running','awaiting_usage')",
     )?;
-    let pending: Vec<String> = stmt
-        .query_map([task], |r| r.get(0))?
+    let pending: Vec<(String, Option<String>)> = stmt
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
-    db.execute(
-        "UPDATE pi_model_requests SET status='unknown',usage_json=COALESCE(NULLIF(usage_json,''),'{}'),finished_at=? WHERE task_id=? AND status IN ('running','awaiting_usage')",
-        params![chrono::Utc::now().to_rfc3339(), task],
-    )?;
-    let outcome = if stop_rev > 0 && stop_source.as_deref() != Some("system_timeout") {
-        "cancelled"
-    } else {
-        "interrupted"
-    };
-    for req_id in pending {
+    let now = chrono::Utc::now().to_rfc3339();
+    let outcome = if user_stop { "cancelled" } else { "interrupted" };
+    for (req_id, raw_usage) in pending {
+        let parsed = raw_usage
+            .as_deref()
+            .and_then(|v| serde_json::from_str::<Value>(v).ok())
+            .unwrap_or_else(|| json!({}));
+        let has_tokens = parsed["input"].as_u64().is_some() && parsed["output"].as_u64().is_some();
+        let next_status = if has_tokens {
+            if user_stop { "cancelled" } else { "failed" }
+        } else {
+            "unknown"
+        };
+        db.execute(
+            "UPDATE pi_model_requests SET status=?,usage_json=?,finished_at=? WHERE task_id=? AND request_id=? AND status IN ('running','awaiting_usage')",
+            params![next_status, parsed.to_string(), now, task, req_id],
+        )?;
         mirror_usage(db, task, &req_id, outcome)?;
     }
     Ok(())
@@ -435,26 +480,48 @@ pub(crate) fn read_budget(db: &Connection, task: &str) -> Result<Value> {
                 .saturating_add(used[key].as_u64().unwrap_or(0))
                 .into();
         }
+        let is_pending = ["running", "unknown", "awaiting_usage"].contains(&status.as_str());
+        let inp_tok = used["input"].as_u64();
+        let out_tok = used["output"].as_u64();
+        let cr_tok = used["cacheRead"].as_u64().unwrap_or(0);
+        let cw_tok = used["cacheWrite"].as_u64().unwrap_or(0);
+        let is_zero_token = !is_pending
+            && inp_tok == Some(0)
+            && out_tok == Some(0)
+            && cr_tok == 0
+            && cw_tok == 0;
         let price = &model["cost"];
         let current = price["currency"].as_str().unwrap_or("").to_owned();
-        if currency.as_ref().is_some_and(|old| old != &current) {
+        if !is_zero_token || !current.is_empty() {
+            if let Some(old) = &currency {
+                if !old.is_empty() && !current.is_empty() && old != &current {
+                    price_known = false;
+                } else if old.is_empty() && !current.is_empty() {
+                    currency = Some(current);
+                }
+            } else {
+                currency = Some(current);
+            }
+        }
+        if is_pending || inp_tok.is_none() || out_tok.is_none() {
+            price_known = false;
+        } else if is_zero_token {
+            // Pure 0-token HTTP rejection/retry before token generation costs 0 without tainting priceKnown.
+        } else if let (Some(inp_price), Some(out_price)) =
+            (price["input"].as_f64(), price["output"].as_f64())
+        {
+            let cr_price = price["cacheRead"].as_f64().unwrap_or(inp_price * 0.1);
+            let cw_price = price["cacheWrite"].as_f64().unwrap_or(inp_price);
+            amount += (inp_price * inp_tok.unwrap_or(0) as f64
+                + out_price * out_tok.unwrap_or(0) as f64
+                + cr_price * cr_tok as f64
+                + cw_price * cw_tok as f64)
+                / 1_000_000.0;
+        } else {
             price_known = false;
         }
-        currency.get_or_insert(current);
-        if ["running", "unknown", "awaiting_usage"].contains(&status.as_str())
-            || used["input"].as_u64().is_none()
-            || used["output"].as_u64().is_none()
-            || ["input", "output", "cacheRead", "cacheWrite"]
-                .iter()
-                .any(|key| price[*key].as_f64().is_none())
-        {
-            price_known = false;
-        } else {
-            for key in ["input", "output", "cacheRead", "cacheWrite"] {
-                amount += price[key].as_f64().unwrap_or(0.0)
-                    * used[key].as_u64().unwrap_or(0) as f64
-                    / 1_000_000.0;
-            }
+        if currency.is_none() {
+            currency = Some(String::new());
         }
     }
     let tools: i64 = db.query_row(
@@ -666,5 +733,50 @@ mod tests {
                 "ok".into(),
             )
         );
+    }
+    #[test]
+    fn user_stop_cancelled_outcome_zero_token_retry_and_default_cache_read_discount() {
+        let mut db = fixture(json!({}));
+        let tx = db.transaction().unwrap();
+        let priced_only_io = json!({
+            "id": "main-model",
+            "protocol": "chat-completions",
+            "cost": {"input": 2.0, "output": 8.0, "currency": "CNY"}
+        });
+        // 1) 0-token HTTP 429 retry does not taint priceKnown
+        reserve_model(&tx, "t", "retry-429", "retry", &json!({"id":"aux-unpriced","cost":{}})).unwrap();
+        let b1 = finish_model(&tx, "t", "retry-429", &json!({"input":0,"output":0,"httpStatus":429}), "failed").unwrap();
+        assert_eq!(b1["priceKnown"], true);
+        assert_eq!(b1["estimatedCost"], 0.0);
+
+        // 2) Priced request with cacheRead uses 10% input discount when cacheRead price is omitted
+        reserve_model(&tx, "t", "cached-ok", "main", &priced_only_io).unwrap();
+        let b2 = finish_model(
+            &tx,
+            "t",
+            "cached-ok",
+            &json!({"input": 100_000, "cacheRead": 900_000, "output": 50_000}),
+            "success",
+        )
+        .unwrap();
+        assert_eq!(b2["priceKnown"], true);
+        assert_eq!(b2["currency"], "CNY");
+        // 100k * 2.0/1M (0.20) + 900k * 0.2/1M (0.18) + 50k * 8.0/1M (0.40) = 0.78
+        assert!((b2["estimatedCost"].as_f64().unwrap() - 0.78).abs() < 1e-9);
+
+        // 3) Explicit user stop records outcome = 'cancelled' in usage ledger
+        tx.execute(
+            "UPDATE pi_tasks SET stop_revision=1, metadata_json=json_set(metadata_json,'$.stopReceipt',json('{\"source\":\"user\"}')) WHERE id='t'",
+            [],
+        )
+        .unwrap();
+        reserve_model(&tx, "t", "stopped-req", "main", &priced_only_io).unwrap();
+        finish_model(&tx, "t", "stopped-req", &json!({"input":500,"output":20}), "cancelled").unwrap();
+        tx.commit().unwrap();
+
+        let outcome: String = db
+            .query_row("SELECT outcome FROM usage WHERE id='pi:t:stopped-req'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, "cancelled");
     }
 }

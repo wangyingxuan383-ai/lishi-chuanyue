@@ -122,7 +122,9 @@ impl Analysis {
             let (Some(original), Some(after)) = (edit.get("original"), edit.get("after")) else {
                 return Err(invalid("资源草稿缺少完整original或after"));
             };
-            if original == after {
+            let has_conflict = edit["needsRelocation"] == true
+                || edit["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+            if original == after && !has_conflict {
                 continue;
             }
             let kind = text(edit, "kind");
@@ -176,7 +178,11 @@ impl Analysis {
                 route,
                 original,
                 after,
-                json!({"recordReviewed":edit["recordReviewed"]}),
+                if has_conflict {
+                    json!({"recordReviewed":edit["recordReviewed"],"needsRelocation":edit["needsRelocation"],"rebaseConflicts":edit["rebaseConflicts"]})
+                } else {
+                    json!({"recordReviewed":edit["recordReviewed"]})
+                },
                 edit_calls,
             );
             if kind == "world"

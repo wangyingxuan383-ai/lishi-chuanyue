@@ -2,6 +2,7 @@
 // authority and the root ledger are checked for every read and model request.
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { auxModelSpec } from "./context-budget.mjs";
 
 export function childCallId(childId, original) {
   return `child-${childId}-${createHash("sha256").update(JSON.stringify({ id: original })).digest("hex")}`;
@@ -41,12 +42,9 @@ export class ReadonlyChildren {
     let text = "", ok = false;
     try {
       const rootModel = this.root.options.model;
-      const useAux = typeof rootModel.auxModel === "string" && rootModel.auxModel.trim()
-        && rootModel.auxModel !== rootModel.id
-        && !(rootModel.endpointRef && rootModel.protocol === "gemini");
-      const childModel = {
+      const childModel = auxModelSpec(rootModel) ?? {
         ...rootModel,
-        ...(useAux ? { id: rootModel.auxModel } : {}),
+        id: typeof rootModel.id === "string" ? rootModel.id.trim() : rootModel.id,
         auxModel: undefined,
         thinkingMode: "off",
       };

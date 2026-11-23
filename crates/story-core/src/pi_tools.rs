@@ -64,7 +64,7 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
         .map(|mut tool| {
             if tool.name=="read_skill_resource" {tool.parameters["properties"]["version"]=json!({"type":"string","maxLength":64});}
             if tool.name=="run_script" {tool.description="运行受控JavaScript，调用示例：const r=await tools.read_resource({kind:'settings'}); text(r.value)。工具由tools.<工具名>(参数)调用。分页：for await (const page of pages('read_resource',{kind:'people'})) 可读取每页；const items=await collectPages('read_resource',{kind:'people'},{maxPages:5}) 直接返回数组，使用items.length，不是items.items。第一个参数必须是工具名称字符串，不能传回调。支持text/store/load，不能访问Node、文件、裸网络或直接提交任务。";}
-            if tool.name=="finish_task" {tool.description="按已选策略采用核对通过的完整独立资源组，未通过部分保留草稿。返回结果已包含采用回执；采用后本批写权限关闭，除非需回查详细快照不必额外调read_commit_receipt，直接简要答复玩家即可。不能把部分采用说成全部完成；查询不产生剧情。";}
+            if tool.name=="finish_task" {tool.description="按本次策略收尾并结算已核对的完整独立资源组（策略为preview「先看预览」时不会直接改写存档，而是生成供玩家确认的正式预览面板与「采用这批修改」按钮；策略为auto/auto-reversible时正式写入存档，未通过部分保留草稿）。无论哪种策略，暂存完修改后都必须调用finish_task收尾，直接发文字结束不会生成预览按钮。返回结果已含回执；收尾后本批写权限关闭，直接简要答复玩家即可。不能把部分采用说成全部完成；查询不产生剧情。";}
             if tool.name=="check_draft" {
                 tool.description="读取任务约束、草稿资源组指纹及内嵌的已送达证据摘要(evidenceSummary.items，含evidenceId、location和引文预览)；仅当证据超过30条或需完整正文时再用read_evidence分页。不会调用模型或证明原著正确。逐项结论用record_findings记录。";
                 tool.parameters["properties"]["includeEvidence"]=json!({"type":"boolean","description":"兼容完整材料读取，通常直接使用evidenceSummary.items或read_evidence分页"});
@@ -83,7 +83,7 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
             if ["read_resource","stage_edit"].contains(&tool.name) {
                 tool.parameters["properties"]["ref"]=crate::pi_resources::schema();
                 if let Some(required)=tool.parameters["required"].as_array_mut(){required.retain(|v|v!="kind");}
-                tool.description=if tool.name=="read_resource" {"按返回的ref直接读取资源；ref包含容器、实体及版本，不用猜ID。也可用kind/id/path重新定位。带ref时path相对ref目标，省略即目标本身；pageSize表示条目数、charBudget表示文字预算；继续回传nextCursor分页，offset/limit仅兼容旧调用。资料过期时按错误的next重新读取。"} else {"暂存本局修改。优先直接回传查阅或检索结果的ref，不把人物/卡片ID当成回合ID。带ref时path相对该目标，省略即修改该实体本身；也支持kind/id/path。operation=set/merge/remove/append/replace_text；replace_text须find/replace。append每次追加一个项目，不能用数组追加多项；facts项目须有id/detail，多项可逐项append或set保留旧项目的完整数组。历史正文要同步核对record，正式提交重算后续；书籍正文只改/data/sections，内部归属由程序维护。"};
+                tool.description=if tool.name=="read_resource" {"按返回的ref直接读取资源；ref包含容器、实体及版本，不用猜ID。也可用kind/id/path重新定位。带ref时path相对ref目标，省略即目标本身；pageSize表示条目数、charBudget表示文字预算；继续回传nextCursor分页，offset/limit仅兼容旧调用。资料过期时按错误的next重新读取。"} else {"暂存本局修改。修改已有条目优先直接回传查阅或检索结果的ref，不把人物/卡片ID当成回合ID；带ref时path相对该目标，省略即修改该实体本身。新增设定卡/人物/地点/目标/事实直接传kind（如{\"kind\":\"cards\",\"operation\":\"append\",\"value\":{...}}，无需旧条目ref）；往主角行囊等子数组追加传{\"kind\":\"protagonist\",\"path\":\"/items\",\"operation\":\"append\",\"value\":{...}}。operation=set/merge/remove/append/replace_text；replace_text须find/replace。append每次追加一个项目，不能用数组追加多项；facts项目须有id/detail。历史正文要同步核对record，正式提交重算后续；书籍正文只改/data/sections，内部归属由程序维护。"};
             }
             if ["list_resources","read_resource","read_tool_result","read_agent_history","read_player_choices"].contains(&tool.name) {
                 paging_schema(&mut tool.parameters);
@@ -92,8 +92,8 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
         })
         .collect::<Vec<_>>();
     tools.push(ToolDefinition{name:"record_findings",description:"记录本次具体目标及核对依据；从check_draft直接使用版本、resourceGroups完整指纹和evidenceLedger精确引文/位置。仅实际送达成功请求的原文可作原著依据，泛化编辑授权不证明事实；明确玩家分支可用playerReferenceId/quote/declaration={subject,value,scope}引用真实要求，对象和值逐字出自原句；local_custom另须明确补全许可和原句中的范围。报告可区分完成/部分完成/受阻。普通写作整理无需额外检查表。constraints.factContract=2时原著改动需分开sourceClaim（来源说法）和revisionDecision={summary,reason,appliesTo:world_rule/identity_fact/local_event}；local_event还须localReferences本局正式引文或明确玩家设定，原著规则不能证明本局已发生。basis=external可引用已送达网页/资料文件，但不能冒充原著核对。",parameters:json!({"type":"object","properties":{"report":{"type":"object","properties":{"worldVersion":{"type":"string"},"intentRevision":{"type":"integer","minimum":0},"goals":{"type":"array","maxItems":64,"items":{"type":"object"}},"findings":{"type":"array","maxItems":256,"items":{"type":"object"}}},"required":["worldVersion","intentRevision","goals","findings"]}},"required":["report"],"additionalProperties":false}),read_only:true});
-    let mut evidence=ToolDefinition{name:"read_evidence",description:"读取本任务已实际送达成功模型窗口的证据。sourceKind可过滤original原著、player本局要求或book书籍，bookId限定书籍；支持pageSize/charBudget/nextCursor。目录不是原文，具体引文按返回定位读取。",parameters:json!({"type":"object","properties":{"sourceKind":{"type":"string","enum":["original","player","book"]},"bookId":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}),read_only:true};paging_schema(&mut evidence.parameters);tools.push(evidence);
-    let mut facts=ToolDefinition{name:"read_fact_sources",description:"读取本局正式采用的事实来源和原句。按nodeId可定位历史回合；basis区分原著、玩家分支、本局自定与一致性。来源匹配不证明解释必然正确；新草稿不能把旧来源当成新的原著证据。",parameters:json!({"type":"object","properties":{"nodeId":{"type":"string"},"basis":{"type":"string"}},"additionalProperties":false}),read_only:true};paging_schema(&mut facts.parameters);tools.push(facts);
+    let mut evidence=ToolDefinition{name:"read_evidence",description:"读取本任务已实际送达成功模型窗口的证据。sourceKind可过滤original原著、world本局资料、external外部网页与文件、draft草稿、player本局要求或book书籍，bookId限定书籍；支持pageSize/charBudget/nextCursor。目录不是原文，具体引文按返回定位读取。",parameters:json!({"type":"object","properties":{"sourceKind":{"type":"string","enum":["original","world","external","draft","player","book"]},"bookId":{"type":"string","minLength":0},"path":{"type":"string","minLength":0}},"additionalProperties":false}),read_only:true};paging_schema(&mut evidence.parameters);tools.push(evidence);
+    let mut facts=ToolDefinition{name:"read_fact_sources",description:"读取本局正式采用的事实来源和原句。按nodeId可定位历史回合；basis区分原著、玩家分支、本局自定与一致性。来源匹配不证明解释必然正确；新草稿不能把旧来源当成新的原著证据。",parameters:json!({"type":"object","properties":{"nodeId":{"type":"string","minLength":0},"basis":{"type":"string","minLength":0}},"additionalProperties":false}),read_only:true};paging_schema(&mut facts.parameters);tools.push(facts);
     tools.extend(crate::pi_history::catalog());
     tools.push(ToolDefinition{name:"draft_tool_package",description:"准备纯JavaScript工具包草稿。manifest遵循schema1/API1.0.0或1.0.1，files为包内相对路径到文字的映射；本地无IO检查后保存草稿，玩家采用和启用前不能执行。不提供Node、Shell、Tauri或任意设备权限。",parameters:json!({"type":"object","properties":{"manifest":{"type":"object"},"files":{"type":"object"}},"required":["manifest","files"],"additionalProperties":false}),read_only:false});
     // Shared ordinary schemas, without broadening the retired Agent catalog.
@@ -102,10 +102,10 @@ pub(crate) fn catalog() -> Vec<ToolDefinition> {
     tools.extend(crate::pi_browser::catalog());
     tools.push(ToolDefinition{name:"list_tool_packages",description:"查看本任务启动时已启用的纯JavaScript工具包、版本、入口和工具名。工具包不能自行安装、授权或访问Node；不兼容的接口会明确失败。",parameters:json!({"type":"object","properties":{},"additionalProperties":false}),read_only:true});
     tools.push(ToolDefinition{name:"call_tool_package",description:"在现有QuickJS中运行已启用工具包的一项导出。packageId为列表中的id，entry和name须直接使用目录返回值。所有内部工具调用仍走本任务权限和累计账本，不能递归工具包或提交整个任务。",parameters:json!({"type":"object","properties":{"packageId":{"type":"string"},"entry":{"type":"string"},"name":{"type":"string"},"arguments":{"type":"object"}},"required":["packageId","entry","name"],"additionalProperties":false}),read_only:false});
-    let mut external=ToolDefinition{name:"read_external_resource",description:"按完整ref回读本任务已经保存的网页/搜索/MCP资料快照。保留来源、内容版本和读取范围；抓到内容不代表事实正确，不能跨局读取。",parameters:json!({"type":"object","properties":{"ref":{"type":"object"},"path":{"type":"string"}},"required":["ref"],"additionalProperties":false}),read_only:true};paging_schema(&mut external.parameters);tools.push(external);
+    let mut external=ToolDefinition{name:"read_external_resource",description:"按完整ref回读本任务已经保存的网页/搜索/MCP资料快照。保留来源、内容版本和读取范围；抓到内容不代表事实正确，不能跨局读取。",parameters:json!({"type":"object","properties":{"ref":{"type":"object"},"path":{"type":"string","minLength":0}},"required":["ref"],"additionalProperties":false}),read_only:true};paging_schema(&mut external.parameters);tools.push(external);
     for (name,description,properties) in [
-        ("read_commit_receipt","读取本任务正式采用的回执、版本、实际修改和未完成事项；结束后仍可回读，不重新启动故事修改。",json!({"batchId":{"type":"string"},"path":{"type":"string"}})),
-        ("read_committed_snapshot","读取本批次保存的固定正式快照；kind支持settings/state/protagonist/people/places/cards/goals/facts/node/line/clock。故事后来推进不会改变快照。",json!({"batchId":{"type":"string"},"kind":{"type":"string"},"path":{"type":"string"}})),
+        ("read_commit_receipt","读取本任务正式采用的回执、版本、实际修改和未完成事项；结束后仍可回读，不重新启动故事修改。",json!({"batchId":{"type":"string","minLength":0},"path":{"type":"string","minLength":0}})),
+        ("read_committed_snapshot","读取本批次保存的固定正式快照；kind支持settings/state/protagonist/people/places/cards/goals/facts/node/line/clock。故事后来推进不会改变快照。",json!({"batchId":{"type":"string","minLength":0},"kind":{"type":"string"},"path":{"type":"string","minLength":0}})),
     ] {
         let mut schema=json!({"type":"object","properties":properties,"additionalProperties":false});paging_schema(&mut schema);
         tools.push(ToolDefinition{name,description,parameters:schema,read_only:true});
@@ -191,7 +191,7 @@ pub(crate) fn call(
         "list_skills" => skill_catalog(task),
         "read_skill" => read_skill(db, task, plan, request),
         "read_skill_resource" => skill_resource(db, task, plan, request),
-        "preview_turn_record" => crate::reference_lookup::preview_record(plan,args),
+        "preview_turn_record" => preview_turn_record(db, task, plan, args),
         "list_sections" | "search_original" | "read_original" | "read_canon_notes" | "read_canon_facts" | "locate_original_event" | "prepare_reference_check" => {
             original(db, plan, args, &request.tool)
         }
@@ -663,10 +663,52 @@ fn read_tool_result(db: &Connection, task: &Value, plan: &RunPlan, request: &PiC
     }
     Ok(page)
 }
+fn preview_turn_record(
+    db: &Connection,
+    task: &Value,
+    plan: &RunPlan,
+    args: &Value,
+) -> Result<Value> {
+    let mut state = ws::resource(db, plan, "state", "")?;
+    let work = ws::workspace(db, ws::text(task, "id"))?;
+    for edit in work["edits"].as_array().into_iter().flatten() {
+        if edit["needsRelocation"] == true
+            || edit["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+        {
+            continue;
+        }
+        let ekind = ws::text(edit, "kind");
+        let eid = ws::text(edit, "id");
+        if !(eid.is_empty() || eid == plan.head_id) {
+            continue;
+        }
+        if ekind == "state" && edit["after"].is_object() {
+            state = edit["after"].clone();
+        } else if ["protagonist", "people", "places", "cards", "goals", "facts"].contains(&ekind) {
+            state[ekind] = edit["after"].clone();
+        }
+    }
+    let mut hydrated = plan.clone();
+    hydrated.options = ws::clock_options(&state, "continue", true);
+    hydrated.state = state;
+    crate::reference_lookup::preview_record(&hydrated, args)
+}
+
 fn read_evidence(db:&Connection,task:&Value,args:&Value)->Result<Value> {
     let evidence=crate::pi_receipts::pages(db,task)?;
     let selected=evidence.as_array().into_iter().flatten().filter(|item|{
-        let kind=ws::text(args,"sourceKind");(kind.is_empty()||if kind=="book" {item["bookId"].is_string()}else{item["sourceKind"]==kind})&&(ws::text(args,"bookId").is_empty()||item["bookId"]==args["bookId"])
+        let kind = ws::text(args, "sourceKind");
+        let matches_kind = match kind {
+            "" => true,
+            "book" => item["bookId"].is_string(),
+            "player" => {
+                item["sourceKind"] == "player"
+                    || item["origin"] == "player_input"
+                    || item["sourceTool"] == "read_player_choices"
+            }
+            other => item["sourceKind"] == other,
+        };
+        matches_kind && (ws::text(args, "bookId").is_empty() || item["bookId"] == args["bookId"])
     }).cloned().collect::<Vec<_>>();
     let mut paging=args.clone();if paging.get("pageSize").is_none(){paging["pageSize"]=20.into();}
     let data=json!(selected);let path=ws::text(args,"path");let data=if path.is_empty(){data}else{data.pointer(path).cloned().ok_or_else(||invalid("证据字段不存在，请从证据目录重新定位"))?};
@@ -687,6 +729,50 @@ fn check_draft(db: &Connection, task: &Value, plan: &RunPlan,args:&Value) -> Res
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let evidence=rows.into_iter().filter_map(|(id,tool,raw)|{let output=ws::parse(&raw);if output["ok"]!=true{return None;}let data=&output["data"];Some(json!({"callId":id,"tool":tool,"status":data["status"],"bookId":data["bookId"],"through":data["through"],"excerpts":data["excerpts"].as_array().map(|v|v.iter().map(|e|json!({"kind":e["kind"],"bookId":e["bookId"],"section":e["section"],"chunk":e["chunk"],"title":e["title"],"page":e["page"],"start":e["start"],"end":e["end"]})).collect::<Vec<_>>()),"read":{"callId":id,"path":"","offset":0,"limit":4800}}))}).collect::<Vec<_>>();
     let workspace = ws::workspace(db, ws::text(task, "id"))?;
+    let mut all_conflicts = Vec::new();
+    for e in workspace["edits"].as_array().into_iter().flatten() {
+        if e["needsRelocation"] == true
+            || e["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+        {
+            all_conflicts.push(json!({
+                "collection": "edits",
+                "kind": e["kind"],
+                "id": e["id"],
+                "needsRelocation": e["needsRelocation"] == true,
+                "conflicts": e["rebaseConflicts"],
+            }));
+        }
+    }
+    for (idx, t) in workspace["turns"].as_array().into_iter().flatten().enumerate() {
+        if t["needsRelocation"] == true
+            || t["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+        {
+            all_conflicts.push(json!({
+                "collection": "turns",
+                "kind": "story",
+                "index": idx,
+                "summary": t["summary"],
+                "needsRelocation": t["needsRelocation"] == true,
+                "conflicts": t["rebaseConflicts"],
+            }));
+        }
+    }
+    for r in workspace["routes"].as_array().into_iter().flatten() {
+        if r["needsRelocation"] == true
+            || r["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty())
+        {
+            all_conflicts.push(json!({
+                "collection": "routes",
+                "kind": "line",
+                "id": r["id"],
+                "headId": r["headId"],
+                "needsRelocation": r["needsRelocation"] == true,
+                "conflicts": r["rebaseConflicts"],
+            }));
+        }
+    }
+    let mut constraints = crate::pi_goal_report::constraints(db, task, plan)?;
+    constraints["rebaseConflicts"] = json!(all_conflicts);
     let ledger=crate::pi_receipts::pages(db,task)?;
     let total=ledger.as_array().map(Vec::len).unwrap_or(0);
     let items:Vec<Value>=ledger.as_array().into_iter().flatten().take(30).map(|p|{
@@ -696,7 +782,7 @@ fn check_draft(db: &Connection, task: &Value, plan: &RunPlan,args:&Value) -> Res
     let summary=json!({"count":total,"truncated":total>30,"items":items,"readTool":"read_evidence","read":{"pageSize":20,"charBudget":6000}});
     let ledger=if args["includeEvidence"]==true {ledger}else {json!([])};
     Ok(
-        json!({"evidenceSummary":summary,"constraints":crate::pi_goal_report::constraints(db,task,plan)?,"goalResult":metadata(task)["goalResult"],"evidenceLedger":ledger,"evidenceDeliveryVersion":1,"sourceReads":evidence,"referenceScope":plan.meta["agent"]["referenceScope"],"verification":crate::agent_verification::pending(&workspace),"resourceGroups":crate::pi_verification::resource_groups(&workspace)?,"skillReads":metadata(task)["skillReads"],"verified":false,"instructions":"evidenceSummary.items已内嵌最多30条实际送达成功请求的evidenceId、location、offsetUnit与引文预览，可直接用于record_findings；超过30条或需完整长引文时再调read_evidence。sourceReads仅为调用定位，不代表原文已读。resourceGroups以完整原始/修改后资源绑定指纹，atomicSet内不可拆半；它们不代表事实已核实。原著请read_original，玩家分支须核对真实原句。"}),
+        json!({"evidenceSummary":summary,"constraints":constraints,"rebaseConflicts":all_conflicts,"goalResult":metadata(task)["goalResult"],"evidenceLedger":ledger,"evidenceDeliveryVersion":1,"sourceReads":evidence,"referenceScope":plan.meta["agent"]["referenceScope"],"verification":crate::agent_verification::pending(&workspace),"resourceGroups":crate::pi_verification::resource_groups(&workspace)?,"skillReads":metadata(task)["skillReads"],"verified":false,"instructions":"evidenceSummary.items已内嵌最多30条实际送达成功请求的evidenceId、location、offsetUnit与引文预览，可直接用于record_findings；超过30条或需完整长引文时再调read_evidence。sourceReads仅为调用定位，不代表原文已读。resourceGroups以完整原始/修改后资源绑定指纹，atomicSet内不可拆半；它们不代表事实已核实。原著请read_original，玩家分支须核对真实原句。"}),
     )
 }
 

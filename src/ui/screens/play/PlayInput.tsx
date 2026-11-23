@@ -26,7 +26,7 @@ export function InputModeSheet({ watch, modeList, modeIndex, inputBox, noteOpen,
           </button>
         ))}
         {!watch && !noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b><Icon name="plus" size={16} />幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
-        <button className="mode-option" onClick={() => { captureReading(); setModePicker(false); push({ name: "agent", worldId, lineId: cursor.line.id }); }}><b>助手 ›</b><small>单独交谈、查资料或修改本局，完成后继续游玩</small></button>
+        <button className="mode-option" onClick={() => { captureReading(); setModePicker(false); push({ name: "companion", worldId, lineId: cursor.line.id }); }}><b>伴聊 ›</b><small>角色畅谈、查原著与史料，或让智能体预演修改本局</small></button>
       </div>
     </Sheet>
   );

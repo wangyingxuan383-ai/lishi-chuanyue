@@ -455,7 +455,13 @@ async fn native_search(
             }
         })
         .collect();
-    let url = endpoint(&configured_url.replace("{model}", &escaped_model))?;
+    let substituted = configured_url.replace("{model}", &escaped_model);
+    let target_url = if protocol == "gemini" && config["endpointRef"].is_null() {
+        story_core::pi_http::normalize_gemini_native_url(&substituted)
+    } else {
+        substituted
+    };
+    let url = endpoint(&target_url)?;
     // Bind to the configured endpoint, rather than a model-substituted address.
     let key = credential(authorize, config, configured_url)?;
     let mut request = client.post(url);

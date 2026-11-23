@@ -14,6 +14,7 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
   const modeList = watch ? WATCH_MODES : MODES;
   const currentMode = modeList[modeIndex] ?? modeList[0];
   const loaded = useRef(false);
+  const touched = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Switching who plays the protagonist starts again from the first way of writing.
@@ -24,9 +25,9 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
       loaded.current = true;
       if (!saved) return;
       if (saved.text) setInput((current) => current || saved.text!);
-      if (saved.note) { setNote(saved.note); setNoteOpen(true); }
+      if (saved.note && !touched.current) { setNote((current) => current || saved.note!); setNoteOpen(true); }
       const index = modeList.findIndex((m) => m.mode === saved.mode);
-      if (index > 0) setModeIndex(index);
+      if (index > 0 && !touched.current) setModeIndex(index);
     }).catch(() => { loaded.current = true; });
   }, [ready, worldId]);
   useEffect(() => {
@@ -39,15 +40,17 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
     return () => clearTimeout(timer.current);
   }, [input, note, noteOpen, currentMode.mode, worldId]);
 
-  const selectMode = (mode: string) => setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === mode)));
+  const selectMode = (mode: string) => { touched.current = true; setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === mode))); };
   /** After sending: the box and the note are emptied; 写 and 幕后 are one-off ways of writing. */
   const clearAfterSend = (mode: string) => {
+    touched.current = true;
     setNote("");
     setNoteOpen(false);
     if (mode === "write" || (mode === "direct" && !watch)) setModeIndex(0);
   };
   /** A failed action comes back to the box, with its way of writing and note. */
   const restore = (r: Restore, force = false) => {
+    touched.current = true;
     // Auto-restore never overwrites words typed meanwhile; an explicit button tap always restores.
     if (r.text.trim() || force) setInput((current) => (!force && current.trim() ? current : r.text));
     if (r.mode !== "continue" && r.mode !== "skip") selectMode(r.mode);

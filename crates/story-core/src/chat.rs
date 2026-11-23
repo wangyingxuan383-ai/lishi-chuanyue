@@ -66,13 +66,14 @@ impl Accumulator {
 
     /// True once any reasoning/thinking delta has been streamed (R31-P4).
     pub fn has_thinking(&self) -> bool {
-        ["reasoning_content", "reasoning"].iter().any(|field| {
-            self.result
-                .continuation
-                .get(*field)
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty())
-        })
+        self.current_thinking().is_some()
+    }
+
+    pub fn current_thinking(&self) -> Option<&str> {
+        ["reasoning_content", "reasoning"]
+            .iter()
+            .find_map(|field| self.result.continuation.get(*field).and_then(Value::as_str))
+            .filter(|s| !s.is_empty())
     }
 
     /// A clean HTTP close alone does not complete a sequence of streamed deltas.

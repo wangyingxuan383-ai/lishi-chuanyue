@@ -174,13 +174,14 @@ mod tests {
     }
     #[test]
     fn task_skills_have_read_only_ordinary_profiles() {
-        for name in ["story-recap", "character-knowledge", "continuity-check", "story-threads"] {
+        for name in ["story-recap", "character-knowledge", "continuity-check", "story-threads", "historical-world", "challenge-play"] {
             let common = read_writing(name).unwrap();
             let full = read(name).unwrap();
             let body = common["body"].as_str().unwrap();
             assert_eq!(common["bodyProfile"], "ordinary-writing-1");
             assert!(full["body"].as_str().unwrap().starts_with(body));
             assert!(!body.contains("stage_edit"));
+            assert!(!body.contains("stage_clock"));
             assert!(!body.contains("finish_task"));
         }
     }
@@ -201,12 +202,13 @@ mod tests {
                 skill["metadata"]["version"],
                 match name {
                     "canon-reference" => "1.8.0",
-                    "story-writing" => "1.6.0",
-                    "world-upkeep" => "1.5.0",
+                    "story-writing" => "1.7.0",
+                    "world-upkeep" => "1.6.0",
                     "continuity-check" => "1.1.1",
                     "story-recap" | "story-threads" => "1.1.0",
                     "character-knowledge" => "1.3.0",
-                    "historical-world" => "1.2.0",
+                    "historical-world" => "1.3.0",
+                    "challenge-play" => "1.2.0",
                     "script-play" | "spectator-play" => "1.0.0",
                     _ => "1.1.0",
                 }

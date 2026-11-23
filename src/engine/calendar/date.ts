@@ -66,13 +66,31 @@ export function cnDay(day: number): string {
   return "三十";
 }
 
-export function monthDays(date: Pick<GameDate, "lunar" | "month">): number {
-  return date.lunar ? (date.month % 2 === 1 ? 30 : 29) : WESTERN_DAYS[date.month - 1];
+function extraMonthDay(date: Pick<GameDate, "lunar" | "month"> & { day?: number }): number {
+  if (date.lunar) return date.month % 2 === 0 && date.day === 30 ? 1 : 0;
+  return date.month === 2 && date.day === 29 ? 1 : 0;
+}
+
+export function monthDays(date: Pick<GameDate, "lunar" | "month"> & { day?: number }): number {
+  return (date.lunar ? (date.month % 2 === 1 ? 30 : 29) : WESTERN_DAYS[date.month - 1]) + extraMonthDay(date);
 }
 
 // Astronomical years have a year 0 (1 BC = 0), which makes arithmetic simple.
 const toAstro = (ce: number) => (ce < 0 ? ce + 1 : ce);
 const fromAstro = (a: number) => (a <= 0 ? a - 1 : a);
+
+export function isLeapCeYear(ceYear: number | null | undefined): boolean {
+  if (ceYear == null || !Number.isInteger(ceYear) || ceYear === 0) return false;
+  const a = toAstro(ceYear);
+  const mod = (n: number, m: number) => ((n % m) + m) % m;
+  return mod(a, 4) === 0 && (mod(a, 100) !== 0 || mod(a, 400) === 0);
+}
+
+export function maxValidDay(date: { lunar: boolean; month: number; ceYear?: number | null }): number {
+  if (date.lunar) return 30;
+  if (date.month === 2) return isLeapCeYear(date.ceYear) ? 29 : 28;
+  return WESTERN_DAYS[date.month - 1];
+}
 
 /** Years from a to b with no year 0 between BC and AD. */
 function yearsBetween(a: number, b: number): number {
@@ -174,32 +192,59 @@ export function daysBetween(a: GameDate, b: GameDate): number | null {
   const years = a.ceYear != null && b.ceYear != null ? yearsBetween(a.ceYear, b.ceYear) : a.era === b.era ? b.year - a.year : null;
   if (years === null) return null;
   const yearDays = daysBeforeMonth(13, a.lunar);
-  return years * yearDays + daysBeforeMonth(b.month, a.lunar) + b.day - (daysBeforeMonth(a.month, a.lunar) + a.day);
+  const extraA = years > 0 || (years === 0 && b.month > a.month) ? extraMonthDay(a) : 0;
+  const extraB = years < 0 || (years === 0 && a.month > b.month) ? extraMonthDay(b) : 0;
+  return years * yearDays + daysBeforeMonth(b.month, a.lunar) + b.day - (daysBeforeMonth(a.month, a.lunar) + a.day) + extraA - extraB;
 }
 
 /** Signed date projection for a display anchor; the saved play duration is unchanged. */
 export function shiftDate(date: GameDate, days: number, rules?: CalendarRules): GameDate | null {
   if (!Number.isSafeInteger(days)) return null;
   const yearDays = daysBeforeMonth(13, date.lunar);
+  const extra = extraMonthDay(date);
   const originYear = date.ceYear == null ? date.year : toAstro(date.ceYear);
-  const serial = originYear * yearDays + daysBeforeMonth(date.month, date.lunar) + date.day - 1 + days;
-  const year = Math.floor(serial / yearDays);
-  let left = serial - year * yearDays;
+  const doy = daysBeforeMonth(date.month, date.lunar) + date.day - 1;
+  const serial = originYear * yearDays + doy + days;
+  if (!Number.isSafeInteger(serial)) return null;
+  const pos = doy + days;
+  const originYearDays = yearDays + extra;
+  let yearDelta: number;
+  let left: number;
+  if (pos >= 0 && pos < originYearDays) {
+    yearDelta = 0;
+    left = pos;
+  } else if (pos >= originYearDays) {
+    const after = pos - originYearDays;
+    yearDelta = 1 + Math.floor(after / yearDays);
+    left = after - (yearDelta - 1) * yearDays;
+  } else {
+    yearDelta = Math.floor(pos / yearDays);
+    left = pos - yearDelta * yearDays;
+  }
+  const year = originYear + yearDelta;
   let month = 1;
-  while (left >= monthDays({ month, lunar: date.lunar })) left -= monthDays({ month: month++, lunar: date.lunar });
+  for (;;) {
+    const md = monthDays({ month, lunar: date.lunar }) + (yearDelta === 0 && month === date.month ? extra : 0);
+    if (left < md) break;
+    left -= md;
+    month++;
+  }
   const ceYear = date.ceYear == null ? null : fromAstro(year);
-  let projected: GameDate = { ...date, year: date.year + year - originYear, month, day: left + 1, ceYear };
+  let projected: GameDate = { ...date, year: date.year + yearDelta, month, day: left + 1, ceYear };
   if (date.era === "公元" || date.era === "公元前") {
     const ce = ceYear ?? fromAstro(year);
     projected = { ...projected, era: ce < 0 ? "公元前" : "公元", year: Math.abs(ce), ceYear: ce };
   }
   projected = withEra(projected, rules);
-  return Number.isSafeInteger(serial) && projected.year >= 1 && projected.year <= maxYear(projected.era) ? projected : null;
+  return projected.year >= 1 && projected.year <= maxYear(projected.era) ? projected : null;
 }
 
 /** Fixed-calendar year boundaries, without walking arbitrarily large durations. */
 export function newYearsAfterDays(date: GameDate, days: number): number {
-  return Math.floor((daysBeforeMonth(date.month, date.lunar) + date.day - 1 + Math.max(0, Math.floor(days))) / daysBeforeMonth(13, date.lunar));
+  const yearDays = daysBeforeMonth(13, date.lunar);
+  const originYearDays = yearDays + extraMonthDay(date);
+  const pos = daysBeforeMonth(date.month, date.lunar) + date.day - 1 + Math.max(0, Math.floor(days));
+  return pos < originYearDays ? 0 : 1 + Math.floor((pos - originYearDays) / yearDays);
 }
 
 /** "天宝七载 冬月十七" / "公元前44年 3月14日" */

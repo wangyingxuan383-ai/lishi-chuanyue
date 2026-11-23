@@ -21,6 +21,9 @@
   border-color: transparent; color: var(--on-accent); font-family: var(--sans); letter-spacing: 0.08em; font-weight: 600;
   box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent), 0 8px 20px color-mix(in srgb, var(--accent) 22%, transparent);
 }
+:root[data-style="ink"][data-theme="night"] button.primary {
+  background: linear-gradient(180deg, #c63526, var(--accent));
+}
 :root[data-style="ink"] button.primary:disabled { background: var(--raised); color: var(--muted); box-shadow: none; }
 :root[data-style="ink"] button.danger-solid { font-family: var(--sans); border: 1px solid var(--loss); box-shadow: none; }
 :root[data-style="ink"] input, :root[data-style="ink"] textarea, :root[data-style="ink"] select {
@@ -142,7 +145,9 @@
 }
 :root[data-style="ink"] .service-hero-text small, :root[data-style="ink"] .service-hero-text > span, :root[data-style="ink"] .service-hero-state { color: rgba(247, 241, 230, 0.7); }
 :root[data-style="ink"] .service-hero.ok .service-hero-state { color: #9fe0b4; }
-:root[data-style="ink"] .service-hero-icon { background: linear-gradient(180deg, #d84a33, #a3241a); box-shadow: 0 0 0 2px rgba(217, 180, 106, 0.6); }
+:root[data-style="ink"] .service-hero-icon { background: linear-gradient(180deg, #c63526, #9e2218); box-shadow: 0 0 0 2px rgba(217, 180, 106, 0.6); }
+:root[data-style="ink"][data-theme="night"] :is(.writing-badge, .report-head b, .report-card .report-tag, .story-text p.date-line, .tip button, .to-bottom, .tree-marks, .ref-badge.branch, details > summary::before) { color: #ee7a64; }
+:root[data-style="ink"][data-theme="night"] .tag:not(.tag-ai):not(.tag-loss):not(.own) { color: #ee7a64; border-color: color-mix(in srgb, #ee7a64 70%, transparent); }
 :root[data-style="ink"] .style-card { border-color: transparent; box-shadow: var(--elev-2); }
 :root[data-style="ink"] .note-kind, :root[data-style="ink"] .note-row { border-color: transparent; box-shadow: var(--elev-1); border-radius: var(--radius-card); }
 :root[data-style="ink"] .note-kind[aria-checked="true"] { border-color: var(--fg); box-shadow: var(--elev-2), 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent); }

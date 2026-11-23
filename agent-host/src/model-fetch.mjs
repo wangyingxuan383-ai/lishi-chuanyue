@@ -49,7 +49,7 @@ export class NativeModelFetch {
     // signal. The native task owner independently cancels every active stream.
     await this.call("cancel", { requestId: state.id, reason });
   }
-  async fetch(input, options, { onRequest = () => {}, receipts = [], purpose = "model" } = {}) {
+  async fetch(input, options, { onRequest = () => {}, receipts = [], purpose = "model", model } = {}) {
     let request;
     try { request = new Request(input, options); } catch { throw invalid("invalid_model_request"); }
     if (request.method !== "POST") throw invalid("invalid_model_request");
@@ -61,6 +61,7 @@ export class NativeModelFetch {
     for (const name of ["key", "api_key", "apikey", "access_token"]) url.searchParams.delete(name);
     const headers = [...request.headers].filter(([name, value]) => !AUTH_HEADERS.has(name.toLowerCase()) && name.length <= 128 && value.length <= 8192);
     if (headers.length > 64) throw invalid("invalid_model_request");
+    const modelId = typeof model === "string" ? model.trim() : "";
     const state = { id: `model-${randomUUID()}`, signal: request.signal, controller: null, ended: false, cancelled: false };
     state.abort = () => {
       state.controller?.error(abortError());
@@ -69,7 +70,11 @@ export class NativeModelFetch {
     this.active.set(state.id, state);
     request.signal.addEventListener("abort", state.abort, { once: true });
     try {
-      const reply = await this.call("start", { requestId: state.id, method: "POST", url: url.href, headers, body: body.toString("base64"), receipts, purpose }, request.signal);
+      const reply = await this.call("start", {
+        requestId: state.id, method: "POST", url: url.href, headers,
+        body: body.toString("base64"), receipts, purpose,
+        ...(modelId ? { model: modelId } : {}),
+      }, request.signal);
       if (!Number.isInteger(reply?.status) || reply.status < 200 || reply.status > 599 || !Array.isArray(reply.headers)) throw invalid();
       onRequest(state.id);
       if ([204, 205, 304].includes(reply.status)) {
@@ -115,8 +120,15 @@ export class NativeModelFetch {
     // Providers without usage leave Pi's zero-filled defaults. They are not an
     // actual report of a free request, even if the response itself succeeded.
     if (!Object.values(usage).some(value => value > 0)) usage = {};
+    const modelId = typeof message?.model === "string" ? message.model.trim() : "";
     for (let index = 0; index < ids.length; index++) {
-      await this.call("usage", { requestId: ids[index], status: failed || index < ids.length - 1 ? "failed" : "success", accepted: accepted && index === ids.length - 1, usage: index === ids.length - 1 ? usage : {} });
+      await this.call("usage", {
+        requestId: ids[index],
+        status: failed || index < ids.length - 1 ? "failed" : "success",
+        accepted: accepted && index === ids.length - 1,
+        usage: index === ids.length - 1 ? usage : {},
+        ...(modelId ? { model: modelId } : {}),
+      });
     }
   }
   async close() {

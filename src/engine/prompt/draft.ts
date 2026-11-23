@@ -4,7 +4,7 @@ import type { ChatMessage } from "../llm/chat";
 import { MAX_BEATS, type ChallengeInput, type ScriptInput } from "../modes";
 import type { SetupDraft } from "./turn";
 
-export const DRAFT_PROMPT_VERSION = "draft-2";
+export const DRAFT_PROMPT_VERSION = "draft-3";
 
 /** The opening as far as the player has filled it in; `script` / `challenge` are the parts of the draft already written. */
 export type DraftInput = Partial<SetupDraft> & { script?: Partial<ScriptInput> | null; challenge?: Partial<ChallengeInput> | null };
@@ -35,7 +35,7 @@ export function draftScriptMessages(current: DraftInput): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你帮玩家给一部${story(current)}拟剧本大纲：一句话的主线，三到八幕骨架，和想要的结局。每一幕一句话，写这一幕会发生的事（谁、在哪、出了什么事），按先后排；只写局面和事件，不替主角做决定，给玩家留出选择。符合故事设定和主角的身份。玩家已经写好的部分原样保留，接着补全。只输出一个 JSON 对象，不要加代码块或额外说明：
+      content: `你帮玩家给一部${story(current)}拟剧本大纲：一句话的主线，三到八幕骨架，和想要的结局。每一幕一句话，写这一幕会发生的事（谁、在哪、出了什么事），按先后排；各幕之间有递进与张弛节奏，不全写成同质化的危机；只写局面和事件，不替主角做决定，给玩家留出选择。符合故事设定和主角的身份。玩家已经写好的部分原样保留，接着补全。只输出一个 JSON 对象，不要加代码块或额外说明：
 {"line":"主线，一句话","beats":["第一幕","第二幕","第三幕"],"ending":"想要的结局，一句话"}`,
     },
     { role: "user", content: `开局设定：\n${setupText(current)}\n\n已经写好的大纲：\n${written || "（无）"}` },

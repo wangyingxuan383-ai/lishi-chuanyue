@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { getPlatform } from "../../platform";
 
 /**
@@ -11,22 +11,78 @@ import { getPlatform } from "../../platform";
  */
 export function useLongPress(onLongPress: () => void, onTap?: () => void) {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const ghostTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const cleanupGhost = useRef<(() => void) | null>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
   const fired = useRef(false);
+
+  const clearGhost = () => {
+    clearTimeout(ghostTimer.current);
+    cleanupGhost.current?.();
+    cleanupGhost.current = null;
+  };
+  // Suppresses the single synthetic click Android WebView dispatches when a finger
+  // lifts at 450–500 ms right after PassageMenu's backdrop/buttons mount under it (B29).
+  const armGhostClickGuard = () => {
+    clearGhost();
+    const onCaptureClick = (ev: MouseEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      fired.current = false;
+      clearGhost();
+    };
+    let onNextPointerDown: (() => void) | null = null;
+    const onRelease = () => {
+      window.removeEventListener("pointerup", onRelease, true);
+      window.removeEventListener("pointercancel", onRelease, true);
+      clearTimeout(ghostTimer.current);
+      // Once a fresh press starts on the newly opened menu, the old gesture cannot emit a ghost click.
+      onNextPointerDown = () => {
+        fired.current = false;
+        clearGhost();
+      };
+      window.addEventListener("pointerdown", onNextPointerDown, true);
+      ghostTimer.current = setTimeout(() => {
+        fired.current = false;
+        clearGhost();
+      }, 600);
+    };
+    window.addEventListener("click", onCaptureClick, true);
+    window.addEventListener("pointerup", onRelease, true);
+    window.addEventListener("pointercancel", onRelease, true);
+    cleanupGhost.current = () => {
+      window.removeEventListener("click", onCaptureClick, true);
+      window.removeEventListener("pointerup", onRelease, true);
+      window.removeEventListener("pointercancel", onRelease, true);
+      if (onNextPointerDown) window.removeEventListener("pointerdown", onNextPointerDown, true);
+    };
+    ghostTimer.current = setTimeout(() => {
+      fired.current = false;
+      clearGhost();
+    }, 4000);
+  };
   const cancel = () => {
     clearTimeout(timer.current);
     start.current = null;
   };
+  useEffect(() => () => {
+    cancel();
+    clearGhost();
+  }, []);
+
   return {
     onPointerDown(e: React.PointerEvent) {
       // Only the main mouse button presses and holds; a right click is handled below.
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");
       if (inner && inner !== e.currentTarget) return;
+      clearGhost();
       fired.current = false;
       start.current = { x: e.clientX, y: e.clientY };
       timer.current = setTimeout(() => {
         fired.current = true;
+        armGhostClickGuard();
         if (document.documentElement.dataset.haptics !== "off") {
           // Native on Android (no VIBRATE permission there); navigator.vibrate elsewhere.
           void getPlatform().then((p) => p.system.haptic()).catch(() => {});
@@ -43,6 +99,12 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
       if (wasTap) onTap?.();
     },
     onClick(e: React.MouseEvent) {
+      if (fired.current) {
+        fired.current = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       // A pointer click (detail ≥ 1) was handled on pointer up.
       if (e.detail !== 0) return;
       const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");

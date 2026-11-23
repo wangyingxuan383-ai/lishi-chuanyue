@@ -14,7 +14,8 @@ import { buzz } from "../../app/motion";
 import type { Gen } from "./types";
 
 export type Restore = { mode: ActionMode; text: string; note: string };
-export type Notice = { text: string; actions: { label: string; run: () => void }[]; runId?: string; failure?: Failure; failures?: Failure[]; reason?: FailReason; detail?: string; partialText?: string; proseSaved?: boolean; restore?: Restore };
+export type NoticeAction = { label: string; run: () => void; keepNotice?: boolean };
+export type Notice = { text: string; actions: NoticeAction[]; runId?: string; failure?: Failure; failures?: Failure[]; reason?: FailReason; detail?: string; partialText?: string; proseSaved?: boolean; restore?: Restore };
 type SavedRun = Pick<SavedExecution, "id" | "status" | "error"> & Partial<SavedExecution>;
 
 function hasRestoreWords(r?: Restore | null): r is Restore {
@@ -22,6 +23,9 @@ function hasRestoreWords(r?: Restore | null): r is Restore {
 }
 
 function restoreFromSaved(run?: SavedRun): Restore | null {
+  // Only an unsent `turn` belongs in the input box; `variant` (重说) and `continue` (续写)
+  // carry an already-committed passage's action and must never pollute Composer (B02).
+  if (run?.kind && run.kind !== "turn") return null;
   const a = run?.action;
   if (!a) return null;
   const text = a.text?.trim() ? a.text : "";
@@ -124,6 +128,7 @@ export function useGeneration(d: GenerationDeps) {
   const streamedText = useRef("");
   const reachedOrganizing = useRef(false);
   const savedActions = useRef<Map<string, Restore>>(new Map());
+  const savedKinds = useRef<Map<string, string>>(new Map());
   const screenActive = useRef(true);
   const recoveryNoticeVersion = useRef(0);
   const deps = useRef(d);
@@ -256,8 +261,8 @@ export function useGeneration(d: GenerationDeps) {
       else if (again) actions.push({ label: plan.label, run: again });
     }
     const kept = hasRestoreWords(f.restore) ? f.restore : null;
-    if (kept) actions.push({ label: "放回输入框", run: () => { deps.current.restoreDraft(kept, true); deps.current.toast("已放回输入框"); } });
-    if (plan.switchService || failures.current >= 2) actions.push({ label: "换个服务", run: () => push({ name: "settings" }) });
+    if (kept) actions.push({ label: "放回输入框", keepNotice: true, run: () => { deps.current.restoreDraft(kept, true); deps.current.toast("已放回输入框"); } });
+    if (plan.switchService || failures.current >= 2) actions.push({ label: "换个服务", keepNotice: true, run: () => push({ name: "settings" }) });
     // The HTTP status lives in the failure record: 500 and 400 read differently.
     const partialText = f.partialText?.trim() || undefined;
     const proseSaved = !!f.proseSaved;
@@ -277,18 +282,25 @@ export function useGeneration(d: GenerationDeps) {
   /** Starts one passage. `run` gets the event handler and returns the engine's handle. */
   const start = (o: { action: Gen["action"]; text?: string; variant?: boolean; retry: () => void; restore?: Restore | null; run: (on: (e: TurnEvent) => void) => TurnHandle }) => {
     retry.current = o.retry;
-    begin({ text: o.text ?? "", action: o.action, variant: !!o.variant });
-    handle.current = o.run(onEvent(o.restore ?? null));
+    const isVariant = !!o.variant;
+    begin({ text: o.text ?? "", action: o.action, variant: isVariant });
+    handle.current = o.run((e) => {
+      if (isVariant && e.type === "failed" && e.runId) savedKinds.current.set(e.runId, "variant");
+      onEvent(o.restore ?? null)(e);
+    });
   };
 
   /** Follows a run still being written (also one started before the page opened). */
   const resumeExecution = (id: string, resume = false, saved?: SavedRun) => {
     if (!screenActive.current || handle.current || deps.current.isBusy()) return;
     recoveryNoticeVersion.current++;
+    if (saved?.kind) savedKinds.current.set(id, saved.kind);
+    const kind = saved?.kind ?? savedKinds.current.get(id);
     const kept = restoreFromSaved(saved) ?? savedActions.current.get(id) ?? null;
     if (kept) savedActions.current.set(id, kept);
     start({
       action: kept?.text.trim() ? { mode: kept.mode, text: kept.text } : null,
+      variant: kind === "variant",
       restore: kept,
       retry: () => retryExecution(id),
       run: (on) => deps.current.game.followExecution(id, on, resume),
@@ -298,10 +310,12 @@ export function useGeneration(d: GenerationDeps) {
   const retryExecution = (id: string) => {
     if (!screenActive.current || handle.current || deps.current.isBusy()) return;
     recoveryNoticeVersion.current++;
+    const kind = savedKinds.current.get(id);
     const kept = savedActions.current.get(id) ?? null;
     if (kept) deps.current.clearRestoredDraft?.(kept);
     start({
       action: kept?.text.trim() ? { mode: kept.mode, text: kept.text } : null,
+      variant: kind === "variant",
       restore: kept,
       retry: () => retryExecution(id),
       run: (on) => deps.current.game.retryRun(id, on),
@@ -309,6 +323,7 @@ export function useGeneration(d: GenerationDeps) {
   };
   /** Reopening the story after a stop: the same notice the failure gave, never a request by itself. */
   const showSavedExecution = (run: SavedRun) => {
+    if (run.kind) savedKinds.current.set(run.id, run.kind);
     const reason = run.reason ?? (run.status === "paused" ? "limit" : run.status === "cancelled" ? "cancelled" : run.status === "interrupted" ? "interrupted" : "other");
     const kept = restoreFromSaved(run);
     if (kept) {

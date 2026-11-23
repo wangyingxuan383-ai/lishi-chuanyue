@@ -523,4 +523,40 @@ describe("原著札记 (D162)", () => {
     expect(done.status).toBe("done");
     expect(done.content).toBe("最终合并：完整");
   });
+
+  it("chunks oversized story passages, scales output budget on small windows, and preserves through on saveAnswerAsNote (B08, B12)", async () => {
+    const { game, repo, book } = await setup();
+    const { world } = await repo.createWorld({
+      title: "超长单段",
+      eraId: "free",
+      opening: {
+        parentId: null,
+        kind: "opening",
+        narrative: Array.from({ length: 6 }, (_, i) => `第${i + 1}段长文：${"星河浩瀚，飞舟穿云而行。".repeat(350)}`).join("\n\n"),
+        state: sampleState(),
+      },
+    });
+    const storyPieces = await noteMaterials(repo, { bookId: "", source: "story", worldId: world.id, kind: "plot", scope: { from: 0, to: 0 } });
+    expect(storyPieces.length).toBeGreaterThan(1);
+    expect(storyPieces.every((p) => p.text.length <= 16_000)).toBe(true);
+
+    // Small contextWindowTokens scales max_tokens down instead of reserving fixed 8192 (B12)
+    game.llm = { slot: "t", url: "https://test.invalid/v1/chat/completions", model: "m", auxModel: "aux", includeUsage: true, contextWindowTokens: 8192 };
+    let seenMaxTokens = 0;
+    const shortNote = newNote(book.id, "plot", { from: 0, to: 0 }, "小窗口测试");
+    await saveNote(repo, shortNote);
+    game.platform.llm.stream = async (req, onEvent) => {
+      seenMaxTokens = (req.body as { max_tokens: number }).max_tokens;
+      onEvent({ type: "data", data: JSON.stringify({ choices: [{ delta: { content: "第一章要点（第1章）" }, finish_reason: "stop" }] }) });
+      onEvent({ type: "done" });
+      return "s";
+    };
+    await game.runCanonNote(shortNote.id, () => {});
+    expect(seenMaxTokens).toBe(2048);
+
+    // saveAnswerAsNote records scope.through and extracts chapter refs against full book section count (B08)
+    const savedAns = await game.saveAnswerAsNote(world.id, book.id, "沈青在哪修炼？", "沈青在第1章进入青云书院修炼。", 3);
+    expect(savedAns.scope.through).toBe(3);
+    expect(savedAns.refs).toEqual([0]);
+  });
 });

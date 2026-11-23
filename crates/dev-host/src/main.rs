@@ -27,6 +27,7 @@ struct Request {
 struct Host {
     sql: Arc<SqlStore>,
     engine: Arc<Engine>,
+    companion: Arc<story_core::companion_runtime::CompanionRuntime>,
     pi: Arc<pi_agent::PiAgent>,
 }
 
@@ -55,6 +56,11 @@ fn required<'a>(params: &'a Value, key: &str) -> Result<&'a str, Value> {
 impl Host {
     async fn dispatch(self: Arc<Self>, method: String, params: Value) -> Result<Value, Value> {
         match method.as_str() {
+            "companion" => self
+                .companion
+                .dispatch(params.get("request").unwrap_or(&params).clone())
+                .await
+                .map_err(core_error),
             "pi_agent" => {
                 self.pi
                     .request(params.get("request").unwrap_or(&params).clone())
@@ -112,6 +118,7 @@ impl Host {
                 let shared=self.sql.shared();self.sql.fence_writes();let ticket=story_core::maintenance::begin(&shared).map_err(core_error)?;
                 let result=async {
                     for request in story_core::maintenance::pending_stops(&shared).map_err(core_error)?{self.pi.request(request).await?;}
+                    self.companion.shutdown().await;
                     self.engine.shutdown().await;
                     tokio::time::timeout(std::time::Duration::from_secs(30),async{loop{if story_core::maintenance::drained(&shared).map_err(core_error)?{break;}tokio::time::sleep(std::time::Duration::from_millis(50)).await;}Ok::<_,Value>(())}).await.map_err(|_|invalid("执行尚未停止，未恢复存档"))??;
                     self.pi.retire().await?;
@@ -250,9 +257,14 @@ async fn main() {
         directory,
         secrets.clone(),
     ));
+    let dev_model: Arc<dyn story_core::chat::Model> = Arc::new(model::DevModel { secrets });
+    let companion = Arc::new(story_core::companion_runtime::CompanionRuntime::new(
+        sql.shared(),
+        dev_model.clone(),
+    ));
     let engine = Arc::new(Engine::new(
         sql.shared(),
-        Arc::new(model::DevModel { secrets }),
+        dev_model,
         Arc::new(|_| Box::new(())),
         Arc::new(|_| {}),
     ));
@@ -260,7 +272,7 @@ async fn main() {
         eprintln!("开发宿主无法读取运行进度");
         std::process::exit(1);
     }
-    let host = Arc::new(Host { sql, engine, pi });
+    let host = Arc::new(Host { sql, engine, companion, pi });
     let (sender, mut responses) = tokio::sync::mpsc::channel::<Value>(32);
     let writer = tokio::spawn(async move {
         let mut output = tokio::io::stdout();
@@ -308,6 +320,7 @@ async fn main() {
         });
     }
     // Vite closing ends this process; page disconnection never reaches here.
+    host.companion.shutdown().await;
     host.pi.shutdown().await;
     host.engine.shutdown().await;
     drop(sender);

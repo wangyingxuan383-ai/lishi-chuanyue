@@ -19,8 +19,8 @@ describe("generation tiers (D161)", () => {
     expect(depthBudget(20_000, "deep")).toBe(20_000);
   });
   it("checks the original fully at 深度, lightly for 同人 at 标准, never at 快速", () => {
-    expect(referenceReview("deep", book)).toBe("reference-review-2");
-    expect(referenceReview("standard", book)).toBe("reference-review-lite-4");
+    expect(referenceReview("deep", book)).toBe("reference-review-3");
+    expect(referenceReview("standard", book)).toBe("reference-review-lite-5");
     expect(referenceReview("standard", { ...book, fanfic: false })).toBeUndefined();
     expect(referenceReview("fast", book)).toBeUndefined();
     expect(referenceReview("deep", null)).toBeUndefined();
@@ -57,7 +57,7 @@ describe("generation tiers (D161)", () => {
     expect(meta.depth).toBe("fast");
     expect(meta.referenceReviewVersion).toBeUndefined();
     expect(meta.budgetChars).toBeLessThan(10_000);
-    expect(meta.chapterVersion).toBe("chapter-3-free");
+    expect(meta.chapterVersion).toBe("chapter-4-free");
     expect((meta.chapterMessages as { content: string }[])[0].content).not.toContain("历史互动小说");
     expect((meta.chapterMessages as { content: string }[])[0].content).toContain("沿用本局世界设定与称呼");
     expect(contexts[0].history).toHaveLength(200);

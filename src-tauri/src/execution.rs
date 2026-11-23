@@ -167,3 +167,11 @@ pub async fn execution_settle(state: Value, record: Value, options: Value) -> Re
 pub async fn execution_context(input: Value) -> Result<Value, Value> {
     blocking_exec(move || story_core::writing_context::build(&input).map_err(message)).await
 }
+
+#[tauri::command]
+pub async fn execution_companion(
+    companion: State<'_, Arc<story_core::companion_runtime::CompanionRuntime>>,
+    request: Value,
+) -> Result<Value, Value> {
+    companion.inner().dispatch(request).await.map_err(message)
+}

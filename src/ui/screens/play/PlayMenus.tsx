@@ -5,7 +5,7 @@ import type { AppValue } from "../../app/context";
 import { MenuSheet } from "../../components/Sheet";
 
 interface PassageMenuProps {
-  menuNode: StoryNode; head: StoryNode; busy: boolean;
+  menuNode: StoryNode; head: StoryNode; turn?: StoryNode; busy?: boolean;
   setMenuNode: (node: StoryNode | null) => void;
   openWriting: (kind: "rewrite" | "polish", node: StoryNode) => void;
   setEditing: (value: { node: StoryNode; field: "narrative" | "action"; text: string }) => void;
@@ -16,7 +16,10 @@ interface PassageMenuProps {
   setMenuMore: (node: StoryNode | null) => void;
 }
 
-export function PassageMenu({ menuNode, head, busy, setMenuNode, openWriting, setEditing, onAskAbout, setRemember, goBack, toast, setMenuMore }: PassageMenuProps) {
+export function PassageMenu({ menuNode, head, turn, busy = false, setMenuNode, openWriting, setEditing, onAskAbout, setRemember, goBack, toast, setMenuMore }: PassageMenuProps) {
+  const isLatestStory = turn
+    ? menuNode.id === turn.id
+    : menuNode.id === head.id || (head.kind === "edit" && head.parentId === menuNode.id);
   return (
     <MenuSheet
       title={`“${menuNode.narrative.replace(/\s+/g, "").slice(0, 16)}…”`}
@@ -26,7 +29,7 @@ export function PassageMenu({ menuNode, head, busy, setMenuNode, openWriting, se
         { icon: "pen", label: "改写文字", hidden: menuNode.kind === "edit" || busy, onSelect: () => setEditing({ node: menuNode, field: "narrative", text: menuNode.narrative }) },
         { icon: "search", label: "问这段里的事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim(), onSelect: () => onAskAbout(menuNode) },
         { icon: "memo", label: "记住这件事", hidden: menuNode.kind === "edit" || !menuNode.narrative.trim() || busy, onSelect: () => setRemember({ node: menuNode, text: menuNode.narrative.trim() }) },
-        { icon: "rewind", label: "回到这里", hidden: menuNode.id === head.id || busy, onSelect: () => void goBack(menuNode) },
+        { icon: "rewind", label: "回到这里", hidden: menuNode.kind === "edit" || isLatestStory || busy, onSelect: () => void goBack(menuNode) },
         { icon: "copy", label: "复制", onSelect: () => { void navigator.clipboard?.writeText(menuNode.narrative); toast("已复制"); } },
         { icon: "more", label: "更多…", onSelect: () => setMenuMore(menuNode) },
       ]}
@@ -35,7 +38,7 @@ export function PassageMenu({ menuNode, head, busy, setMenuNode, openWriting, se
 }
 
 interface PassageMoreMenuProps {
-  menuMore: StoryNode; busy: boolean; devMode: boolean; game: AppValue["game"];
+  menuMore: StoryNode; busy?: boolean; devMode: boolean; game: AppValue["game"];
   setMenuMore: (node: StoryNode | null) => void;
   setEditing: (value: { node: StoryNode; field: "narrative" | "action"; text: string }) => void;
   refresh: () => Promise<void>;
@@ -46,7 +49,7 @@ interface PassageMoreMenuProps {
   setUsageNode: (id: string) => void;
 }
 
-export function PassageMoreMenu({ menuMore, busy, devMode, game, setMenuMore, setEditing, refresh, toast, setBookmark, setCardNode, setRawNode, setUsageNode }: PassageMoreMenuProps) {
+export function PassageMoreMenu({ menuMore, busy = false, devMode, game, setMenuMore, setEditing, refresh, toast, setBookmark, setCardNode, setRawNode, setUsageNode }: PassageMoreMenuProps) {
   return (
     <MenuSheet
       title="这一段还可以"
@@ -65,7 +68,7 @@ export function PassageMoreMenu({ menuMore, busy, devMode, game, setMenuMore, se
 }
 
 interface MoreMenuProps {
-  mouse: boolean; busy: boolean; state: WorldState; dead: boolean; watch?: boolean;
+  mouse: boolean; busy?: boolean; state: WorldState; dead: boolean; watch?: boolean;
   head: StoryNode; cursor: tree.Cursor; noteOpen: boolean; devMode: boolean;
   game: AppValue["game"]; worldId: string;
   setSheet: (sheet: "toc" | "ask" | "reference" | "notes" | "usage" | "life" | "autoplay" | "skip" | "lines" | "story" | "settings" | "keys" | null) => void;
@@ -73,17 +76,19 @@ interface MoreMenuProps {
   redo: () => Promise<void>;
   setNoteOpen: (open: boolean) => void;
   push: AppValue["push"];
+  captureReading?: () => void;
   again: (retry: boolean) => Promise<void>;
   setContext: (context: ContextPreview | null) => void;
 }
 
-export function MoreMenu({ mouse, busy, state, dead, watch, head, cursor, noteOpen, devMode, game, worldId, setSheet, undo, redo, setNoteOpen, push, again, setContext }: MoreMenuProps) {
+export function MoreMenu({ mouse, busy = false, state, dead, watch, head, cursor, noteOpen, devMode, game, worldId, setSheet, undo, redo, setNoteOpen, push, captureReading, again, setContext }: MoreMenuProps) {
   return (
     <MenuSheet
       onClose={() => setSheet(null)}
       items={[
         { icon: "list", group: "阅读", label: "目录与搜索", onSelect: () => setSheet("toc") },
         { icon: "search", group: "阅读", label: mouse ? "查一查（Ctrl+F）" : "查一查", onSelect: () => setSheet("ask") },
+        { icon: "sparkle", group: "阅读", label: "伴聊（畅聊 · 查资料 · 改档）", onSelect: () => { captureReading?.(); push({ name: "companion", worldId, lineId: cursor.line.id }); } },
         { icon: "memo", group: "阅读", label: "札记", onSelect: () => setSheet("notes") },
         { icon: "book", group: "阅读", label: "参考资料", hidden: !state.source, onSelect: () => setSheet("reference") },
         { icon: "person", group: "阅读", label: "这一世小传", onSelect: () => setSheet("life") },

@@ -727,7 +727,7 @@ fn business(value: &Value) -> Value {
     }
     Value::Null
 }
-pub(crate) fn summary_result(value: &Value) -> Value {
+pub fn summary_result(value: &Value) -> Value {
     let data = &value["data"];
     let mut projected = json!({"ok":value["ok"],"outcomeUnknown":value["outcomeUnknown"],"error":{"code":clipped(text(&value["error"],"code"),80).0,"message":clipped(text(&value["error"],"message"),180).0},"data":{}});
     for key in [
@@ -749,6 +749,27 @@ pub(crate) fn summary_result(value: &Value) -> Value {
                 data[key].clone()
             };
         }
+    }
+    if data["staged"].as_u64().is_some() {
+        projected["data"]["staged"] = data["staged"].clone();
+    }
+    if let Some(items) = data["changes"].as_array() {
+        projected["data"]["changes"] = json!(items
+            .iter()
+            .take(30)
+            .map(|item| {
+                let mut clean = json!({"kind": clipped(text(item, "kind"), 40).0});
+                for key in ["id", "path", "operation"] {
+                    if !text(item, key).is_empty() {
+                        clean[key] = clipped(text(item, key), 100).0.into();
+                    }
+                }
+                if !text(item, "summary").is_empty() {
+                    clean["summary"] = clipped(text(item, "summary"), 160).0.into();
+                }
+                clean
+            })
+            .collect::<Vec<_>>());
     }
     for key in ["title", "name"] {
         if let Some(s) = data[key].as_str() {
@@ -804,9 +825,23 @@ pub(crate) fn summary_result(value: &Value) -> Value {
 
 fn object_args(value: &Value) -> Value {
     let mut projected = json!({});
-    for key in ["query", "path", "name", "kind", "id"] {
+    for key in ["query", "path", "name", "kind", "id", "summary", "firstSummary", "firstKind"] {
         if let Some(s) = value[key].as_str() {
             projected[key] = clipped(s, 100).0.into();
+        }
+    }
+    if let Some(count) = value["editsCount"].as_u64() {
+        projected["editsCount"] = count.into();
+    }
+    if let Some(edits) = value["edits"].as_array() {
+        projected["editsCount"] = edits.len().into();
+        if let Some(first) = edits.first() {
+            if let Some(s) = first["summary"].as_str().filter(|s| !s.is_empty()) {
+                projected["firstSummary"] = clipped(s, 80).0.into();
+            }
+            if let Some(k) = first["kind"].as_str().filter(|s| !s.is_empty()) {
+                projected["firstKind"] = clipped(k, 40).0.into();
+            }
         }
     }
     projected
@@ -867,6 +902,21 @@ fn object(step: &Step, data: &Value) -> String {
         text(data, "name")
     } else if step.name == "stage_edit" && !text(args,"summary").is_empty() {
         text(args,"summary")
+    } else if step.name == "stage_edits" {
+        let count = args["editsCount"]
+            .as_u64()
+            .or_else(|| data["staged"].as_u64())
+            .unwrap_or(0);
+        let first = text(args, "firstSummary");
+        return if !first.is_empty() && count > 1 {
+            clipped(&format!("{first}等{count}项"), 100).0
+        } else if !first.is_empty() {
+            clipped(first, 100).0
+        } else if count > 0 {
+            format!("{count}项资料")
+        } else {
+            String::new()
+        };
     } else if !text(args, "path").is_empty() {
         text(args, "path")
     } else if !text(args, "name").is_empty() {
@@ -950,6 +1000,13 @@ fn outcome(step: &Step) -> (&'static str, &'static str, String) {
     }
     if data["staged"] == true {
         return ("completed", "draft", "草稿已准备，尚未采用".into());
+    }
+    if let Some(count) = data["staged"].as_u64().filter(|n| *n > 0) {
+        return (
+            "completed",
+            "draft",
+            format!("已准备{count}项修改草稿，尚未采用"),
+        );
     }
     if data["reused"] == true {
         return ("completed", "reused", "已复用保存的结果".into());

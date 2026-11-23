@@ -6,8 +6,8 @@ import type { ChatMessage } from "../llm/chat";
 import { lenientJson } from "../record/parse";
 import type { Chapter, StoryNode } from "../types";
 
-export const CHAPTER_PROMPT_VERSION = "chapter-2";
-export const CHAPTER_FREE_PROMPT_VERSION = "chapter-3-free";
+export const CHAPTER_PROMPT_VERSION = "chapter-3";
+export const CHAPTER_FREE_PROMPT_VERSION = "chapter-4-free";
 /** Characters of 【前情提要】 in a turn prompt (PLAN §5.3, layer 7). */
 export const RECAP_BUDGET = 1500;
 /** The newest chapters outside the window are given in full; older ones by their gist. */
@@ -34,11 +34,11 @@ export function chapterMessages(input: ChapterInput): ChatMessage[] {
       role: "system",
       content: `你是一部${free ? "" : "历史"}互动小说的记录员。把下面这一章的剧情写成章节摘要，供作者在以后的回合里回顾前情。
 要求：
-- summary：150～250 字，按时间顺序写清发生了什么：主角做了什么、和谁打了交道、结果如何；得到或失去的重要东西；受的伤；许下的承诺、欠下的人情或债、结下的仇；还没解开的悬念。
+- summary：150～250 字，按时间顺序写清发生了什么：主角做了什么、和谁打了交道、结果如何；得到或失去的重要东西；受的伤；许下的承诺、欠下的人情或债、结下的仇；尚未到期的关键期限、核心物证去向与还没解开的悬念。
 - 人名、地名、物品名照剧情里的叫法；钱数、日期、期限、修为或能力等级、关键物品的下落与数量照原文写具体，不笼统概括。
 - 只写剧情里发生过的事，不评论、不推测、不预告。${free ? "\n- 沿用本局世界设定与称呼，不补写年表或未来事件，不输出 timeline、deviation。" : ""}
 - gist：一句话梗概，不超过 40 字。
-- title：章节标题，4～8 个字。
+- title：章节标题，4～8 个字，点出本章核心事件或意象，不用“风云初起”“暗流涌动”等空泛套话。
 只输出一个 JSON 对象，不要加代码块或额外说明：{"title":"……","gist":"……","summary":"……"}`,
     },
     {

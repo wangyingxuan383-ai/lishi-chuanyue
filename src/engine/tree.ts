@@ -44,8 +44,8 @@ async function replacedBranchEnd(repo: Repo, c: Cursor, parent: StoryNode): Prom
   const first = await repo.getNode(parent.lastChildId);
   if (!first) return null;
   const branch = [first, ...(await tail(repo, first))];
-  const others = (await repo.lines(c.worldId)).filter((l) => l.id !== c.line.id);
-  if (branch.length < KEEP_BRANCH_MIN) return null;
+  const others = (await repo.lines(c.worldId)).filter((l) => l.id !== c.line.id && !l.deletedAt);
+  if (branch.filter((n) => n.kind !== "edit").length < KEEP_BRANCH_MIN) return null;
   if (others.some((l) => branch.some((n) => n.id === l.nodeId))) return null;
   // The current line itself may sit inside the branch (it will move away now).
   return branch[branch.length - 1];
@@ -125,12 +125,17 @@ export async function goBackTo(repo: Repo, c: Cursor, nodeId: string): Promise<C
   const at = path.findIndex((n) => n.id === nodeId);
   if (at < 0) throw new Error("can only go back to a turn on the current path");
   const target = path[at];
-  const ahead = path.length - 1 - at;
+  const ahead = path.slice(at + 1).filter((n) => n.kind !== "edit").length;
   if (ahead < KEEP_BRANCH_MIN) {
+    for (let i = at; i < path.length - 1; i++) {
+      if (path[i].lastChildId !== path[i + 1].id) await repo.setLastChild(path[i].id, path[i + 1].id);
+    }
     await repo.moveLine(c.line.id, target.id);
-    return { ...c, line: { ...c.line, nodeId: target.id }, head: target };
+    const refreshed = at < path.length - 1 ? (await repo.getNode(target.id))! : target;
+    return { ...c, line: { ...c.line, nodeId: refreshed.id }, head: refreshed };
   }
-  const line = await repo.createLine(c.worldId, target.id, at === 0 ? "从开场重来的路" : `第 ${at} 回合后的另一条路`, true);
+  const turnNumber = Math.max(0, path.slice(0, at + 1).filter((n) => n.kind !== "edit").length - 1);
+  const line = await repo.createLine(c.worldId, target.id, turnNumber === 0 ? "从开场重来的路" : `第 ${turnNumber} 回合后的另一条路`, true);
   await repo.setCurrentLine(c.worldId, line.id);
   return { worldId: c.worldId, line, head: target };
 }

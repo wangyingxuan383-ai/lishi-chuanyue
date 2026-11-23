@@ -52,18 +52,47 @@ fn binding_error() -> PlatformError {
     )
 }
 
+fn matches_bound_prefix(candidate_base: &str, target: &str) -> bool {
+    target
+        .strip_prefix(candidate_base)
+        .is_some_and(|tail| tail.is_empty() || tail.starts_with('/') || tail.starts_with('?'))
+}
+
+fn gemini_native_dual_base(base: &str, base_path: &str) -> Option<(String, String)> {
+    let trimmed_base = base.trim_end_matches('/');
+    let trimmed_path = base_path.trim_end_matches('/');
+    let native_base = trimmed_base.strip_suffix("/openai")?;
+    let native_path = trimmed_path.strip_suffix("/openai")?;
+    if !native_base.ends_with("/v1beta") || !native_path.ends_with("/v1beta") {
+        return None;
+    }
+    Some((native_base.to_owned(), native_path.to_owned()))
+}
+
 pub fn check_bound(base: &str, target: &str) -> Result<()> {
-    let valid_prefix = target
-        .strip_prefix(base)
-        .is_some_and(|tail| tail.is_empty() || tail.starts_with('/') || tail.starts_with('?'));
-    let base_url = reqwest::Url::parse(base).map_err(|_| binding_error())?;
-    let valid_url = reqwest::Url::parse(target).is_ok_and(|url| {
-        url.origin() == base_url.origin()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && matches!(url.scheme(), "https" | "http")
+    let base_trimmed = base.trim_end_matches('/');
+    let base_url = reqwest::Url::parse(base_trimmed).map_err(|_| binding_error())?;
+    let base_path = base_url.path().trim_end_matches('/');
+    let valid_url_and_prefix = reqwest::Url::parse(target).is_ok_and(|url| {
+        if url.origin() != base_url.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(url.scheme(), "https" | "http")
+        {
+            return false;
+        }
+        let target_path = url.path();
+        let direct_match = matches_bound_prefix(base_trimmed, target)
+            && matches_bound_prefix(base_path, target_path);
+        if direct_match {
+            return true;
+        }
+        gemini_native_dual_base(base_trimmed, base_path).is_some_and(|(alt_base, alt_path)| {
+            matches_bound_prefix(&alt_base, target)
+                && matches_bound_prefix(&alt_path, target_path)
+        })
     });
-    if !valid_prefix || !valid_url {
+    if !valid_url_and_prefix {
         return Err(PlatformError::new(
             "llm_url_not_bound",
             "请求地址与密钥绑定地址不符",
@@ -163,3 +192,82 @@ impl Credentials {
 #[cfg(test)]
 #[path = "credentials_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod gemini_binding_tests {
+    use super::*;
+    use crate::credentials::tests::MemoryStore;
+
+    #[test]
+    fn gemini_v1beta_openai_and_native_v1beta_authorize_each_other_on_same_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Credentials::open(dir.path().into(), Arc::new(MemoryStore::default())).unwrap();
+
+        service
+            .set(
+                "gemini-preset",
+                "AIzaFakeTestCredential000001".into(),
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            )
+            .unwrap();
+        for allowed in [
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        ] {
+            assert!(service.authorize("gemini-preset", allowed).is_ok(), "{allowed}");
+        }
+
+        service
+            .set(
+                "gemini-native",
+                "AIzaFakeTestCredential000002".into(),
+                "https://generativelanguage.googleapis.com/v1beta",
+            )
+            .unwrap();
+        for allowed in [
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+        ] {
+            assert!(service.authorize("gemini-native", allowed).is_ok(), "{allowed}");
+        }
+
+        check_bound(
+            "https://relay.example.com:8443/gemini/v1beta/openai",
+            "https://relay.example.com:8443/gemini/v1beta/models/gemini-2.5-flash:generateContent",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn gemini_dual_binding_never_loosens_host_port_scheme_or_arbitrary_paths() {
+        let base = "https://generativelanguage.googleapis.com/v1beta/openai";
+        for rejected in [
+            "https://evil.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            "http://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            "https://generativelanguage.googleapis.com:8443/v1beta/models/gemini-2.5-flash:generateContent",
+            "https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.5-flash:generateContent",
+            "https://generativelanguage.googleapis.com/v1/chat/completions",
+            "https://generativelanguage.googleapis.com/v1beta2/models/gemini-2.5-flash:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/../v1alpha/models/gemini-2.5-flash:generateContent",
+            "https://relay.example.com/other",
+        ] {
+            assert_eq!(
+                check_bound(base, rejected).unwrap_err().code,
+                "llm_url_not_bound",
+                "should reject {rejected}"
+            );
+        }
+        assert_eq!(
+            check_bound(
+                "https://relay.example.com/foov1beta/openai",
+                "https://relay.example.com/foov1beta/models/x"
+            )
+            .unwrap_err()
+            .code,
+            "llm_url_not_bound"
+        );
+    }
+}

@@ -5,7 +5,7 @@ import type { AnalysisJob, ReferenceContext, ReferencePassage, ReferenceQuery, S
 import { checkCancelled } from "./parse";
 import { relevantSourceFacts, sourceAnalysisText } from "./facts";
 
-export const SOURCE_PROMPT_VERSION = "source-3";
+export const SOURCE_PROMPT_VERSION = "source-4";
 export interface SourceChunk { section: number; ordinal: number; text: string }
 export const terms = (text: string): string[] => {
   const found = new Set<string>();

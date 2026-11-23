@@ -3,9 +3,9 @@ import type { PiReadableArchive } from "./archive";
 
 const fields = (raw: any, keys: string[], cap = 16000): any => Object.fromEntries(keys.flatMap(key => typeof raw?.[key] === "string" ? [[key, raw[key].slice(0, cap)]] : []));
 export function cleanSource(raw: any): any {
-  const out = fields(raw, ["findingId", "goalId", "topic", "groupId", "basis", "title", "quote", "text", "bookId", "sourceKind", "scope", "playerReferenceId", "evidenceId", "subject", "value", "sourceClaim", "contentHash", "readAt"]);
+  const out = fields(raw, ["findingId", "goalId", "topic", "groupId", "basis", "title", "quote", "text", "bookId", "worldId", "originWorldId", "originTitle", "sourceKind", "scope", "playerReferenceId", "evidenceId", "subject", "value", "sourceClaim", "contentHash", "readAt"]);
   for (const key of ["page", "section", "chunk", "offset", "start", "end", "quoteOffset"]) if (Number.isSafeInteger(raw?.[key]) && raw[key] >= 0) out[key] = raw[key];
-  if (raw?.location) out.location = { ...fields(raw.location, ["bookId", "nodeId", "lineId", "title", "path", "offsetUnit", "contentHash", "readAt"]), ...Object.fromEntries(["page", "section", "chunk", "offset", "start", "end"].flatMap(k => Number.isSafeInteger(raw.location[k]) && raw.location[k] >= 0 ? [[k, raw.location[k]]] : [])) };
+  if (raw?.location) out.location = { ...fields(raw.location, ["bookId", "nodeId", "lineId", "worldId", "originWorldId", "originTitle", "title", "path", "offsetUnit", "contentHash", "readAt"]), ...Object.fromEntries(["page", "section", "chunk", "offset", "start", "end"].flatMap(k => Number.isSafeInteger(raw.location[k]) && raw.location[k] >= 0 ? [[k, raw.location[k]]] : [])) };
   if (raw?.location && typeof raw.location.url === "string") {
     const link = cleanSource({ url: raw.location.url }).url;
     if (link) out.location.url = link;
@@ -25,11 +25,16 @@ export function cleanSource(raw: any): any {
 
 export function cleanReadablePi(raw: PiReadableArchive): PiReadableArchive {
   return { engine: "pi", version: 1, readOnly: true,
-    sessions: raw.sessions.map(s => fields(s, ["id", "worldId", "lineId", "title", "createdAt", "updatedAt"])),
+    sessions: raw.sessions.map(s => fields(s, ["id", "worldId", "originWorldId", "originTitle", "lineId", "title", "createdAt", "updatedAt"])),
     tasks: raw.tasks.map(t => {
       const h: any = t.history;
-      return { ...fields(t, ["id", "sessionId", "lineId", "text", "policy", "createdAt", "updatedAt"]), status: "archived", history: {
-        messages: Array.isArray(h?.messages) ? h.messages.slice(0, 500).filter((m: any) => ["user", "assistant"].includes(m?.role)).map((m: any) => fields(m, ["id", "role", "content", "at"])) : [],
+      return { ...fields(t, ["id", "sessionId", "worldId", "originWorldId", "originTitle", "lineId", "text", "policy", "createdAt", "updatedAt"]), status: "archived", history: {
+        messages: Array.isArray(h?.messages) ? h.messages.slice(0, 500).filter((m: any) => ["user", "assistant"].includes(m?.role)).map((m: any) => {
+          const clean = fields(m, ["id", "role", "content", "at", "createdAt"]);
+          const createdAt = clean.createdAt ?? clean.at;
+          delete clean.at;
+          return createdAt !== undefined ? { ...clean, createdAt } : clean;
+        }) : [],
         steps: Array.isArray(h?.steps) ? h.steps.slice(0, 1000).map((s: any) => ({ ...fields(s, ["id", "tool", "action", "object", "status", "outcome", "summary", "resultText"]), ...(Number.isSafeInteger(s.seq) ? { seq: s.seq } : {}) })) : [],
         plan: Array.isArray(h?.plan) ? h.plan.slice(0, 1000).map((s: any) => fields(s, ["id", "title", "status"])) : [],
         sources: Array.isArray(h?.sources) ? h.sources.slice(0, 100).map(cleanSource) : [],

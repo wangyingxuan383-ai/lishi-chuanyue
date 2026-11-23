@@ -314,3 +314,89 @@ async fn opening_name_is_metadata_and_manual_name_wins() {
     let raw:String=db.query_row("SELECT record_json FROM nodes WHERE world_id='new-world' LIMIT 1",[],|r|r.get(0)).unwrap();assert!(!raw.contains("storyTitle"));
  }
 }
+
+#[tokio::test]
+async fn carried_notes_queued_director_note_clock_taboos_upkeep_and_final_choices_work_end_to_end() {
+    let f = Fixture::new(false);
+    {
+        let db = f.engine.store.lock().unwrap();
+        db.execute(
+            "INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,progress_json,origin_world_id,origin_title,active,status,created_at,updated_at)
+             VALUES ('carried-1','w','plot','前世因果','{\"toNode\":\"old-node-9\"}','前世留下的玄铁剑线索','{\"routeNode\":\"old-node-9\"}','old-w','前尘录',1,'done','now','now')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO settings(key, value) VALUES ('autoplayNote:auto', '\"让旧友突然来访\"')",
+            [],
+        )
+        .unwrap();
+    }
+    let mut plan = f.plan(2);
+    plan.meta["autoplayPilot"] = "temporary-ai".into();
+    plan.meta["autoplayPauseMs"] = 10.into();
+    plan.meta["upkeepEvery"] = 2.into();
+    plan.meta["autoplayUpkeepSystem"] = "你是资料员".into();
+    plan.settings = json!({"pilot":"player","choiceCount":3,"difficulty":"标准","mode":"history","autoUpkeep":true,"fortune":"on","premise":"盛唐长安"});
+    plan.state["era"] = json!({"mode":"history","clockStyle":"era","timeStyle":"24h","packId":null,"calendar":{"lunar":true,"yearWord":"载"}});
+    plan.state["time"]["anchor"] = json!({"atElapsedMinutes":0,"minuteOfDay":1200,"date":{"era":"天宝","year":7,"month":12,"day":30,"ceYear":748,"lunar":true}});
+    plan.state["cards"] = json!([
+        {"id":"c-era","kind":"时代","name":"盛唐","content":"不要出现：银两（铜钱）；玉米","source":"卡组"},
+        {"id":"c-player","kind":"物品","name":"古玉","content":"家传古玉","source":"玩家"}
+    ]);
+    {
+        let db = f.engine.store.lock().unwrap();
+        db.execute("UPDATE worlds SET settings_json=? WHERE id='w'", [plan.settings.to_string()]).unwrap();
+        db.execute("UPDATE nodes SET narrative='掌柜递来二两银两。' WHERE id='h'", []).unwrap();
+        db.execute("UPDATE states SET state_json=? WHERE node_id='h'", [plan.state.to_string()]).unwrap();
+    }
+    f.engine.start(plan).unwrap();
+    // Wait until step 2 child run is registered (after step 2's take_pending_director_note), then queue a note during the final step!
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if f.scalar("SELECT COUNT(*) FROM execution_runs WHERE id='auto:step:2'") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.engine
+        .store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO settings(key, value) VALUES ('autoplayNote:auto', '\"留给连播结束后的提示\"') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [],
+        )
+        .unwrap();
+    let saved = f.settled().await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let requests = f.model.requests.lock().unwrap().clone();
+    let turn_reqs: Vec<String> = requests
+        .iter()
+        .map(|r| r.to_string())
+        .filter(|s| !s.contains("提取本回合记录") && !s.contains("你是资料员"))
+        .collect();
+    assert_eq!(turn_reqs.len(), 2, "expected 2 turn requests, got {}", turn_reqs.len());
+    let req1 = &turn_reqs[0];
+    let req2 = &turn_reqs[1];
+    // B16: carried sequel note survives into step 2+
+    assert!(req1.contains("前世留下的玄铁剑线索"), "{req1}");
+    assert!(req2.contains("前世留下的玄铁剑线索"), "carried note must survive step 2: {req2}");
+    // B17: queued director note keeps 【继续】 header and <record> reminder; unconsumed final-step note is preserved when queued before finish_autoplay
+    assert!(req1.contains("【继续】") && req1.contains("让旧友突然来访") && req1.contains("<record>"), "{req1}");
+    if let Some(unused) = saved.result.as_ref().unwrap().get("unusedDirectorNote").and_then(Value::as_str) {
+        assert_eq!(unused, "留给连播结束后的提示");
+    }
+    // B20: calibrated anchor (腊月三十 · 20:00), taboo reminder, and fortune note
+    assert!(req1.contains("天宝七载 腊月三十 · 20:00"), "{req1}");
+    assert!(req1.contains("【用词提醒】") && req1.contains("银两"), "{req1}");
+    assert!(req1.contains("【本回合运势"), "{req1}");
+    // B15: final step of temporary-ai requests protagonist action choices, and upkeep uses structured roster
+    assert!(req2.contains("建议行动"), "final step of temporary-ai must request player action choices: {req2}");
+    let step2_plan = f.engine.store.plan("auto:step:2").unwrap();
+    let upkeep_str = step2_plan.meta["upkeepMessages"].to_string();
+    assert!(upkeep_str.contains("【设定集里已有的卡片】") && upkeep_str.contains("玩家写的，不要改"), "{upkeep_str}");
+}

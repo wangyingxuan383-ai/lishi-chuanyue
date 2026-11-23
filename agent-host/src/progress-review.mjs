@@ -2,6 +2,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { auxModelSpec } from "./context-budget.mjs";
 export const PROGRESS_REVIEW_VERSION="1.0.0";
 export function parseReview(text) {
   const raw=String(text??"").trim().replace(/^```(?:json)?\s*/u,"").replace(/\s*```$/u,"");
@@ -19,8 +20,8 @@ export class ProgressReview {
     try {
       await Promise.all([...root.accountingWrites]);
       const rootModel=root.options.model;
-      const useAux=typeof rootModel.auxModel==="string"&&rootModel.auxModel.trim()&&rootModel.auxModel!==rootModel.id&&!(rootModel.endpointRef&&rootModel.protocol==="gemini");
-      host=await this.createHost({directory,model:{...rootModel,...(useAux?{id:rootModel.auxModel}:{}),auxModel:undefined,thinkingMode:"off",inputTokens:12000,maxOutputTokens:1024},
+      const baseReviewModel=auxModelSpec(rootModel)??{...rootModel,id:typeof rootModel.id==="string"?rootModel.id.trim():rootModel.id,auxModel:undefined,thinkingMode:"off"};
+      host=await this.createHost({directory,model:{...baseReviewModel,inputTokens:Math.min(baseReviewModel.inputTokens??12000,12000),maxOutputTokens:Math.min(baseReviewModel.maxOutputTokens??1024,1024)},
         reviewSession:true,nativeModelHttp:root.options.nativeModelHttp===true,tools:[],activeTools:[],taskContext:false,
         systemPrompt:`进展复核 ${PROGRESS_REVIEW_VERSION}。你只判断当前任务方法是否有效，没有读写工具。不要判断原著正确性或扩大玩家授权。正常批处理、资料变化和压缩后必要回读允许继续。依据实际读取覆盖、有效草稿和校验变化，决定continue继续、replan换方法、pause保存暂停或ask_user缺必要信息。只返回JSON：{"decision":"...","reason":"具体记录、原因及下一步建议；replan给出可实行的新方法，ask_user写清必要问题"}。`,
         invokeTool:async()=>{throw Error("复核会话没有工具权限");},

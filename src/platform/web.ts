@@ -91,6 +91,7 @@ export async function createWebPlatform(): Promise<Platform> {
     name: "web-dev",
     execution: {
       agent: (request) => bridge("host/pi_agent", { request }),
+      companion: (request) => bridge("host/companion", { request }),
       settle: (state, record, options) => bridge("host/settle", { state, record, options }),
       context: (input) => bridge("host/context", { input }),
       start: (plan) => bridge<string>("host/start", { plan }),

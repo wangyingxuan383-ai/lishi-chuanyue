@@ -1,7 +1,7 @@
 // The game's "now" (D119): the opening date plus elapsed minutes, shown as
 // "天宝七载 冬月十九 · 酉时". Worlds whose opening gave no usable date count
 // days instead ("第 3 日 · 酉时").
-import { coerceDate, formatDate, ganzhi, monthDays, newYearsAfterDays, seasonDetail, shiftDate, type CalendarRules, type GameDate } from "./date";
+import { coerceDate, formatDate, ganzhi, maxValidDay, newYearsAfterDays, seasonDetail, shiftDate, type CalendarRules, type GameDate } from "./date";
 
 const SHICHEN = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"];
 
@@ -42,7 +42,7 @@ export function readClockAnchor(raw: unknown, rules: CalendarRules): ClockAnchor
   const source = v.date as Record<string, unknown> | null;
   if (date && source?.ceYear === null && date.era !== "公元" && date.era !== "公元前") date.ceYear = null;
   if (!date || !source || typeof source.year !== "number" || typeof source.month !== "number" || typeof source.day !== "number"
-    || source.day !== date.day || date.day > monthDays(date)
+    || source.day !== date.day || date.day > maxValidDay(date)
     || source.ceYear != null && source.ceYear !== date.ceYear
     || source.lunar != null && typeof source.lunar !== "boolean") return null;
   return { atElapsedMinutes: v.atElapsedMinutes, minuteOfDay: v.minuteOfDay, date };

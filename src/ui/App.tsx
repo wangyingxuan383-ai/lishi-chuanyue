@@ -16,6 +16,7 @@ import Setup, { sweepDraftKey } from "./screens/Setup";
 import NewGame from "./screens/NewGame";
 import Play from "./screens/Play";
 import AgentConversation from "./screens/AgentConversation";
+import CompanionScreen from "./screens/CompanionScreen";
 import Settings from "./screens/Settings";
 import Guide from "./screens/Guide";
 import { applyFallback, llmFor } from "./app/llmConfig";
@@ -180,7 +181,15 @@ export default function App() {
     const take = async (event?: Event) => {
       if (event?.type === "visibilitychange" && document.visibilityState !== "visible") return;
       const target = await platform.system.takeLaunchTarget?.().catch(() => null);
-      if (!target?.worldId || !(await game.repo.getWorld(target.worldId))) return;
+      if (!target?.worldId) return;
+      if (!(await game.repo.getWorld(target.worldId))) {
+        // An interrupted or failed opening has not created its `worlds` row yet; open NewGame so the player can resume it (B04).
+        const pendingOpening = await game.unfinishedOpening(target.runId ?? undefined).catch(() => null);
+        if (pendingOpening && pendingOpening.worldId === target.worldId) {
+          setStack([{ name: "home" }, { name: "newgame", resumeRunId: pendingOpening.id }]);
+        }
+        return;
+      }
       const resumeRunId = target.action === "resume" ? target.runId ?? undefined : undefined;
       const next: Route = { name: "play", worldId: target.worldId, resumeRunId };
       const top = topRoute.current;
@@ -284,16 +293,24 @@ export default function App() {
   }
   const route = value.route;
   // Keep the player's ordinary draft, loaded passages and viewport alive
-  // while the separate assistant page is open.
-  const assistantRoute = [...stack].reverse().find((item) => item.name === "agent");
-  const storyId = route.name === "play" ? route.worldId : assistantRoute?.name === "agent" ? assistantRoute.worldId : null;
+  // while the separate assistant or companion page is open.
+  const assistantRoute = [...stack].reverse().find(
+    (item) => item.name === "agent" || (item.name === "companion" && !!item.worldId),
+  );
+  const storyId =
+    route.name === "play"
+      ? route.worldId
+      : assistantRoute && "worldId" in assistantRoute
+        ? (assistantRoute.worldId ?? null)
+        : null;
   return (
     <AppProvider value={value}>
       {route.name === "home" && <Home key={homeKey} />}
       {route.name === "setup" && <Setup first={route.first} profileId={route.profileId} />}
-      {route.name === "newgame" && <NewGame />}
+      {route.name === "newgame" && <NewGame resumeRunId={route.resumeRunId} />}
       {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} resumeRunId={route.name === "play" ? route.resumeRunId : undefined} /></div>}
       {route.name === "agent" && <AgentConversation key={`${route.worldId}:${route.lineId}`} route={route} />}
+      {route.name === "companion" && <CompanionScreen {...route} />}
       {route.name === "settings" && <Settings />}
       {route.name === "guide" && <Guide />}
       {toastState && (

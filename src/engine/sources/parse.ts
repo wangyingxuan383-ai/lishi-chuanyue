@@ -14,13 +14,31 @@ export function decodeText(bytes: Uint8Array, encoding: TextEncoding = "auto"): 
   }
   return clean(new TextDecoder(chosen, { fatal: true }).decode(bytes).replace(/^\uFEFF/, ""));
 }
-const VOLUME_HEADING_RE = /^(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇](?!.*第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折])[^\n]{0,65}|part\s+[\divxlc]+[^\n]{0,65})$/i;
+const SHORT_VOL_RE = String.raw`(?:[上中下前后全]\s*[卷部篇集]|[卷部篇集]\s*[零〇一二三四五六七八九十百千万两上中下\d]+)`;
+const VOLUME_HEADING_RE = new RegExp(
+  String.raw`^(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇集](?!.*第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折])[^\n]{0,65}|${SHORT_VOL_RE}(?!.*第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折])(?:\s*$|[\s：:·—\-]+[^\n。！？；，”]{1,40})|part\s+[\divxlc]+[^\n]{0,65})$`,
+  "i",
+);
 const CHAPTER_HEADING_RE = /^(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折][^\n]{0,65}|chapter\s+[\divxlc]+[^\n]{0,65})$/i;
-const SECTION_LINE_RE = /^\s*(?![^\n]*。$)(?:第[零〇一二三四五六七八九十百千万两\d]+[卷章节回部篇话幕折][^\n]{0,65}|(?:序章|序言|楔子|尾声|后记|前言|引子)|(?:chapter|part)\s+[\divxlc]+[^\n]{0,65})\s*$/i;
-const HAS_VOLUME_MARKER_RE = /(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇]|\bpart\s+[\divxlc]+\b)/i;
+const SECTION_LINE_RE = new RegExp(
+  String.raw`^\s*(?![^\n]*。$)(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷章节回集部篇话幕折][^\n]{0,65}|${SHORT_VOL_RE}(?:\s*$|[\s：:·—\-]+[^\n。！？；，”]{1,40})|(?:序章|序言|楔子|尾声|后记|前言|引子)(?:\s*$|[\s：:·—\-]+[^\n。！？；，”]{1,40})|(?:chapter|part)\s+[\divxlc]+[^\n]{0,65})\s*$`,
+  "i",
+);
+const HAS_VOLUME_MARKER_RE = new RegExp(
+  String.raw`(?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇集]|(?:^|[\s·—\-])${SHORT_VOL_RE}(?=$|[\s：:·—\-])|\bpart\s+[\divxlc]+\b)`,
+  "i",
+);
+const INLINE_VOLUME_RE = new RegExp(
+  String.raw`^((?:第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[卷部篇集]|${SHORT_VOL_RE})(?:\s+[^\s第]{1,30})?)\s+(?=第\s*[零〇一二三四五六七八九十百千万两\d]+\s*[章节回话幕折]|\bchapter\s+)`,
+  "i",
+);
 
 function isVolumeHeading(line: string): boolean {
   return VOLUME_HEADING_RE.test(line.trim());
+}
+
+function extractInlineVolume(line: string): string | null {
+  return INLINE_VOLUME_RE.exec(line.trim())?.[1]?.trim() ?? null;
 }
 
 function withVolume(volume: string, heading: string): string {
@@ -43,11 +61,23 @@ export async function textSections(text: string, signal?: AbortSignal): Promise<
       flush();
       const trimmed = line.trim();
       if (isVolumeHeading(trimmed)) { volume = trimmed; title = trimmed; }
-      else title = withVolume(volume, trimmed);
+      else {
+        const inlineVol = extractInlineVolume(trimmed);
+        if (inlineVol) volume = inlineVol;
+        title = withVolume(volume, trimmed);
+      }
     } else lines.push(line);
   }
   flush();
   return sections;
+}
+
+function hasPdfMagic(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.length, 8192);
+  for (let i = 0; i + 5 <= limit; i++) {
+    if (bytes[i] === 0x25 && bytes[i + 1] === 0x50 && bytes[i + 2] === 0x44 && bytes[i + 3] === 0x46 && bytes[i + 4] === 0x2d) return true;
+  }
+  return false;
 }
 
 async function readBook(file: { name: string; bytes: Uint8Array }, platform: Platform, options: { encoding?: TextEncoding; signal?: AbortSignal; progress?: (text: string) => void } = {}): Promise<SourceBook> {
@@ -58,14 +88,34 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
   let format: BookFormat = "txt", title = name.replace(/\.[^.]+$/, "") || "参考书籍", sections: BookSection[] = [];
   progress("正在读取正文…"); await tick();
   checkCancelled(signal);
-  if (new TextDecoder().decode(bytes.subarray(0, 5)) === "%PDF-") {
+  if (hasPdfMagic(bytes)) {
     format = "pdf";
     const { pages, headings } = await platform.files.extractPdf(bytes, signal);
-    const ordered = [...headings].sort((a, b) => a.page - b.page)
-      .filter((heading, index, all) => !index || all[index - 1].page !== heading.page);
+    const byPage = new Map<number, string[]>();
+    for (const h of [...headings].sort((a, b) => a.page - b.page)) {
+      const t = h.title.trim();
+      if (!t) continue;
+      const list = byPage.get(h.page) ?? [];
+      if (!list.includes(t)) list.push(t);
+      byPage.set(h.page, list);
+    }
+    const ordered: { page: number; title: string }[] = [];
+    let pdfVolume = "";
+    for (const [page, titles] of [...byPage.entries()].sort((a, b) => a[0] - b[0])) {
+      const nonVol: string[] = [];
+      for (const t of titles) {
+        if (isVolumeHeading(t)) pdfVolume = t;
+        else {
+          const inlineVol = extractInlineVolume(t);
+          if (inlineVol) pdfVolume = inlineVol;
+          nonVol.push(withVolume(pdfVolume, t));
+        }
+      }
+      ordered.push({ page, title: nonVol.length ? nonVol.join(" · ") : pdfVolume || titles[0] });
+    }
     let next = 0;
     for (const [i, text] of pages.entries()) {
-      if (i % 40 === 0) { await tick(); checkCancelled(signal); }
+      if (i % 256 === 0) { await tick(); checkCancelled(signal); }
       const page = i + 1;
       while (next < ordered.length && ordered[next].page <= page) next++;
       const heading = ordered[next - 1];
@@ -160,13 +210,83 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         return path.join("/");
       };
       const toc = new Map<string, string>();
+      const tocAnchors = new Map<string, { anchor: string; label: string }[]>();
+      const recordToc = (href: string, fromDir: string, label: string, parentVolume: string) => {
+        const cleanLabel = label.trim();
+        if (!cleanLabel) return;
+        const path = resolvePath(href, fromDir);
+        const fullLabel = withVolume(parentVolume, cleanLabel);
+        const prev = toc.get(path);
+        if (!prev || (isVolumeHeading(prev) && !isVolumeHeading(cleanLabel))) {
+          toc.set(path, fullLabel);
+        }
+        const hashIdx = href.indexOf("#");
+        if (hashIdx >= 0 && !isVolumeHeading(cleanLabel)) {
+          const anchor = decodeURIComponent(href.slice(hashIdx + 1)).trim();
+          if (anchor) {
+            const list = tocAnchors.get(path) ?? [];
+            if (!list.some((x) => x.anchor === anchor)) list.push({ anchor, label: fullLabel });
+            tocAnchors.set(path, list);
+          }
+        }
+      };
       const nav = [...manifest.values()].find((item) => String(item["@_properties"] ?? "").split(/\s+/).includes("nav"));
       if (nav) {
         const navPath = resolvePath(nav["@_href"]), value = xml(navPath);
-        for (const match of value.matchAll(/<(?:\w+:)?a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/(?:\w+:)?a>/gi)) {
-          const path = resolvePath(match[1], navPath);
-          if (!toc.has(path)) toc.set(path, textOf(`<root>${match[2]}</root>`));
-        }
+        const navOrdered = new XMLParser({ preserveOrder: true, ignoreAttributes: false, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false }).parse(value) as any[];
+        const inlineText = (nodes: any[]): string => clean(nodes.map((row) => Object.entries(row).map(([k, v]) => {
+          if (k === ":@" || k === "ol" || k === "ul" || k === "script" || k === "style") return "";
+          if (k === "#text") return String(v);
+          return Array.isArray(v) ? inlineText(v) : "";
+        }).join("")).join(""));
+        const walkNav = (nodes: any[], parentVolume = "") => {
+          for (const node of nodes) {
+            for (const [tag, children] of Object.entries(node)) {
+              if (tag === ":@" || !Array.isArray(children)) continue;
+              if (tag === "li") {
+                let href: string | null = null;
+                let label = "";
+                const findDirectLinkOrLabel = (items: any[]) => {
+                  for (const child of items) {
+                    if ("a" in child && Array.isArray(child.a)) {
+                      const attrs = child[":@"] ?? {};
+                      href = typeof attrs["@_href"] === "string" ? attrs["@_href"] : null;
+                      label = inlineText(child.a);
+                      return;
+                    }
+                  }
+                  label = inlineText(items);
+                };
+                findDirectLinkOrLabel(children);
+                const inlineVol = label ? extractInlineVolume(label) : null;
+                const nextVolume = label && isVolumeHeading(label) ? label : inlineVol ?? parentVolume;
+                if (href && label) recordToc(href, navPath, label, parentVolume);
+                walkNav(children, nextVolume);
+              } else {
+                walkNav(children, parentVolume);
+              }
+            }
+          }
+        };
+        const collectNavRoots = (nodes: any[]): any[][] => {
+          const tocNavs: any[][] = [], allNavs: any[][] = [];
+          const scan = (items: any[]) => {
+            for (const row of items) {
+              for (const [k, v] of Object.entries(row)) {
+                if (k === ":@" || !Array.isArray(v)) continue;
+                if (k === "nav") {
+                  const attrs = row[":@"] ?? {};
+                  const epubType = String(attrs["@_type"] ?? ""), role = String(attrs["@_role"] ?? "");
+                  allNavs.push(v);
+                  if (/\btoc\b/i.test(epubType) || /\bdoc-toc\b/i.test(role)) tocNavs.push(v);
+                } else scan(v);
+              }
+            }
+          };
+          scan(nodes);
+          return tocNavs.length ? tocNavs : allNavs.length ? [allNavs[0]] : [nodes];
+        };
+        for (const root of collectNavRoots(navOrdered)) walkNav(root);
       } else {
         const ncx = manifest.get(pkg?.spine?.["@_toc"]) ?? [...manifest.values()].find((item) => item["@_media-type"] === "application/x-dtbncx+xml");
         if (ncx) {
@@ -175,20 +295,16 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
             for (const point of list<any>(points)) {
               const href = point.content?.["@_src"], rawLabel = point.navLabel?.text;
               const label = typeof rawLabel === "string" ? rawLabel.trim() : "";
-              const nextVolume = label && isVolumeHeading(label) ? label : parentVolume;
-              if (typeof href === "string" && label) {
-                const path = resolvePath(href, ncxPath);
-                const prev = toc.get(path);
-                if (!prev || (isVolumeHeading(prev) && !isVolumeHeading(label))) {
-                  toc.set(path, withVolume(parentVolume, label));
-                }
-              }
+              const inlineVol = label ? extractInlineVolume(label) : null;
+              const nextVolume = label && isVolumeHeading(label) ? label : inlineVol ?? parentVolume;
+              if (typeof href === "string" && label) recordToc(href, ncxPath, label, parentVolume);
               walk(point.navPoint, nextVolume);
             }
           };
           walk(parser.parse(xml(ncxPath)).ncx?.navMap?.navPoint);
         }
       }
+      const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const spine = list<any>(pkg?.spine?.itemref);
       let epubVolume = "";
       for (const itemref of spine) {
@@ -196,13 +312,34 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         const item = manifest.get(itemref["@_idref"]);
         if (!item || itemref["@_linear"] === "no") continue;
         const path = resolvePath(item["@_href"]);
-        const value = xml(path), text = textOf(value);
+        const value = xml(path);
+        const anchors = tocAnchors.get(path);
+        if (anchors && anchors.length >= 2) {
+          const located = anchors
+            .map((a) => ({ ...a, index: new RegExp(`<[^>]+\\b(?:id|name)=["']${escapeRegExp(a.anchor)}["'][^>]*>`, "i").exec(value)?.index ?? -1 }))
+            .filter((a) => a.index >= 0)
+            .sort((a, b) => a.index - b.index);
+          if (located.length >= 2) {
+            const bodyEnd = /<\/body>/i.exec(value)?.index ?? value.length;
+            for (let idx = 0; idx < located.length; idx++) {
+              const slice = value.slice(located[idx].index, idx + 1 < located.length ? located[idx + 1].index : bodyEnd);
+              const partText = clean(slice.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, "").replace(/<(?:br|cr)\b[^>]*>/gi, "\n").replace(/<\/(?:p|div|h[1-6]|li|tr|section)>/gi, "\n\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&apos;/gi, "'").replace(/&amp;/gi, "&"));
+              if (partText) sections.push({ title: withVolume(epubVolume, located[idx].label), text: partText });
+            }
+            progress(`正在读取章节…${sections.length}`);
+            continue;
+          }
+        }
+        const text = textOf(value);
         const heading = /<h[1-6](?:\s[^>]*)?>([\s\S]*?)<\/h[1-6]>/i.exec(value)?.[1];
         const rawTitle = (toc.get(path) || (heading ? textOf(`<root>${heading}</root>`) : "")).trim();
         if (rawTitle && isVolumeHeading(rawTitle)) {
           epubVolume = rawTitle;
           // Skip bare volume cover pages whose text only repeats the volume heading.
           if (!text || text === rawTitle) continue;
+        } else if (rawTitle) {
+          const inlineVol = extractInlineVolume(rawTitle);
+          if (inlineVol) epubVolume = inlineVol;
         }
         if (text) {
           const secTitle = rawTitle ? withVolume(epubVolume, rawTitle) : `第 ${sections.length + 1} 节`;

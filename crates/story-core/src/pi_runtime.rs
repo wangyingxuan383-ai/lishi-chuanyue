@@ -19,7 +19,7 @@ use std::{
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-pub const PI_PROMPT_VERSION: &str = "1.8.0";
+pub const PI_PROMPT_VERSION: &str = "1.9.0";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// Secret-bearing model configuration is passed only to Pi's memory transport.
@@ -275,15 +275,20 @@ impl PiTaskHost {
             if !active_tools.iter().any(|n|n==name) {active_tools.push(name.into());}
         }
         let extra_tools:Vec<&str>=definitions.iter().filter_map(|t|t["name"].as_str()).filter(|name|!active_tools.iter().any(|a|a==name)).collect();
+        let policy_hint = match text(&task, "policy") {
+            "preview" => "preview（先看预览：暂存完修改后仍必须调用 finish_task 生成正式预览面板与采用按钮，不会直接写入存档）",
+            "auto" => "auto（自动采用、不留本次恢复点）",
+            _ => "auto-reversible（自动采用并保留恢复点）",
+        };
         let mut params = json!({"directory":config.directory,"model":config.model,
             "systemPrompt":format!(
                 "原生故事助手协议 {PI_PROMPT_VERSION}。玩家目标在用户消息中；按需读取最新存档，不凭印象代替。讨论、工具日志和说明不进剧情；助手历史不代替本次授权、存档或原著证据。\n\
-                工作流：核心工具已常驻，优先用 stage_edits 批量暂存多处修改（或 stage_edit 单条）；普通修改暂存后直接 finish_task 按策略采用，模型停止输出不等于完成。需更多能力时用 discover_tools 按名称加载（只传所需工具名）。\n\
+                工作流：核心工具已常驻，优先用 stage_edits 批量暂存多处修改（或 stage_edit 单条）；无论采用策略是自动采用还是 preview（先看预览），修改暂存完毕后都必须调用 finish_task 收尾（preview 策略下调用 finish_task 不会改写存档，而是生成正式预览与「采用这批修改」按钮），切勿只发文字就结束输出。需更多能力时用 discover_tools 按名称加载（只传所需工具名）。\n\
                 技能与事实：玩家指定技能须先 read_skill 再执行；读技能不等于完成查证，普通写作整理无需额外报告。原著规则、玩家事实、本局修订与正式采用分开核对；constraints.factContract=2 时原著改动分别记录 sourceClaim 与 revisionDecision，涉及本局已发生事件须补本局依据。网页/文件 basis=external，不可冒充导入原著；玩家分支引用 constraints.playerReferences 原句（request 附 declaration 对象/值/本局范围），自定项引用允许补全的原句和范围。\n\
-                原著核对与分批：明确核对原著时先 check_draft 获取 constraints、resourceGroups 与 evidenceSummary.items（足够直接引用；仅缺原文细节时再 read_evidence），用 record_findings 记录目标/依据或不足后 finish_task。通过核对的独立资源组可分批采用，关联资源不可拆半；未核对草稿保留待续。blocked 仅保存不采用。采用后本批写权限关闭，直接根据 finish_task 回执（或按需 read_commit_receipt/read_committed_snapshot）收尾答复，不重复编辑提交。\n\
+                原著核对与分批：明确核对原著时先 check_draft 获取 constraints、resourceGroups 与 evidenceSummary.items（足够直接引用；仅缺原文细节时再 read_evidence），用 record_findings 记录目标/依据或不足后 finish_task。通过核对的独立资源组可分批采用，关联资源不可拆半；未核对草稿保留待续。blocked 仅保存不采用。收尾后本批写权限关闭，直接根据 finish_task 回执（或按需 read_commit_receipt/read_committed_snapshot）收尾答复，不重复编辑提交。\n\
                 分页与时间：分页统一用 pageSize/charBudget/nextCursor；read_timeline 批量读路线时间。日期调整默认只校准纪年/日期不重写历史，明确区分原文明示、推定与资料不足。最终答复先短段总结结果、主要改动与未解决项，不露内部 ID/指纹/参数。系统运行提示只建议方法不扩大授权，未接通能力不宣称已执行。\n\
-                资源定位：worldId={}，lineId={}，headId={}。\n本次指定技能：{}\n按需可用工具（discover_tools）：{}\n{}",
-                state.world_id,state.line_id,state.head_id,task["metadata_json"]["skills"],extra_tools.join("、"),config.constraints
+                资源定位：worldId={}，lineId={}，headId={}。\n本次采用策略：{}\n本次指定技能：{}\n按需可用工具（discover_tools）：{}\n{}",
+                state.world_id,state.line_id,state.head_id,policy_hint,task["metadata_json"]["skills"],extra_tools.join("、"),config.constraints
             ),
             "tools":definitions,"activeTools":active_tools,"nativeAttempt":state.permit.attempt_id(),"taskContext":true,"nativeModelHttp":state.model_http_host.is_some()});
         if let Some(file) = session["session_file"].as_str() {
@@ -564,9 +569,17 @@ impl PiTaskHost {
         .await
         .map_err(|_| invalid("停止尚未确认，停止标记已保存"))?
         .map_err(host_error)?;
-        self.0
-            .gateway
-            .interrupt(&self.0.permit, "玩家已停止，进度与草稿已保存")?;
+        let fresh = self.0.gateway.0.task(&self.0.permit.task_id)?;
+        let meta = fresh["metadata_json"]
+            .as_str()
+            .map(crate::agent_workspace::parse)
+            .unwrap_or_else(|| fresh["metadata_json"].clone());
+        let reason = if meta["stopReceipt"]["source"] == "system_timeout" {
+            "系统后台运行时间受限已暂停，可点继续接着处理"
+        } else {
+            "玩家已停止，进度与草稿已保存"
+        };
+        self.0.gateway.interrupt(&self.0.permit, reason)?;
         Ok(json!({"abortConfirmed":true,"taskReceipt":self.receipt()?}))
     }
 
@@ -703,8 +716,10 @@ async fn run_prompt(state: &Arc<State>, value: &str, resume: bool) -> Result<Val
         }
     };
     let task = state.gateway.0.task(&state.permit.task_id)?;
+    let answer_text = answer["text"].as_str().unwrap_or("");
     let finished_by_reply = active(text(&task, "status"))
-        && state.gateway.finish_readonly_reply(&state.permit, answer["text"].as_str().unwrap_or(""))?;
+        && (state.gateway.finish_readonly_reply(&state.permit, answer_text)?
+            || state.gateway.finish_preview_reply(&state.permit, answer_text)?);
     if !finished_by_reply && active(text(&state.gateway.0.task(&state.permit.task_id)?, "status")) {
         state.gateway.interrupt(
             &state.permit,

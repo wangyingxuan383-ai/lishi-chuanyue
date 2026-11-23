@@ -197,7 +197,12 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
                 .iter()
                 .find(|c| c.get("id") == found.get("id"))
         });
-        let content = text(&item["content"], room(&name));
+        let max_len = if card.is_some_and(|c| is_ability(text(&c["name"], 20).as_str())) {
+            room(&ability_name)
+        } else {
+            room(&name)
+        };
+        let content = text(&item["content"], max_len);
         if content.is_empty() {
             continue;
         }
@@ -290,12 +295,17 @@ pub fn upkeep_patch(raw: &str, state: &Value) -> Option<Value> {
             })
         };
         let touched = |id: &Value, list: &[Value]| list.iter().any(|x| x.get("id") == Some(id) && x["op"] == "remove");
-        if let (Some(k), Some(d)) = (card(&keep), card(&drop)) {
+        if let (Some(mut k), Some(mut d)) = (card(&keep), card(&drop)) {
             if k["id"] != d["id"] && k["source"] == "AI" && d["source"] == "AI" && k["kind"] == d["kind"] && !touched(&k["id"], &cards) && !touched(&d["id"], &cards) {
+                // If the dropped card was the protagonist's canonical ability card, keep its canonical name.
+                if !is_ability(text(&k["name"], 20).as_str()) && is_ability(text(&d["name"], 20).as_str()) {
+                    std::mem::swap(&mut k, &mut d);
+                }
                 let mut keys = values(&k["keys"]).to_vec();
                 keys.push(d["name"].clone());
                 keys.extend(values(&d["keys"]).iter().cloned());
-                let content = text(&item["content"], 200);
+                let max_len = room(text(&k["name"], 20).as_str());
+                let content = text(&item["content"], max_len);
                 let content = if content.is_empty() { k["content"].clone() } else { json!(content) };
                 cards.push(json!({"op":"update", "id":k["id"], "name":k["name"], "keys":keys, "content":content, "source":"AI"}));
                 cards.push(json!({"op":"remove", "id":d["id"], "name":d["name"], "by":"AI"}));
@@ -456,17 +466,25 @@ mod tests {
     #[test]
     fn upkeep_keeps_a_long_ability_card_and_drops_only_its_own_one_offs() {
         let state = json!({"protagonist":{"name":"林舟","statuses":[]},"people":[],"places":[],"cards":[
-            {"id":"ab","name":"林舟的本事","kind":"设定","keys":[],"content":"一环","source":"AI"},
+            {"id":"ab","name":"林舟的本事","kind":"设定","keys":["剑术修为"],"content":"一环","source":"AI"},
+            {"id":"ab_dup","name":"主角招式","kind":"设定","keys":[],"content":"二环","source":"AI"},
             {"id":"scene","name":"雨夜茶摊","kind":"设定","keys":[],"content":"一次性","source":"AI"},
             {"id":"own","name":"玩家的规矩","kind":"设定","keys":[],"content":"玩家写","source":"玩家"}]});
         let long = "剑法：".to_owned() + &"第三式已成；".repeat(60);
-        let raw = json!({"updates":[{"name":"林舟的本事","content":long}],"drop":["雨夜茶摊","玩家的规矩","林舟的本事","不存在"]}).to_string();
+        // Update by alias ("剑术修为") AND merge into ability card must both preserve >200 chars (B09).
+        let raw = json!({"updates":[{"name":"剑术修为","content":long}],"drop":["雨夜茶摊","玩家的规矩","林舟的本事","不存在"]}).to_string();
         let patch = upkeep_patch(&raw, &state).unwrap();
         let cards = patch["cards"].as_array().unwrap();
         assert_eq!(cards[0]["id"], "ab");
         assert!(cards[0]["content"].as_str().unwrap().encode_utf16().count() > 200);
         assert_eq!(cards[1], json!({"op":"remove","id":"scene","name":"雨夜茶摊","by":"AI"}));
         assert_eq!(cards.len(), 2);
+
+        let merge_raw = json!({"merges":[{"keep":"主角招式","drop":"林舟的本事","content":long}]}).to_string();
+        let merge_patch = upkeep_patch(&merge_raw, &state).unwrap();
+        let mcards = merge_patch["cards"].as_array().unwrap();
+        assert_eq!(mcards[0]["name"], "林舟的本事");
+        assert!(mcards[0]["content"].as_str().unwrap().encode_utf16().count() > 200);
     }
 
     #[test]

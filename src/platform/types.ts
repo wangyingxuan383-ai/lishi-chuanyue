@@ -153,6 +153,8 @@ export interface Platform {
   execution?: {
     /** Dedicated Pi RPC, including Agent snapshot/stop; ordinary runs use the methods below. */
     agent(request: Json): Promise<Json>;
+    /** Dedicated Companion ("伴聊") RPC for chat, research RAG & web search, personas, memories, and Agent bridge. */
+    companion?(request: Json): Promise<Json>;
     settle(state: Json, record: Json, options: Json): Promise<Json>;
     context?(input: Json): Promise<Json>;
     start(plan: Json): Promise<string>;

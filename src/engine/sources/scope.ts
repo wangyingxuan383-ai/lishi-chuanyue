@@ -27,10 +27,16 @@ export function scopeLabel(scope: SourceScope | null | undefined): string {
 }
 /** “第 3 节 · 渡口”, or the title alone when it already names its chapter (“第三章 渡口”). */
 export const chapterLabel = (section: number, title?: string) => {
-  const t = (title ?? "").trim().slice(0, 24);
+  const raw = (title ?? "").trim();
+  const pageTail = /\s*·\s*(第\s*\d+\s*页)$/.exec(raw);
+  const t = raw.length <= 28
+    ? raw
+    : pageTail
+      ? `${raw.slice(0, Math.max(8, 22 - pageTail[1].length)).trim()}… · ${pageTail[1]}`
+      : raw.slice(0, 24);
   return !t
     ? `第 ${section + 1} 节`
-    : /^(?:第\s*[0-9零〇一二两三四五六七八九十百千万]+\s*[章回节卷集部篇话幕折]|(?:序章|序言|楔子|尾声|后记|前言|引子)|chapter\s+\d+)/i.test(t)
+    : /^(?:第\s*[0-9零〇一二两三四五六七八九十百千万]+\s*[章回节卷集部篇话幕折页]|(?:序章|序言|楔子|尾声|后记|前言|引子)|chapter\s+\d+)/i.test(t) || /\b第\s*\d+\s*页$/.test(t) || /·\s*第\s*\d+\s*页$/.test(t)
       ? t
       : `第 ${section + 1} 节 · ${t}`;
 };
@@ -41,7 +47,7 @@ const CN_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10
 
 /** Parse Arabic digits or standard Chinese numerals (e.g. “三十五” → 35, “零” → 0, “一百零八” → 108). */
 export function parseChapterNumeral(raw: string): number | null {
-  const s = raw.trim().replace(/^第\s*/, "").replace(/\s*[章回节卷集部篇话幕折]$/, "").trim();
+  const s = raw.trim().replace(/^第\s*/, "").replace(/\s*[章回节卷集部篇话幕折页]$/, "").trim();
   if (!s) return null;
   if (/^\d+$/.test(s)) {
     const n = Number(s);
@@ -76,7 +82,7 @@ export function parseChapterNumeral(raw: string): number | null {
 /** Chapter numbers explicitly stated in a section title; volume numbers (卷/部/篇/集) are ignored when a chapter number is present. */
 export function extractChapterNumbers(title: string): number[] {
   const nums = new Set<number>();
-  for (const m of title.matchAll(/第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[章回节话幕折]/g)) {
+  for (const m of title.matchAll(/第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*[章回节话幕折页]/g)) {
     const n = parseChapterNumeral(m[1]);
     if (n !== null) nums.add(n);
   }

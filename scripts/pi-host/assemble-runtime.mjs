@@ -1,11 +1,108 @@
 // Package the upstream's complete official bundle, without replacing its loop.
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { artifactFiles, sha256, verifyRuntime } from "../../agent-host/src/artifacts.mjs";
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const host = path.join(project, "agent-host");
+
+async function loadEsbuild(source) {
+  if (source) {
+    const upstreamEsbuild = path.join(source, "node_modules/esbuild/lib/main.js");
+    try {
+      await fs.access(upstreamEsbuild);
+      return await import(pathToFileURL(upstreamEsbuild).href);
+    } catch { /* Fall back to workspace esbuild when upstream cache is absent. */ }
+  }
+  const rootRequire = createRequire(path.join(project, "package.json"));
+  for (const anchor of [null, "vite/package.json", "tsx/package.json"]) {
+    try {
+      const req = anchor ? createRequire(rootRequire.resolve(anchor)) : rootRequire;
+      return await import(pathToFileURL(req.resolve("esbuild")).href);
+    } catch { /* Try next workspace package anchor. */ }
+  }
+  throw new Error("Unable to locate esbuild to bundle document-parser.mjs");
+}
+
+async function bundleDocumentParser(build, temporary, dependencyNotices) {
+  // Exactly the same text/EPUB/DOCX parser used by the existing import flow.
+  // It runs in a bounded worker and has no database or model dependencies.
+  const parserBuild = await build({
+    absWorkingDir: project,
+    entryPoints: [path.join(project, "src/engine/sources/parse.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node24.19",
+    legalComments: "inline",
+    outfile: path.join(temporary, "host/src/document-parser.mjs"),
+    logLevel: "silent",
+    metafile: true,
+  });
+  // Preserve the exact notices of libraries bundled from the APP lockfile,
+  // including transitive XML dependencies; these are not Pi's dependencies.
+  const parserPackages = new Set();
+  for (const input of Object.keys(parserBuild.metafile.inputs)) {
+    if (!input.includes("node_modules")) continue;
+    let directory = path.dirname(await fs.realpath(path.resolve(project, input)));
+    for (let depth = 0; depth < 10; depth++) {
+      let pkg;
+      try { pkg = JSON.parse(await fs.readFile(path.join(directory, "package.json"), "utf8")); } catch {}
+      if (pkg?.name) {
+        const id = `${pkg.name}@${pkg.version}`;
+        if (!parserPackages.has(id)) {
+          parserPackages.add(id);
+          if (!dependencyNotices.some(item => item.name === pkg.name && item.version === pkg.version)) {
+            dependencyNotices.push({ name: pkg.name, version: pkg.version, license: pkg.license ?? "SEE PACKAGE NOTICES" });
+          }
+          const target = path.join(temporary, "notices/dependencies", id);
+          await fs.mkdir(target, { recursive: true });
+          for (const item of await fs.readdir(directory, { withFileTypes: true })) {
+            if (item.isFile() && /^(?:licen[sc]e|notice|copying|copyright)(?:[.\-_]|$)/i.test(item.name)) {
+              await fs.copyFile(path.join(directory, item.name), path.join(target, item.name));
+            }
+          }
+        }
+        break;
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) throw new Error("Parser dependency notice is missing");
+      directory = parent;
+    }
+  }
+  await fs.writeFile(
+    path.join(temporary, "notices/dependencies.json"),
+    JSON.stringify(dependencyNotices.sort((a, b) => a.name.localeCompare(b.name)), null, 2) + "\n",
+  );
+}
+
+async function finalizeRuntimeDirectory(temporary, directory, lock, builtAt) {
+  const files = [];
+  for (const name of await artifactFiles(temporary)) {
+    const bytes = await fs.readFile(path.join(temporary, name));
+    files.push({ path: name, bytes: bytes.length, sha256: sha256(bytes) });
+  }
+  const manifest = {
+    schemaVersion: 1, built: true, fullCodingAgent: true,
+    commit: lock.commit, codingAgentVersion: lock.codingAgentVersion, nodeVersion: lock.nodeVersion,
+    sourceArchiveSha256: lock.archive.sha256, sourceNpmLockSha256: lock.sourceNpmLockSha256,
+    modelCatalogSha256: lock.modelCatalog.sha256, builtAt, files,
+  };
+  await fs.writeFile(path.join(temporary, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+  await verifyRuntime(temporary, lock);
+  if (path.dirname(directory) !== path.join(host, ".cache")) throw new Error("Unexpected runtime build directory");
+  // This exact build-owned directory contains no personal saves or credentials.
+  await fs.rm(directory, { recursive: true, force: true });
+  await fs.rename(temporary, directory);
+  return {
+    directory,
+    files: files.length,
+    bytes: files.reduce((sum, item) => sum + item.bytes, 0),
+    manifestSha256: sha256(await fs.readFile(path.join(directory, "manifest.json"))),
+  };
+}
 
 export async function assembleRuntime(source, lock, sourceReceipt) {
   if (!sourceReceipt.built || sourceReceipt.commit !== lock.commit || sourceReceipt.sourceTreeVerified !== true) throw new Error("Build the verified pinned source before packaging its runtime");
@@ -45,34 +142,8 @@ export async function assembleRuntime(source, lock, sourceReceipt) {
   await fs.mkdir(path.join(temporary, "notices"), { recursive: true });
   await fs.writeFile(path.join(temporary, "notices/dependencies.json"), JSON.stringify(dependencyNotices.sort((a, b) => a.name.localeCompare(b.name)), null, 2) + "\n");
   await fs.writeFile(path.join(temporary, "package.json"), JSON.stringify({ private: true, type: "module" }) + "\n");
-  const { build } = await import(pathToFileURL(path.join(source, "node_modules/esbuild/lib/main.js")).href);
-  // Exactly the same text/EPUB/DOCX parser used by the existing import flow.
-  // It runs in a bounded worker and has no database or model dependencies.
-  const parserBuild=await build({ absWorkingDir:project,entryPoints:[path.join(project,"src/engine/sources/parse.ts")], bundle:true,
-    format:"esm",platform:"node",target:"node24.19",legalComments:"inline",
-    outfile:path.join(temporary,"host/src/document-parser.mjs"),logLevel:"silent",metafile:true });
-  // Preserve the exact notices of libraries bundled from the APP lockfile,
-  // including transitive XML dependencies; these are not Pi's dependencies.
-  const parserPackages=new Set();
-  for(const input of Object.keys(parserBuild.metafile.inputs)){
-    if(!input.includes("node_modules"))continue;
-    let directory=path.dirname(await fs.realpath(path.resolve(project,input)));
-    for(let depth=0;depth<10;depth++){
-      let pkg;try{pkg=JSON.parse(await fs.readFile(path.join(directory,"package.json"),"utf8"));}catch{}
-      if(pkg?.name){
-        const id=`${pkg.name}@${pkg.version}`;
-        if(!parserPackages.has(id)){
-          parserPackages.add(id);
-          if(!dependencyNotices.some(item=>item.name===pkg.name&&item.version===pkg.version))dependencyNotices.push({name:pkg.name,version:pkg.version,license:pkg.license??"SEE PACKAGE NOTICES"});
-          const target=path.join(temporary,"notices/dependencies",id);await fs.mkdir(target,{recursive:true});
-          for(const item of await fs.readdir(directory,{withFileTypes:true})){if(item.isFile()&&/^(?:licen[sc]e|notice|copying|copyright)(?:[.\-_]|$)/i.test(item.name))await fs.copyFile(path.join(directory,item.name),path.join(target,item.name));}
-        }
-        break;
-      }
-      const parent=path.dirname(directory);if(parent===directory)throw new Error("Parser dependency notice is missing");directory=parent;
-    }
-  }
-  await fs.writeFile(path.join(temporary,"notices/dependencies.json"),JSON.stringify(dependencyNotices.sort((a,b)=>a.name.localeCompare(b.name)),null,2)+"\n");
+  const { build } = await loadEsbuild(source);
+  await bundleDocumentParser(build, temporary, dependencyNotices);
   // This tiny public credential-store export is from the same source snapshot.
   // The full AgentSession implementation is the unmodified official bundle.
   await build({
@@ -80,31 +151,42 @@ export async function assembleRuntime(source, lock, sourceReceipt) {
     bundle: true, format: "esm", platform: "node", target: "node24.19", legalComments: "inline",
     outfile: path.join(temporary, "memory-credentials.mjs"), logLevel: "silent",
   });
-  const files = [];
-  for (const name of await artifactFiles(temporary)) {
-    const bytes = await fs.readFile(path.join(temporary, name));
-    files.push({ path: name, bytes: bytes.length, sha256: sha256(bytes) });
+  return finalizeRuntimeDirectory(temporary, directory, lock, sourceReceipt.verifiedAt);
+}
+
+/** Sync host/src and rebundle document-parser.mjs onto an already verified Pi runtime cache. */
+export async function refreshRuntimeHost(lock) {
+  const directory = path.join(host, ".cache/runtime");
+  const existingManifest = await verifyRuntime(directory, lock);
+  const temporary = await fs.mkdtemp(path.join(host, ".cache/runtime-build-"));
+  try {
+    await fs.cp(directory, temporary, { recursive: true, dereference: true });
+    await fs.rm(path.join(temporary, "manifest.json"), { force: true });
+    await fs.rm(path.join(temporary, "host/src"), { recursive: true, force: true });
+    await fs.cp(path.join(host, "src"), path.join(temporary, "host/src"), { recursive: true });
+    await fs.copyFile(path.join(host, "upstream-lock.json"), path.join(temporary, "host/upstream-lock.json"));
+    await fs.copyFile(path.join(host, "THIRD_PARTY_NOTICES.md"), path.join(temporary, "THIRD_PARTY_NOTICES.md"));
+    const dependencyNotices = JSON.parse(await fs.readFile(path.join(temporary, "notices/dependencies.json"), "utf8"));
+    const { build } = await loadEsbuild(null);
+    await bundleDocumentParser(build, temporary, dependencyNotices);
+    return await finalizeRuntimeDirectory(temporary, directory, lock, existingManifest.builtAt);
+  } catch (error) {
+    await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
-  const manifest = {
-    schemaVersion: 1, built: true, fullCodingAgent: true,
-    commit: lock.commit, codingAgentVersion: lock.codingAgentVersion, nodeVersion: lock.nodeVersion,
-    sourceArchiveSha256: lock.archive.sha256, sourceNpmLockSha256: lock.sourceNpmLockSha256,
-    modelCatalogSha256: lock.modelCatalog.sha256, builtAt: sourceReceipt.verifiedAt, files,
-  };
-  await fs.writeFile(path.join(temporary, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-  await verifyRuntime(temporary, lock);
-  if (path.dirname(directory) !== path.join(host, ".cache")) throw new Error("Unexpected runtime build directory");
-  // This exact build-owned directory contains no personal saves or credentials.
-  await fs.rm(directory, { recursive: true, force: true });
-  await fs.rename(temporary, directory);
-  return { directory, files: files.length, bytes: files.reduce((sum, item) => sum + item.bytes, 0), manifestSha256: sha256(await fs.readFile(path.join(directory, "manifest.json"))) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const lock = JSON.parse(await fs.readFile(path.join(host, "upstream-lock.json"), "utf8"));
   const source = path.join(host, ".cache/upstream", lock.sourceDirectory);
-  const receipt = JSON.parse(await fs.readFile(path.join(host, ".cache/upstream/source-receipt.json"), "utf8"));
-  receipt.runtime = await assembleRuntime(source, lock, receipt);
-  await fs.writeFile(path.join(host, ".cache/upstream/source-receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
-  console.log(JSON.stringify(receipt.runtime));
+  const receiptPath = path.join(host, ".cache/upstream/source-receipt.json");
+  const hasUpstream = await Promise.all([fs.access(source), fs.access(receiptPath)]).then(() => true, () => false);
+  if (hasUpstream) {
+    const receipt = JSON.parse(await fs.readFile(receiptPath, "utf8"));
+    receipt.runtime = await assembleRuntime(source, lock, receipt);
+    await fs.writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
+    console.log(JSON.stringify(receipt.runtime));
+  } else {
+    console.log(JSON.stringify(await refreshRuntimeHost(lock)));
+  }
 }

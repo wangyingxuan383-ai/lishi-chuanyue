@@ -288,6 +288,9 @@ impl Engine {
         if matches!(snapshot.status.as_str(), "paused" | "failed" | "interrupted" | "cancelled") {
             plan.meta["resumeBudgetBase"] = serde_json::to_value(&snapshot.budget)?;
         }
+        if matches!(snapshot.status.as_str(), "paused" | "interrupted") {
+            plan.meta["keepFallbackOnResume"] = true.into();
+        }
         // Store::resume acquires ownership before changing a running flag.
         // A second process cannot mark the first owner's active run stopped.
         self.store.resume(id)?;
@@ -297,14 +300,28 @@ impl Engine {
         self: &Arc<Self>,
         plan: RunPlan,
         budget: RunBudget,
-        draft: Value,
+        mut draft: Value,
     ) -> Result<()> {
         // Registration persists its fencing ticket. Do not run using the
         // caller's earlier copy, or a restarted process's former ownership.
         let resume_base = plan.meta["resumeBudgetBase"].clone();
+        let is_resumed = resume_base.is_object();
+        let keep_fallback = plan.meta["keepFallbackOnResume"] == true;
         let mut plan = self.store.activate_lease(&plan.id)?;
         // The stored plan does not carry the pause point; keep the one resume() set (D159).
-        if resume_base.is_object() { plan.meta["resumeBudgetBase"] = resume_base; }
+        if is_resumed { plan.meta["resumeBudgetBase"] = resume_base; }
+        // If an earlier step in a paused/interrupted run already failed over to a healthy backup service,
+        // continue on that backup model instead of reverting to the dead primary (B10).
+        // A retry after `"failed"` starts fresh on the primary model first.
+        if keep_fallback && draft["fallbackUsed"].is_object() {
+            if let Some(backup) = plan.fallback_model.clone().filter(|b| !b.same_service(&plan.model)) {
+                plan.model = backup;
+            }
+        } else if is_resumed && !keep_fallback {
+            if let Some(obj) = draft.as_object_mut() {
+                obj.remove("fallbackUsed");
+            }
+        }
         let execution_ticket = execution_lease::ticket(&plan)?.ok_or(Error::Stale)?;
         let execution_id=execution_ticket.execution_id();
         let token = CancellationToken::new();
@@ -688,6 +705,9 @@ impl Engine {
                     }
                     return;
                 }
+                if text.starts_with('\0') {
+                    return;
+                }
                 if !show_text || record_seen.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
@@ -804,6 +824,10 @@ impl Engine {
                             plan.model = backup.clone();
                             {
                                 let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+                                // Keep the model that wrote the prose if failover only happened on an aux helper stage (B07).
+                                if !aux && c.draft["proseModel"].is_null() {
+                                    c.draft["proseModel"] = backup.model.clone().into();
+                                }
                                 c.plan.model = backup.clone();
                                 c.draft["fallbackUsed"] = json!({"from": from, "to": backup.model, "reason": crate::failure_kind(&error)});
                             }
@@ -999,7 +1023,7 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.kind=="ask"||plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"));
+        let modern=plan.kind=="ask"||plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-3"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"|"reference-review-lite-5"));
         let support = if tier == Tier::Fast && plan.kind != "ask" {
             false
         } else if modern {
@@ -1069,6 +1093,11 @@ impl Engine {
                 // whatever text came back is the passage.
                 let mut response = response;
                 response.tool_calls.clear();
+                {
+                    let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+                    let wrote = c.plan.model.model.clone();
+                    c.draft["proseModel"] = wrote.into();
+                }
                 break response;
             }
             // Validate the whole group before saving any tool result from this reply.
@@ -1211,11 +1240,11 @@ impl Engine {
         if let Some(problem) = turn_record_problem(&plan, &record) {
             return Err(Error::fail(crate::failure::FailKind::Format, format!("正文已保留，{problem}，可以接着整理")));
         }
-        if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2")) && !plan.meta["playerNarrative"].is_string() {
+        if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-3")) && !plan.meta["playerNarrative"].is_string() {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
             narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
-        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4")) && !plan.meta["playerNarrative"].is_string() {
+        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"|"reference-review-lite-5")) && !plan.meta["playerNarrative"].is_string() {
             let (revised,revised_record,report)=self.review_reference_lite(&shared,&plan,&narrative,&record).await?;
             narrative=revised; record=revised_record;
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report;
@@ -1246,6 +1275,25 @@ impl Engine {
                             .clone();
                     }
                 }
+            }
+            // Preserve the post-codex + startMoney baseline so revising Turn 0 never wipes AI cards or initial money (B01).
+            let mut opening_seed = seed.clone();
+            let base_money = plan.meta["startMoney"]
+                .as_f64()
+                .or_else(|| opening_seed["protagonist"]["stats"]["money"].as_f64())
+                .unwrap_or(0.0)
+                .max(0.0);
+            opening_seed["protagonist"]["stats"]["money"] = (rules::js_round(base_money).max(0.0) as i64).into();
+            if let Some(events) = plan.meta["openingTimeline"].as_array() {
+                let mut clock = plan.options["clock"].clone();
+                clock["date"] = opening_seed["time"]["date"].clone();
+                clock["hour"] = opening_seed["time"]["startHour"].clone();
+                opening_seed["timeline"] = Value::Array(rules::calendar::retime(events, &clock));
+            }
+            let mut c = shared.lock().map_err(|_| Error::Cancelled)?;
+            c.draft["openingSeed"] = opening_seed;
+            if codex_timeline.is_array() {
+                c.draft["codexTimeline"] = codex_timeline.clone();
             }
         }
         let state = if plan.kind == "opening" {
@@ -1303,8 +1351,10 @@ impl Engine {
         }
         if deferred {
             // The passage is saved either way; tidying that cannot start is
-            // asked for again by the next passage.
-            let _ = self.start_maintenance(&plan, &narrative, &result);
+            // asked for again by the next passage. Use the live `c.plan` so a
+            // backup service activated during the turn is reused instead of a dead primary (B07).
+            let latest_plan = shared.lock().map(|c| c.plan.clone()).unwrap_or_else(|_| plan.clone());
+            let _ = self.start_maintenance(&latest_plan, &narrative, &result);
         }
         Ok(())
     }
@@ -1405,11 +1455,13 @@ impl Engine {
         let currency = state["era"]
             .get("currency")
             .unwrap_or(&plan.options["currency"]);
-        state["protagonist"]["stats"]["money"] =
+        state["protagonist"]["stats"]["money"] = (rules::js_round(
             rules::money::parse_money(&record["money"], currency)
                 .unwrap_or(plan.meta["startMoney"].as_f64().unwrap_or(0.0))
-                .max(0.0)
-                .into();
+                .max(0.0),
+        )
+        .max(0.0) as i64)
+        .into();
         if let Some(events) = plan.meta["openingTimeline"].as_array() {
             let mut clock = plan.options["clock"].clone();
             clock["date"] = state["time"]["date"].clone();
@@ -1482,7 +1534,11 @@ impl Engine {
         meta["chips"] = applied["chips"].clone();
         meta["notes"] = applied["notes"].clone();
         meta["log"] = applied["log"].clone();
-        meta["model"] = plan.model.model.clone().into();
+        meta["model"] = c.draft["proseModel"]
+            .as_str()
+            .unwrap_or(&plan.model.model)
+            .to_owned()
+            .into();
         meta["nativeRun"] = plan.id.clone().into();
         meta["referenceReview"] = c.draft["referenceReview"].clone();
         meta["contextReports"]=c.draft["contextReports"].clone();
@@ -1512,7 +1568,14 @@ impl Engine {
             meta["upkeep"] = true.into();
         }
         if plan.kind == "opening" {
-            meta["openingSeed"] = plan.state.clone();
+            meta["openingSeed"] = if c.draft["openingSeed"].is_object() {
+                c.draft["openingSeed"].clone()
+            } else {
+                plan.state.clone()
+            };
+            if c.draft["codexTimeline"].is_array() {
+                meta["codexTimeline"] = c.draft["codexTimeline"].clone();
+            }
         }
         let mut state = applied["state"].clone();
         let taboos = scan_taboos(&state, narrative);
@@ -2159,16 +2222,37 @@ fn preserve_branch(tx: &Transaction<'_>, plan: &RunPlan) -> Result<()> {
     let Some(base) = &plan.base_id else {
         return Ok(());
     };
-    let branch:Option<(String,i64)>=tx.query_row("WITH RECURSIVE tail(id,last_child_id,n) AS (SELECT id,last_child_id,1 FROM nodes WHERE id=(SELECT last_child_id FROM nodes WHERE id=?) UNION ALL SELECT n.id,n.last_child_id,t.n+1 FROM nodes n JOIN tail t ON n.id=t.last_child_id) SELECT id,n FROM tail ORDER BY n DESC LIMIT 1",[base],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    if let Some((head, n)) = branch {
-        if n >= 3
-            && !tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM lines WHERE world_id=? AND node_id=? AND id<>?)",
-                params![plan.world_id, head, plan.line_id],
-                |r| r.get::<_, bool>(0),
-            )?
-        {
-            tx.execute("INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) VALUES(?,?,'未命名路线',?,'line',1,?)",params![uuid::Uuid::new_v4().simple().to_string(),plan.world_id,head,Utc::now().to_rfc3339()])?;
+    let branch: Option<(String, i64)> = tx.query_row(
+        "WITH RECURSIVE tail(id,last_child_id,steps,turns) AS (
+           SELECT id,last_child_id,1,CASE WHEN kind='edit' THEN 0 ELSE 1 END FROM nodes WHERE id=(SELECT last_child_id FROM nodes WHERE id=?)
+           UNION ALL
+           SELECT n.id,n.last_child_id,t.steps+1,t.turns+CASE WHEN n.kind='edit' THEN 0 ELSE 1 END FROM nodes n JOIN tail t ON n.id=t.last_child_id
+         ) SELECT id,turns FROM tail ORDER BY steps DESC LIMIT 1",
+        [base],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    if let Some((head, turns)) = branch {
+        let covered: bool = tx.query_row(
+            "WITH RECURSIVE tail(id,last_child_id) AS (
+               SELECT id,last_child_id FROM nodes WHERE id=(SELECT last_child_id FROM nodes WHERE id=?)
+               UNION ALL SELECT n.id,n.last_child_id FROM nodes n JOIN tail t ON n.id=t.last_child_id
+             ) SELECT EXISTS(SELECT 1 FROM lines WHERE world_id=? AND id<>? AND deleted_at IS NULL AND node_id IN (SELECT id FROM tail))",
+            params![base, plan.world_id, plan.line_id],
+            |r| r.get(0),
+        )?;
+        if turns >= 3 && !covered {
+            let mut stmt = tx.prepare("SELECT name FROM lines WHERE world_id=?")?;
+            let taken: std::collections::HashSet<String> = stmt.query_map([&plan.world_id], |r| r.get::<_, String>(0))?.collect::<std::result::Result<_, _>>()?;
+            drop(stmt);
+            let name = if !taken.contains("未命名路线") {
+                "未命名路线".to_owned()
+            } else {
+                (2..).map(|i| format!("未命名路线（{i}）")).find(|c| !taken.contains(c)).unwrap()
+            };
+            tx.execute(
+                "INSERT INTO lines(id,world_id,name,node_id,kind,auto_named,created_at) VALUES(?,?,?,?,'line',1,?)",
+                params![uuid::Uuid::new_v4().simple().to_string(), plan.world_id, name, head, Utc::now().to_rfc3339()],
+            )?;
         }
     }
     Ok(())

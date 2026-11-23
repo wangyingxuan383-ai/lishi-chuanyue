@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatMoney, parseMoney } from "../money";
 import { lenientJson, parseRecord } from "./parse";
 import { RecordSplitter } from "./split";
 
@@ -141,5 +142,29 @@ describe("parseRecord", () => {
 
   it("notes missing time and choices", () => {
     expect(parseRecord('<record>{"log":"x"}</record>').issues).toEqual(["缺少 time", "缺少 choices"]);
+  });
+
+  it("enforces currencyIssues and guards money formatting/parsing against 0, decimals, and regex metacharacters", () => {
+    const ok = parseRecord('{"time":"0","currency":[{"name":"贯","value":1000},{"name":"文","value":1}],"choices":["甲"]}');
+    expect(ok.record?.currency).toEqual([{ name: "贯", value: 1000 }, { name: "文", value: 1 }]);
+    expect(ok.issues).toEqual([]);
+
+    for (const bad of [
+      [{ name: "铜板", value: 0.1 }],
+      [{ name: "铜板", value: 0 }],
+      [{ name: "文", value: 10 }, { name: "文", value: 1 }],
+      [{ name: "文", value: 1 }, { name: "贯", value: 1000 }],
+      [{ name: "两", value: 10 }, { name: "钱", value: 3 }, { name: "文", value: 1 }],
+      [{ name: "两", value: 100 }],
+    ]) {
+      const res = parseRecord(JSON.stringify({ time: "0", currency: bad, choices: ["甲"] }));
+      expect(res.record?.currency).toBeUndefined();
+      expect(res.issues.some((i) => i.startsWith("货币单位无效："))).toBe(true);
+    }
+
+    expect(formatMoney(50, { units: [{ name: "铜板", value: 0 }] })).toBe("50 铜板");
+    expect(formatMoney(0, { units: [{ name: "铜板", value: 0 }] })).toBe("0 铜板");
+    const special = { units: [{ name: "两(官银)", value: 100 }, { name: "$铜[旧]", value: 1 }] };
+    expect(parseMoney("3两(官银)5$铜[旧]", special)).toBe(305);
   });
 });

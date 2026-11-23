@@ -49,6 +49,7 @@ class GenerationService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         synchronized(lock) {
+            current = this
             try {
                 val notification = notification()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -142,7 +143,7 @@ class GenerationService : Service() {
             this,
             REQUEST_STOP,
             Intent(this, GenerationActionReceiver::class.java).setAction(GenerationActionReceiver.ACTION_STOP)
-                .setData(Uri.Builder().scheme("chuanyue").authority("generation-stop").appendPath(executionId).build())
+                .setData(Uri.Builder().scheme("chuanyue").authority("generation-stop").appendPath(executionId.ifBlank { "active" }).build())
                 .putExtra(GenerationActionReceiver.EXTRA_RUN_ID, runId)
                 .putExtra(GenerationActionReceiver.EXTRA_EXECUTION_ID, executionId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -173,9 +174,7 @@ class GenerationService : Service() {
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setSound(null)
-        if (runId.isNotBlank() && executionId.isNotBlank()) {
-            builder.addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
-        }
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
         if (detailed && phase != "writing") builder.setProgress(0, 0, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
@@ -374,6 +373,8 @@ class GenerationService : Service() {
         }
 
         private fun refreshProgress(context: Context) {
+            val previousRun = runId
+            val previousExecution = executionId
             val target = progress.values.lastOrNull()
             runId = target?.run.orEmpty()
             executionId = target?.execution.orEmpty()
@@ -381,7 +382,8 @@ class GenerationService : Service() {
             storyTitle = target?.title.orEmpty()
             chars = target?.chars ?: 0
             val service = current ?: return
-            if (!prefs(context).getBoolean(PREF_PROGRESS, true)) return
+            val targetChanged = runId != previousRun || executionId != previousExecution
+            if (!targetChanged && !prefs(context).getBoolean(PREF_PROGRESS, true)) return
             try {
                 service.getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, service.notification())
             } catch (error: Exception) {
@@ -419,8 +421,12 @@ class GenerationService : Service() {
         /** Stop only the launch represented by this immutable notification. */
         @JvmStatic
         fun stopFromNotification(run: String, execution: String) {
-            if (run.isBlank() || execution.isBlank()) return
-            try { nativeStop(run, execution) }
+            val target = synchronized(lock) {
+                if (run.isNotBlank() && execution.isNotBlank()) run to execution
+                else progress.values.lastOrNull()?.let { it.run to it.execution }
+            } ?: return
+            if (target.first.isBlank() || target.second.isBlank()) return
+            try { nativeStop(target.first, target.second) }
             catch (error: LinkageError) { Log.w(TAG, "Generation targeted cancellation unavailable: ${error.javaClass.simpleName}") }
         }
 

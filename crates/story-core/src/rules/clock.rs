@@ -14,9 +14,13 @@ fn validate_date_input(raw: &Value, rules: &Value, field: &str) -> Result<(), St
     if !raw["month"].as_i64().is_some_and(|month| (1..=12).contains(&month)) {
         return Err(invalid(&format!("{field}.month={} 无效，允许范围为1～12的整数", raw["month"])));
     }
-    let date = calendar::coerce_date(raw, rules).ok_or_else(|| invalid(&format!("{field}不是有效日期")))?;
-    if raw.get("day").is_some_and(|day| !day.as_i64().is_some_and(|day| day == date.day && (1..=calendar::month_days(&date)).contains(&day))) {
-        return Err(invalid(&format!("{field}.day={} 无效，该月允许范围为1～{}", raw["day"], calendar::month_days(&date))));
+    let mut date = calendar::coerce_date(raw, rules).ok_or_else(|| invalid(&format!("{field}不是有效日期")))?;
+    if raw.get("ceYear").is_some_and(Value::is_null) && !["公元", "公元前"].contains(&date.era.as_str()) {
+        date.ce_year = None;
+    }
+    let max_day = calendar::max_valid_day(&date);
+    if raw.get("day").is_some_and(|day| !day.as_i64().is_some_and(|day| day == date.day && (1..=max_day).contains(&day))) {
+        return Err(invalid(&format!("{field}.day={} 无效，该月允许范围为1～{max_day}", raw["day"])));
     }
     if !raw["ceYear"].is_null() && raw["ceYear"].as_i64() != date.ce_year {
         return Err(invalid(&format!("{field}.ceYear={}与实际公元年不符；自定纪年请使用null，不能把纪年数字当成公元年", raw["ceYear"])));
@@ -122,7 +126,11 @@ pub fn validate_clock_transition(before: &Value, after: &Value) -> Result<(), St
         {
             return Err(invalid("time.date.ceYear必须显式为null：自由世界的自定纪年不映射为公元年"));
         }
-        validate_date_input(date, &after["era"]["calendar"], "time.date")?;
+        if before["time"]["date"] != *date || before["era"]["calendar"] != after["era"]["calendar"] {
+            validate_date_input(date, &after["era"]["calendar"], "time.date")?;
+        } else if calendar::coerce_date(date, &after["era"]["calendar"]).is_none() {
+            return Err(invalid("time.date不是有效日期"));
+        }
     }
     if let Some(anchor) = after["time"].get("anchor").filter(|v| !v.is_null()) {
         if after["era"]["mode"] == "free"

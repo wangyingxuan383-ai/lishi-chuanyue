@@ -139,7 +139,14 @@ fn verify_gemini_model_proof(model: &Value, request: &Value) -> Result<()> {
     Ok(())
 }
 fn authorize_url(model: &Value, raw: &str) -> Result<Url> {
-    let base = endpoint(model["baseUrl"].as_str().ok_or_else(invalid)?)?;
+    let is_full = full_endpoint(model)?;
+    let raw_base = model["baseUrl"].as_str().ok_or_else(invalid)?;
+    let effective_base = if !is_full && model["protocol"] == "gemini" {
+        story_core::pi_http::strip_gemini_openai_base(raw_base)
+    } else {
+        raw_base.to_owned()
+    };
+    let base = endpoint(&effective_base)?;
     let url = endpoint(raw)?;
     if base.query().is_some()
         || url.origin() != base.origin()
@@ -151,7 +158,7 @@ fn authorize_url(model: &Value, raw: &str) -> Result<Url> {
     }
     let prefix = decoded_path(base.path())?;
     let path = decoded_path(url.path())?;
-    if full_endpoint(model)? {
+    if is_full {
         // The fresh resolver has already checked this immutable grant against
         // its saved profile and native secret binding. Only that exact path is
         // a generation endpoint; no descendants/count_tokens are authorized.

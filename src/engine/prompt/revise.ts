@@ -4,7 +4,7 @@
 // edit. With 参考原著, the canon notes and a few original passages go along.
 import type { ChatMessage } from "../llm/chat";
 
-export const REVISE_PROMPT_VERSION = "revise-3";
+export const REVISE_PROMPT_VERSION = "revise-4";
 
 export interface ReviseEntry { label: string; name: string; aliases: string[]; text: string }
 export interface ReviseEntryResult { name: string; aliases: string[]; text: string }
@@ -23,7 +23,7 @@ function contextBlock(c: ReviseContext): string {
 export function reviseEntryMessages(entry: ReviseEntry, instruction: string, c: ReviseContext): ChatMessage[] {
   const maxChars = entry.label === "时代卡" || entry.label === "世界卡" ? 900 : 300;
   return [
-    { role: "system", content: `你帮玩家修改互动小说“设定集”里的一条${entry.label}。照玩家的要求改，要求没提到的部分、具体名称、数字、等级与别名尽量保持原样；只写设定资料，不写剧情，不加解释或代码块。内容不超过 ${maxChars} 字。只输出一个 JSON 对象：{"name":"名称","aliases":["别名"],"text":"改好的内容"}` },
+    { role: "system", content: `你帮玩家修改互动小说“设定集”里的一条${entry.label}。照玩家的要求改，要求没提到的部分、具体名称、数字、等级与别名尽量保持原样；用精炼备查的资料口吻，只写设定资料，不写小说剧情段落，不加解释或代码块。内容不超过 ${maxChars} 字。只输出一个 JSON 对象：{"name":"名称","aliases":["别名"],"text":"改好的内容"}` },
     { role: "user", content: `${contextBlock(c)}\n\n【这条${entry.label}现在的样子】\n名称：${entry.name || "（未填）"}\n别名：${entry.aliases.join("、") || "（无）"}\n内容：\n${entry.text || "（空）"}\n\n【玩家的要求】${instruction.trim()}` },
   ];
 }

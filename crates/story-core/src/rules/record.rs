@@ -1,6 +1,6 @@
 //! Lenient JSON record decoding. Panel-only edits are intentionally excluded
 //! here; they enter apply_record through the trusted editing API instead.
-use super::{js_number, js_round, js_string};
+use super::{js_number, js_string};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
@@ -256,22 +256,29 @@ pub fn normalize_record(value: &Value, issues: &mut Vec<String>) -> Option<Value
     if v["died"] == true || v["died"] == "true" {
         out.insert("died".into(), json!(true));
     }
-    let mut units: Vec<Value> = arr(&v["currency"])
-        .into_iter()
-        .filter_map(|u| {
-            let name = str_value(&u["name"])?;
-            let value = js_number(&u["value"])?;
-            (value > 0.0).then(|| json!({"name":name,"value":js_round(value)}))
-        })
-        .collect();
-    if !units.is_empty() {
-        units.sort_by(|a, b| {
-            b["value"]
-                .as_f64()
-                .unwrap()
-                .total_cmp(&a["value"].as_f64().unwrap())
-        });
-        out.insert("currency".into(), json!(units));
+    let raw_currency = arr(&v["currency"]);
+    if !raw_currency.is_empty() {
+        let candidate: Vec<Value> = raw_currency
+            .into_iter()
+            .map(|u| {
+                let name = str_value(&u["name"]).unwrap_or_default();
+                let value = js_number(&u["value"])
+                    .filter(|n| n.is_finite() && *n <= 9_007_199_254_740_991.0)
+                    .map(|n| json!(n))
+                    .unwrap_or(Value::Null);
+                json!({"name": name, "value": value})
+            })
+            .collect();
+        let unit_issues = super::money::currency_issues(&candidate);
+        if unit_issues.is_empty() {
+            let units: Vec<Value> = candidate
+                .into_iter()
+                .map(|u| json!({"name": u["name"], "value": u["value"].as_f64().unwrap() as i64}))
+                .collect();
+            out.insert("currency".into(), json!(units));
+        } else if let Some(msg) = unit_issues[0]["message"].as_str() {
+            issues.push(format!("货币单位无效：{msg}"));
+        }
     }
     for key in ["log", "deviation"] {
         insert_str(&mut out, key, &v[key]);
@@ -363,4 +370,29 @@ fn parsed_record(value: Option<Value>) -> Value {
     }
     let title=value["storyTitle"].as_str().map(str::trim).filter(|s|!s.is_empty()&&s.chars().count()<=24&&!s.contains(['\n','\r','<','>']));
     json!({"record":record,"issues":issues,"openingTitle":title})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn currency_validation_rejects_fractional_zero_duplicate_and_non_descending_units() {
+        let ok = parse_record(r#"{"time":0,"currency":[{"name":"贯","value":1000},{"name":"文","value":1}],"choices":["甲"]}"#).unwrap();
+        assert_eq!(ok["record"]["currency"], json!([{"name":"贯","value":1000},{"name":"文","value":1}]));
+        assert!(ok["issues"].as_array().unwrap().is_empty());
+
+        for bad in [
+            r#"{"time":0,"currency":[{"name":"铜板","value":0.1}],"choices":["甲"]}"#,
+            r#"{"time":0,"currency":[{"name":"铜板","value":0}],"choices":["甲"]}"#,
+            r#"{"time":0,"currency":[{"name":"文","value":10},{"name":"文","value":1}],"choices":["甲"]}"#,
+            r#"{"time":0,"currency":[{"name":"文","value":1},{"name":"贯","value":1000}],"choices":["甲"]}"#,
+            r#"{"time":0,"currency":[{"name":"两","value":10},{"name":"钱","value":3},{"name":"文","value":1}],"choices":["甲"]}"#,
+            r#"{"time":0,"currency":[{"name":"两","value":100}],"choices":["甲"]}"#,
+        ] {
+            let parsed = parse_record(bad).unwrap();
+            assert!(parsed["record"].get("currency").is_none(), "should reject currency in {bad}");
+            assert!(parsed["issues"].as_array().unwrap().iter().any(|i| i.as_str().unwrap().starts_with("货币单位无效：")), "expected currency issue for {bad}: {parsed}");
+        }
+    }
 }

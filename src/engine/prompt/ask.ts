@@ -9,8 +9,8 @@ import { recallBlock } from "../memory/recall";
 import type { Chapter, StoryNode, WorldSettings, WorldState } from "../types";
 import { renderState } from "./turn";
 
-export const ASK_PROMPT_VERSION = "ask-3";
-export const ASK_FREE_PROMPT_VERSION = "ask-4";
+export const ASK_PROMPT_VERSION = "ask-4";
+export const ASK_FREE_PROMPT_VERSION = "ask-5";
 /** Characters of the newest story for the question; the opening always comes too. */
 const RECENT_CHARS = 5000;
 const short = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
@@ -64,7 +64,7 @@ export function askMessages(input: AskInput): ChatMessage[] {
 - 先用下面的本局资料回答（开场、人物、地点、设定、目标、章节、最近的剧情、相关旧事、要点），这些就是这个世界里的事实。
 - 【本局】段只写本局资料里明明白白写着的内容；资料没写的${free ? "世界规则、能力和背景细节" : "官品、年代、制度细节"}，就算你知道，也放进【仅供参考】段，不要混进【本局】。
 - 本局资料里没有、需要靠你的${free ? "一般知识或推测" : "历史知识"}回答的部分，单独成段，段首写“【仅供参考】”，提醒玩家可能有误；拿不准就说不确定，不编造。${state.source?.bookId ? "\n- 若涉及绑定原著的资料，把原著说法与本局已发生剧情分开说明，玩家改写过的部分以本局为准，不剧透原著后续。" : ""}${free ? "\n- 不补写年表或未来事件，不输出 timeline、deviation。" : ""}
-- 不推进剧情，不替玩家做决定，不剧透资料里没有的后续。回答简短清楚，三五句为宜。`,
+- 不推进剧情，不替玩家做决定，不剧透资料里没有的后续。若问题带有上文追问记录，顺着前文的指代直接作答、不重复铺垫。回答简短清楚，三五句为宜。`,
     },
     {
       role: "user",

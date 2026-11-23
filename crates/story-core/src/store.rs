@@ -28,6 +28,7 @@ impl Store {
         self.lock()?.execute_batch(include_str!("schema.sql"))?;
         self.lock()?
             .execute_batch(include_str!("agent_schema.sql"))?;
+        crate::companion_store::CompanionStore(self.clone()).initialize()?;
         lease::ensure_schema(&*self.lock()?)?;
         crate::agent_workspace::install_hooks(&*self.lock()?);
         Ok(())
@@ -297,16 +298,27 @@ impl Store {
         if line != plan.line_id || head != plan.head_id {
             return Err(Error::Stale);
         }
-        let live: Value = serde_json::from_str(&settings)?;
-        if let Some(expected) = plan.meta.get("settingsGuard").filter(|value| value.is_object()) {
-            // Current starts capture raw settings. Older plans may compare a subset.
-            let matches = if plan.meta["generationSnapshot"] == true {
-                &live == expected
-            } else {
-                expected.as_object().into_iter().flatten().all(|(key, value)| live.get(key).unwrap_or(&Value::Null) == value)
-            };
-            if !matches {
-                return Err(Error::Stale);
+        let already_running: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM execution_runs WHERE id=? AND status IN ('running','committing'))",
+                [&plan.id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !already_running {
+            let live: Value = serde_json::from_str(&settings)?;
+            if let Some(expected) = plan.meta.get("settingsGuard").filter(|value| value.is_object()) {
+                // Current starts capture raw settings. Older plans may compare a subset.
+                // Once a run is already streaming in `execution_runs`, changing "从下一段起生效"
+                // world settings must not abort committing the already-generated passage (R32-T001 B05).
+                let matches = if plan.meta["generationSnapshot"] == true {
+                    &live == expected
+                } else {
+                    expected.as_object().into_iter().flatten().all(|(key, value)| live.get(key).unwrap_or(&Value::Null) == value)
+                };
+                if !matches {
+                    return Err(Error::Stale);
+                }
             }
         }
         let state: String = tx.query_row(

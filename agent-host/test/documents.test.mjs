@@ -18,9 +18,18 @@ test("packaged parser worker reuses book parsing, preserves spine/order and fenc
     const text = strToU8("第一章 灯\n甲😀乙丙\n第二章 信\n后续秘密");
     const first = await read("book.txt", text, { charBudget: 2 });
     assert.equal(first.ok, true); assert.equal(first.data.text, "甲😀"); assert.equal(first.data.nextOffset, 2);
+    assert.equal(first.data.fileHash, hash(text));
+    const entries = await fs.readdir(directory);
+    assert.ok(entries.some(item => item.includes(".parser2-")), "worker cache must use parser2- prefix");
     const limited = await read("book.txt", text, { boundBookHash: first.data.normalizedHash, through: 0, query: "秘密", operation: "find" });
     assert.equal(limited.data.sectionCount, 1); assert.deepEqual(limited.data.hits, []);
     assert.equal((await read("book.txt", text, { boundBookHash: first.data.normalizedHash, through: 0, section: 1 })).ok, false);
+    // B43: Even when normalizedHash differs from boundBookHash, matching boundFileHash or boundBookId enforces through!
+    const fencedByRawHash = await read("book.txt", text, { boundBookHash: "stale-normalized-hash", boundFileHash: hash(text), through: 0, query: "秘密", operation: "find" });
+    assert.equal(fencedByRawHash.data.sectionCount, 1); assert.deepEqual(fencedByRawHash.data.hits, []);
+    assert.equal((await read("book.txt", text, { boundBookHash: "stale-normalized-hash", boundFileHash: hash(text), through: 0, section: 1 })).ok, false);
+    const fencedByBookId = await read("book.txt", text, { boundBookHash: "stale-normalized-hash", boundBookId: "book-42", bookId: "book-42", through: 0, section: 1 });
+    assert.equal(fencedByBookId.ok, false);
     assert.equal((await read("gbk.txt", Uint8Array.from([0xd6, 0xd0, 0xce, 0xc4]))).data.text, "中文");
     const epub = zipSync({
       "META-INF/container.xml": strToU8('<container><rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>'),

@@ -9,7 +9,9 @@ const LABELS: Record<string, string> = {
   writing: "写作", turn: "写作", opening: "开场", continue: "续写", extract: "补记", "reference-review": "原著核对", "reference-review-lite": "原著快速校对",
   codex: "整理设定", upkeep: "整理设定（游玩中）", chapter: "章节摘要", capability: "检测工具支持", ask: "查一查", assist: "补全",
   test: "测试", outline: "拟大纲", challenge: "出题", source: "通读书籍", "canon-notes": "札记", tool: "写作", autoplay: "连播",
-  revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步", correction: "按原著纠错", agent: "助手", "段落改写": "段落改写", "行动润色": "行动润色",
+  revise: "改稿", "revise-passage": "按要求改写", "sync-facts": "改后同步", correction: "按原著纠错",
+  companion: "伴聊", "companion-compact": "伴聊", agent: "助手", "agent-context": "助手记忆整理", "agent-task": "助手", "status-tidy": "状况整理",
+  "段落改写": "段落改写", "行动润色": "行动润色",
 };
 export const purposeLabel = (purpose: string) => LABELS[purposeBase(purpose)] ?? LABELS[purpose] ?? purpose;
 /** SQL for the base purpose, for GROUP BY. */

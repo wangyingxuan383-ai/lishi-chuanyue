@@ -26,15 +26,16 @@ function NameSheet({ title, initial, onSave, onClose }: { title: string; initial
   );
 }
 
-export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: string; current: string; onClose: () => void; onChanged: (message: string) => void }) {
+export function LinesSheet({ worldId, current, busy = false, onClose, onChanged }: { worldId: string; current: string; busy?: boolean; onClose: () => void; onChanged: (message: string) => void }) {
   const { game, ask } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
   const [menu, setMenu] = useState<Row | null>(null);
   const [renaming, setRenaming] = useState<Row | null>(null);
   const [showTree, setShowTree] = useState(false);
+  const [acting, setActing] = useState(false);
 
   const load = async () => {
-    await game.repo.purgeTrash(worldId);
+    if (!busy) await game.repo.purgeTrash(worldId);
     const out: Row[] = [];
     const world = await game.repo.getWorld(worldId);
     for (const line of await game.repo.lines(worldId)) {
@@ -53,33 +54,44 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
   const bookmarks = rows.filter((r) => r.line.kind === "bookmark" && !r.line.deletedAt);
   const archived = rows.filter((r) => r.line.kind === "line" && r.line.archived && !r.line.deletedAt);
   const trash = rows.filter((r) => r.line.deletedAt);
-  const act = async (fn: () => Promise<unknown>, message: string) => {
-    try { await fn(); await load(); onChanged(message); }
-    catch (error) { onChanged(error instanceof Error ? error.message : "没能更新路线"); }
+  const act = async (fn: () => Promise<unknown>, message: string, closeAfter = false) => {
+    if (busy || acting) return;
+    setActing(true);
+    try {
+      await fn();
+      if (closeAfter) { onClose(); onChanged(message); return; }
+      await load();
+      onChanged(message);
+    } catch (error) {
+      onChanged(error instanceof Error ? error.message : "没能更新路线");
+    } finally {
+      setActing(false);
+    }
   };
-  const card = (r: Row, onTap: () => void) => (
+  const card = (r: Row, onTap: () => void, tapDisabled = false) => (
     <div key={r.line.id} className="row line-row">
-      <button className={`card grow${r.line.id === current ? " selected" : ""}`} onClick={onTap}>
+      <button className={`card grow${r.line.id === current ? " selected" : ""}`} disabled={acting || tapDisabled} onClick={onTap}>
         <h3><span className={`line-mark ${r.line.kind}`} aria-hidden="true">{r.line.kind === "bookmark" ? "签" : "路"}</span>{r.line.name}{r.line.id === current ? "（当前）" : ""}</h3>
         {r.when && <p className="line-when">{r.when}</p>}
         <p>{r.turns} 回合 · {r.last}</p>
       </button>
-      <button className="ghost" aria-label={`${r.line.name}的更多操作`} onClick={() => setMenu(r)}><Icon name="more" /></button>
+      <button className="ghost" aria-label={`${r.line.name}的更多操作`} disabled={acting || (busy && !!r.line.deletedAt)} onClick={() => setMenu(r)}><Icon name="more" /></button>
     </div>
   );
 
   // The turn tree takes the sheet's place instead of rising as a second
   // sheet on top (AUDIT_V4 6.3); closing it comes back to the list.
-  if (showTree) return <TreeView worldId={worldId} onClose={() => setShowTree(false)} onJumped={(message) => { setShowTree(false); onClose(); onChanged(message); }} />;
+  if (showTree) return <TreeView worldId={worldId} busy={busy} onClose={() => setShowTree(false)} onJumped={(message) => { setShowTree(false); onClose(); onChanged(message); }} />;
 
   return (
     <Sheet title="世界线" onClose={onClose}>
+      {busy && <p className="notice mt-0" role="status">正在续写故事，等这一段写完再切换、归档或删除路线。</p>}
       <div className="list">
-        {routes.map((r) => card(r, () => void act(() => tree.switchLine(game.repo, worldId, r.line.id), `已切换到“${r.line.name}”`)))}
+        {routes.map((r) => card(r, () => (r.line.id === current ? onClose() : void act(() => tree.switchLine(game.repo, worldId, r.line.id), `已切换到“${r.line.name}”`, true)), busy && r.line.id !== current))}
       </div>
       {bookmarks.length > 0 && <>
         <p className="muted">书签（点一下从那里接着玩）</p>
-        <div className="list">{bookmarks.map((r) => card(r, () => void act(() => tree.jumpTo(game.repo, worldId, r.line.nodeId, `从书签“${r.line.name}”继续`), `已回到书签“${r.line.name}”`)))}</div>
+        <div className="list">{bookmarks.map((r) => card(r, () => void act(() => tree.jumpTo(game.repo, worldId, r.line.nodeId, `从书签“${r.line.name}”继续`), `已回到书签“${r.line.name}”`, true), busy))}</div>
       </>}
       {archived.length > 0 && <details>
         <summary className="muted">已归档 {archived.length}</summary>
@@ -87,7 +99,7 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
       </details>}
       {trash.length > 0 && <details>
         <summary className="muted">回收站 {trash.length}（30 天后自动清除）</summary>
-        <div className="list">{trash.map((r) => card(r, () => setMenu(r)))}</div>
+        <div className="list">{trash.map((r) => card(r, () => setMenu(r), busy))}</div>
       </details>}
       <button className="ghost start" onClick={() => setShowTree(true)}>看回合树 ›</button>
       <p className="muted">长按任意一段，可以“回到这里”开出新路线，或者“加书签”。</p>
@@ -95,13 +107,13 @@ export function LinesSheet({ worldId, current, onClose, onChanged }: { worldId: 
         title={menu.line.name}
         onClose={() => setMenu(null)}
         items={menu.line.deletedAt ? [
-          { label: "恢复", onSelect: () => void act(() => game.repo.setLineDeleted(menu.line.id, false), `已恢复“${menu.line.name}”`) },
-          { label: "彻底删除", danger: true, onSelect: async () => { if (await ask({ title: `彻底删除“${menu.line.name}”？`, message: "只属于这条路线的回合会一起删掉，不能恢复。", confirm: "彻底删除", danger: true })) void act(() => game.repo.purgeLine(menu.line.id), "已彻底删除"); } },
+          { label: "恢复", hidden: busy, onSelect: () => void act(() => game.repo.setLineDeleted(menu.line.id, false), `已恢复“${menu.line.name}”`) },
+          { label: "彻底删除", danger: true, hidden: busy, onSelect: async () => { if (await ask({ title: `彻底删除“${menu.line.name}”？`, message: "只属于这条路线的回合会一起删掉，不能恢复。", confirm: "彻底删除", danger: true })) void act(() => game.repo.purgeLine(menu.line.id), "已彻底删除"); } },
         ] : [
           { label: "重命名", onSelect: () => setRenaming(menu) },
-          { label: "归档", hidden: menu.line.kind !== "line" || menu.line.archived || menu.line.id === current, onSelect: () => void act(() => game.repo.setLineArchived(menu.line.id, true), `已归档“${menu.line.name}”`) },
-          { label: "取消归档", hidden: !menu.line.archived, onSelect: () => void act(() => game.repo.setLineArchived(menu.line.id, false), `“${menu.line.name}”回到了路线列表`) },
-          { label: "删除", danger: true, hidden: menu.line.id === current, onSelect: () => void act(() => game.repo.setLineDeleted(menu.line.id, true), `“${menu.line.name}”已放进回收站`) },
+          { label: "归档", hidden: busy || menu.line.kind !== "line" || menu.line.archived || menu.line.id === current, onSelect: () => void act(() => game.repo.setLineArchived(menu.line.id, true), `已归档“${menu.line.name}”`) },
+          { label: "取消归档", hidden: busy || !menu.line.archived, onSelect: () => void act(() => game.repo.setLineArchived(menu.line.id, false), `“${menu.line.name}”回到了路线列表`) },
+          { label: "删除", danger: true, hidden: busy || menu.line.id === current, onSelect: () => void act(() => game.repo.setLineDeleted(menu.line.id, true), `“${menu.line.name}”已放进回收站`) },
         ]}
       />}
       {renaming && <NameSheet title="重命名" initial={renaming.line.name} onClose={() => setRenaming(null)}

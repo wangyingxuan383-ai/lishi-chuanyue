@@ -10,7 +10,7 @@ import { RecentUsageLine } from "./TurnUsage";
 import { DiffView, RecordChanges } from "./WritingAssist";
 import { diffStats, diffText } from "./textDiff";
 
-export interface FactSyncAsk { anchor: WritingAnchor; text: string; latest: boolean; autoStart?: boolean }
+export interface FactSyncAsk { anchor: WritingAnchor; text: string; latest: boolean; isOpening?: boolean; autoStart?: boolean }
 
 export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
   ask: FactSyncAsk; onTextOnly: () => Promise<void>; onAdopt: (preview: PlayerRevisionPreview) => Promise<void>; onClose: () => void;
@@ -47,7 +47,11 @@ export function FactSyncSheet({ ask, onTextOnly, onAdopt, onClose }: {
     setSaving(true); setError("");
     try { await action(); onClose(); } catch (e) { setError(writingError(e)); } finally { setSaving(false); }
   };
-  const where = ask.latest ? "改好的会成为这一段的另一个版本，原来的留着。" : "这段不是最新一段：会另起一条“改写后的路线”，原路线和后面的剧情都留着。";
+  const where = ask.isOpening
+    ? "这是开场段：采用后会另起一条“修订开场后的路线”，原来的开场留着。"
+    : ask.latest
+      ? "改好的会成为这一段的另一个版本，原来的留着。"
+      : "这段不是最新一段：会另起一条“改写后的路线”，原路线和后面的剧情都留着。";
   return <Sheet title="这段的事实也要一起改吗？" onClose={() => { task.current?.cancel(); onClose(); }}>
     <div className="stack">
       {hasDiff && step !== "syncing" && (

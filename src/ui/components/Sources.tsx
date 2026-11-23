@@ -78,7 +78,7 @@ function ChapterPickSheet({ title, book, maxSection, value, onSelect, onClose }:
       <div className="scope-toc-bar">
         <input type="search" aria-label={`搜索${title}`} value={query}
           onChange={(e) => { setQuery(e.target.value); setLimit(TOC_PAGE); }}
-          placeholder="搜章名或章号，如 61、六十一、永冻之域" />
+          placeholder="搜章名或章号，如 61、六十一、风雪夜归" />
       </div>
       <div className="row">
         <label className="row grow gap-2">
@@ -292,7 +292,7 @@ export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSe
   </div></Sheet>;
 }
 
-export function SourceSetup({ value, onChange, disabled = false, fanfic = false }: { value: SourceBinding | null | undefined; onChange: (b: SourceBinding | null) => void; disabled?: boolean; fanfic?: boolean }) {
+export function SourceSetup({ value, onChange, disabled = false, fanfic = false, worldId = null }: { value: SourceBinding | null | undefined; onChange: (b: SourceBinding | null) => void; disabled?: boolean; fanfic?: boolean; worldId?: string | null }) {
   const { game, toast } = useApp();
   const [library, setLibrary] = useState(false), [book, setBook] = useState<SourceBook | null>(null), [analysis, setAnalysis] = useState(false), [browse, setBrowse] = useState(false), [notes, setNotes] = useState(false);
   const [picking, setPicking] = useState<"position" | "through" | null>(null);
@@ -334,7 +334,7 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false 
       <p className="muted m-0">直接检索无需预先调用 AI。未整理也可以先直接使用，以后再整理。修改用法不会自动重新整理，也不会自动产生费用。</p>
       <div className="row wrap"><button onClick={() => setBrowse(true)}>目录与正文</button><button onClick={() => setNotes(true)}>原著札记</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
       <p className="muted m-0">原著札记：让 AI 先整理一段主线、一个人物或一个设定，写作时带上，比每段都翻原文更快更省。</p>
-      {notes && <CanonNotesSheet bookId={value.bookId} worldId={null} position={value.position} through={value.through} onClose={() => setNotes(false)} />}
+      {notes && <CanonNotesSheet bookId={value.bookId} worldId={worldId} position={value.position} through={value.through} onClose={() => setNotes(false)} />}
     </>}
     {library && <SourceLibrary onClose={() => setLibrary(false)} onSelect={(b, use) => { onChange(newBinding(b.id, use === "fanfic" || fanfic || value?.fanfic)); toast("已选入，保存设置后生效"); }} />}
     {browse && book && <Sheet title={book.title} onClose={() => setBrowse(false)}><BookPreview book={book} through={value?.through} /></Sheet>}

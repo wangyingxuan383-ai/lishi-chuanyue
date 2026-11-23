@@ -192,3 +192,102 @@ test("runtime manifest rejects altered build artifacts", async () => {
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("B43 source agent-host/src files match packaged .cache/runtime/host/src byte-for-byte", async () => {
+  const srcDir = path.join(hostRoot, "src");
+  const runtimeSrcDir = path.join(hostRoot, ".cache/runtime/host/src");
+  const entries = (await fs.readdir(srcDir)).filter(name => name.endsWith(".mjs")).sort();
+  assert.ok(entries.length > 0);
+  for (const name of entries) {
+    const [sourceBytes, runtimeBytes] = await Promise.all([
+      fs.readFile(path.join(srcDir, name)),
+      fs.readFile(path.join(runtimeSrcDir, name)),
+    ]);
+    assert.equal(Buffer.compare(sourceBytes, runtimeBytes), 0, `Stale packaged runtime file: host/src/${name}`);
+  }
+});
+
+test("B47 resume continuation runs inside AgentSession lifecycle with streaming state, retry, queue drain and abort waiting", { timeout: 30_000 }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "lishi-pi-resume-lifecycle-"));
+  let attemptCount = 0;
+  let holdSecondRun = false;
+  let releaseHeldServer;
+  let heldEnteredResolve;
+  const heldEntered = new Promise(resolve => { heldEnteredResolve = resolve; });
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const callNo = ++attemptCount;
+    if (callNo === 1) {
+      // Transient 503 to verify AgentSession auto-retry works during resume!
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Service overloaded, please retry" } }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+    if (holdSecondRun) {
+      res.write(`data: ${JSON.stringify({
+        id: `resume-${callNo}`, object: "chat.completion.chunk", created: 1, model: "resume-mock",
+        choices: [{ index: 0, delta: { role: "assistant", content: "中断前片段" }, finish_reason: null }],
+      })}\n\n`);
+      releaseHeldServer = () => { try { res.end(); } catch {} };
+      heldEnteredResolve();
+      return;
+    }
+    const hasFollowUp = JSON.stringify(body.messages).includes("续跑期间排队补充");
+    res.end(`data: ${JSON.stringify({
+      id: `resume-${callNo}`, object: "chat.completion.chunk", created: 1, model: "resume-mock",
+      choices: [{ index: 0, delta: { role: "assistant", content: hasFollowUp ? "已合并排队补充完成。" : "首次续跑回复。" }, finish_reason: "stop" }],
+    })}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const model = { id: "resume-mock", protocol: "chat-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "local-resume-mock", inputTokens: 12000, maxOutputTokens: 1024 };
+  let host;
+  try {
+    host = await PiHost.create({
+      directory, model, tools: [], systemPrompt: "验证续跑生命周期。",
+      invokeTool: async () => ({ ok: true, data: {} }),
+    });
+    // Seed an interrupted session whose tail is a user turn (triggers canContinueDirectly)
+    host.manager.appendMessage({ role: "user", content: [{ type: "text", text: "请核对第一章设定" }], timestamp: Date.now() });
+    let observedStreaming = false;
+    let queuedFollowUp = false;
+    const unsub = host.session.subscribe(ev => {
+      if (ev.type === "turn_start" && host.session.isStreaming) {
+        observedStreaming = true;
+        if (attemptCount === 1 && !queuedFollowUp) {
+          queuedFollowUp = true;
+          void host.followUp("续跑期间排队补充");
+        }
+      }
+    });
+    const resumed = await host.prompt("", "resume-task-1", { resume: true });
+    unsub();
+    assert.equal(observedStreaming, true, "session.isStreaming must be true during direct resume continuation");
+    assert.equal(attemptCount, 3, "resume must auto-retry transient 503 and drain followUp queue");
+    assert.match(resumed.text, /已合并排队补充完成/);
+    assert.equal(host.session.isIdle, true);
+
+    // Verify abort() + waitForIdle() properly waits for resumed run settlement
+    host.manager.appendMessage({ role: "user", content: [{ type: "text", text: "第二轮续跑等待停止" }], timestamp: Date.now() });
+    holdSecondRun = true;
+    const runningAbort = host.prompt("", "resume-task-2", { resume: true });
+    await heldEntered;
+    assert.equal(host.session.isStreaming, true);
+    assert.equal(host.session.isIdle, false);
+    const abortPromise = host.abort();
+    releaseHeldServer?.();
+    await abortPromise;
+    await assert.rejects(runningAbort, err => err.code === "aborted");
+    assert.equal(host.session.isStreaming, false);
+    assert.equal(host.session.isIdle, true);
+  } finally {
+    releaseHeldServer?.();
+    await host?.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

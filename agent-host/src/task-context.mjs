@@ -40,7 +40,8 @@ function userBlocks(content) {
 }
 
 /** Merge consecutive user turns in the outgoing request projection only so
- * Anthropic/Gemini never reject a resumed session whose tail was a user turn. */
+ * Anthropic/Gemini/strict-role relays never reject consecutive user messages
+ * (including after custom task-state or compaction summary blocks convert to user). */
 export function coalesceConsecutiveUsers(messages) {
   let hasAdjacent = false;
   for (let i = 1; i < messages.length; i++) {
@@ -61,6 +62,12 @@ export function coalesceConsecutiveUsers(messages) {
     }
   }
   return out;
+}
+
+/** Wrap Pi's convertToLlm so dynamic custom/compaction blocks mapped to role:"user"
+ * are coalesced with any adjacent user message as the final LLM projection step. */
+export function wrapConvertToLlm(convertToLlm) {
+  return async messages => coalesceConsecutiveUsers(await convertToLlm(messages));
 }
 
 export class TaskContext {
@@ -90,7 +97,7 @@ export class TaskContext {
     // made during that phase, and a different task's snapshot is never reused.
     const taskId = this.getTaskId();
     if (!taskId) return undefined;
-    const messages = coalesceConsecutiveUsers(event.messages.filter(message => !ownMessage(message)));
+    const messages = event.messages.filter(message => !ownMessage(message));
     try {
       if (context.signal?.aborted) throw unavailable(true);
       const result = await this.getTaskState({ signal: context.signal });

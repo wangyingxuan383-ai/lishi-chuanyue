@@ -4,13 +4,15 @@ import { EXIT_MS, motionOn } from "./motion";
 import type { Platform } from "../../platform";
 import type { Game } from "../../engine/game";
 import type { Profile } from "../../engine/llm/providers";
+import type { CompanionScreenProps } from "../screens/CompanionScreen";
 
 export type Route =
   | { name: "home" }
   | { name: "setup"; first?: boolean; profileId?: string }
-  | { name: "newgame" }
+  | { name: "newgame"; resumeRunId?: string }
   | { name: "play"; worldId: string; resumeRunId?: string }
   | { name: "agent"; worldId: string; lineId: string; sessionId?: string; initialText?: string; skills?: string[]; target?: { nodeId: string; paragraph?: number; evidence?: import("../../engine/types").FactCitation[] } }
+  | ({ name: "companion" } & CompanionScreenProps)
   | { name: "settings" }
   | { name: "guide" };
 

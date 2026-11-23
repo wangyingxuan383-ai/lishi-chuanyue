@@ -4,7 +4,6 @@ import { KnowledgeRecords } from "./Continuity";
 import { useEffect, useRef, useState } from "react";
 import type { EraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
-import { rejectedReason } from "../../engine/game";
 import { formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
@@ -46,6 +45,15 @@ function levelValue(index: number, count: number): number {
 
 export const NAME_MAX = 12;
 const quantityText = (i: Item) => `${i.quantity}${i.unit ? ` ${i.unit}` : ""}`;
+const saveError = (e: unknown) => (e instanceof Error ? e.message : "没能保存，请稍后再试");
+
+interface StatusDraft {
+  _key: string;
+  name: string;
+  detail: string;
+  sinceMinute: number;
+  isNew: boolean;
+}
 
 function Stat({ label, value, n, tone }: { label: string; value: string; n?: number; tone?: "good" | "warn" | "bad" }) {
   return (
@@ -75,7 +83,7 @@ function HeroPanel({ text }: { text: string }) {
 }
 
 /** 人物小传: name, age, identity, who they were and their 金手指 (AUDIT_V4_FUNCTION F7). */
-function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () => void; onSave: Save }) {
+function BioSheet({ state, headId, onClose, onSave }: { state: WorldState; headId: string; onClose: () => void; onSave: Save }) {
   const me = state.protagonist;
   const [name, setName] = useState(me.name);
   const [age, setAge] = useState(me.age != null ? String(me.age) : "");
@@ -101,9 +109,9 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
     if (!summary.length) { onClose(); return; }
     setSaving(true);
     try {
-      await onSave({ profile }, `人物小传：${summary.join("、")}`);
+      await onSave({ profile }, `人物小传：${summary.join("、")}`, headId);
       onClose();
-    } catch (e) { setProblem(rejectedReason(e)); } finally { setSaving(false); }
+    } catch (e) { setProblem(saveError(e)); } finally { setSaving(false); }
   };
 
   return (
@@ -133,7 +141,7 @@ function BioSheet({ state, onClose, onSave }: { state: WorldState; onClose: () =
 }
 
 /** One item of the 行囊, or a new one (AUDIT_V4_FUNCTION F8). */
-function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state: WorldState; onClose: () => void; onSave: Save }) {
+function ItemSheet({ item, state, headId, onClose, onSave }: { item: Item | null; state: WorldState; headId: string; onClose: () => void; onSave: Save }) {
   const { ask } = useApp();
   const [name, setName] = useState(item?.name ?? "");
   const [quantity, setQuantity] = useState(String(item?.quantity ?? 1));
@@ -149,7 +157,7 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } catch (e) { setProblem(rejectedReason(e)); } finally { setSaving(false); }
+    try { await onSave(patch, summary, headId); onClose(); } catch (e) { setProblem(saveError(e)); } finally { setSaving(false); }
   };
   const save = async () => {
     if (!clean) return;
@@ -191,7 +199,7 @@ function ItemSheet({ item, state, onClose, onSave }: { item: Item | null; state:
 }
 
 /** 整理状况 (R30 step 2): AI suggests which statuses are over; the player keeps what to remove checked. */
-function StatusTidySheet({ worldId, onClose, onSave }: { worldId: string; onClose: () => void; onSave: Save }) {
+function StatusTidySheet({ worldId, headId, onClose, onSave }: { worldId: string; headId: string; onClose: () => void; onSave: Save }) {
   const { game, toast } = useApp();
   const [found, setFound] = useState<{ name: string; why: string }[] | null>(null);
   const [off, setOff] = useState<Set<string>>(new Set());
@@ -202,10 +210,10 @@ function StatusTidySheet({ worldId, onClose, onSave }: { worldId: string; onClos
   const apply = async () => {
     setSaving(true);
     try {
-      await onSave({ status: chosen.map((x) => ({ op: "remove" as const, name: x.name })) }, `整理状况：去掉${chosen.map((x) => x.name).join("、")}`);
+      await onSave({ status: chosen.map((x) => ({ op: "remove" as const, name: x.name })) }, `整理状况：去掉${chosen.map((x) => x.name).join("、")}`, headId);
       toast(`去掉了 ${chosen.length} 项状况，可撤销`);
       onClose();
-    } catch (e) { setProblem(rejectedReason(e)); } finally { setSaving(false); }
+    } catch (e) { setProblem(saveError(e)); } finally { setSaving(false); }
   };
   return (
     <Sheet title="整理身上的状况" onClose={onClose}>
@@ -241,8 +249,11 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
 }) {
   const [tab, setTab] = useState<Tab>(initialTab ?? "我");
   const [draft, setDraft] = useState<WorldState | null>(null);
+  const [statusDrafts, setStatusDrafts] = useState<StatusDraft[]>([]);
+  const nextStatusKey = useRef(0);
   // What the draft started from: beside a docked panel a turn can be played while editing, and saving keeps what it did.
   const [base, setBase] = useState<WorldState | null>(null);
+  const [draftHeadId, setDraftHeadId] = useState(headId);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [bio, setBio] = useState(false);
@@ -252,6 +263,34 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   const editingRef = useRef(false);
   editingRef.current = editing;
   useEffect(() => { if (initialTab && !editingRef.current) setTab(initialTab); }, [initialTab, initialTabNonce]);
+  // Reset open drafts/sub-editors if the world or head changes externally (line switch, undo/redo, turn commit).
+  const prevAnchor = useRef(`${worldId}:${headId}`);
+  useEffect(() => {
+    const key = `${worldId}:${headId}`;
+    if (prevAnchor.current === key) return;
+    prevAnchor.current = key;
+    setDraft(null);
+    setBase(null);
+    setStatusDrafts([]);
+    setProblem(null);
+    setBio(false);
+    setItem(null);
+    setTidy(false);
+  }, [worldId, headId]);
+  const startEdit = () => {
+    setProblem(null);
+    setBase(state);
+    setDraftHeadId(headId);
+    setDraft(structuredClone(state));
+    setStatusDrafts(state.protagonist.statuses.map((s) => ({
+      _key: `existing-${++nextStatusKey.current}`,
+      name: s.name,
+      detail: s.detail,
+      sinceMinute: s.sinceMinute,
+      isNew: false,
+    })));
+  };
+  const cancelEdit = () => { setDraft(null); setBase(null); setStatusDrafts([]); setProblem(null); };
   const change = (fn: (s: WorldState) => void) => setDraft((s) => { const next = structuredClone(s!); fn(next); return next; });
   // Closing slides the panel back out to the right before it is removed (R28).
   const [leaving, setLeaving] = useState(false);
@@ -265,7 +304,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   };
   useBack(() => {
     if (saving) return true;
-    if (editing) { setDraft(null); return true; }
+    if (editing) { cancelEdit(); return true; }
     if (docked) return false;
     close();
     return true;
@@ -278,6 +317,10 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
 
   const save = async () => {
     if (!draft) return;
+    if (statusDrafts.some((s) => s.isNew && !s.name.trim())) {
+      setProblem("新添加的状况还没有填名称；不用添加的话点旁边的“去掉”。");
+      return;
+    }
     const patch: TurnRecord = {};
     const summary: string[] = [];
     // Only what the player changed since the draft began; the values shown are today's.
@@ -294,23 +337,51 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
       (patch.setStats ??= {})[key] = value;
       summary.push(`${STAT_LABEL[key]} ${level(current.stats[key], LEVELS[key])} → ${level(value, LEVELS[key])}`);
     }
+    const keptExisting = new Set(statusDrafts.filter((s) => !s.isNew).map((s) => s.name));
+    const newByName = new Map<string, { name: string; detail: string }>();
+    for (const s of statusDrafts.filter((x) => x.isNew)) {
+      const clean = s.name.trim();
+      if (!clean) continue;
+      const prev = newByName.get(clean);
+      newByName.set(clean, { name: clean, detail: s.detail.trim() || prev?.detail || "" });
+    }
     for (const s of before.statuses) {
-      if (me.statuses.some((x) => x.name === s.name) || !current.statuses.some((x) => x.name === s.name)) continue;
+      if (keptExisting.has(s.name) || newByName.has(s.name) || !current.statuses.some((x) => x.name === s.name)) continue;
       (patch.status ??= []).push({ op: "remove", name: s.name });
       summary.push(`去掉状况 ${s.name}`);
     }
-    for (const s of me.statuses.filter((x) => x.name.trim())) {
-      if (before.statuses.some((x) => x.name === s.name)) continue;
-      (patch.status ??= []).push({ op: "add", name: s.name.trim(), detail: s.detail });
-      summary.push(`添加状况 ${s.name.trim()}`);
+    let duplicateUnchanged: string | null = null;
+    for (const [clean, added] of newByName) {
+      const existing = matchName(before.statuses, clean, { partial: false });
+      if (existing) {
+        if (added.detail && added.detail !== existing.detail) {
+          (patch.status ??= []).push({ op: "add", name: existing.name, detail: added.detail });
+          summary.push(`更新状况 ${existing.name}`);
+        } else if (!keptExisting.has(existing.name) && !added.detail && existing.detail) {
+          (patch.status ??= []).push({ op: "remove", name: existing.name }, { op: "add", name: existing.name, detail: "" });
+          summary.push(`更新状况 ${existing.name}`);
+        } else if (keptExisting.has(existing.name)) {
+          duplicateUnchanged = existing.name;
+        }
+        continue;
+      }
+      (patch.status ??= []).push({ op: "add", name: clean, detail: added.detail });
+      summary.push(`添加状况 ${clean}`);
     }
-    if (!summary.length) { setDraft(null); return; }
+    if (!summary.length) {
+      if (duplicateUnchanged) {
+        setProblem(`身上已经有“${duplicateUnchanged}”了；想更新说明可填好说明再保存。`);
+        return;
+      }
+      cancelEdit();
+      return;
+    }
     setSaving(true);
     setProblem(null);
     try {
-      await onSave(patch, summary.slice(0, 3).join("、") + (summary.length > 3 ? "等" : ""));
-      setDraft(null);
-    } catch (e) { setProblem(rejectedReason(e)); } finally { setSaving(false); }
+      await onSave(patch, summary.slice(0, 3).join("、") + (summary.length > 3 ? "等" : ""), draftHeadId);
+      cancelEdit();
+    } catch (e) { setProblem(saveError(e)); } finally { setSaving(false); }
   };
 
   return (
@@ -318,7 +389,7 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
       <div className="topbar">
         {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={close}><Icon name="back" /></button>}
         <div className="title"><h1>{tab === "我" ? "我" : me.name}</h1>{tab !== "我" && <div className="subtitle">{[me.gender, me.age ? `${me.age} 岁` : ""].filter(Boolean).join(" · ")}</div>}</div>
-        {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={() => { setProblem(null); setBase(state); setDraft(structuredClone(state)); }}>修改</button>}
+        {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={startEdit}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
         {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && t !== "我"} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
@@ -372,17 +443,25 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
                 <p className="muted m-0">身上的状况</p>
                 {!editing && me.statuses.some((x) => x.name !== "垂危") && <button className="ghost small" disabled={busy} onClick={() => setTidy(true)}>看看哪些已经好了</button>}
               </div>
-              {me.statuses.length ? me.statuses.map((s, i) => (
-                <div className="item-row" key={i}>
-                  {editing && !state.protagonist.statuses.some((x) => x.name === s.name) ? <div className="stack grow">
-                    <input aria-label="状况名称" placeholder="名称" value={s.name} onChange={(e) => change((d) => { d.protagonist.statuses[i].name = e.target.value; })} />
-                    <input aria-label="状况说明" placeholder="说明" value={s.detail} onChange={(e) => change((d) => { d.protagonist.statuses[i].detail = e.target.value; })} />
-                  </div> : <div className="grow"><b className={s.name === "垂危" ? "status-danger" : undefined}>{s.name}</b><small>{s.detail}</small></div>}
-                  {!editing && s.name === "垂危" && <span className="tag tag-loss">危重</span>}
-                  {editing && <button onClick={() => change((d) => { d.protagonist.statuses.splice(i, 1); })}>去掉</button>}
-                </div>
-              )) : <p className="muted mt-2 mb-0">无</p>}
-              {editing && <button className="mt-2" onClick={() => change((d) => { d.protagonist.statuses.push({ name: "", detail: "", sinceMinute: d.time.elapsedMinutes }); })}><Icon name="plus" size={18} />添加状况</button>}
+              {editing ? (
+                statusDrafts.length ? statusDrafts.map((s) => (
+                  <div className="item-row" key={s._key}>
+                    {s.isNew ? <div className="stack grow">
+                      <input aria-label="状况名称" placeholder="名称" value={s.name} onChange={(e) => { const v = e.target.value; setStatusDrafts((list) => list.map((x) => (x._key === s._key ? { ...x, name: v } : x))); }} />
+                      <input aria-label="状况说明" placeholder="说明" value={s.detail} onChange={(e) => { const v = e.target.value; setStatusDrafts((list) => list.map((x) => (x._key === s._key ? { ...x, detail: v } : x))); }} />
+                    </div> : <div className="grow"><b className={s.name === "垂危" ? "status-danger" : undefined}>{s.name}</b><small>{s.detail}</small></div>}
+                    <button onClick={() => setStatusDrafts((list) => list.filter((x) => x._key !== s._key))}>去掉</button>
+                  </div>
+                )) : <p className="muted mt-2 mb-0">无</p>
+              ) : (
+                me.statuses.length ? me.statuses.map((s, i) => (
+                  <div className="item-row" key={`${s.name}-${i}`}>
+                    <div className="grow"><b className={s.name === "垂危" ? "status-danger" : undefined}>{s.name}</b><small>{s.detail}</small></div>
+                    {s.name === "垂危" && <span className="tag tag-loss">危重</span>}
+                  </div>
+                )) : <p className="muted mt-2 mb-0">无</p>
+              )}
+              {editing && <button className="mt-2" onClick={() => { setProblem(null); setStatusDrafts((list) => [...list, { _key: `new-${++nextStatusKey.current}`, name: "", detail: "", sinceMinute: state.time.elapsedMinutes, isNew: true }]); }}><Icon name="plus" size={18} />添加状况</button>}
             </div>
             {problem && <p className="notice m-0">{problem}</p>}
           </div>
@@ -397,18 +476,18 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
           <button disabled={busy} onClick={() => setItem({ item: null })}><Icon name="plus" size={18} />添加物品</button>
         </div>}
         {tab === "我" && <KnowledgeRecords worldId={worldId} headId={headId} person={{ id: "protagonist", name: me.name, aliases: me.aliases }} busy={busy} onSaved={onContinuitySaved} />}
-        {tab === "人物" && <People worldId={worldId} headId={headId} onContinuitySaved={onContinuitySaved} state={state} era={era} busy={busy} onSave={onSave} />}
+        {tab === "人物" && <People worldId={worldId} headId={headId} onContinuitySaved={onContinuitySaved} onClosePanel={!docked ? onClose : undefined} state={state} era={era} busy={busy} onSave={onSave} />}
         {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
         {tab === "设定" && <Codex worldId={worldId} state={state} era={era} headId={headId} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
-        {tab === "目标" && <Goals state={state} era={era} busy={busy} onSave={onSave} />}
+        {tab === "目标" && <Goals state={state} era={era} headId={headId} busy={busy} onSave={onSave} />}
       </div>
       {editing && <div className="dock row between">
-        <button disabled={saving} onClick={() => setDraft(null)}>取消</button>
+        <button disabled={saving} onClick={cancelEdit}>取消</button>
         <button className="primary" disabled={saving || busy} onClick={() => void save()}>{busy ? "等这段写完" : "保存修改"}</button>
       </div>}
-      {bio && <BioSheet state={state} onClose={() => setBio(false)} onSave={onSave} />}
-      {tidy && <StatusTidySheet worldId={worldId} onClose={() => setTidy(false)} onSave={onSave} />}
-      {item && <ItemSheet item={item.item} state={state} onClose={() => setItem(null)} onSave={onSave} />}
+      {bio && <BioSheet state={state} headId={headId} onClose={() => setBio(false)} onSave={onSave} />}
+      {tidy && <StatusTidySheet worldId={worldId} headId={headId} onClose={() => setTidy(false)} onSave={onSave} />}
+      {item && <ItemSheet item={item.item} state={state} headId={headId} onClose={() => setItem(null)} onSave={onSave} />}
     </div>
   );
 }

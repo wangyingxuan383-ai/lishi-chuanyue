@@ -42,6 +42,24 @@ export function rangeLabel(from: number, to: number): string {
   return from === 0 ? `开场～第 ${to} 回合` : `第 ${from}～${to} 回合`;
 }
 
+/**
+ * Jumping to story turn `storyNodeId` inside `seg` lands on the last contiguous
+ * `edit` node attached right after that turn, preserving its upkeep and panel edits (B25).
+ */
+export function jumpTarget(seg: Segment, storyNodeId: string): StoryNode {
+  let idx = seg.nodes.findIndex((n) => n.id === storyNodeId);
+  if (idx < 0) return seg.nodes[seg.nodes.length - 1];
+  while (idx + 1 < seg.nodes.length && !isStory(seg.nodes[idx + 1])) idx++;
+  return seg.nodes[idx];
+}
+
+/** Readable summary for a pure-`edit` segment so it is never blank in the turn tree (B25). */
+export function editSummary(nodes: StoryNode[]): string {
+  const parts = nodes.map((n) => (n.actionText || n.narrative || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (!parts.length) return "状态与设定修改";
+  return parts.length === 1 ? parts[0] : `${parts[0]} → ${parts[parts.length - 1]}`;
+}
+
 /** Number of segments, for tests and sanity checks. */
 export function countSegments(roots: Segment[]): number {
   return roots.reduce((n, seg) => n + 1 + countSegments(seg.children), 0);

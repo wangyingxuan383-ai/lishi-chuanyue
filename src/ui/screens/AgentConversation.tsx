@@ -9,6 +9,8 @@ import { useApp, type Route } from "../app/context";
 import { Icon } from "../components/Icon";
 import { MenuSheet, Sheet } from "../components/Sheet";
 import { StoryText } from "../components/StoryText";
+import { CompanionMarkdown } from "./companion/CompanionMarkdown";
+import { BudgetReminder } from "../components/MonthlyBudget";
 import { Switch } from "../components/Switch";
 import { usePrices } from "../components/TurnUsage";
 import { DiffView } from "../components/WritingAssist";
@@ -36,8 +38,8 @@ const inFlight = (status: string) => ["running", "committing", "compacting", "st
 const canCompact = (status: string) => ["running", "paused", "failed", "cancelled", "interrupted", "blocked"].includes(status);
 const TOOL_LABELS: Record<string, string> = { list_resources: "查看本局资料", read_resource: "读取本局资料", search_resources: "搜索本局资料", stage_edit: "准备修改", stage_edits: "批量准备修改", stage_story_turn: "准备正式剧情", finish_task: "完成任务", list_skills: "查看可用技能", read_skill: "读取技能", read_world: "读取本局设定", check_draft: "核对草稿", list_sections: "查看原著目录", search_original: "检索原著", read_original: "阅读原著", read_canon_notes: "核对原著札记", read_canon_facts: "查证原著事实", web_search: "联网搜索", read_webpage: "阅读网页", list_remote_tools: "查看外部工具", call_remote_tool: "调用外部工具" };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-function modelFor(profile: Profile, override: string, preferences?: AgentPreferences | null): LlmConfig & { protocol: AgentProtocol; thinkingMode: AgentThinkingMode; contextWindowTokens?: number; maxOutputTokens?: number } {
-  const model = override.trim() || profile.mainModel, protocol = preferences?.protocol ?? "chat-completions";
+function modelFor(profile: Profile, override: string, preferences?: AgentPreferences | null): LlmConfig & { profileId: string; protocol: AgentProtocol; thinkingMode: AgentThinkingMode; contextWindowTokens?: number; maxOutputTokens?: number } {
+  const model = (override.trim() || profile.mainModel).trim(), protocol = preferences?.protocol ?? "chat-completions";
   let url = chatCompletionsUrl(profile.baseUrl);
   if (protocol !== "chat-completions") {
     let base = profile.baseUrl.trim().replace(/\/+$/, "").replace(/\/(?:chat\/completions|responses|messages)$/, "");
@@ -50,7 +52,7 @@ function modelFor(profile: Profile, override: string, preferences?: AgentPrefere
       url = `${base}/${protocol === "openai-responses" ? "responses" : "messages"}`;
     }
   }
-  return { slot: profile.keySlot, url: preferences?.modelUrl?.trim() || url, model, auxModel: profile.auxModel ?? undefined, includeUsage: profile.includeUsage, contextTokens: preferences?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, protocol, thinkingMode: preferences?.thinkingMode ?? "off", ...(preferences?.contextWindowTokens ? { contextWindowTokens: preferences.contextWindowTokens } : {}), ...(preferences?.maxOutputTokens ? { maxOutputTokens: preferences.maxOutputTokens, maxTokens: preferences.maxOutputTokens } : {}) };
+  return { profileId: profile.id, slot: profile.keySlot, url: preferences?.modelUrl?.trim() || url, model, auxModel: profile.auxModel?.trim() || "", includeUsage: profile.includeUsage, contextTokens: preferences?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, protocol, thinkingMode: preferences?.thinkingMode ?? "off", ...(preferences?.contextWindowTokens ? { contextWindowTokens: preferences.contextWindowTokens } : {}), ...(preferences?.maxOutputTokens ? { maxOutputTokens: preferences.maxOutputTokens, maxTokens: preferences.maxOutputTokens } : {}) };
 }
 const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "深度思考中…", compacting: "正在整理记忆", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
 const TASK_NAMES: Record<string, string> = { ...TOOL_LABELS, browser_open:"打开资料网页",browser_read:"读取网页正文",browser_find:"查找网页内容",browser_follow:"阅读网页链接",browser_close:"关闭资料网页",list_documents:"查看资料文件",read_document:"读取资料文件",find_document:"查找资料文件",write_document:"写出资料笔记",call_tool_package:"运行工具包",draft_tool_package:"准备工具包草稿", discover_tools: "查找可用工具", read_tool_result: "读取已保存结果", update_plan: "更新任务进度", ask_user: "请你补充信息", search_agent_history: "查找助手对话", validate_changes: "检查修改影响", read_clock: "查看故事时间", stage_clock: "调整故事时间", stage_route: "准备故事路线", run_script: "处理资料", delegate_readonly: "分工查证", read_skill_resource: "读取技能资料", draft_skill: "准备常用技能", list_mcp_resources: "查看服务资料", read_mcp_resource: "读取服务资料" };
@@ -73,10 +75,13 @@ function messageText(message: AgentMessage): string {
 function MessageBody({ message, latest, preserve }: { message: AgentMessage; latest: boolean; preserve: () => void }) {
   const text = messageText(message), [manual, setManual] = useState<boolean | undefined>();
   const collapsible = message.role === "assistant" || text.length > 90 || text.split("\n").length > 2;
-  if (!collapsible) return <StoryText emphasizeDate={false} text={text} />;
+  const rendered = message.role === "assistant"
+    ? <CompanionMarkdown text={text} streaming={message.status === "streaming"} />
+    : <StoryText emphasizeDate={false} text={text} />;
+  if (!collapsible) return rendered;
   const open = manual ?? (message.role === "assistant" && latest);
-  const preview = text.replace(/\s+/g, " ").slice(0, 90);
-  return <details className="agent-message-body" open={open}><summary onClick={event => { event.preventDefault(); preserve(); setManual(!open); }}><span className="agent-message-summary">{open ? "收起内容" : preview}</span></summary>{open && <StoryText emphasizeDate={false} text={text} streaming={message.status === "streaming"} />}</details>;
+  const preview = text.replace(/^[#>*\-\s`]+/gm, "").replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\s+/g, " ").trim().slice(0, 90);
+  return <details className="agent-message-body" open={open}><summary onClick={event => { event.preventDefault(); preserve(); setManual(!open); }}><span className="agent-message-summary">{open ? "收起内容" : preview}</span></summary>{open && rendered}</details>;
 }
 
 const pretty = (value: unknown): string => {
@@ -129,20 +134,31 @@ function ChangePreview({ value }: { value: Json | undefined }) {
 function agentCostLine(budget: AgentBudget, prices: Prices): string {
   const reqs = budget.modelRequests;
   if (!reqs && !budget.activeMs) return "";
-  const inp = (budget.usage?.input ?? 0) + (budget.usage?.cacheRead ?? 0) + (budget.usage?.cacheWrite ?? 0);
+  const rawInput = budget.usage?.input ?? 0;
+  const cacheRead = budget.usage?.cacheRead ?? 0;
+  const cacheWrite = budget.usage?.cacheWrite ?? 0;
+  const inp = rawInput + cacheRead + cacheWrite;
   const out = budget.usage?.output ?? 0;
   const totalTokens = inp + out;
   const unreported = budget.unreportedUsageRequests ?? (budget.usageKnown === false ? Math.max(1, reqs) : 0);
   const allUnknown = reqs > 0 && unreported >= reqs && totalTokens === 0;
   const tokPart = reqs === 0 ? "" : allUnknown ? "用量未知" : `${tokenText(totalTokens)} tokens${unreported > 0 ? `（另 ${unreported} 次未知）` : ""}`;
+  const zeroOrCost = (yuan: number) => (reqs === 0 || totalTokens === 0 || yuan <= 0 ? "¥0" : costText(yuan));
   let costPart = "";
   if (budget.priceKnown && typeof budget.estimatedCost === "number") {
-    costPart = budget.currency && !["CNY", "RMB", "¥"].includes(budget.currency) ? `约 ${budget.estimatedCost.toLocaleString("zh-CN", { maximumFractionDigits: 4 })} ${budget.currency}` : costText(budget.estimatedCost);
-  } else if (prices.input !== null && prices.output !== null && reqs > 0) {
-    if (allUnknown) costPart = "花费未知";
+    if (reqs === 0 || (!allUnknown && (totalTokens === 0 || budget.estimatedCost <= 0))) {
+      costPart = budget.currency && !["CNY", "RMB", "¥"].includes(budget.currency) ? `0 ${budget.currency}` : "¥0";
+    } else {
+      costPart = budget.currency && !["CNY", "RMB", "¥"].includes(budget.currency) ? `约 ${budget.estimatedCost.toLocaleString("zh-CN", { maximumFractionDigits: 4 })} ${budget.currency}` : zeroOrCost(budget.estimatedCost);
+    }
+  } else if (prices.input !== null && prices.output !== null) {
+    if (reqs === 0) costPart = "¥0";
+    else if (allUnknown) costPart = "花费未知";
+    else if (totalTokens === 0) costPart = "¥0";
     else {
-      const yuan = (inp * prices.input + out * prices.output) / 1_000_000;
-      costPart = unreported > 0 ? `已计${costText(yuan)}（另 ${unreported} 次未知）` : costText(yuan);
+      const billableInput = rawInput + cacheWrite + cacheRead * 0.1;
+      const yuan = (billableInput * prices.input + out * prices.output) / 1_000_000;
+      costPart = unreported > 0 ? `已计${zeroOrCost(yuan)}（另 ${unreported} 次未知）` : zeroOrCost(yuan);
     }
   }
   const secPart = budget.activeMs > 0 ? `${Math.max(1, Math.round(budget.activeMs / 1000))} 秒` : "";
@@ -525,13 +541,13 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   });
   const continueTask = (task: AgentTask) => void act(async () => {
     const check=await client.resumeCheck(task.id,prefs?.limits);
+    if(check.reasonCode==="budget_exhausted"){openSettings("limits");throw new Error(check.message);}
     if(check.routeChanged){setRouteChoice({task,currentLineId:check.currentLineId});return;}
     if(!check.canContinue && !check.needsRebase) {
-      if(check.reasonCode==="budget_exhausted")openSettings("limits");
       throw new Error(check.message);
     }
 
-    await client.continue(task.id,input.trim()||undefined,prefs?.limits,prefs?.inputTokens??DEFAULT_AGENT_INPUT_TOKENS,prefs&&selected?modelFor(selected,model,prefs):task.model,prefs?.modelUrl,check.needsRebase);
+    await client.continue(task.id,input.trim()||undefined,prefs?.limits,prefs?.inputTokens??DEFAULT_AGENT_INPUT_TOKENS,prefs&&selected?modelFor(selected,model,prefs):task.model,prefs?.modelUrl??"",check.needsRebase,selected?.id,prefs?.thinkingMode);
     changeInput("");
   });
   const discardTaskDrafts = (task: AgentTask) => void act(async () => {
@@ -539,7 +555,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     await client.discardDrafts(task.id);
     toast("已清空未采用草稿");
   });
-  const compactTask = (task: AgentTask) => void act(async () => { await client.compact(task.id, prefs?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, prefs && selected ? modelFor(selected, model, prefs) : task.model, prefs?.limits, prefs?.modelUrl); toast("已安排整理记忆"); });
+  const compactTask = (task: AgentTask) => void act(async () => { await client.compact(task.id, prefs?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, prefs && selected ? modelFor(selected, model, prefs) : task.model, prefs?.limits, prefs?.modelUrl ?? "", selected?.id, prefs?.thinkingMode); toast("已安排整理记忆"); });
   const inspectTask = (task: AgentTask) => {
     const previous = snapshotCache.current[task.runId];
     if ((previous && !previous.hasMore) || task.runId.startsWith("imported:") || task.status === "archived") return;
@@ -556,6 +572,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     void readSessions(value).catch((failure) => { if (alive.current && revision === sessionQueryRevision.current) setError(errorText(failure)); });
   };
   return <div className="play agent-conversation">
+    <BudgetReminder revision={`${sessionId ?? ""}:${tasks.length}:${last?.status ?? ""}:${last?.budget?.modelRequests ?? 0}`} />
     <div className="topbar">
       <button className="icon-btn" aria-label="返回故事" onClick={pop}><Icon name="back" /></button>
       <div className="title"><h1>助手</h1><div className="subtitle">{worldTitle}</div></div>

@@ -288,3 +288,30 @@ fn new_process_recovery_preserves_other_live_story_owner() {
         "running"
     );
 }
+
+#[test]
+fn disconnected_role_liveness_hook_and_startup_expiry_reclaim_leases_without_waiting_ttl() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reclaim.sqlite");
+    let mut db = database(&path);
+    let now = lease::now_ms();
+    {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        lease::acquire_tx(&tx, "w-android", "task-1", "android-agent:dead-box", now, 45_000).unwrap();
+        lease::acquire_tx(&tx, "w-desktop", "task-2", "old-desktop-uuid", now, 45_000).unwrap();
+        tx.commit().unwrap();
+    }
+    // Startup desktop expiry clears non-android-agent foreign leases while preserving live android-agent
+    assert_eq!(lease::expire_other_instance_leases(&db, "new-desktop-uuid").unwrap(), 1);
+    assert_eq!(lease::current(&db, "w-desktop").unwrap().unwrap().expires_at_ms, 0);
+    assert!(lease::current(&db, "w-android").unwrap().unwrap().expires_at_ms > now);
+
+    // Register role liveness reporting android-agent dead -> acquire_tx immediately takes over with fence 2
+    lease::set_role_liveness_check(Some(Arc::new(|role| role != "android-agent")));
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let ticket = lease::acquire_tx(&tx, "w-android", "turn-run", "ui-main", now + 10, 45_000).unwrap();
+    tx.commit().unwrap();
+    lease::set_role_liveness_check(None);
+    assert_eq!(ticket.fence, 2);
+    assert_eq!(ticket.owner_id, "turn-run");
+}

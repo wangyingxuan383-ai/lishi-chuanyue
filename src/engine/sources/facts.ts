@@ -11,7 +11,7 @@ const text = (value: unknown, max: number) => typeof value === "string" ? value.
 export function structuredSourceAnalysis(raw: string): StructuredSourceAnalysis | null {
   try {
     const value = JSON.parse(raw);
-    return value?.version === "source-3" && typeof value.summary === "string" && Array.isArray(value.facts) ? value : null;
+    return (value?.version === "source-3" || value?.version === "source-4") && typeof value.summary === "string" && Array.isArray(value.facts) ? value : null;
   } catch { return null; }
 }
 
@@ -57,7 +57,7 @@ export function sourceAnalysisResult(raw: string, book: SourceBook, chunk: Sourc
     seen.add(key);
     facts.push({ kind: item.kind, subject, aliases, statement, quote, ...(validFrom !== undefined ? { validFrom } : {}), ...(validThrough !== undefined ? { validThrough } : {}) });
   }
-  const structured: StructuredSourceAnalysis = { version: "source-3", summary: text(value.summary, 4000), facts };
+  const structured: StructuredSourceAnalysis = { version: "source-4", summary: text(value.summary, 4000), facts };
   while (JSON.stringify(structured).length > 20000 && facts.length) facts.pop();
   return {
     text: JSON.stringify(structured),

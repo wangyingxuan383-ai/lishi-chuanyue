@@ -38,12 +38,48 @@ pub(crate) fn workspace(db:&Connection,task:&Value,plan:&RunPlan,work:&Value,new
             edit["rebaseConflicts"]=json!([{"path":"","reason":"target_missing","oldId":old_id,"message":"旧修改目标不在最新路线中，请重新定位或撤回该草稿"}]);
             continue;
         };
-        let latest=ws::resource(db,&fresh_plan,&kind,&rid)?;
-        let mut conflicts=vec![];
-        let merged=merge(Some(&edit["original"]),Some(&latest),Some(&edit["after"]),"",&mut conflicts).unwrap_or(Value::Null);
-        edit["id"]=rid.into();edit["original"]=latest;edit["after"]=merged;
-        edit["rebaseConflicts"]=json!(conflicts);
-        if let Some(obj)=edit.as_object_mut(){obj.remove("needsRelocation");}
+        let Ok(latest) = ws::resource(db, &fresh_plan, &kind, &rid) else {
+            edit["needsRelocation"] = true.into();
+            edit["rebaseConflicts"] = json!([{"path":"","reason":"target_missing","oldId":old_id,"message":"旧修改目标已被删除或不在当前故事中，请重新定位或撤回该草稿"}]);
+            continue;
+        };
+        if kind == "line"
+            && (!latest["deleted_at"].is_null()
+                || latest["archived"].as_i64().unwrap_or(0) != 0)
+        {
+            edit["needsRelocation"] = true.into();
+            edit["rebaseConflicts"] = json!([{"path":"","reason":"target_missing","oldId":old_id,"message":"目标路线已删除或归档，请重新定位或撤回该草稿"}]);
+            continue;
+        }
+        let prior_conflicts: Vec<Value> = edit["rebaseConflicts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| ws::text(c, "reason") != "target_missing")
+            .cloned()
+            .collect();
+        let mut conflicts = vec![];
+        let merged = merge(
+            Some(&edit["original"]),
+            Some(&latest),
+            Some(&edit["after"]),
+            "",
+            &mut conflicts,
+        )
+        .unwrap_or(Value::Null);
+        for old in prior_conflicts {
+            let p = ws::text(&old, "path");
+            if !conflicts.iter().any(|c| ws::text(c, "path") == p) {
+                conflicts.push(old);
+            }
+        }
+        edit["id"] = rid.into();
+        edit["original"] = latest;
+        edit["after"] = merged;
+        edit["rebaseConflicts"] = json!(conflicts);
+        if let Some(obj) = edit.as_object_mut() {
+            obj.remove("needsRelocation");
+        }
     }
     // A planned fork must still refer to a real node, never a node guessed from
     // a compressed conversation. Missing targets are marked for relocation instead of locking resume.

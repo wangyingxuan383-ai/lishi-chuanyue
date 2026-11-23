@@ -101,6 +101,25 @@ pub fn file_cancel_book(request_id: String) {
     }
 }
 
+fn picked_file_name(selected: &FilePath, picked_name: Option<String>, fallback: &str) -> String {
+    if let Some(name) = picked_name
+        .map(|s| s.rsplit(['/', '\\']).next().unwrap_or("").trim().to_owned())
+        .filter(|s| !s.is_empty() && s != "." && s != "..")
+    {
+        return name;
+    }
+    match selected {
+        FilePath::Path(path) => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback)
+            .to_owned(),
+        FilePath::Url(_) => fallback.to_owned(),
+    }
+}
+
 #[tauri::command]
 pub async fn file_import_book(
     app: AppHandle,
@@ -120,23 +139,17 @@ pub async fn file_import_book(
                 .dialog()
                 .file()
                 .add_filter("书籍", &["txt", "epub", "pdf", "docx"])
-                .blocking_pick_file())
+                .blocking_pick_file()
+                .map(|file| (file, None)))
         })
         .await?
     };
-    let Some(selected) = selected else {
+    let Some((selected, picked_name)) = selected else {
         return Ok(None);
     };
     blocking(move || {
         operation.check()?;
-        let name = match &selected {
-            FilePath::Path(path) => path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("参考书籍")
-                .to_string(),
-            _ => "参考书籍".to_string(),
-        };
+        let name = picked_file_name(&selected, picked_name, "参考书籍");
         let mut bytes = Vec::new();
         let mut file = open_file(&app, selected, "r")?;
         let mut buffer = [0u8; 65536];
@@ -213,7 +226,8 @@ pub async fn file_import_text(app: AppHandle) -> Result<Option<String>> {
     #[cfg(target_os = "android")]
     let selected = crate::document_picker::pick_import(&app)
         .await
-        .map_err(|_| io_error())?;
+        .map_err(|_| io_error())?
+        .map(|(file, _)| file);
     #[cfg(not(target_os = "android"))]
     let selected = {
         let handle = app.clone();
@@ -232,11 +246,11 @@ pub async fn file_import_skill(app: AppHandle) -> Result<Option<BookFile>> {
     #[cfg(not(target_os = "android"))]
     let selected = {
         let handle=app.clone();
-        blocking(move ||Ok(handle.dialog().file().add_filter("技能与工具包",&["zip","md","json","toolpkg"]).blocking_pick_file())).await?
+        blocking(move ||Ok(handle.dialog().file().add_filter("技能与工具包",&["zip","md","json","toolpkg"]).blocking_pick_file().map(|file|(file,None)))).await?
     };
-    let Some(selected)=selected else{return Ok(None);};
+    let Some((selected,picked_name))=selected else{return Ok(None);};
     blocking(move || {
-        let name=match &selected {FilePath::Path(path)=>path.file_name().and_then(|p|p.to_str()).unwrap_or("技能包").to_owned(),_=>"技能包".into()};
+        let name=picked_file_name(&selected,picked_name,"技能包");
         let mut bytes=Vec::new();open_file(&app,selected,"r")?.take(8*1024*1024+1).read_to_end(&mut bytes).map_err(|_|io_error())?;
         if bytes.len()>8*1024*1024{return Err(PlatformError::new("file_too_large","技能包最多8MiB"));}
         Ok(Some(BookFile{name,data:base64::engine::general_purpose::STANDARD.encode(bytes)}))
@@ -337,5 +351,22 @@ mod tests {
                 .code,
             "file_too_large"
         );
+    }
+
+    #[test]
+    fn picked_file_name_preserves_android_and_desktop_extensions() {
+        let content = FilePath::Url(tauri::Url::parse("content://example.documents/document/42").unwrap());
+        assert_eq!(
+            picked_file_name(&content, Some("三国演义.epub".into()), "参考书籍"),
+            "三国演义.epub"
+        );
+        assert_eq!(
+            picked_file_name(&content, Some("skill-pack.zip".into()), "技能包"),
+            "skill-pack.zip"
+        );
+        assert_eq!(picked_file_name(&content, None, "参考书籍"), "参考书籍");
+        assert_eq!(picked_file_name(&content, Some("   ".into()), "技能包"), "技能包");
+        let desktop = FilePath::Path(std::path::PathBuf::from("archive/资治通鉴.pdf"));
+        assert_eq!(picked_file_name(&desktop, None, "参考书籍"), "资治通鉴.pdf");
     }
 }

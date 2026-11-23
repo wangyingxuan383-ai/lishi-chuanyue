@@ -5,14 +5,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { parseBook } from "./document-parser.mjs";
 
 try {
-  const { path, name, version, operation, section = 0, offset = 0, charBudget = 4000, through, boundBookHash, query } = workerData;
+  const {
+    path, name, version, operation, section = 0, offset = 0, charBudget = 4000,
+    through, boundBookHash, boundFileHash, fileHash, boundBookId, bookId, query,
+  } = workerData;
   const bytes = new Uint8Array(await fs.readFile(path));
-  if (createHash("sha256").update(bytes).digest("hex") !== version) throw new Error("资料文件版本已变化，请重新读取。");
+  const actualFileHash = createHash("sha256").update(bytes).digest("hex");
+  if (actualFileHash !== version) throw new Error("资料文件版本已变化，请重新读取。");
   const platform = { files: { extractPdf: async () => {
     if (!workerData.pdf) throw new Error("PDF原生文字提取结果尚未取得。");
     return workerData.pdf;
   } } };
-  const cachePath = `${path}.parser1-${workerData.encoding ?? "auto"}.json`;
+  const cachePath = `${path}.parser2-${workerData.encoding ?? "auto"}.json`;
   let book;
   try { const saved = JSON.parse(await fs.readFile(cachePath, "utf8")); if (saved.version === version && Array.isArray(saved.book?.sections)) book = saved.book; } catch { /* Rebuild an absent/invalid derived cache. */ }
   if (!book) {
@@ -22,10 +26,15 @@ try {
     await fs.rename(temporary, cachePath).catch(async () => { await fs.rm(temporary, { force: true }); });
   }
   const normalizedHash = createHash("sha256").update(JSON.stringify(book.sections.map(s => s.text))).digest("hex");
-  const sections = boundBookHash === normalizedHash && Number.isSafeInteger(through) ? book.sections.slice(0, through + 1) : book.sections;
+  const matchesBoundBook = Boolean(
+    (typeof boundFileHash === "string" && boundFileHash && (boundFileHash === actualFileHash || (typeof fileHash === "string" && fileHash && boundFileHash === fileHash)))
+    || (typeof boundBookId === "string" && boundBookId && typeof bookId === "string" && bookId && boundBookId === bookId)
+    || (typeof boundBookHash === "string" && boundBookHash && (boundBookHash === actualFileHash || boundBookHash === normalizedHash)),
+  );
+  const sections = matchesBoundBook && Number.isSafeInteger(through) && through >= 0 ? book.sections.slice(0, through + 1) : book.sections;
   const scalarLength = text => { let size = 0; for (const _ of text) size++; return size; };
   const take = (text, start, size) => { let pos = 0, result = ""; for (const ch of text) { if (pos >= start + size) break; if (pos >= start) result += ch; pos++; } return result; };
-  let result = { title: book.title, format: book.format, version, normalizedHash, sectionCount: sections.length, untrusted: true };
+  let result = { title: book.title, format: book.format, version, fileHash: actualFileHash, normalizedHash, sectionCount: sections.length, untrusted: true };
   if (operation === "find") {
     if (typeof query !== "string" || !query || query.length > 512) throw new Error("请填写不超过512字的查找文字。");
     const hits = [];

@@ -13,8 +13,8 @@ import type { ChatMessage } from "../llm/chat";
 import type { StoryNode, WorldState } from "../types";
 import { abilityCardName, isAbilityCard } from "../memory/cards";
 
-export const UPKEEP_PROMPT_VERSION = "upkeep-8";
-export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-free-8";
+export const UPKEEP_PROMPT_VERSION = "upkeep-9";
+export const UPKEEP_FREE_PROMPT_VERSION = "upkeep-free-9";
 /** Turns between two passes. */
 export const UPKEEP_EVERY = 6;
 const STORY_CHARS = 5000;
@@ -68,7 +68,7 @@ export function upkeepMessages(input: UpkeepInput): ChatMessage[] {
 - 剧情里到过或详细写到的地点：没有描述的补一句描述；没有的新地点可以新建。已有地点里面的一处（院子、偏厅、牢房）写进那个地点的描述，不要另建一张。
 - 【主角的状况】里不是身体或精神状况的（东西、知道的事、处境、别人的态度），和剧情里早已好了、过去了的，写进 statusRemove。
 - 两张标着“AI 整理，可以更新”的卡片，或两个标着“AI 整理”或“还没有描述”的地点，其实是同一样东西、同一个地方的不同叫法（如“县衙”和“县衙大堂”、“密信”和“那封信”），写进 merges：keep 是留下的那个，drop 并进去，content 写合并后的正文。只合并确定是同一个的；同类但不同的两样东西不要合并。
-- 逐张检查标着“AI 整理，可以更新”的卡片和地点：最近的剧情让它过时了（东西被取走、人死了、地方被毁、真相揭开、立场改变），就重写它的正文；没变的不要动。标着“不要改”的一律不动。
+- 逐张检查标着“AI 整理，可以更新”的卡片和地点：只在实质事实变了（东西易主或损毁、人死了、地方被毁、真相揭开、立场改变）时才重写正文；仅在本段顺带提及而事实没变的不要同义改写。标着“不要改”的一律不动。
 - 只写剧情里写到的事实，不编造、不预告；别人转述的话、传闻和猜测要写明“某某说”“传闻”，不要写成定论。同一件事只写在最相关的那一张卡里。用资料口吻，普通卡片每张不超过 80 字（“${ability}”可写到 300 字）。
 - ${free ? "名称和称呼沿用剧情与世界卡，其他叫法写进别名。世界卡只供参考，不改写；不自动编排未来事件，不输出 timeline、deviation。" : "名称用剧情里的叫法，其他叫法写进别名；但要用这个时代该有的说法，不要照抄正文里不合时代的词（附有【这个时代不该出现的东西】时，避开里面的说法）。"}
 - 标着“AI 整理，可以更新”的卡里，只是一次性的场景、已经结束而且以后用不上的事（不是人物、地点、势力、关键物品、规矩，也不是“${ability}”），写进 drop，一次最多 3 张；拿不准的留着。
@@ -108,7 +108,7 @@ ${storyBlock(input.turns)}`,
 // 整理状况 (R30 step 2): on request from the character panel, which of the
 // protagonist's statuses are over or are not a condition at all. The player
 // sees the list with reasons and chooses; nothing is removed without that.
-export const STATUS_TIDY_PROMPT_VERSION = "status-tidy-2";
+export const STATUS_TIDY_PROMPT_VERSION = "status-tidy-3";
 
 export function statusTidyMessages(state: Pick<WorldState, "protagonist" | "time">, turns: Pick<StoryNode, "actionText" | "narrative">[]): ChatMessage[] {
   const now = state.time.elapsedMinutes;

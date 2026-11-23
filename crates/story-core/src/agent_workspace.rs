@@ -946,6 +946,10 @@ fn modify(target: &mut Value, parts: &[String], operation: &str, args: &Value) -
     }
     let key = &parts[0];
     if let Some(array) = target.as_array_mut() {
+        if parts.len() == 1 && (key == "-" || key.is_empty()) && matches!(operation, "append" | "set") {
+            array.push(args["value"].clone());
+            return Ok(());
+        }
         let index = key
             .parse::<usize>()
             .map_err(|_| Error::Invalid("数组路径无效".into()))?;
@@ -980,7 +984,7 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
     let args = &scoped;
     let kind = canonical_kind(text(args, "kind"));
     let rid = text(args, "id");
-    if kind=="facts" && text(args,"path").is_empty() && text(args,"operation")=="append" && args["value"].is_array(){
+    if kind=="facts" && matches!(text(args,"path"), "" | "/" | "/-") && text(args,"operation")=="append" && args["value"].is_array(){
         return Err(Error::Tool{code:"invalid_append_item",field:"value",message:"facts的append每次追加一个事实对象，不能追加整个数组；多项请逐项append，或set保留原有项目的完整数组".into(),next:json!({"tool":"read_resource","args":{"kind":"facts"},"item":{"id":"事实唯一标识","detail":"具体事实文字","origin":"ai","citations":[]}})});
     }
     let mut w = workspace(db, task)?;
@@ -1020,9 +1024,9 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
         "before": args["before"],
         "after": args["after"],
     }));
-    if edit["appliedFingerprints"]
-        .as_array()
-        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(fp.as_str())))
+    let operation = text(args, "operation");
+    if operation != "remove"
+        && edit["lastAppliedFingerprint"].as_str() == Some(fp.as_str())
         && edit["rebaseConflicts"].as_array().is_none_or(Vec::is_empty)
         && edit["needsRelocation"] != true
     {
@@ -1079,11 +1083,21 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
     modify(&mut edit["after"], &parts, text(args, "operation"), args)?;
     if kind=="facts" {let before=edit["original"].clone();normalize_changed_fact_origins(&before,&mut edit["after"])?;}
     if kind=="state" {let before=edit["original"]["facts"].clone();normalize_changed_fact_origins(&before,&mut edit["after"]["facts"])?;}
-    if let Some(conflicts)=edit["rebaseConflicts"].as_array_mut(){conflicts.retain(|conflict|{
-        let at=text(conflict,"path");!(path.is_empty()||at==path||at.starts_with(&format!("{path}/")))
-    });}
+    if let Some(conflicts) = edit["rebaseConflicts"].as_array_mut() {
+        conflicts.retain(|conflict| {
+            let at = text(conflict, "path");
+            let target_missing = text(conflict, "reason") == "target_missing";
+            !(target_missing
+                || path.is_empty()
+                || at.is_empty()
+                || at == path
+                || at.starts_with(&format!("{path}/"))
+                || path.starts_with(&format!("{at}/")))
+        });
+    }
     if let Some(obj) = edit.as_object_mut() {
         obj.remove("needsRelocation");
+        obj.insert("lastAppliedFingerprint".into(), json!(fp));
     }
     if kind == "node"
         && (root == "record" || path.is_empty() && args["value"].get("record").is_some())
@@ -1098,8 +1112,12 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
     if !call.is_empty(){edit["callIds"].as_array_mut().unwrap().push(json!(call));}
     if !edit["appliedFingerprints"].is_array(){edit["appliedFingerprints"]=json!([]);}
     edit["appliedFingerprints"].as_array_mut().unwrap().push(json!(fp));
-    if edit["after"]==edit["original"] && edit["rebaseConflicts"].as_array().is_none_or(Vec::is_empty) {
-        if let Some(pos)=pos {edits.remove(pos);}
+    let has_conflict = edit["needsRelocation"] == true
+        || edit["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+    if edit["after"] == edit["original"] && !has_conflict {
+        if let Some(pos) = pos {
+            edits.remove(pos);
+        }
     } else if let Some(pos) = pos {
         edits[pos] = edit
     } else {
@@ -1113,7 +1131,7 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
     }
     save_workspace(db, task, &w)?;
     Ok(
-        json!({"staged":true,"summary":args["summary"],"message":"已放入本次修改草稿，完成任务后按当前策略采用"}),
+        json!({"staged":true,"summary":args["summary"],"message":"已放入本次修改草稿（尚未生成预览或完成回执）；全部修改暂存完毕后，必须调用 finish_task（先看预览策略下调用 finish_task 不会直接写存档，而是生成供玩家确认的修改预览按钮）"}),
     )
 }
 
@@ -1229,26 +1247,48 @@ fn ws_call(args: &Value) -> &str {
     args["_agentCall"].as_str().unwrap_or("")
 }
 pub(crate) fn discard_draft(db:&Connection,task:&str,args:&Value)->Result<Value>{
-    let kind=text(args,"kind");
+    let raw_kind = text(args, "kind");
+    let kind = match raw_kind {
+        "turn" | "turns" => "story",
+        "routes" => "line",
+        other => canonical_kind(other),
+    };
     if args["all"]!=true && kind.is_empty(){return Err(Error::Invalid("请指定待撤回的草稿kind/id，或all=true；此操作不撤回正式本局".into()));}
     let mut w=workspace(db,task)?;
-    let before=changes(&w).len();
+    let before=preview_changes(&w).len().max(changes(&w).len());
     for key in ["edits","turns","routes"] {
         if let Some(items)=w[key].as_array_mut(){items.retain(|item|{
             if args["all"]==true{return false;}
-            let item_kind=if key=="turns"{"story"}else if key=="routes"{"line"}else{text(item,"kind")};
+            let item_kind=if key=="turns"{"story"}else if key=="routes"{"line"}else{canonical_kind(text(item,"kind"))};
             !(item_kind==kind && (text(args,"id").is_empty()||text(item,"id")==text(args,"id")))
         });}
     }
+    if args["all"] == true {
+        w["appliedCalls"] = json!([]);
+    }
     save_workspace(db,task,&w)?;
-    Ok(json!({"discarded":true,"removedChanges":before.saturating_sub(changes(&w).len()),"verification":crate::agent_verification::pending(&w),"message":"仅撤回本任务尚未采用的草稿，正式剧情、已发生的外部操作和累计用量不变；查清后可以重新暂存"}))
+    let after=preview_changes(&w).len().max(changes(&w).len());
+    Ok(json!({"discarded":true,"removedChanges":before.saturating_sub(after),"verification":crate::agent_verification::pending(&w),"message":"仅撤回本任务尚未采用的草稿，正式剧情、已发生的外部操作和累计用量不变；查清后可以重新暂存"}))
 }
 pub(crate) fn changes(w: &Value) -> Vec<Value> {
     let mut changes = vec![];
     for edit in w["edits"].as_array().into_iter().flatten() {
-        if edit["after"]==edit["original"] {continue;}
-        for summary in edit["summaries"].as_array().into_iter().flatten() {
-            changes.push(json!({"kind":edit["kind"],"id":edit["id"],"summary":summary}));
+        let has_conflict = edit["needsRelocation"] == true
+            || edit["rebaseConflicts"].as_array().is_some_and(|v| !v.is_empty());
+        if edit["after"] == edit["original"] && !has_conflict {
+            continue;
+        }
+        let summaries = edit["summaries"].as_array().cloned().unwrap_or_default();
+        if summaries.is_empty() && has_conflict {
+            changes.push(json!({"kind":edit["kind"],"id":edit["id"],"summary":"待处理冲突草稿","hasConflicts":true}));
+        } else {
+            for summary in summaries {
+                let mut item = json!({"kind":edit["kind"],"id":edit["id"],"summary":summary});
+                if has_conflict {
+                    item["hasConflicts"] = true.into();
+                }
+                changes.push(item);
+            }
         }
     }
     for turn in w["turns"].as_array().into_iter().flatten() {
@@ -1397,7 +1437,7 @@ fn path_nodes(db: &Connection, world: &str, head: &str) -> Result<Vec<Value>> {
     result.reverse();
     Ok(result)
 }
-fn clock_options(state: &Value, mode: &str, advance: bool) -> Value {
+pub(crate) fn clock_options(state: &Value, mode: &str, advance: bool) -> Value {
     let era = &state["era"];
     let style = era["clockStyle"]
         .as_str()

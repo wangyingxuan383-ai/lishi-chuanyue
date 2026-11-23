@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TaskContext, TASK_CONTEXT_TYPE, TASK_CONTEXT_VERSION, coalesceConsecutiveUsers, taskContextExtensions } from "../src/task-context.mjs";
+import { TaskContext, TASK_CONTEXT_TYPE, TASK_CONTEXT_VERSION, coalesceConsecutiveUsers, wrapConvertToLlm, taskContextExtensions } from "../src/task-context.mjs";
 
 const snapshot = (overrides = {}) => ({ ok: true, data: {
   goal: "读取原著，纠正本局设定，保留玩家主动改写。", corrections: [], plan: { steps: ["读取", "核对"] },
@@ -190,4 +190,25 @@ test("coalesceConsecutiveUsers merges adjacent user turns without mutating non-a
   assert.equal(merged[0].role, "user");
   const joined = merged[0].content.map(part => part.text).join("");
   assert.ok(joined.includes("初始任务") && joined.includes("续跑补充"));
+});
+
+test("B51 wrapConvertToLlm and PiHost coalesce trailing custom task-state blocks with preceding user or compactionSummary turns", async () => {
+  const { loadPiSdk } = await import("../src/upstream.mjs");
+  const pi = await loadPiSdk();
+  const convert = wrapConvertToLlm(pi.convertToLlm);
+  const task = new TaskContext({ getTaskId: () => "own-task", getTaskState: async () => snapshot({ goal: "不产生连续user角色" }) });
+  const prepared = await task.prepare({
+    messages: [
+      { role: "compactionSummary", summary: "前文摘要", tokensBefore: 5000, timestamp: 1 },
+      { role: "user", content: [{ type: "text", text: "玩家当前指令" }], timestamp: 2 },
+    ],
+  });
+  assert.equal(prepared.messages.at(-1).role, "custom");
+  const llmMessages = await convert(prepared.messages);
+  assert.equal(llmMessages.length, 1, "compactionSummary + user + custom task-state must coalesce into a single user turn");
+  assert.equal(llmMessages[0].role, "user");
+  const fullText = llmMessages[0].content.map(part => part.text).join("");
+  assert.ok(fullText.includes("前文摘要"));
+  assert.ok(fullText.includes("玩家当前指令"));
+  assert.ok(fullText.includes("不产生连续user角色"));
 });

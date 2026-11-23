@@ -241,4 +241,61 @@ describe("各功能按范围发送 (D184)", () => {
     expect(matchChapterQuery(shiftedBook[3], "35 客栈")).toBe(false);
     expect(chapterRangeSummary(shiftedBook, { from: 2, to: 36 })).toBe("第一章 渡口 ～ 第三十五章 水门伏兵");
   });
+
+  it("parses spaced TXT chapters/集/inline volumes, nested EPUB3 nav & multi-anchor XHTML, PDF same-page bookmarks & 第N页 search, and historical revision source (B10, B11)", async () => {
+    const { textSections, parseBook } = await import("./parse");
+    const { resolveRevisionSource } = await import("../writing/assist");
+
+    // 1. TXT spaced numerals, 集, and inline volume+chapter ("第二卷 ... 第一章 ...") updating current volume (B11)
+    const txt = [
+      "第一集 雪鹰领",
+      "楔子正文。",
+      "第 1 章 少年东伯",
+      "第一章正文。",
+      "第二卷 云起 第一章 惊变",
+      "二卷一章正文。",
+      "第 2 章 追击",
+      "二卷二章正文。",
+    ].join("\n");
+    const parsedTxt = await textSections(txt);
+    expect(parsedTxt.map((s) => s.title)).toEqual([
+      "第一集 雪鹰领",
+      "第一集 雪鹰领 · 第 1 章 少年东伯",
+      "第二卷 云起 第一章 惊变",
+      "第二卷 云起 · 第 2 章 追击",
+    ]);
+
+    // 2. EPUB3 nested <nav epub:type="toc"> volume inheritance + shared-file multi-anchor split (B11)
+    const { zipSync, strToU8 } = await import("fflate");
+    const epubBytes = zipSync({
+      "META-INF/container.xml": strToU8(`<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`),
+      "OEBPS/content.opf": strToU8(`<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>多卷EPUB3</dc:title></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="c1" href="part1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>`),
+      "OEBPS/nav.xhtml": strToU8(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><span>第一卷 潜龙</span><ol><li><a href="part1.xhtml#ch1">第一章 初遇</a></li><li><a href="part1.xhtml#ch2">第二章 夜谈</a></li></ol></li></ol></nav></body></html>`),
+      "OEBPS/part1.xhtml": strToU8(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><section id="ch1"><h2>第一章 初遇</h2><p>甲段正文。</p></section><section id="ch2"><h2>第二章 夜谈</h2><p>乙段正文。</p></section></body></html>`),
+    });
+    const s = await setup();
+    const epubBook = await parseBook({ name: "test.epub", bytes: epubBytes }, s.platform);
+    expect(epubBook.sections.map((sec) => sec.title)).toEqual(["第一卷 潜龙 · 第一章 初遇", "第一卷 潜龙 · 第二章 夜谈"]);
+    expect(epubBook.sections[0].text).toContain("甲段正文");
+    expect(epubBook.sections[1].text).toContain("乙段正文");
+
+    // 3. PDF leading whitespace + same-page volume & chapter bookmarks + 第 N 页 search & label retention (B11)
+    s.platform.files.extractPdf = async () => ({
+      pages: ["第一页正文", "第二页正文"],
+      headings: [{ page: 1, title: "第一卷 沧海" }, { page: 1, title: "第一章 启航" }],
+    });
+    const pdfBytes = new TextEncoder().encode("   \n%PDF-1.5 mock");
+    const pdfBook = await parseBook({ name: "voyage.pdf", bytes: pdfBytes }, s.platform);
+    expect(pdfBook.sections[0].title).toBe("第一卷 沧海 · 第一章 启航 · 第 1 页");
+    expect(pdfBook.sections[1].title).toBe("第一卷 沧海 · 第一章 启航 · 第 2 页");
+    expect(chapterLabel(11, "第一卷 沧海横流万里长空 · 第一章 远航奇遇记 · 第 12 页")).toContain("第 12 页");
+    expect(matchChapterQuery({ section: 11, title: pdfBook.sections[0].title.replace("第 1 页", "第 12 页"), chars: 100 }, "第12页")).toBe(true);
+
+    // 4. Historical turn revision preserves later-bound book and avoids stamping another book's advanced position (B10)
+    const unboundOld = sampleState();
+    const laterBound = { ...sampleState(), source: { ...newBinding("book-a", true), position: 25, through: 50 } };
+    expect(resolveRevisionSource(unboundOld, laterBound, false)).toMatchObject({ bookId: "book-a", position: 0, through: 50 });
+    const oldBookB = { ...sampleState(), source: { ...newBinding("book-b", true), position: 10, through: 20 } };
+    expect(resolveRevisionSource(oldBookB, laterBound, false)).toMatchObject({ bookId: "book-a", position: 0, through: 50 });
+  });
 });

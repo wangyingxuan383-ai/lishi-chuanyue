@@ -1,6 +1,7 @@
 package io.timejump.chuanyue
 
 import android.app.Activity
+import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
@@ -41,6 +42,40 @@ internal fun buildExportDocumentIntent(suggestedName: String): Intent = Intent(I
 
 internal fun documentPickerFailure(code: String): JSObject = JSObject()
     .put("status", "failed").put("code", code)
+
+internal fun sanitizeDocumentDisplayName(raw: String?): String? {
+    if (raw == null) return null
+    val leaf = raw.substringAfterLast('/').substringAfterLast('\\')
+    val cleaned = leaf.filter { !Character.isISOControl(it) }.trim().take(512)
+    if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return null
+    return cleaned
+}
+
+internal fun fallbackUriDisplayName(uri: Uri): String? {
+    val rawSegment = uri.lastPathSegment
+        ?: uri.encodedPath?.substringAfterLast('/')?.let(Uri::decode)
+        ?: return null
+    var leaf = rawSegment.substringAfterLast('/').substringAfterLast('\\')
+    if (':' in leaf && '/' !in rawSegment && '\\' !in rawSegment) {
+        val prefix = leaf.substringBefore(':')
+        val rest = leaf.substringAfter(':')
+        if (prefix.isNotEmpty() && prefix.all { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' } && rest.isNotBlank()) {
+            leaf = rest
+        }
+    }
+    return sanitizeDocumentDisplayName(leaf)
+}
+
+internal fun resolveDocumentDisplayName(resolver: ContentResolver, uri: Uri): String? {
+    val queried = try {
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
+        }
+    } catch (_: Exception) {
+        null
+    }
+    return sanitizeDocumentDisplayName(queried) ?: fallbackUriDisplayName(uri)
+}
 
 internal fun decodeDocumentPickerResult(result: ActivityResult): JSObject {
     if (result.resultCode == Activity.RESULT_CANCELED) {
@@ -198,19 +233,23 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
             if (current.invoke !== invoke) return@post
             val reply = try {
                 val decoded = decodeDocumentPickerResult(result)
-                if (current.grant && !current.gate.isResolved() && decoded.optString("status") == "selected") {
+                if (!current.gate.isResolved() && decoded.optString("status") == "selected") {
                     val uri = Uri.parse(decoded.getString("uri"))
-                    val requestedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (current.writable) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0
-                    val flags = (result.data?.flags ?: 0) and requestedFlags
-                    if (flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) throw SecurityException("read grant missing")
-                    ownerActivity.contentResolver.takePersistableUriPermission(uri, flags)
-                    val document = if (current.directory) DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri)) else uri
-                    var name = if (current.directory) "资料目录" else "资料文件"
-                    ownerActivity.contentResolver.query(document, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) name = cursor.getString(0)?.take(512) ?: name
+                    if (current.grant) {
+                        val requestedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (current.writable) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0
+                        val flags = (result.data?.flags ?: 0) and requestedFlags
+                        if (flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) throw SecurityException("read grant missing")
+                        ownerActivity.contentResolver.takePersistableUriPermission(uri, flags)
+                        val document = if (current.directory) DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri)) else uri
+                        val name = resolveDocumentDisplayName(ownerActivity.contentResolver, document)
+                            ?: if (current.directory) "资料目录" else "资料文件"
+                        decoded.put("name", name)
+                        decoded.put("writable", current.writable && (flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0)
+                    } else {
+                        resolveDocumentDisplayName(ownerActivity.contentResolver, uri)?.let { name ->
+                            decoded.put("name", name)
+                        }
                     }
-                    decoded.put("name", name)
-                    decoded.put("writable", current.writable && (flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0)
                 }
                 decoded
             }

@@ -6,7 +6,7 @@ import { sampleState } from "../testing/fixtures";
 import { appendContinuity, readContinuity } from "../continuity";
 import * as tree from "../tree";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
-import { abilityCardName, adoptPlayerRevision, resolveCorrectionCards, canonOutcomeText, canonStop, filterCorrectionPatch, mergeRecordPatch, MISSING_OPENING_SEED_REVISE, parsePlayerRevision, STALE_WRITING, type CanonCorrectionPreview, type PlayerRevisionRequest } from "./assist";
+import { abilityCardName, adoptPlayerRevision, isLatestPassage, recoverOpeningSeed, resolveCorrectionCards, canonOutcomeText, canonStop, filterCorrectionPatch, mergeRecordPatch, MISSING_OPENING_SEED_REVISE, parsePlayerRevision, STALE_WRITING, type CanonCorrectionPreview, type PlayerRevisionRequest } from "./assist";
 
 const LLM = { slot: "t", url: "https://main.invalid/v1/chat/completions", model: "m", auxModel: "aux", includeUsage: true };
 
@@ -263,5 +263,95 @@ describe("按我的要求改", () => {
       hint: "换成短剑并写明九霄剑诀",
     }, () => {}).done;
     expect(sent[0]).toContain("九霄剑诀第九层");
+  });
+
+  it("revises Turn 0 opening while preserving AI codex cards, startMoney, trailing player edits, and original root route (B01)", async () => {
+    const platform = await createMemoryPlatform();
+    const game = await Game.open(platform, LLM);
+    // Simulate a pre-R32 opening where meta.openingSeed was saved before codex ran (cards=[], money=0),
+    // while the committed opening state has AI codex cards, places, and Tang startMoney (300).
+    const preCodexSeed = sampleState(0);
+    preCodexSeed.cards = [];
+    preCodexSeed.places = [];
+    const committedOpening = sampleState(300);
+    committedOpening.cards = [
+      { id: "era-card", kind: "时代", name: "天宝七载", keys: [], content: "盛唐长安坊市", source: "AI" },
+      { id: "lore-card", kind: "设定", name: "崇仁坊", keys: [], content: "北街多旅舍", source: "AI" },
+    ];
+    committedOpening.places = [{ id: "p-inn", name: "胡姬酒肆", description: "落脚处", source: "AI" }];
+    const { world, node: openingNode, line: origLine } = await game.repo.createWorld({
+      title: "长安初至",
+      eraId: "tang-748",
+      opening: {
+        parentId: null,
+        kind: "opening",
+        narrative: "清晨微雨，你站在崇仁坊口。",
+        state: committedOpening,
+        record: { log: "初到崇仁坊" },
+        choices: ["走进酒肆"],
+        meta: { openingSeed: preCodexSeed, startMoney: 300 },
+      },
+    });
+    // Recovering the seed must backfill AI codex cards, places, and startMoney=300.
+    const recovered = recoverOpeningSeed(openingNode, committedOpening, world.eraId)!;
+    expect(recovered.protagonist.stats.money).toBe(300);
+    expect(recovered.cards.map((c) => c.name)).toEqual(["天宝七载", "崇仁坊"]);
+    expect(recovered.places.map((p) => p.name)).toEqual(["胡姬酒肆"]);
+
+    // Append a player panel edit on top of Turn 0; Turn 0 must still count as the latest passage!
+    const edited = await game.editState(world.id, { profile: { identity: "书铺学徒" } }, "修改身份");
+    const head = "head" in edited ? edited.head : (await tree.cursor(game.repo, world.id)).head;
+    const anchor = { worldId: world.id, lineId: origLine.id, headId: head.id, nodeId: openingNode.id, original: openingNode.narrative };
+    expect(await isLatestPassage(game, anchor)).toBe(true);
+
+    platform.llm.stream = async (_req, onEvent) => {
+      onEvent({
+        type: "data",
+        data: JSON.stringify({
+          choices: [{
+            delta: {
+              content: JSON.stringify({
+                replacement: "暮雨初歇，你站在崇仁坊北街。",
+                recordPatch: { log: "暮雨至崇仁坊", choices: ["投宿旅舍", "先买胡饼"] },
+                note: "改为傍晚抵达",
+              }),
+            },
+            finish_reason: "stop",
+          }],
+        }),
+      });
+      onEvent({ type: "done" });
+      return "turn0-rev";
+    };
+    const preview = await game.runPlayerRevision({ anchor, range: { start: 0, end: openingNode.narrative.length }, hint: "改成傍晚，并刷新选项" }, () => {}).done;
+    const revised = await adoptPlayerRevision(game, preview);
+    // Original root route remains reachable; new route carries trailing player edit on top of revised Turn 0.
+    expect(revised.line.id).not.toBe(origLine.id);
+    expect(revised.line.name).toContain("修订开场后的路线");
+    expect((await game.repo.getLine(origLine.id))?.nodeId).toBe(head.id);
+    expect(revised.head.kind).toBe("edit");
+    expect(revised.head.actionText).toBe("修改身份");
+    const newOpening = (await game.repo.getNode(revised.head.parentId!))!;
+    expect(newOpening.parentId).toBeNull();
+    expect(newOpening.narrative).toBe("暮雨初歇，你站在崇仁坊北街。");
+    expect(newOpening.choices).toEqual(["投宿旅舍", "先买胡饼"]);
+    const finalState = await game.repo.getState(revised.head.id);
+    expect(finalState.protagonist.identity).toBe("书铺学徒");
+    expect(finalState.protagonist.stats.money).toBe(300);
+    expect(finalState.cards.map((c) => c.name)).toEqual(["天宝七载", "崇仁坊"]);
+  });
+
+  it("updates node meta_json atomically so concurrent Rust upkeep flags are never wiped (B06)", async () => {
+    const s = await setup();
+    // Simulate background Rust maintain writing `$.upkeep = true` in SQLite while JS holds an older node snapshot.
+    await s.game.platform.sql.batch([{ sql: "UPDATE nodes SET meta_json = json_set(meta_json, '$.upkeep', json('true')) WHERE id = ?", params: [s.target.id] }]);
+    await s.game.repo.mergeMeta(s.target.id, { sealShown: true });
+    await s.game.repo.updateNarrative(s.target.id, "手动微调后的正文");
+    const afterEdit = await s.game.repo.getNode(s.target.id);
+    expect(afterEdit?.meta).toMatchObject({ upkeep: true, sealShown: true });
+    expect(await s.game.repo.restoreNarrative(s.target.id)).toBe(true);
+    const afterRestore = await s.game.repo.getNode(s.target.id);
+    expect(afterRestore?.meta).toMatchObject({ upkeep: true, sealShown: true });
+    expect(afterRestore?.meta.original).toBeUndefined();
   });
 });

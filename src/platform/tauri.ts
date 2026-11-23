@@ -52,6 +52,7 @@ export async function createTauriPlatform(): Promise<Platform> {
     name,
     execution: {
       agent: (request) => call("pi_agent_request", { request }),
+      companion: (request) => call("execution_companion", { request }),
       settle: (state, record, options) => call("execution_settle", { state, record, options }),
       context: (input) => call("execution_context", { input }),
       start: (plan) => call("execution_start", { plan }),

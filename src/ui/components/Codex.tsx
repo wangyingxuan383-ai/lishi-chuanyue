@@ -3,7 +3,6 @@
 // save becomes an edit node that can be undone.
 import { abilityCardName, isAbilityCard } from "../../engine/memory/cards";
 import { useApp } from "../app/context";
-import { rejectedReason } from "../../engine/game";
 import { useContext, useEffect, useRef, useState } from "react";
 import { NoteEntry } from "./CanonNotes";
 import type { EraContext } from "../../engine/era";
@@ -34,7 +33,7 @@ const SOURCE: Record<NonNullable<Card["source"]>, string> = { 卡组: "内置卡
 const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.trim()).filter(Boolean);
 const preview = (text: string, max = 60) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
-function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing; state: WorldState; worldId: string; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void> }) {
+function Editor({ editing, state, worldId, headId, onClose, onSave }: { editing: Editing; state: WorldState; worldId: string; headId: string; onClose: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void> }) {
   const { ask, toast, game } = useApp();
   const noteEntry = useContext(NoteEntry);
   const isEra = editing.type === "card" && editing.kind === "时代";
@@ -75,7 +74,7 @@ function Editor({ editing, state, worldId, onClose, onSave }: { editing: Editing
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
+    try { await onSave(patch, summary, headId); onClose(); } catch (e) { toast(e instanceof Error ? e.message : "没能保存，请稍后再试"); } finally { setSaving(false); }
   };
   const save = () => {
     const clean = name.trim();
@@ -152,6 +151,16 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
   live.current = { state, active: true, busy };
   useEffect(() => () => { live.current.active = false; }, []);
   useEffect(() => { setSelected([]); setSelecting(false); }, [state]);
+  const prevAnchor = useRef(`${worldId}:${headId}`);
+  useEffect(() => {
+    const key = `${worldId}:${headId}`;
+    if (prevAnchor.current === key) return;
+    prevAnchor.current = key;
+    setEditing(null);
+    setBuiltin(false);
+    setSelected([]);
+    setSelecting(false);
+  }, [worldId, headId]);
   const eraCard = era.eraCard;
   const eraLabel = (state.era as { mode?: string }).mode === "free" ? "世界卡" : "时代卡";
   const open = (next: Editing) => { if (!busy && !organizing) setEditing(next); };
@@ -187,9 +196,9 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
       const patch = deletionPatch(source, selected);
       const count = (patch.cards?.length ?? 0) + (patch.places?.length ?? 0);
       if (!count) return;
-      await onSave(patch, `批量删除 ${count} 项设定`);
+      await onSave(patch, `批量删除 ${count} 项设定`, headId);
       setSelected([]); setSelecting(false); toast("已删除，可以在“⋯”里撤销");
-    } catch { toast("没有删除成功，请稍后再试"); }
+    } catch (e) { toast(e instanceof Error ? e.message : "没有删除成功，请稍后再试"); }
     finally { if (live.current.active) setDeleting(false); }
   };
 
@@ -278,7 +287,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
           <button className="danger-text" disabled={busy || deleting || !selected.length} onClick={() => void removeSelected()}>删除所选（{selected.length}）</button>
         </div>
       )}
-      {editing && <Editor editing={editing} state={state} worldId={worldId} onClose={() => setEditing(null)} onSave={onSave} />}
+      {editing && <Editor editing={editing} state={state} worldId={worldId} headId={headId} onClose={() => setEditing(null)} onSave={onSave} />}
     </div>
   );
 }

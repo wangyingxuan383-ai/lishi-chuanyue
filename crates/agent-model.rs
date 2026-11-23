@@ -563,6 +563,7 @@ struct Parser {
     final_value: Option<Value>,
     blocks: BTreeMap<u64, Block>,
     parts: Vec<Value>,
+    thinking_buf: String,
     prompt_blocked: bool,
     saw_thinking: bool,
     ended: bool,
@@ -576,6 +577,7 @@ impl Parser {
             final_value: None,
             blocks: BTreeMap::new(),
             parts: vec![],
+            thinking_buf: String::new(),
             prompt_blocked: false,
             saw_thinking: false,
             ended: false,
@@ -605,6 +607,7 @@ impl Parser {
                 "response.output_text.delta" => self.result.text.push_str(text(&value["delta"])),
                 "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                     self.saw_thinking = true;
+                    self.thinking_buf.push_str(text(&value["delta"]));
                 }
                 "response.output_item.added" if value["item"]["type"] == "reasoning" => {
                     self.saw_thinking = true;
@@ -671,6 +674,7 @@ impl Parser {
                                 self.result.text.push_str(part);
                             } else if key == "thinking" && !part.is_empty() {
                                 self.saw_thinking = true;
+                                self.thinking_buf.push_str(part);
                             }
                         }
                         "input_json_delta" => block.args.push_str(text(&delta["partial_json"])),
@@ -728,6 +732,7 @@ impl Parser {
                 for part in items(&candidate["content"]["parts"]) {
                     if part["thought"] == true {
                         self.saw_thinking = true;
+                        self.thinking_buf.push_str(text(&part["text"]));
                     } else {
                         self.result.text.push_str(text(&part["text"]));
                     }
@@ -758,6 +763,13 @@ impl Parser {
             self.chat.has_thinking()
         } else {
             self.saw_thinking
+        }
+    }
+    fn current_thinking(&self) -> &str {
+        if self.protocol == Protocol::Chat {
+            self.chat.current_thinking().unwrap_or("")
+        } else {
+            &self.thinking_buf
         }
     }
     fn finish(self, sse: bool) -> Result<Completion> {
@@ -900,6 +912,7 @@ pub async fn complete(
     let mut total = 0;
     let mut first = None;
     let mut streamed_text_len = 0;
+    let mut streamed_thinking_len = 0;
     let mut thinking_notified = false;
     'read: loop {
         let chunk = tokio::select! {_ = cancel.cancelled()=>return Err(Error::Cancelled),r=tokio::time::timeout(Duration::from_millis(if first.is_none() {story_core::chat::FIRST_BYTE_MS} else {story_core::chat::IDLE_MS}),response.chunk())=>r.map_err(|_|provider(if first.is_none() {"timeout_first"} else {"timeout_idle"},None,"等待模型内容超时",first.is_some()))?.map_err(|e|provider("network",None,story_core::failure::connection_reason(&e),first.is_some()))?};
@@ -941,6 +954,10 @@ pub async fn complete(
                 if !thinking_notified && streamed_text_len == 0 && parser.has_thinking() {
                     thinking_notified = true;
                     sink("\0phase:thinking".into());
+                }
+                if parser.current_thinking().len() > streamed_thinking_len {
+                    streamed_thinking_len = parser.current_thinking().len();
+                    sink(format!("\0thinking:{}", parser.current_thinking()));
                 }
                 if parser.current_text().len() > streamed_text_len {
                     streamed_text_len = parser.current_text().len();

@@ -25,6 +25,10 @@ test("four fixed provider paths preserve their native authorized service prefix"
   const gemini = transport("gemini", "https://service.invalid/native/v1beta/");
   assert.equal(gemini.api, "google-generative-ai");
   assert.equal(modelRequestUrl(gemini, `${gemini.baseUrl}/models/gemini-fixture:streamGenerateContent?alt=sse`), "https://service.invalid/native/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse");
+  // B45: Strip trailing /openai when Gemini protocol is selected on a /v1beta/openai base URL.
+  const geminiOpenaiCompat = transport("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/");
+  assert.equal(geminiOpenaiCompat.baseUrl, "https://generativelanguage.googleapis.com/v1beta");
+  assert.equal(modelRequestUrl(geminiOpenaiCompat, `${geminiOpenaiCompat.baseUrl}/models/gemini-2.5-flash:streamGenerateContent?alt=sse`), "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
   // A v1 binding is not authorization to silently send its key to v1beta.
   blocked(() => modelRequestUrl(transport("gemini"), "https://service.invalid/proxy/v1beta/models/gemini-fixture:streamGenerateContent"));
 });

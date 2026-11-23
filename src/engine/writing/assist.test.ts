@@ -30,7 +30,7 @@ describe("writing assistance", () => {
   });
   it("versions the prompt and keeps rewriting and action polishing factual", () => {
     // The version is kept with each adopted rewrite, not sent to the model.
-    expect(WRITING_PROMPT_VERSION).toBe("writing-4");
+    expect(WRITING_PROMPT_VERSION).toBe("writing-5");
     const rewrite = writingMessages("rewrite", "雨", "", "前文", "do")[0].content;
     expect(rewrite).not.toContain(WRITING_PROMPT_VERSION);
     expect(rewrite).toContain("不改变已经发生的事实");

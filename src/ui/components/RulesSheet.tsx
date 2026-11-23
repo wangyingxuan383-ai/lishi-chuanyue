@@ -2,7 +2,7 @@
 import { SourceScopeRow } from "./SourceScope";
 import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
 import { useState } from "react";
-import { LUNAR_MONTHS, monthDays } from "../../engine/calendar/date";
+import { ceYearOf, LUNAR_MONTHS, maxValidDay } from "../../engine/calendar/date";
 import { nowOf } from "../../engine/calendar/clock";
 import { applyDisplayClock, validClockDate, type ClockDisplayChange } from "../../engine/calendar/clockEdit";
 import type { EraContext } from "../../engine/era";
@@ -71,7 +71,8 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
   const parsedUnits = units.map(u => ({ name: u.name.trim(), value: Number(u.value) }));
   const currencyChanged = JSON.stringify(parsedUnits) !== JSON.stringify(era.currency.units.map(u => ({ name: u.name, value: u.value })));
   const unitProblems = currencyChanged ? currencyIssues(parsedUnits) : [];
-  const dayLimit = monthDays({ lunar: form.lunar, month: form.month });
+  const previewCe = form.lunar || state.era.mode === "free" && !["公元", "公元前"].includes(form.eraName.trim()) ? null : ceYearOf(form.eraName.trim(), Number(form.year), { ...era.clock.rules, lunar: false });
+  const dayLimit = maxValidDay({ lunar: form.lunar, month: form.month, ceYear: previewCe });
   let clockChange: ClockDisplayChange | undefined, clockProblem: string | null = null, preview = current.text;
   if (timeDirty) {
     const hour = Number(form.hour), minute = Number(form.minute), displayDay = Number(form.displayDay);
@@ -85,7 +86,16 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
         else if (timeChanged || form.displayDay !== initial.displayDay) clockChange.elapsedAnchor = { atElapsedMinutes: state.time.elapsedMinutes, day: displayDay, minuteOfDay: hour * 60 + minute };
       } else {
         const rules = { ...era.clock.rules, lunar: form.lunar };
-        const newDate = validClockDate({ era: form.eraName.trim(), year: Number(form.year), month: form.month, day: Number(form.day), lunar: form.lunar, ceYear: null }, rules);
+        const eraName = form.eraName.trim(), yearNum = Number(form.year);
+        const baseDate = date ?? state.time.date ?? era.clock.date;
+        const eraCe = (state.era as { ceYear?: number | null }).ceYear ?? era.clock.date?.ceYear ?? null;
+        const shiftCe = (ce: number, delta: number) => { const a = (ce < 0 ? ce + 1 : ce) + delta; return a <= 0 ? a - 1 : a; };
+        const fallbackCe = state.era.mode === "free" ? null
+          : baseDate && baseDate.ceYear != null && baseDate.era === eraName && Number.isInteger(yearNum)
+            ? shiftCe(baseDate.ceYear, yearNum - baseDate.year)
+            : (!baseDate || baseDate.era === eraName) ? eraCe : null;
+        const preservedCe = fallbackCe != null && Number.isInteger(fallbackCe) && fallbackCe !== 0 && fallbackCe > -5000 && fallbackCe < 2200 ? fallbackCe : null;
+        const newDate = validClockDate({ era: eraName, year: yearNum, month: form.month, day: Number(form.day), lunar: form.lunar, ceYear: preservedCe }, rules);
         if (!newDate) clockProblem = `请填完整纪年和日期；该月日数为1～${dayLimit}，自定年份支持1～999999999。`;
         else {
           // Custom free-world years are independent of CE, including similarly named era tables.

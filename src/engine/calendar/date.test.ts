@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  addDays, ceYearOf, cnDay, cnNumber, coerceDate, daysBetween, eraAt, formatDate, ganzhi, monthIndex, monthLabel, parseDateLabel, season, seasonDetail,
+  addDays, ceYearOf, cnDay, cnNumber, coerceDate, daysBetween, eraAt, formatDate, ganzhi, monthIndex, monthLabel, newYearsAfterDays, parseDateLabel, season, seasonDetail, shiftDate,
   type CalendarRules, type GameDate,
 } from "./date";
 
@@ -166,5 +166,26 @@ describe("daysBetween", () => {
   it("labels a month", () => {
     expect(monthLabel({ era: "天宝", year: 9, month: 10, day: 1, ceYear: 750, lunar: true }, TANG)).toBe("天宝九载 十月");
     expect(monthLabel({ era: "公元", year: 1665, month: 4, day: 1, ceYear: 1665, lunar: false })).toBe("公元1665年 4月");
+  });
+
+  it("accommodates lunar day 30 on even months and western Feb 29 without Turn 0 overflow", () => {
+    const eve: GameDate = { era: "天宝", year: 7, month: 12, day: 30, ceYear: 748, lunar: true };
+    expect(shiftDate(eve, 0, TANG)).toEqual(eve);
+    expect(shiftDate(eve, -1, TANG)).toMatchObject({ year: 7, month: 12, day: 29, ceYear: 748 });
+    expect(shiftDate(eve, 1, TANG)).toMatchObject({ year: 8, month: 1, day: 1, ceYear: 749 });
+    expect(newYearsAfterDays(eve, 0)).toBe(0);
+    expect(newYearsAfterDays(eve, 1)).toBe(1);
+    expect(daysBetween(eve, { era: "天宝", year: 8, month: 1, day: 1, ceYear: 749, lunar: true })).toBe(1);
+
+    const feb30Lunar: GameDate = { era: "天宝", year: 7, month: 2, day: 30, ceYear: 748, lunar: true };
+    expect(shiftDate(feb30Lunar, 0, TANG)).toEqual(feb30Lunar);
+    expect(shiftDate(feb30Lunar, 1, TANG)).toMatchObject({ year: 7, month: 3, day: 1 });
+    expect(addDays(feb30Lunar, 1, TANG).date).toMatchObject({ year: 7, month: 3, day: 1 });
+
+    const feb29: GameDate = { era: "公元", year: 2025, month: 2, day: 29, ceYear: 2025, lunar: false };
+    expect(shiftDate(feb29, 0)).toEqual(feb29);
+    expect(shiftDate(feb29, 1)).toMatchObject({ year: 2025, month: 3, day: 1 });
+    expect(newYearsAfterDays(feb29, 306)).toBe(0);
+    expect(newYearsAfterDays(feb29, 307)).toBe(1);
   });
 });

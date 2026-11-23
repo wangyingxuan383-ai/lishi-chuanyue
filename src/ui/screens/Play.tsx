@@ -75,6 +75,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const [state, setState] = useState<WorldState | null>(null);
   const [variants, setVariants] = useState<tree.Variants | null>(null);
   const [agentFloor, setAgentFloor] = useState<number | undefined>();
+  const [routeTurns, setRouteTurns] = useState(0);
   /** The state before the latest passage: an end card shows only on the passage where the script or challenge ended. */
   const [before, setBefore] = useState<WorldState | null>(null);
   /** The end card set aside with 继续玩下去 / 继续自由发展, by the passage it belongs to. */
@@ -150,7 +151,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     return () => cancelAnimationFrame(frame);
   }, [recap, reading.autoScroll]);
   // 印谱: "得一枚印：…" the first time a seal is earned (PLAN_V4 direction G).
-  useSealToast(world, state, nodes.filter((n) => n.kind === "turn" || n.kind === "fastforward").length);
+  useSealToast(world, state, routeTurns);
   const refresh = useCallback(async (keepLimit = limit.current) => {
     const inflight = refreshQueue.current;
     if (inflight && keepLimit <= inflight.maxLimit) {
@@ -183,6 +184,9 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         latest.parentId ? game.repo.getState(latest.parentId) : Promise.resolve(null),
       ]);
       const loaded = path.slice(-keepLimit);
+      const fullTurns = path.length > keepLimit
+        ? (await game.repo.homeSummary(c.head.id)).turns
+        : path.filter((n) => n.kind === "turn" || n.kind === "fastforward").length;
       if (version !== refreshVersion.current) return;
       if (!readingLoaded.current) {
         const saved = await game.repo.getSetting<string | null>("reading:" + worldId, null);
@@ -197,6 +201,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       limit.current = keepLimit;
       visibleNodes.current = loaded;
       setNodes(loaded);
+      setRouteTurns(fullTurns);
       setWorld(w);
       setCursor(c);
       setState(currentState);
@@ -528,7 +533,8 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const applyRewrite = async (anchor: WritingAnchor, text: string, autoStart = false) => {
     checkScope(anchor);
     if (!text.trim() || text === anchor.original) throw new WritingError("文字没有变化。");
-    setFactAsk({ anchor, text, latest: await isLatestPassage(game, anchor), autoStart });
+    const targetNode = await game.repo.getNode(anchor.nodeId);
+    setFactAsk({ anchor, text, latest: await isLatestPassage(game, anchor), isOpening: !targetNode?.parentId, autoStart });
   };
   /** 只改文字: into the passage itself (R14 engine review); the first original stays for 恢复原文. */
   const saveTextOnly = async (anchor: WritingAnchor, text: string) => {
@@ -544,12 +550,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   /** 事实也一起改: the passage's facts follow its edited text, as another version or a revision route. */
   const adoptFactSync = async (preview: PlayerRevisionPreview) => {
     const liveAnchor = { ...preview.anchor, headId: writingScope.current.headId ?? preview.anchor.headId };
-    const latest = await isLatestPassage(game, liveAnchor);
+    const [latest, targetNode] = await Promise.all([isLatestPassage(game, liveAnchor), game.repo.getNode(liveAnchor.nodeId)]);
+    const inPlace = latest && !!targetNode?.parentId;
     const revised = await adoptPlayerRevision(game, { ...preview, anchor: liveAnchor });
     setEditing(null);
     await refresh();
-    toast(latest ? "已改好，事实跟着改了；原来的写法留作另一个版本" : "已改好，进入改写后的路线；原路线和后续剧情保留",
-      latest ? undefined : { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, preview.anchor.lineId).then(() => refresh())) });
+    toast(inPlace ? "已改好，事实跟着改了；原来的写法留作另一个版本" : "已改好，进入改写后的路线；原路线和后续剧情保留",
+      inPlace ? undefined : { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, preview.anchor.lineId).then(() => refresh())) });
   };
   const openWriting = (kind: "rewrite" | "polish", node: StoryNode) => {
     if (!cursor || busy) return;
@@ -561,14 +568,18 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     const draft = writing;
     checkScope(draft.anchor);
     if (revision) {
-      const latest = await isLatestPassage(game, draft.anchor);
+      const [latest, targetNode] = await Promise.all([isLatestPassage(game, draft.anchor), game.repo.getNode(draft.anchor.nodeId)]);
+      const inPlace = latest && !!targetNode?.parentId;
       const revised = await adoptPlayerRevision(game, revision);
       await refresh();
-      if (latest) toast("已按你的要求改好；原来的写法留作另一个版本", { label: "换回原版", run: still(revised.head.id, () => void (async () => {
+      if (inPlace) toast("已按你的要求改好；原来的写法留作另一个版本", { label: "换回原版", run: still(revised.head.id, () => void (async () => {
         const original = await game.repo.getNode(draft.anchor.nodeId);
         if (!original) return;
         const { index } = await tree.variants(game.repo, original);
-        await tree.switchVariant(game.repo, await tree.cursor(game.repo, worldId), index);
+        const cur = await tree.cursor(game.repo, worldId);
+        let turnHead = cur.head;
+        while (turnHead.kind === "edit" && turnHead.parentId) turnHead = (await game.repo.getNode(turnHead.parentId))!;
+        await tree.switchVariant(game.repo, { ...cur, head: turnHead }, index);
         await refresh();
       })()) });
       else toast("已改好，进入改写后的路线；原路线和后续剧情保留", { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, draft.anchor.lineId).then(() => refresh())) });
@@ -682,7 +693,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const ending = challengeView(state);
   /** After a 剧本 / 挑战 edit: one line in the story, and a toast that can take it back. */
   const saveMode = async (patch: TurnRecord, summary: string) => {
-    const c = await game.editState(worldId, patch, summary);
+    const c = await game.editState(worldId, patch, summary, undefined, head.id);
     await refresh();
     toast(MODE_SAVED.find(([re]) => re.test(summary))?.[1] ?? "已保存剧本", { label: "撤销", run: still(c.head.id, () => void tree.undo(game.repo, c).then(() => refresh())) });
   };
@@ -697,7 +708,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   };
   /** 回到之前: to just before the passage that ended it, keeping edits made before that passage (such as adding the challenge). */
   const backOne = () => { const target = nodes.find((n) => n.id === turn?.parentId); if (target) void goBack(target); };
-  const statusText = gen && (gen.detail || { starting: "", thinking: "构思中…", writing: "", organizing: "整理中…" }[gen.phase]);
+  const statusText = gen && (gen.detail || { starting: "", thinking: "", writing: "", organizing: "正在整理记录…" }[gen.phase]);
   const sealAlert = !dead && (state.protagonist.statuses.some((x) => x.name === "垂危") || state.protagonist.stats.health <= 25)
     ? "danger"
     : !dead && (state.protagonist.stats.health <= 50 || (state.challenge?.status === "active" && state.challenge.deadlineMinute !== null && state.challenge.deadlineMinute - state.time.elapsedMinutes <= 2 * 1440))
@@ -749,7 +760,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
               return (
                 <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
                   {isHead && node.status === "interrupted" && (
-                    <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(run) => run()} onOpenUsage={() => setSheet("usage")} />
+                    <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(a) => a.run()} onOpenUsage={() => setSheet("usage")} />
                   )}
                   {isHead && node.status === "no_record" && <p className="muted">这段没能整理出记录，状态可能没有更新。</p>}
                   {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
@@ -774,9 +785,9 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
             {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
             {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
             {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
-              <NoticeCard notice={notice} onAction={(run) => { setNotice(null); run(); }} onOpenUsage={() => setSheet("usage")} />
+              <NoticeCard notice={notice} onAction={(a) => { if (!a.keepNotice) setNotice(null); a.run(); }} onOpenUsage={() => setSheet("usage")} />
             )}
-            {dead && <EndingCard state={state} world={world} now={now.text} turns={nodes.filter((n) => n.kind === "turn").length}
+            {dead && <EndingCard state={state} world={world} now={now.text} turns={routeTurns}
               onLife={() => setSheet("life")}
               onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
               onLines={() => setSheet("lines")}
@@ -804,7 +815,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         onQueueAutoplayNote={auto?.runId ? async (text) => { await game.queueAutoplayNote(auto.runId!, text); toast(text.trim() ? "已排队，将在下一段生效" : "已取消下一段提示"); } : undefined}
         onSend={() => send()} onStopOrSend={stopOrSend} />
 
-      {menuNode && <PassageMenu menuNode={menuNode} head={head} busy={busy} setMenuNode={setMenuNode}
+      {menuNode && <PassageMenu menuNode={menuNode} head={head} turn={turn} busy={busy} setMenuNode={setMenuNode}
         openWriting={openWriting} setEditing={setEditing}
         onAskAbout={(n) => { const excerpt = n.narrative.replace(/\s+/g, " ").trim(); setAskInitial(`关于“${excerpt.slice(0, 48)}${excerpt.length > 48 ? "…" : ""}”：`); setSheet("ask"); }}
         setRemember={setRemember} goBack={goBack} toast={toast} setMenuMore={setMenuMore} />}
@@ -886,7 +897,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       )}
       {sheet === "more" && <MoreMenu mouse={mouse} busy={busy} state={state} dead={dead} watch={watch} head={head} cursor={cursor}
         noteOpen={noteOpen} devMode={devMode} game={game} worldId={worldId} setSheet={setSheet} undo={undo} redo={redo}
-        setNoteOpen={setNoteOpen} push={push} again={again} setContext={setContext} />}
+        setNoteOpen={setNoteOpen} push={push} captureReading={captureReading} again={again} setContext={setContext} />}
       {sheet === "time" && (
         <Sheet title="此时此地" onClose={() => setSheet(null)}>
           <dl className="facts">
@@ -905,8 +916,8 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {sheet === "notes" && <CanonNotesSheet bookId={state.source?.bookId ?? null} worldId={worldId} position={state.source?.position ?? 0} through={state.source?.through ?? null} start={notesStart ?? undefined} open={notesOpen ?? undefined} onClose={() => { setSheet(null); setNotesStart(null); setNotesOpen(null); }} />}
       {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
         onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
-        onBookmark={(line) => void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); })} />}
-      {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} onClose={() => setSheet(null)} onChanged={(message) => { void refresh(); toast(message); }} />}
+        onBookmark={(line) => { if (busy) { toast("正在续写故事，等这一段写完再切换路线"); return; } void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); }); }} />}
+      {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} busy={busy} onClose={() => setSheet(null)} onChanged={(message) => { void refresh(); toast(message); }} />}
       {bookmark && <BookmarkSheet initial={bookmark.name} onClose={() => setBookmark(null)} onSave={(name) => {
         const node = bookmark.node;
         setBookmark(null);
@@ -916,7 +927,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {sheet === "settings" && <WorldSettingsSheet world={world} state={state} busy={busy} onChange={updateSettings} onPanelSave={async (text) => {
         // The ledger agent supplies profile.panel; the content belongs to this branch's snapshot.
         const patch: TurnRecord & { profile: { panel: string } } = { profile: { panel: text.slice(0, 2000) } };
-        await game.editState(worldId, patch, "主角面板"); await refresh();
+        await game.editState(worldId, patch, "主角面板", undefined, head.id); await refresh();
       }} onPilot={(pilot) => { void updateSettings({ pilot }); toast(pilot === "ai" ? "主角交给 AI 了，你在幕后指点" : "主角由你来演了"); }}
         onScript={() => setSheet("script")} onChallenge={() => setSheet("challenge")} onRules={() => setSheet("rules")} onSourceSave={async (source) => { await game.bindSource(worldId, source); await refresh(); }} onClose={() => setSheet(null)} />}
       {sheet === "script" && <ScriptSheet state={state} busy={busy} onClose={() => setSheet(null)}

@@ -64,6 +64,8 @@ pub fn initialize<R: Runtime>(
     #[cfg(not(target_os = "android"))]
     {
         use std::sync::Arc;
+        let _ = story_core::execution_lease::expire_other_instance_leases_store(&store);
+        let _ = story_core::pi_service::reconcile_store(&store);
         let secrets = Arc::clone(&app.state::<crate::secret::PlatformSecrets>().0);
         app.manage(DesktopAgent(Arc::new(desktop::Host::new(
             app.clone(),
@@ -74,8 +76,88 @@ pub fn initialize<R: Runtime>(
         ))));
     }
     #[cfg(target_os = "android")]
-    let _ = (app, store);
+    {
+        let _ = app;
+        if let Ok(mut db) = store.lock() {
+            if let Ok(tx) = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+                let _ = story_core::execution_lease::reclaim_dead_leases(&tx);
+                let _ = tx.commit();
+            }
+        }
+        let _ = story_core::pi_service::reconcile_store(&store);
+    }
     Ok(())
+}
+
+#[cfg(target_os = "android")]
+async fn reclaim_disconnected_android_agent<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    store: &story_core::Store,
+) {
+    let has_agent_lease = {
+        let now = story_core::execution_lease::now_ms();
+        store.lock().ok().and_then(|db| {
+            let _ = story_core::execution_lease::reclaim_dead_leases(&db);
+            db.query_row(
+                "SELECT owner_instance FROM world_execution_leases WHERE owner_instance LIKE 'android-agent:%' AND expires_at_ms > ?",
+                [now],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        })
+    };
+    let Some(lease_instance) = has_agent_lease else {
+        return;
+    };
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        json: Option<String>,
+        #[serde(default, rename = "hostAbsent")]
+        host_absent: bool,
+    }
+    let probe = app
+        .state::<AndroidAgent<R>>()
+        .0
+        .run_mobile_plugin_async::<Reply>(
+            "cancelExisting",
+            json!({"request":{"op":"force_stop_attempt","taskId":"","attemptId":""}}),
+        )
+        .await;
+    let reclaim_keep_prefix: Option<String> = match probe {
+        Ok(reply) if reply.host_absent => Some(String::new()),
+        Ok(reply) => reply
+            .json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| {
+                if v["data"]["hostAbsent"] == true {
+                    return Some(String::new());
+                }
+                if v["ok"] == true {
+                    if let Some(pid) = v["data"]["pid"].as_u64().filter(|&p| p > 0) {
+                        let live_prefix = format!("android-agent:{pid}:");
+                        if !lease_instance.starts_with(&live_prefix) {
+                            return Some(live_prefix);
+                        }
+                    }
+                }
+                None
+            }),
+        Err(_) => None,
+    };
+    if let Some(live_prefix) = reclaim_keep_prefix {
+        let store = store.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _ = story_core::execution_lease::expire_dead_role_leases_except_prefix_store(
+                &store,
+                "android-agent",
+                &live_prefix,
+            );
+            let _ = story_core::pi_service::reconcile_store(&store);
+        })
+        .await;
+    }
 }
 
 #[tauri::command]
@@ -90,6 +172,11 @@ pub async fn pi_agent_request<R: Runtime>(
     if request["op"]=="archive_export" || request["op"]=="archive_validate" {
         let store=app.state::<ControlStore>().0.clone();
         return tauri::async_runtime::spawn_blocking(move||if request["op"]=="archive_export"{story_core::world_archive::export(&store,request["worldId"].as_str().unwrap_or(""))}else{story_core::world_archive::validate_history(&request)}).await.map_err(|_|unavailable())?.map_err(core_error);
+    }
+    #[cfg(target_os = "android")]
+    {
+        let store = app.state::<ControlStore>().0.clone();
+        reclaim_disconnected_android_agent(&app, &store).await;
     }
     if request["op"]=="resume_check" || request["op"]=="continue" {
         let store=app.state::<ControlStore>().0.clone();let query=request.clone();

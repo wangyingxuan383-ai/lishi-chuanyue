@@ -1,5 +1,5 @@
 //! 原著核对: the deep tier's checked rewrite and the standard tier's lite check
-//! (reference-review-2 and reference-review-lite-4, D161, D162).
+//! (reference-review-3 and reference-review-lite-5, D161, D162).
 use super::*;
 
 impl Engine {
@@ -14,7 +14,7 @@ impl Engine {
         let passages = lite_review_passages(plan, &extra_passages, cap);
         if passages.is_empty() {
             return Ok((narrative.to_owned(), record.clone(), json!({
-                "version":"reference-review-lite-4","status":"skipped","reason":"no_passages","issues":[],"skipped":0,"unresolved":[]
+                "version":"reference-review-lite-5","status":"skipped","reason":"no_passages","issues":[],"skipped":0,"unresolved":[]
             })));
         }
         let mut messages=lite_review_messages_with(plan, &passages, narrative);
@@ -24,7 +24,7 @@ impl Engine {
         let result=match self.complete(shared,"reference-review-lite",messages,vec![],true).await {
             Ok(result)=>result,
             Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
-            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-4","status":"skipped","reason":error.to_string()}))),
+            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-5","status":"skipped","reason":error.to_string()}))),
         };
         // Do not repair truncated JSON into an executable record patch.
         let text=result.text.trim();
@@ -32,7 +32,7 @@ impl Engine {
         let raw_issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
         let Some(raw_list) = raw_issues.as_array() else {
             return Ok((narrative.to_owned(), record.clone(), json!({
-                "version":"reference-review-lite-4","status":"skipped","issues":[],"skipped":0,
+                "version":"reference-review-lite-5","status":"skipped","issues":[],"skipped":0,
                 "unresolved":["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]
             })));
         };
@@ -55,7 +55,7 @@ impl Engine {
         if apply_skipped > 0 {
             unresolved.push("部分更正未能同时校准正文和回合记录，已跳过冲突条目；可使用“按原著纠错”进一步核对。");
         }
-        Ok((revised,revised_record,json!({"version":"reference-review-lite-4","status":if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
+        Ok((revised,revised_record,json!({"version":"reference-review-lite-5","status":if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
     }
     pub(super) async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
@@ -68,7 +68,7 @@ impl Engine {
             findings.extend(reviewed["report"]["findings"].as_array().cloned().unwrap_or_default());
             unresolved.extend(reviewed["report"]["unresolved"].as_array().cloned().unwrap_or_default());
         }
-        Ok(json!({"narrative":body,"record":current,"report":{"version":"reference-review-2","parts":parts.len(),"findings":findings,"unresolved":unresolved,"status":if unresolved.is_empty(){"reviewed"}else{"partial"}}}))
+        Ok(json!({"narrative":body,"record":current,"report":{"version":"reference-review-3","parts":parts.len(),"findings":findings,"unresolved":unresolved,"status":if unresolved.is_empty(){"reviewed"}else{"partial"}}}))
     }
     async fn review_reference_part(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value,part:usize)->Result<Value>{
         self.emit_run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
@@ -135,7 +135,7 @@ impl Engine {
             if let Some(problem) = turn_record_problem(plan, &record) {
                 return Err(Error::fail(crate::failure::FailKind::Review, format!("核对后的记录不完整：{problem}")));
             }
-            return Ok(json!({"narrative":revised["narrative"],"record":record,"report":{"version":"reference-review-1","findings":report["findings"],"unresolved":report["unresolved"],"status":if report["unresolved"].as_array().is_some_and(|a|!a.is_empty()){"partial"}else{"reviewed"}}}));
+            return Ok(json!({"narrative":revised["narrative"],"record":record,"report":{"version":"reference-review-3","findings":report["findings"],"unresolved":report["unresolved"],"status":if report["unresolved"].as_array().is_some_and(|a|!a.is_empty()){"partial"}else{"reviewed"}}}));
         }
         Err(Error::fail(crate::failure::FailKind::Review,"关键细节仍需补查，草稿已保留；请缩小待查问题或补充必要线索"))
     }

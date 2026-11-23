@@ -1,6 +1,7 @@
 // Lenient parsing of the record block into a TurnRecord. Whatever can be
 // understood is kept; malformed parts are dropped and reported in `issues`.
 import { normalizeContinuity } from "../continuity";
+import { currencyIssues } from "../money";
 import type { TurnRecord } from "../state/apply";
 
 export interface ParsedRecord {
@@ -165,13 +166,21 @@ export function normalizeRecord(value: unknown, issues: string[] = []): TurnReco
   const hour = Number(v.hour);
   if (v.hour !== undefined && Number.isInteger(hour) && hour >= 0 && hour < 24) r.hour = hour;
   if (v.died === true || v.died === "true") r.died = true;
-  const units = arr(v.currency).flatMap((u) => {
-    const o = u as Record<string, unknown>;
-    const name = str(o?.name);
-    const value = Number(o?.value);
-    return name && Number.isFinite(value) && value > 0 ? [{ name, value: Math.round(value) }] : [];
-  });
-  if (units.length) r.currency = units.sort((a, b) => b.value - a.value);
+  const rawCurrency = arr(v.currency);
+  if (rawCurrency.length) {
+    const candidate = rawCurrency.map((u) => {
+      const o = u as Record<string, unknown>;
+      const rawVal = o?.value;
+      const value = typeof rawVal === "number" ? rawVal : typeof rawVal === "string" && rawVal.trim() !== "" ? Number(rawVal) : NaN;
+      return { name: str(o?.name) ?? "", value };
+    });
+    const problems = currencyIssues(candidate);
+    if (!problems.length) {
+      r.currency = candidate;
+    } else {
+      issues.push(`货币单位无效：${problems[0].message}`);
+    }
+  }
 
   if (str(v.log)) r.log = str(v.log);
   if (str(v.deviation)) r.deviation = str(v.deviation);

@@ -3,7 +3,7 @@
 // and then reads, edits, switches off or deletes. Each passage carries the ones
 // that matter at the reading position, instead of re-reading the original.
 import { createContext, useEffect, useRef, useState } from "react";
-import { NOTE_KINDS, NOTE_KIND_LABEL, STORY_NOTE_KINDS, NOTE_TEXT_LIMIT, deleteNote, draftFromParts, estimateNote, gapRanges, listNotes, listStoryNotes, localNoteContent, newLocalNote, newNote, newStoryNote, nextNoteReach, noteBehind, noteChapterRange, noteNearEnd, noteOffRoute, noteWithinScope, restartOnRoute, routeIds, noteProgressDetail, noteProgressLabel, noteStepsDone, noteUnit, readNoteText, renameNote, restorePrevious, saveNote, startNoteUpdate, storyLastTurn, suggestTitle, turnLabel, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
+import { NOTE_KINDS, NOTE_KIND_LABEL, STORY_NOTE_KINDS, NOTE_TEXT_LIMIT, deleteNote, draftFromParts, estimateNote, gapRanges, listNotes, listStoryNotes, localNoteContent, mentionedChapters, newLocalNote, newNote, newStoryNote, nextNoteReach, noteBehind, noteChapterRange, noteNearEnd, noteOffRoute, noteWithinScope, restartOnRoute, routeIds, noteProgressDetail, noteProgressLabel, noteStepsDone, noteUnit, readNoteText, renameNote, restorePrevious, saveNote, startNoteUpdate, storyLastTurn, suggestTitle, turnLabel, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { RecentUsageLine } from "./TurnUsage";
@@ -38,6 +38,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
   const [view, setView] = useState<View>(start ? { name: "new" } : open ? { name: "note", id: open.id } : { name: "list" });
   const [notes, setNotes] = useState<CanonNote[] | null>(null);
   const [sections, setSections] = useState<string[]>([]);
+  const [totalBookSections, setTotalBookSections] = useState(0);
   const [lastTurn, setLastTurn] = useState(-1);
   const [route, setRoute] = useState<Set<string> | null>(null);
   const [, setTick] = useState(0);
@@ -58,10 +59,17 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
       void storyLastTurn(game.repo, worldId).then((last) => { if (live) { setLastTurn(last); setSections(Array.from({ length: last + 1 }, (_, i) => turnLabel(i))); } });
       void routeIds(game.repo, worldId).then((ids) => { if (live) setRoute(ids); }).catch(() => { if (live) setRoute(null); });
     } else if (bookId) {
-      void game.repo.platform.sql.query(
-        "SELECT section,title FROM source_sections WHERE book_id=? AND (? IS NULL OR section <= ?) ORDER BY section",
-        [bookId, through, through],
-      ).then((rows) => { if (live) setSections(rows.map((r) => String(r.title))); });
+      void Promise.all([
+        game.repo.platform.sql.query(
+          "SELECT section,title FROM source_sections WHERE book_id=? AND (? IS NULL OR section <= ?) ORDER BY section",
+          [bookId, through, through],
+        ),
+        game.repo.platform.sql.query("SELECT COUNT(*) AS n FROM source_sections WHERE book_id=?", [bookId]),
+      ]).then(([rows, countRows]) => {
+        if (!live) return;
+        setSections(rows.map((r) => String(r.title)));
+        setTotalBookSections(Number(countRows[0]?.n ?? rows.length));
+      });
     }
     return () => { live = false; };
   }, [bookId, worldId, tab, through]);
@@ -96,7 +104,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         </ul>
         <button className="primary" onClick={() => setView({ name: "new" })}>新建札记</button>
       </div>}
-      {view.name === "new" && <NewNote bookId={bookId ?? ""} worldId={worldId} story={story} sections={sections} position={story ? 0 : position} through={story ? null : through} draft={view.draft} start={start}
+      {view.name === "new" && <NewNote bookId={bookId ?? ""} worldId={worldId} story={story} sections={sections} totalSections={story ? sections.length : (totalBookSections || sections.length)} position={story ? 0 : position} through={story ? null : through} draft={view.draft} start={start}
         onCancel={() => setView({ name: "list" })}
         onStart={async (note, generate) => {
           await saveNote(game.repo, note);
@@ -131,7 +139,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         }}
         onSave={async (patch) => {
           const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
-          if (patch.content !== undefined && !current.model) next.refs = newLocalNote(current, patch.content, sections.length).refs;
+          if (patch.content !== undefined && !current.model) next.refs = newLocalNote(current, patch.content, story ? sections.length : (totalBookSections || sections.length)).refs;
           await saveNote(game.repo, next, true);
           setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null);
         }}
@@ -163,8 +171,8 @@ function storyTitle(kind: NoteKind, scope: NoteScope): string {
   return scope.question?.trim().slice(0, 24) || "问题";
 }
 
-function NewNote({ bookId, worldId, story, sections, position, through, draft, start, onStart, onCancel }: {
-  bookId: string; worldId: string | null; story: boolean; sections: string[]; position: number; through: number | null; draft?: CanonNote; start?: NoteStart;
+function NewNote({ bookId, worldId, story, sections, totalSections, position, through, draft, start, onStart, onCancel }: {
+  bookId: string; worldId: string | null; story: boolean; sections: string[]; totalSections: number; position: number; through: number | null; draft?: CanonNote; start?: NoteStart;
   onStart: (note: CanonNote, generate: boolean) => Promise<void>; onCancel: () => void;
 }) {
   const { game, toast } = useApp();
@@ -178,6 +186,7 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
   const [title, setTitle] = useState(draft ? `${Array.from(draft.title).slice(0, 34).join("")}（已整理）` : "");
   const [titleEdited, setTitleEdited] = useState(!!draft);
   const [generate, setGenerate] = useState(!draft);
+  const [importedExternal, setImportedExternal] = useState(false);
   const [body, setBody] = useState(() => draft ? draftFromParts(draft) : "");
   const [estimate, setEstimate] = useState<NoteEstimate | null>(null);
   const [starting, setStarting] = useState(false);
@@ -194,11 +203,12 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
     }
   }, [last, sections.length, story, position]);
   const ranged = kind === "plot" || kind === "timeline";
+  const allowImplicitThrough = !story && through !== null && (generate || !importedExternal);
   const scope: NoteScope = ranged
     ? { from: Math.min(from, to), to: Math.max(from, to) }
     : kind === "question"
-      ? { question: question.trim(), ...(!story && through !== null ? { through } : {}) }
-      : { subject: subject.trim(), aliases: aliases.split(/[、，,\s]+/).map((s) => s.trim()).filter(Boolean), ...(!story && through !== null ? { through } : {}) };
+      ? { question: question.trim(), ...(allowImplicitThrough ? { through } : {}) }
+      : { subject: subject.trim(), aliases: aliases.split(/[、，,\s]+/).map((s) => s.trim()).filter(Boolean), ...(allowImplicitThrough ? { through } : {}) };
   const ready = ranged ? sections.length > 0 : kind === "question" ? !!question.trim() : !!subject.trim();
   const key = JSON.stringify([kind, scope]);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -221,6 +231,9 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
       if (imported.from !== undefined && imported.to !== undefined && imported.from <= imported.to && imported.to <= last) {
         setKind(imported.title?.startsWith("时间线：") ? "timeline" : "plot");
         setFrom(imported.from); setTo(imported.to);
+        setImportedExternal(false);
+      } else {
+        setImportedExternal(true);
       }
       setGenerate(false);
       setBody(imported.content);
@@ -230,8 +243,8 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
   return (
     <div className="stack">
       {!draft && <div className="row" aria-label="札记录入方式">
-        <button className={generate ? "primary" : ""} aria-pressed={generate} onClick={() => setGenerate(true)}>AI 整理</button>
-        <button className={!generate ? "primary" : ""} aria-pressed={!generate} onClick={() => setGenerate(false)}>手写</button>
+        <button className={generate ? "primary" : ""} aria-pressed={generate} onClick={() => { setGenerate(true); setImportedExternal(false); }}>AI 整理</button>
+        <button className={!generate && !importedExternal ? "primary" : ""} aria-pressed={!generate && !importedExternal} onClick={() => { setGenerate(false); setImportedExternal(false); }}>手写</button>
         <button disabled={picking} onClick={() => void importText()}>导入 TXT</button>
       </div>}
       <div className="note-kinds" role="radiogroup" aria-label="札记种类">
@@ -239,7 +252,7 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
           <button key={k} role="radio" aria-checked={kind === k} className="note-kind" onClick={() => setKind(k)}><b>{label}</b><small>{hint}</small></button>
         ))}
       </div>
-      {ranged && <RangeInputs last={last} from={from} to={to} setFrom={(n) => { rangeTouched.current = true; setFrom(n); }} setTo={(n) => { rangeTouched.current = true; setTo(n); }} story={story} describe={chapter} total={story ? `本局到${turnLabel(last)}` : through !== null ? `本局可参考到第 ${through + 1} 节（共 ${sections.length} 节）` : `全书共 ${sections.length} 节`} />}
+      {ranged && <RangeInputs last={last} from={from} to={to} setFrom={(n) => { rangeTouched.current = true; setFrom(n); }} setTo={(n) => { rangeTouched.current = true; setTo(n); }} story={story} describe={chapter} total={story ? `本局到${turnLabel(last)}` : through !== null ? `本局可参考到第 ${through + 1} 节（全书共 ${totalSections} 节）` : `全书共 ${totalSections} 节`} />}
       {(kind === "person" || kind === "setting") && <div className="stack gap-2">
         <label>{kind === "person" ? "人物名字" : story ? "地点、势力或物件" : "设定名称"}<input value={subject} maxLength={40} onChange={(e) => setSubject(e.target.value)} placeholder={kind === "person" ? (story ? "如：主角的名字、王掌柜" : "如：林舟") : story ? "如：西市货栈、漕帮" : "如：机关傀儡、青云书院"} /></label>
         <label>别名（可不填，用顿号隔开）<input value={aliases} maxLength={120} onChange={(e) => setAliases(e.target.value)} placeholder="如：阿舟、林兄" /></label>
@@ -252,6 +265,9 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
         : `用辅助模型约 ${estimate.requests} 次请求，读约 ${(estimate.chars / 10000).toFixed(estimate.chars >= 100000 ? 0 : 1)} 万字${estimate.digests ? `（其中 ${estimate.digests} 段用通读整理的摘要，更省）` : ""}。可以随时暂停，已整理的部分保留。`}</p>
         : <>
           {draft && <p className="muted m-0">已把目前整理出的内容带进来。请核对范围和待补提示，保存后会多一份可用于写作的札记。</p>}
+          {!story && importedExternal && through !== null && !ranged && mentionedChapters(body).filter((s) => s < totalSections).length === 0 && (
+            <p className="field-hint m-0">导入的外部 TXT 未标明具体章节号，为防止剧透后文，仅在“全书参考”或标出章节号时用于写作。</p>
+          )}
           <label>札记内容<textarea aria-label="札记内容" className="note-text" rows={10} value={body} onChange={(event) => setBody(event.target.value)} /></label>
           <small className="muted">{body.length.toLocaleString()} / {NOTE_TEXT_LIMIT.toLocaleString()} 字{ranged ? " · 请确认上方章节范围" : ""}</small>
         </>}
@@ -262,7 +278,7 @@ function NewNote({ bookId, worldId, story, sections, position, through, draft, s
           void Promise.resolve().then(() => {
             const named = title || (story ? storyTitle(kind, scope) : suggestTitle(kind, scope));
             const note = story && worldId ? newStoryNote(worldId, kind, scope, named) : newNote(bookId, kind, scope, named, kind === "question" ? worldId : null);
-            return onStart(generate ? note : newLocalNote(note, body, sections.length), generate);
+            return onStart(generate ? note : newLocalNote(note, body, totalSections), generate);
           }).catch((error) => toast(error instanceof Error ? error.message : "没能保存札记")).finally(() => setStarting(false));
         }}>{generate ? "开始整理" : "保存札记"}</button>
       </div>

@@ -26,15 +26,29 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
   const latest = useRef(onClose);
   latest.current = onClose;
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(timer.current), []);
-  const dismiss = () => {
+  const settleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => {
+    clearTimeout(timer.current);
+    clearTimeout(settleTimer.current);
+  }, []);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const dismiss = (flung = false) => {
     if (closing) return;
     if (!motionOn()) { latest.current(); return; }
     setClosing(true);
+    const el = sheetRef.current;
+    if (flung && el) {
+      el.classList.add("flung");
+      el.style.transform = "translateY(105%)";
+      if (backdropRef.current) { backdropRef.current.style.transition = "opacity 200ms ease-in"; backdropRef.current.style.opacity = "0"; }
+      timer.current = setTimeout(() => latest.current(), 200);
+      return;
+    }
     timer.current = setTimeout(() => latest.current(), EXIT_MS);
   };
-  const requestClose = () => {
-    if (!dirty) { dismiss(); return; }
+  const attemptClose = (flung = false) => {
+    if (!dirty) { dismiss(flung); return; }
     if (asking.current) return;
     asking.current = true;
     void ask({ title: "放弃修改？", message: "刚才改的内容还没有保存。", confirm: "放弃", danger: true })
@@ -42,17 +56,35 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
       .finally(() => { asking.current = false; });
   };
   useBack(() => {
-    requestClose();
+    attemptClose();
     return true;
   });
   // Pull the handle or the title down to close (R28 第二批): the sheet follows the finger,
   // and a long or quick pull lets it fall away; otherwise it springs back.
-  const sheetRef = useRef<HTMLDivElement>(null);
-  const backdropRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ y: number; dy: number; t: number } | null>(null);
+  const resetDrag = () => {
+    const el = sheetRef.current;
+    drag.current = null;
+    if (!el) return;
+    el.classList.remove("dragging");
+    if (motionOn()) {
+      el.classList.add("settle");
+      clearTimeout(settleTimer.current);
+      settleTimer.current = setTimeout(() => el.classList.remove("settle"), 450);
+    } else {
+      el.classList.remove("settle");
+    }
+    el.style.transform = "";
+    if (backdropRef.current) {
+      backdropRef.current.style.transition = "";
+      backdropRef.current.style.opacity = "";
+    }
+  };
   const grab = {
     onPointerDown: (e: React.PointerEvent) => {
       if (e.button !== 0 || closing || (e.target as Element).closest("button")) return;
+      clearTimeout(settleTimer.current);
+      sheetRef.current?.classList.remove("settle");
       drag.current = { y: e.clientY, dy: 0, t: performance.now() };
       sheetRef.current?.classList.add("dragging");
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
@@ -66,31 +98,30 @@ export function Sheet({ title, onClose, dirty = false, children }: { title?: str
     },
     onPointerUp: () => {
       const d = drag.current, el = sheetRef.current;
-      drag.current = null;
-      if (!d || !el) return;
-      el.classList.remove("dragging");
+      if (!d || !el) { drag.current = null; return; }
       const fast = d.dy / Math.max(1, performance.now() - d.t) > 0.7;
-      if ((d.dy > 120 || (fast && d.dy > 30)) && !dirty && motionOn()) {
-        el.classList.add("flung");
-        el.style.transform = "translateY(105%)";
-        if (backdropRef.current) { backdropRef.current.style.transition = "opacity 200ms ease-in"; backdropRef.current.style.opacity = "0"; }
-        timer.current = setTimeout(() => latest.current(), 200);
+      const shouldClose = d.dy > 120 || (fast && d.dy > 30);
+      if (shouldClose && !dirty) {
+        drag.current = null;
+        el.classList.remove("dragging");
+        attemptClose(true);
         return;
       }
-      el.classList.add("settle");
-      el.style.transform = "";
-      if (backdropRef.current) backdropRef.current.style.opacity = "";
-      setTimeout(() => el.classList.remove("settle"), 450);
-      if (d.dy > 120) requestClose();
+      resetDrag();
+      if (shouldClose) attemptClose();
+    },
+    onPointerCancel: () => {
+      if (!drag.current) return;
+      resetDrag();
     },
   };
   return createPortal(
     <div className={`sheet-layer${closing ? " closing" : ""}`}>
-      <div ref={backdropRef} className="backdrop" onClick={requestClose} />
+      <div ref={backdropRef} className="backdrop" onClick={() => attemptClose()} />
       <div ref={sheetRef} className="sheet" role="dialog" aria-label={title}>
-        <div className="sheet-grab" {...grab} onPointerCancel={grab.onPointerUp}><div className="sheet-handle" /></div>
-        <button className="sheet-close" aria-label="关闭" onClick={requestClose}><Icon name="close" size={22} /></button>
-        {title && <h2 {...grab} onPointerCancel={grab.onPointerUp}>{title}</h2>}
+        <div className="sheet-grab" {...grab}><div className="sheet-handle" /></div>
+        <button className="sheet-close" aria-label="关闭" onClick={() => attemptClose()}><Icon name="close" size={22} /></button>
+        {title && <h2 {...grab}>{title}</h2>}
         {children}
       </div>
     </div>,

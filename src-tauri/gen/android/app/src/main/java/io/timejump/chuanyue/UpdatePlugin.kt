@@ -30,7 +30,11 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
     /** Android 8+ asks once per app (“安装未知应用”); older versions ask inside the installer. */
     @Command
     fun canInstallPackages(invoke: Invoke) {
-        invoke.resolve(JSObject().put("allowed", allowed()))
+        try {
+            invoke.resolve(JSObject().put("allowed", allowed()))
+        } catch (error: Exception) {
+            invoke.reject("无法读取安装未知应用权限")
+        }
     }
 
     /**
@@ -40,19 +44,43 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
      */
     @Command
     fun installPackage(invoke: Invoke) {
-        val path = invoke.parseArgs(PackageArgs::class.java).path ?: ""
-        val folder = File(activity.cacheDir, "updates").canonicalFile
-        val file = try { File(path).canonicalFile } catch (error: Exception) { null }
-        if (file == null || file.parentFile != folder || !file.name.endsWith(".apk") || !file.isFile) {
-            invoke.reject("update package unavailable")
+        val path = try {
+            invoke.parseArgs(PackageArgs::class.java).path ?: ""
+        } catch (error: Exception) {
+            invoke.reject("无法读取更新安装包路径")
             return
         }
-        if (!allowed()) {
-            openInstallSettings()
+        val folder = try {
+            File(activity.cacheDir, "updates").canonicalFile
+        } catch (error: Exception) {
+            invoke.reject("无法访问更新缓存目录")
+            return
+        }
+        val file = try { File(path).canonicalFile } catch (error: Exception) { null }
+        if (file == null || file.parentFile != folder || !file.name.endsWith(".apk") || !file.isFile) {
+            invoke.reject("更新安装包不可用，请重新下载")
+            return
+        }
+        val canInstall = try {
+            allowed()
+        } catch (error: Exception) {
+            invoke.reject("无法检查安装未知应用权限")
+            return
+        }
+        if (!canInstall) {
+            if (!openInstallSettings()) {
+                invoke.reject("无法打开“安装未知应用”系统设置，请在系统设置中手动开启")
+                return
+            }
             invoke.resolve(JSObject().put("status", "permission"))
             return
         }
-        val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file)
+        val uri = try {
+            FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file)
+        } catch (error: Exception) {
+            invoke.reject("无法准备更新安装包文件授权，请重新下载后重试")
+            return
+        }
         val intent = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, "application/vnd.android.package-archive")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -60,7 +88,11 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
             activity.startActivity(intent)
             invoke.resolve(JSObject().put("status", "started"))
         } catch (error: ActivityNotFoundException) {
-            invoke.reject("no package installer")
+            invoke.reject("未找到系统软件包安装程序，无法安装更新")
+        } catch (error: SecurityException) {
+            invoke.reject("系统拒绝打开安装程序，请检查安装未知应用权限")
+        } catch (error: Exception) {
+            invoke.reject("没能打开系统安装界面，请稍后重试")
         }
     }
 
@@ -70,20 +102,31 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /** This app's “安装未知应用” switch; ROMs without that screen get the app's details page. */
-    private fun openInstallSettings() {
-        val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
+    private fun openInstallSettings(): Boolean {
+        val pkgUri = Uri.parse("package:${activity.packageName}")
+        val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            activity.startActivity(details)
-            return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                activity.startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                return true
+            } catch (_: Exception) {
+                // Fall back to app details settings on custom ROMs that omit or block the unknown-sources screen.
+            }
         }
-        try {
-            activity.startActivity(
-                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}"))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        } catch (error: ActivityNotFoundException) {
+        return try {
             activity.startActivity(details)
+            true
+        } catch (_: Exception) {
+            try {
+                activity.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 }

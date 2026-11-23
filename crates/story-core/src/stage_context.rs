@@ -49,7 +49,91 @@ pub fn state(state:&Value,query:&str,cap:usize)->Value {
         remaining=remaining.saturating_sub(used);
         if ["items","statuses"].contains(&key){out["protagonist"][key]=selected.into();}else{out[key]=selected.into();}
     }
+    if let Some(beat) = arr(&state["script"]["beats"]).iter().find(|b| b["status"] == "todo") {
+        out["script"] = json!({"line": state["script"]["line"], "currentBeat": beat["text"], "ending": state["script"]["ending"]});
+    }
+    if state["challenge"]["status"] == "active" {
+        out["challenge"] = state["challenge"].clone();
+    }
     out["view"]=json!({"partial":true,"note":"仅本段相关资料，遗漏不等于不存在；read_world/read_characters/read_history可回读，所有原始记录留在本机。"});out
+}
+
+pub fn upkeep_roster_prefix(state: &Value, settings: &Value, taboos: Option<&str>) -> String {
+    let mut blocks = Vec::new();
+    let premise = text(&settings["premise"]).trim();
+    if !premise.is_empty() {
+        blocks.push(format!("【故事设定】\n{premise}"));
+    }
+    let me_name = text(&state["protagonist"]["name"]).trim();
+    let me_id = text(&state["protagonist"]["identity"]).trim();
+    blocks.push(format!(
+        "【主角】{}{}",
+        if me_name.is_empty() { "未命名" } else { me_name },
+        if me_id.is_empty() { String::new() } else { format!("（{}）", excerpt(me_id, "", 120)) }
+    ));
+    let statuses: Vec<&str> = arr(&state["protagonist"]["statuses"])
+        .iter()
+        .map(|s| text(&s["name"]).trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    blocks.push(format!(
+        "【主角的状况】{}",
+        if statuses.is_empty() { "无".to_owned() } else { statuses.join("、") }
+    ));
+    let mut card_lines = Vec::new();
+    for c in arr(&state["cards"]).iter().filter(|c| c["kind"] != "时代") {
+        let tag = match text(&c["source"]) {
+            "AI" => "AI 整理，可以更新",
+            "卡组" => "时代卡组自带，不要改",
+            _ => "玩家写的，不要改",
+        };
+        let body = text(&c["content"]).trim();
+        if body.is_empty() {
+            card_lines.push(format!("- {} · {}（{tag}）", text(&c["kind"]), text(&c["name"])));
+        } else {
+            card_lines.push(format!("- {} · {}（{tag}）：{body}", text(&c["kind"]), text(&c["name"])));
+        }
+    }
+    blocks.push(format!(
+        "【设定集里已有的卡片】\n{}",
+        if card_lines.is_empty() { "（还没有）".to_owned() } else { card_lines.join("\n") }
+    ));
+    let mut place_lines = Vec::new();
+    for p in arr(&state["places"]) {
+        let desc = text(&p["description"]).trim();
+        if desc.is_empty() {
+            place_lines.push(format!("- {}（还没有描述）", text(&p["name"])));
+        } else {
+            place_lines.push(format!("- {}：{desc}", text(&p["name"])));
+        }
+    }
+    blocks.push(format!(
+        "【已有的地点】\n{}",
+        if place_lines.is_empty() { "（还没有）".to_owned() } else { place_lines.join("\n") }
+    ));
+    let people: Vec<&str> = arr(&state["people"])
+        .iter()
+        .map(|p| text(&p["name"]).trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    blocks.push(format!(
+        "【人物表里已有的人物（不要建卡，也不要再写进 people）】{}",
+        if people.is_empty() { "无".to_owned() } else { people.join("、") }
+    ));
+    let dismissed: Vec<&str> = if let Some(list) = state["dismissed"].as_array() {
+        list.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect()
+    } else if let Some(obj) = state["dismissed"].as_object() {
+        obj.values().filter_map(Value::as_array).flatten().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect()
+    } else {
+        Vec::new()
+    };
+    if !dismissed.is_empty() {
+        blocks.push(format!("【玩家删掉的，不要再建】{}", dismissed.join("、")));
+    }
+    if let Some(t) = taboos.map(str::trim).filter(|s| !s.is_empty()) {
+        blocks.push(format!("【这个时代不该出现的东西】{t}"));
+    }
+    blocks.join("\n\n")
 }
 /// Compact an upkeep roster prefix only when it exceeds `cap`: keeps essential headers
 /// (主角/状况/人物表/已删/时代禁用词) and preserves every card/place name + editability tag
@@ -118,7 +202,9 @@ pub fn organization(plan:&RunPlan,messages:&[Value],narrative:&str)->Vec<Value>{
         Some(i) => (&original[..i], &original[i + marker.len()..]),
         None => ("", original),
     };
-    let old=raw_story.replace("{{NARRATIVE}}",narrative);
+    let footer = "未展开的旧资料仍存在，不能据此重复创建；只整理实际读到的剧情。";
+    let replaced = raw_story.replace("{{NARRATIVE}}", narrative);
+    let old = replaced.trim_end().trim_end_matches(footer).trim_end().to_owned();
     let mut output=messages.iter().filter(|m|m["role"]=="system").cloned().collect::<Vec<_>>();
     let sys_chars=units(&json!(output).to_string());
     let available=cap.saturating_sub(sys_chars+400).max(2400);
@@ -127,11 +213,11 @@ pub fn organization(plan:&RunPlan,messages:&[Value],narrative:&str)->Vec<Value>{
         let prefix=compact_org_prefix(raw_prefix,&old,prefix_cap);
         let story_cap=available.saturating_sub(units(&prefix)+80).clamp(1200,5000);
         let recent=if units(&old)>story_cap{parts(&old,story_cap).last().cloned().unwrap_or_default()}else{old};
-        output.push(json!({"role":"user","content":format!("{prefix}\n\n【最近的剧情】\n{}\n未展开的旧资料仍存在，不能据此重复创建；只整理实际读到的剧情。",recent.trim_start())}));
+        output.push(json!({"role":"user","content":format!("{prefix}\n\n【最近的剧情】\n{}\n{footer}",recent.trim_start())}));
         return output;
     }
     let recent=if units(&old)>4500{let chunks=parts(&old,4500);chunks.last().cloned().unwrap_or_default()}else{old};
-    output.push(json!({"role":"user","content":format!("【故事设定】{}\n【玩家规则】{}\n【要点】{}\n【相关资料】{}\n【玩家删除的，不要再建】{}\n【最近的剧情】{}\n未展开的旧资料仍存在，不能据此重复创建；只整理实际读到的剧情。",plan.settings["premise"].as_str().unwrap_or(""),plan.settings["rules"].as_str().unwrap_or(""),plan.settings["essentials"].as_str().unwrap_or(""),state(&plan.state,&recent,(cap/4).min(3000)),excerpt(&plan.state["dismissed"].to_string(),&recent,800),recent)}));output
+    output.push(json!({"role":"user","content":format!("【故事设定】{}\n【玩家规则】{}\n【要点】{}\n【相关资料】{}\n【玩家删除的，不要再建】{}\n【最近的剧情】{}\n{footer}",plan.settings["premise"].as_str().unwrap_or(""),plan.settings["rules"].as_str().unwrap_or(""),plan.settings["essentials"].as_str().unwrap_or(""),state(&plan.state,&recent,(cap/4).min(3000)),excerpt(&plan.state["dismissed"].to_string(),&recent,800),recent)}));output
 }
 pub fn facts(state:&Value,query:&str,cap:usize)->Value{
     let names=arr(&state["people"]).iter().filter(|p|relevant(p,query)).map(|p|text(&p["name"])).collect::<Vec<_>>();
@@ -141,11 +227,77 @@ pub fn facts(state:&Value,query:&str,cap:usize)->Value{
     for f in facts {let item=json!({"id":f["id"],"nodeId":f["nodeId"],"origin":f["origin"],"detail":excerpt(text(&f["detail"]),query,400)});let n=units(&item.to_string())+1;if used+n>cap{continue;}used+=n;picked.push(item);}
     json!({"items":picked,"partial":true,"note":"仅相关玩家事实；未取得依据的旧事实不能当成玩家改写，可read_history核对。"})
 }
+pub fn enrich_extract_system(raw_system: &str, state: &Value) -> String {
+    let has_beat = arr(&state["script"]["beats"]).iter().any(|b| b["status"] == "todo");
+    let has_challenge = state["challenge"]["status"] == "active" && !text(&state["challenge"]["goal"]).trim().is_empty();
+    let mut out = raw_system.to_owned();
+    let beat_line = " \"beat\":当前这一幕的关键事件已在本段正文发生时写 \"done\"，否则不写,";
+    let challenge_line = " \"challenge\":{\"progress\":\"挑战的现状，一句话\",\"result\":\"目标确实达成写 won，失败条件确实出现写 lost，否则不写\",\"why\":\"成败的缘由，一句话\"},";
+    if out.contains("\"choices\":") {
+        let mut lines: Vec<String> = out.lines().map(str::to_owned).collect();
+        if let Some(pos) = lines.iter().position(|l| l.trim_start().starts_with("\"choices\":")) {
+            let mut offset = 0;
+            if has_beat && !out.contains("\"beat\":") {
+                lines.insert(pos + offset, beat_line.to_owned());
+                offset += 1;
+            }
+            if has_challenge && !out.contains("\"challenge\":") {
+                lines.insert(pos + offset, challenge_line.to_owned());
+            }
+        }
+        out = lines.join("\n");
+    } else {
+        if has_beat && !out.contains("\"beat\"") {
+            out.push_str("\n若当前剧本这一幕的关键事件已在本段正文发生，额外写 \"beat\":\"done\"。");
+        }
+        if has_challenge && !out.contains("\"challenge\"") {
+            out.push_str("\n若有进行中的挑战，额外写 \"challenge\":{\"progress\":\"一句话现状\",\"result\":\"目标确实达成写 won，失败条件确实出现写 lost，否则不写\",\"why\":\"成败缘由\"}。");
+        }
+    }
+    out
+}
+pub fn active_modes_prompt(state: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(beat) = arr(&state["script"]["beats"]).iter().find(|b| b["status"] == "todo") {
+        let line = text(&state["script"]["line"]).trim();
+        parts.push(format!(
+            "【当前剧本这一幕】{}{}",
+            if line.is_empty() { String::new() } else { format!("主线：{line}；") },
+            text(&beat["text"]).trim()
+        ));
+    }
+    if state["challenge"]["status"] == "active" && !text(&state["challenge"]["goal"]).trim().is_empty() {
+        let c = &state["challenge"];
+        let limit = text(&c["limit"]).trim();
+        let rem = crate::writing_context::challenge_remaining(state);
+        let limit_str = if limit.is_empty() {
+            "不限时".to_owned()
+        } else if let Some(r) = rem {
+            format!("{limit}（{r}）")
+        } else {
+            limit.to_owned()
+        };
+        parts.push(format!(
+            "【当前挑战】目标：{}；期限：{}；失败条件：{}；最近进展：{}",
+            text(&c["goal"]).trim(),
+            limit_str,
+            text(&c["failIf"]).trim(),
+            text(&c["progress"]).trim()
+        ));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", parts.join("\n"))
+    }
+}
 pub fn extraction(plan:&RunPlan,narrative:&str)->Vec<Value>{
     let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
-    let mut system=plan.extract_messages.first().and_then(|m|m["content"].as_str()).unwrap_or("只输出本回合变化的JSON记录，time/log/choices必须有。").to_owned();
+    let base_system=plan.extract_messages.first().and_then(|m|m["content"].as_str()).unwrap_or("只输出本回合变化的JSON记录，time/log/choices必须有。");
+    let mut system=enrich_extract_system(base_system,&plan.state);
     if plan.kind=="opening"&&plan.meta["titlePolicy"]=="auto"{system+="请结合本段实际开场拟一个小说书名（2～12字为宜，最多24字）：像书架上的网文或小说名，点出核心处境、悬念或人物志向，可用意象或反差；不用“某某的故事/某某传/穿越之XX/重生之XX/我在XX当XX”等套式，不堆砌“天下、风云、传奇、录”，不照抄主角姓名或朝代名。写入额外字段storyTitle，不要写进正文或状态。";}
-    vec![json!({"role":"system","content":system}),json!({"role":"user","content":format!("【当前相关状态】{}\n【结算货币】{}\n【当前时钟】{}\n【本回合行动】{}\n【本回合正文】\n{}",state(&plan.state,narrative,(cap/5).min(3000)),plan.options["currency"],plan.options["clock"],plan.action,narrative)})]
+    let modes=active_modes_prompt(&plan.state);
+    vec![json!({"role":"system","content":system}),json!({"role":"user","content":format!("【当前相关状态】{}{}\n【结算货币】{}\n【当前时钟】{}\n【本回合行动】{}\n【本回合正文】\n{}",state(&plan.state,narrative,(cap/5).min(3000)),modes,plan.options["currency"],plan.options["clock"],plan.action,narrative)})]
 }
 /// Lossless paragraph groups; even an unusually long paragraph is split on a
 /// UTF-8 boundary. Joining the returned pieces reproduces the exact original.
@@ -210,5 +362,14 @@ pub fn chapter(messages:&[Value],narrative:&str,budget:usize)->(Vec<Value>,Vec<S
      assert!(user.contains("【主角的状况】受寒"),"{user}");
      assert!(user.contains("【这个时代不该出现的东西】银两（铜钱）"),"{user}");
      assert!(user.contains("青衣楼换了新堂主"),"{user}");
+ }
+ #[test]fn extraction_injects_active_script_and_challenge_schema_and_context(){
+     let plan:RunPlan=serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"turn","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[{"role":"system","content":"只输出JSON：\n{\"time\":\"一刻\",\n \"choices\":[\"甲\"]}"}],"state":{"time":{"elapsedMinutes":1440},"protagonist":{"name":"沈舟","items":[],"statuses":[]},"script":{"line":"寻剑","ending":"归隐","steer":"gentle","beats":[{"id":"b1","text":"渡口夺剑","status":"todo"}]},"challenge":{"goal":"守住渡口","limit":"三日","deadlineMinute":4320,"failIf":"渡口失守","progress":"已布防","status":"active","startedMinute":0}},"settings":{},"options":{"currency":{},"clock":{}},"action":"拔剑","meta":{"budgetChars":12000}})).unwrap();
+     let msgs=extraction(&plan,"沈舟在渡口夺回古剑，守住了防线。");
+     let sys=msgs[0]["content"].as_str().unwrap();
+     let usr=msgs[1]["content"].as_str().unwrap();
+     assert!(sys.contains("\"beat\":") && sys.contains("\"challenge\":"), "{sys}");
+     assert!(usr.contains("【当前剧本这一幕】") && usr.contains("渡口夺剑"), "{usr}");
+     assert!(usr.contains("【当前挑战】目标：守住渡口；期限：三日（还剩 2 天）"), "{usr}");
  }
 }

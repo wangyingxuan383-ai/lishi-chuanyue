@@ -75,6 +75,8 @@ export function fromTemplate(t: OpeningTemplate, keep: Draft, gender?: "男" | "
   const g = t.gender ?? gender ?? keep.gender;
   return {
     ...keep,
+    fanfic: false,
+    ...(keep.source ? { source: { ...keep.source, fanfic: false } } : {}),
     templateId: t.id,
     challengeId: null,
     lockedGender: t.gender,
@@ -98,6 +100,8 @@ export function fromChallenge(c: ChallengeCard, keep: Draft): Draft {
   const gender = c.gender ?? keep.gender;
   return {
     ...keep,
+    fanfic: false,
+    ...(keep.source ? { source: { ...keep.source, fanfic: false } } : {}),
     templateId: null,
     challengeId: c.id,
     lockedGender: c.gender,
@@ -134,7 +138,7 @@ export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "dif
   return {
       title: d.title,
     titlePolicy: d.titlePolicy ?? (d.title.trim() ? "manual" : "auto"),
-    source: d.source,
+    source: d.source && d.fanfic === false && d.source.fanfic ? { ...d.source, fanfic: false } : d.source,
     eraId: d.settings.mode === "free" ? null : d.eraId,
     settings: {
       ...defaults, ...d.settings, premise: d.premise,

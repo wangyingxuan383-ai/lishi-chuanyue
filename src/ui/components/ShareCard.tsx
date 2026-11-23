@@ -110,7 +110,8 @@ export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvas
   checkCardText(content.body);
   const font = fontStack();
   const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d")!;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("当前设备暂时无法创建画布，请关闭部分页面后重试。");
   const seal = content.seal ?? "穿越";
   if (layout === "手卷") return renderScroll(canvas, ctx, content, font, seal);
 
@@ -264,6 +265,7 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
   const browser = game.platform.name === "web-dev";
+  const isAndroid = game.platform.name === "android" || (typeof navigator !== "undefined" && /android/i.test(navigator.userAgent));
   useEffect(() => {
     // After the fonts the page uses are ready, so the canvas draws with them.
     let live = true;
@@ -289,7 +291,9 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
     }
     const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(content.heading ?? content.title)}</title></head>`
       + `<body style="margin:0;background:#efe5cf"><img alt="${escapeHtml(content.heading ?? content.title)}" src="${url}" style="display:block;max-width:100%;margin:0 auto"></body></html>`;
-    if (await game.platform.files.exportText(`${name}.html`, html).catch(() => false)) toast("已保存为网页文件");
+    if (await game.platform.files.exportText(`${name}.html`, html).catch(() => false)) {
+      toast(isAndroid ? "已保存为网页文件，用浏览器打开可长按存图" : "已保存书摘网页文件，用浏览器打开可右键另存原图");
+    }
   };
   return (
     <Sheet title={title} onClose={onClose}>
@@ -306,7 +310,13 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
           {url ? <img src={url} alt="书摘卡预览" onLoad={(e) => { const box = e.currentTarget.parentElement; if (box) box.scrollLeft = box.scrollWidth; }} /> : <p className={error ? "notice" : "muted"} role={error ? "alert" : undefined}>{error || "正在画…"}</p>}
         </div>
         <button className="primary" disabled={!url} onClick={() => void save()}>保存图片</button>
-        {!browser && <p className="muted m-0 small">手机上暂时不能直接存进相册：会存成一个网页文件（.html），用浏览器打开就能看到这张图，再长按图片保存。</p>}
+        {!browser && (
+          <p className="muted m-0 small">
+            {isAndroid
+              ? "手机上暂时不能直接存进相册：会存成一个网页文件（.html），用浏览器打开就能看到这张图，再长按图片保存。"
+              : "会保存为内嵌高清原图的网页文件（.html），双击用浏览器打开后右键“图片另存为”即可保存 PNG 图片。"}
+          </p>
+        )}
       </div>
     </Sheet>
   );
@@ -325,7 +335,18 @@ export function PassageCardSheet({ world, node, onClose }: { world: World; node:
   useEffect(() => {
     let live = true;
     setCount(1); setPassages([node]);
-    void game.repo.path(node.id, 50).then((path) => { if (live) setPassages(path.filter((p) => p.kind !== "edit" && p.narrative.trim()).slice(-5)); }).catch(() => {});
+    void (async () => {
+      let limit = 120;
+      for (;;) {
+        const path = await game.repo.path(node.id, limit);
+        const found = path.filter((p) => p.kind !== "edit" && p.narrative.trim());
+        if (found.length >= 5 || path.length < limit || limit >= 2400) {
+          if (live) setPassages(found.length ? found.slice(-5) : [node]);
+          return;
+        }
+        limit *= 2;
+      }
+    })().catch(() => {});
     return () => { live = false; };
   }, [game, node]);
   useEffect(() => {

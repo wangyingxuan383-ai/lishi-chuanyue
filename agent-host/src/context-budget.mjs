@@ -10,6 +10,47 @@ const positiveInteger = (value, name) => {
 // The pinned Pi provider adapter retains this margin when fitting response caps.
 // Do not shrink its model window to the APP input cap and accidentally consume it.
 const PI_CONTEXT_SAFETY_TOKENS = 4096;
+export const AUX_DEFAULT_CONTEXT_WINDOW_TOKENS = 64_000;
+export const AUX_DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+
+/** Build a trimmed, safely bounded auxiliary model spec (or null when unavailable/unsafe). */
+export function auxModelSpec(model) {
+  const mainId = typeof model?.id === "string" ? model.id.trim() : "";
+  const auxId = typeof model?.auxModel === "string" ? model.auxModel.trim() : "";
+  // Never route an auxiliary model ID onto an explicit single-model custom endpointRef.
+  if (!auxId || auxId === mainId || (model?.endpointRef !== undefined && model?.endpointRef !== null)) {
+    return null;
+  }
+  const configuredAuxWindow = model.auxContextWindowTokens == null
+    ? null : positiveInteger(model.auxContextWindowTokens, "auxContextWindowTokens");
+  const mainWindow = model.contextWindowTokens == null
+    ? null : positiveInteger(model.contextWindowTokens, "contextWindowTokens");
+  const contextWindowTokens = configuredAuxWindow ?? (mainWindow === null
+    ? AUX_DEFAULT_CONTEXT_WINDOW_TOKENS
+    : Math.min(mainWindow, AUX_DEFAULT_CONTEXT_WINDOW_TOKENS));
+  const maxOutputTokens = Math.min(
+    positiveInteger(model.maxOutputTokens ?? AUX_DEFAULT_MAX_OUTPUT_TOKENS, "maxOutputTokens"),
+    AUX_DEFAULT_MAX_OUTPUT_TOKENS,
+    Math.max(256, Math.floor(contextWindowTokens / 4)),
+  );
+  const inputTokens = Math.min(
+    positiveInteger(model.inputTokens ?? 475_000, "inputTokens"),
+    contextWindowTokens - maxOutputTokens,
+  );
+  return {
+    ...model,
+    id: auxId,
+    name: auxId,
+    auxModel: undefined,
+    cost: undefined,
+    reasoning: undefined,
+    compat: undefined,
+    thinkingMode: "off",
+    contextWindowTokens,
+    maxOutputTokens,
+    inputTokens,
+  };
+}
 
 /** Keep configured model capacity separate from Pi's application input cap. */
 export function contextBudget(model) {

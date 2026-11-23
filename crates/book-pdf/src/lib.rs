@@ -20,12 +20,17 @@ pub fn extract(bytes: &[u8]) -> Result<PdfText, &'static str> {
 }
 
 pub fn extract_with_cancel(bytes: &[u8], cancelled: impl Fn() -> bool) -> Result<PdfText, &'static str> {
-    if bytes.len() > 64 * 1024 * 1024 || !bytes.starts_with(b"%PDF-") {
+    if bytes.len() > 64 * 1024 * 1024 {
         return Err("PDF 文件无效或超过 64 MiB");
     }
+    let header_window = &bytes[..bytes.len().min(8192)];
+    let Some(header_offset) = header_window.windows(5).position(|w| w == b"%PDF-") else {
+        return Err("PDF 文件无效或超过 64 MiB");
+    };
+    let pdf_bytes = &bytes[header_offset..];
     if cancelled() { return Err("已取消"); }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut document = lopdf::Document::load_mem(bytes).map_err(|_| INVALID_TEXT)?;
+        let mut document = lopdf::Document::load_mem(pdf_bytes).map_err(|_| INVALID_TEXT)?;
         if document.is_encrypted() { document.decrypt("").map_err(|_| INVALID_TEXT)?; }
         let capture = Rc::new(RefCell::new(Capture::default()));
         let writer = Writer { capture: capture.clone(), cancelled: &cancelled };
@@ -138,6 +143,12 @@ mod tests {
 
         let result = extract(&fixture).unwrap();
         assert_eq!(result.pages.iter().map(|page| page.trim()).collect::<Vec<_>>(), ["First page", "Second page"]);
+        // Leading BOM / whitespace / wrapper header within first 8192 bytes is valid (B11, F39).
+        let mut padded = b"\xEF\xBB\xBF   \r\n".to_vec();
+        padded.extend(std::iter::repeat_n(b' ', 1500));
+        padded.extend_from_slice(&fixture);
+        let padded_res = extract(&padded).unwrap();
+        assert_eq!(padded_res.pages.iter().map(|page| page.trim()).collect::<Vec<_>>(), ["First page", "Second page"]);
         let checks = Cell::new(0);
         assert!(matches!(extract_with_cancel(&fixture, || {
             checks.set(checks.get() + 1);

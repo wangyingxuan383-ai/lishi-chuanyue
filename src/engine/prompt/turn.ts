@@ -17,7 +17,7 @@ import { beatTitle, challengeView } from "../modes";
 
 import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-27";
+export const PROMPT_VERSION = "turn-28";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -140,7 +140,7 @@ const AI_AGENCY = "主角由你来演：照他的性格、处境和目标，自�
 
 function choicesRule(settings: PromptSettings): string {
   if (settings.choiceCount <= 0) return "记录里的 choices 写空数组 []";
-  return aiPilot(settings) ? "记录里给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字），写成事件或局面走向、不以主角作主语（如“旧识带来一个坏消息”“让日子先平静几天”），供玩家在幕后挑选" : `记录里给 ${settings.choiceCount} 个简短、不同的建议行动（各不超过二十字），由玩家选择`;
+  return aiPilot(settings) ? "记录里给 2～3 个“接下来可以怎样发展”的短句（各不超过二十字），写成事件或局面走向、不以主角作主语（如“旧识带来一个坏消息”“让日子先平静几天”），供玩家在幕后挑选" : `记录里给 ${settings.choiceCount} 个简短、思路截然不同的建议行动（如试探交涉、细致查验、强硬出手或抽身退让，各不超过二十字），由玩家选择`;
 }
 
 function systemParts(ctx: StoryContext, panel?: string, modes: ModeContext = {}): SystemParts {
@@ -156,9 +156,9 @@ function systemParts(ctx: StoryContext, panel?: string, modes: ModeContext = {})
       : "【时代】以【故事设定】为准。称谓、货币、器物符合那个时代；拿不准的细节写得模糊些。";
   const rulesText = `你是一部${free ? "" : "历史"}互动小说的作者兼叙事者。${aiPilot(settings) ? "主角和其他人物都由你来演，玩家在幕后指点。" : "玩家扮演主角，你写世界、其他人物和剧情。"}
 【写作要求】
-- ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}；每回合${LENGTH[settings.length]}。${free ? "文风和对白贴合玩家设定与人物身份" : `叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，对白符合时代与人物身份`}；多写具体的动作、神态、环境细节与各具腔调的对白，少用空泛总结，避免重复上回合的开头和句式。
+- ${PERSPECTIVE[settings.perspective](ctx.protagonistName)}；每回合${LENGTH[settings.length]}。${free ? "文风和对白贴合玩家设定与人物身份" : `叙述用${settings.style === "半文半白" ? "半文半白" : "白话"}，对白符合时代与人物身份`}；多写具体的动作、神态、环境细节与各具腔调的对白，少用空泛总结，避免重复上回合的开头和句式，结尾停在具体的对话或局面节点上而非悬念套话。
 - ${aiPilot(settings) ? AI_AGENCY : PLAYER_AGENCY}
-- 行动按情理决定成败，失败有后果；其他人物有自己的目的和处境，态度变化有缘由。
+- 行动按情理决定成败，失败有后果；主角重伤或垂危时剧烈行动受限，强行搏杀或奔逃会令伤势加重；其他人物有自己的目的、眼界和处境，不围着主角转，态度变化有缘由。
 - 性别、身份、年龄、钱物、生死以【当前】和已发生的故事为准；钱物只用现有数量，花用写明数目，钱不够就付不起。时间不倒退，正文的${elapsedClock(settings) ? "时间" : "时辰"}与经过时长一致，跳过多久写入 time。
 - 回忆旧事时只依据已记录的事实，绝不为圆场补造未出现过的旧恩怨、旧信物、过往来源、承诺或秘密；未记录的过往只留白或写主角记不清，可以描写此刻的感受和环境，新事件从现在发展。
 - ${choicesRule(settings)}。
@@ -622,14 +622,14 @@ export function openingExtractMessages(input: OpeningInput & { text: string }): 
     {
       role: "system",
       content: `你是这部互动小说的记录员。玩家亲手写了开场。根据【故事设定】【主角】和【开场正文】，只输出一个 JSON 对象，记录故事开始时的状态。字段如下（没有的省略）：
-${recordFields(input.settings)}
+${recordFields(input.settings, { script: input.script, challenge: input.challenge })}
 ${openingExtra(input.settings)}${packLine(input.era, input.settings)}
 记录必须与开场正文一致，不补造正文未写的设定；items 只记主角随身真正有的东西（不含景物与钱），status 只记身心状况；${extractChoicesRule(input.settings)}
 time 写 "0"。只输出 JSON，不要加代码块或额外说明。`,
     },
     {
       role: "user",
-      content: `【故事设定】\n${input.settings.premise || "（未写）"}\n\n【主角】\n${protagonistLine(input)}${heroPanelBlock(input.settings, input.settings.heroPanel)}\n\n【开场正文】\n${input.text}`,
+      content: `【故事设定】\n${input.settings.premise || "（未写）"}\n\n【主角】\n${protagonistLine(input)}${heroPanelBlock(input.settings, input.settings.heroPanel)}${scriptBlock(input.script, input.settings)}${challengeBlock({ challenge: input.challenge, time: { start: "", elapsedMinutes: 0 } })}\n\n【开场正文】\n${input.text}`,
     },
   ];
 }

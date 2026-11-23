@@ -729,12 +729,14 @@ fn note_within_scope(kind: &str, scope: &str, refs: &str, through: Option<u64>, 
     let refs: Value = serde_json::from_str(refs).unwrap_or(Value::Null);
     let Some(refs) = refs.as_array() else { return false; };
     if refs.iter().any(|s| s.as_u64().is_none_or(|s| s > through)) { return false; }
+    let scope: Value = serde_json::from_str(scope).unwrap_or(Value::Null);
     if matches!(kind, "plot" | "timeline") {
-        let scope: Value = serde_json::from_str(scope).unwrap_or(Value::Null);
-        scope["to"].as_u64().is_some_and(|to| to <= through)
-    } else {
-        (!refs.is_empty() || kind == "question" && same_world) && refs.len() < 400
+        return scope["to"].as_u64().is_some_and(|to| to <= through);
     }
+    if scope["through"].as_u64().is_some_and(|t| t <= through) {
+        return refs.len() < 400;
+    }
+    (!refs.is_empty() || kind == "question" && same_world) && refs.len() < 400
 }
 
 fn budget(plan: &RunPlan) -> usize {
@@ -775,7 +777,7 @@ fn analysis_locator(
         return Ok(None);
     };
     let structured: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-    let summary = if structured["version"] == "source-3" {
+    let summary = if matches!(structured["version"].as_str(), Some("source-3" | "source-4")) {
         structured["summary"].as_str().unwrap_or("")
     } else {
         &raw
@@ -835,6 +837,9 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     if notes_only(plan) && ["list_sections","search_original","read_original","read_canon_facts","locate_original_event","prepare_reference_check"].contains(&name) {
         return Err(Error::Invalid("这次只用你选的札记，不查原文；请依据札记作答，札记里没有的写明资料不足".into()));
     }
+    if name == "read_canon_notes" {
+        return read_notes(db, plan, args["query"].as_str().unwrap_or(""));
+    }
     if name == "list_sections" {
         return list_sections(db, plan, args);
     }
@@ -893,7 +898,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     }
     let position = binding["position"].as_i64().unwrap_or(0).clamp(from, through);
     let raw_query = args["query"].as_str().unwrap_or("").trim();
-    let ignore_position = matches!(plan.kind.as_str(), "correction" | "ask");
+    let ignore_position = matches!(plan.kind.as_str(), "correction" | "ask" | "pi_task");
     let mut keys = query_keys(plan, args);
     let notes = facts(
         db,

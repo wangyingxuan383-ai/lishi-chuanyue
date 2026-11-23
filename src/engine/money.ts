@@ -15,16 +15,21 @@ export const TANG_CURRENCY: Currency = {
   aliases: { 缗: "贯", 钱: "文", 枚: "文", 个: "文" },
 };
 
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 export function formatMoney(amount: number, currency: Currency): string {
+  const validUnits = currency.units.filter((u) => Number.isFinite(u.value) && u.value > 0);
+  const fallbackName = validUnits[validUnits.length - 1]?.name ?? currency.units[currency.units.length - 1]?.name ?? "钱";
+  if (!Number.isFinite(amount)) return `0 ${fallbackName}`.trim();
   const sign = amount < 0 ? "−" : "";
   let rest = Math.abs(Math.round(amount));
   const parts: string[] = [];
-  for (const unit of currency.units) {
+  for (const unit of validUnits) {
     const n = Math.floor(rest / unit.value);
     rest -= n * unit.value;
     if (n) parts.push(`${n} ${unit.name}`.trim());
   }
-  return sign + (parts.length ? parts.join(" ") : `0 ${currency.units[currency.units.length - 1].name}`.trim());
+  return sign + (parts.length ? parts.join(" ") : `${rest ? `${rest} ` : "0 "}${fallbackName}`.trim());
 }
 
 
@@ -37,7 +42,14 @@ export function parseMoney(input: unknown, currency: Currency): number | null {
   if (/^[-−－]/.test(text)) { sign = -1; text = text.slice(1); }
   else if (/^[+＋]/.test(text)) text = text.slice(1);
   if (/^\d+$/.test(text)) return sign * Number(text);
-  const names = [...currency.units.map((u) => u.name), ...Object.keys(currency.aliases ?? {})];
+  const names = [
+    ...currency.units.filter((u) => Number.isFinite(u.value) && u.value > 0).map((u) => u.name),
+    ...Object.keys(currency.aliases ?? {}),
+  ]
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegExp);
+  if (!names.length) return null;
   // Lazy, so a unit named 两 is not read as the digit two ("三两二百文" = 3 两 + 200 文).
   const pattern = new RegExp(`(\\d+(?:\\.\\d+)?|[零〇一二两俩三四五六七八九十百千]+?)(${names.join("|")})(半)?`, "g");
   let total = 0;
@@ -46,7 +58,7 @@ export function parseMoney(input: unknown, currency: Currency): number | null {
     const amount = parseChineseNumber(amountText);
     const canonical = currency.aliases?.[unitName] ?? unitName;
     const unit = currency.units.find((u) => u.name === canonical);
-    if (amount === null || !unit) continue;
+    if (amount === null || !unit || !Number.isFinite(unit.value) || unit.value <= 0) continue;
     total += (amount + (half ? 0.5 : 0)) * unit.value;
     matched = true;
   }
@@ -69,7 +81,7 @@ export function currencyIssues(units: unknown[]): { index: number | null; messag
     if (!name) return issues.push({ index, message: "货币单位缺少名字" });
     if (seen.has(name)) issues.push({ index, message: `单位“${name}”重复` });
     seen.add(name);
-    if (!Number.isInteger(u.value) || (u.value as number) < 1) return issues.push({ index, message: `“${name}”缺少换算（value 要是正整数，以最小单位计）` });
+    if (!Number.isSafeInteger(u.value) || (u.value as number) < 1) return issues.push({ index, message: `“${name}”缺少换算（value 要是正整数，以最小单位计）` });
     const value = u.value as number;
     const next = unit(units[index + 1]);
     if (Number.isInteger(next.value) && (next.value as number) >= 1) {

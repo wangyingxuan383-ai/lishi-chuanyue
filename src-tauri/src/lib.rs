@@ -60,6 +60,11 @@ pub fn run() {
             let application = app.handle().clone();
             let live_app = app.handle().clone();
             let notices = services.0.shared();
+            let companion = Arc::new(story_core::companion_runtime::CompanionRuntime::with_lease(
+                services.0.shared(),
+                model.clone(),
+                Arc::new(|remaining| Box::new(keep_alive::shared().acquire_for(remaining))),
+            ));
             let engine = Arc::new(story_core::runtime::Engine::new(
                 services.0.shared(),
                 model,
@@ -96,6 +101,7 @@ pub fn run() {
             keep_alive::set_stop_handler(move |run,execution| {
                 if let Some(engine)=weak.upgrade(){let _=engine.stop_execution(run,execution);}
             });
+            app.manage(companion);
             app.manage(engine);
             pi_agent::initialize(app.handle(), services.0.shared())?;
             app.manage(services.0);
@@ -125,6 +131,7 @@ pub fn run() {
             commands::network_set,
             commands::http_get_public,
             execution::execution_start,
+            execution::execution_companion,
             pi_agent::pi_agent_request,
             execution::execution_settle,
             execution::execution_context,

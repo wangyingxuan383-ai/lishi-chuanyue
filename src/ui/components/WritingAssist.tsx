@@ -217,7 +217,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {pickChaptersOpen && draft.source && <SourceScopeSheet worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose="correction" initialMode="chapters" anchorPosition={targetPosition} onClose={() => setPickChaptersOpen(false)} onChange={(next) => { setPickChaptersOpen(false); choose(range); setScope(next); void generate(undefined, next); }} />}
       <div className="writing-actions">
         {pending ? <button onClick={() => { stop(); setError("已取消，原文没有改动。"); }}>取消生成</button> : <button disabled={saving} onClick={close}>取消</button>}
-        {!pending && <button className={preview || correction ? "" : "primary"} disabled={saving || !original.trim()} onClick={() => void generate()}>{canon ? (correction ? "再查一次" : "开始核对") : preview ? "再改一版" : "生成改稿"}</button>}
+        {!pending && <button className={preview || correction ? "" : "primary"} disabled={saving || !original.trim() || (mode === "revise" && !hint.trim())} onClick={() => void generate()}>{canon ? (correction ? "再查一次" : "开始核对") : preview ? "再改一版" : "生成改稿"}</button>}
         {adoptable && <button className="primary" disabled={saving || !preview.trim()} onClick={() => void adopt()}>{rewrite ? "采用改稿" : "采用到输入框"}</button>}
       </div>
     </div>

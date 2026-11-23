@@ -784,3 +784,88 @@ async fn task_summary_exposes_staged_drafts_and_discard_drafts_clears_them_safel
     assert!(cleared["task"]["drafts"].as_array().unwrap().is_empty());
     f.service.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn queued_task_keeps_thinking_and_aux_model_and_discard_drafts_cleans_stale_reports_in_safe_states() {
+    use story_core::{pi_gateway::StoryToolGateway, pi_store::PiCallRequest};
+    let (f, _peer) = Fixture::new();
+    f.store.lock().unwrap().execute(
+        "INSERT INTO profiles(id,name,provider,base_url,key_slot,main_model,params_json,created_at) VALUES('prof-live','主服务','custom','https://fixture.invalid/v1','slot-live','main-v1','{}','test')",
+        [],
+    ).unwrap();
+    let session = f.session().await;
+    let gateway = StoryToolGateway::new(f.store.clone());
+    gateway.start_task(
+        &session,
+        "q-base",
+        "基础任务",
+        "preview",
+        false,
+        json!({"profileId":"prof-live","slot":"slot-live","model":"main-v1"}),
+        json!({}),
+    ).unwrap();
+    // Enqueue queued task with thinkingMode, auxModel, and profileId
+    let enq = f.service.request(json!({
+        "op": "enqueue_input",
+        "taskId": "q-base",
+        "id": "queued-1",
+        "delivery": "queued",
+        "text": "排队任务要求",
+        "request": {
+            "profileId": "prof-live",
+            "thinkingMode": "deep",
+            "auxModel": "  mini-aux  ",
+            "model": {"profileId": "prof-live", "slot": "slot-live", "model": "main-v1", "auxModel": "  mini-aux  ", "thinkingMode": "deep"}
+        }
+    })).await.unwrap();
+    assert_eq!(enq["accepted"], true);
+    let saved_queue: String = f.store.lock().unwrap().query_row(
+        "SELECT content_json FROM pi_inputs WHERE id='queued-1'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    let parsed_queue: Value = serde_json::from_str(&saved_queue).unwrap();
+    assert_eq!(parsed_queue["request"]["thinkingMode"], "deep");
+    assert_eq!(parsed_queue["request"]["profileId"], "prof-live");
+    assert_eq!(parsed_queue["request"]["model"]["auxModel"], "mini-aux");
+    assert_eq!(parsed_queue["request"]["model"]["thinkingMode"], "deep");
+
+    // Stage draft & preview -> discard_drafts must reject previewed state
+    let permit = gateway.permit("q-base").unwrap();
+    let ver = gateway.0.task("q-base").unwrap()["base_world_version"].as_str().unwrap().to_owned();
+    gateway.invoke(&permit, PiCallRequest {
+        task_id: "q-base".into(),
+        call_id: "st-1".into(),
+        tool: "stage_edit".into(),
+        args: json!({"kind":"settings","path":"/premise","operation":"set","value":"新预览设定","summary":"改设定"}),
+        intent_revision: 0,
+        world_version: ver.clone(),
+        external_write: false,
+    }).unwrap();
+    gateway.invoke(&permit, PiCallRequest {
+        task_id: "q-base".into(),
+        call_id: "fin-preview".into(),
+        tool: "finish_task".into(),
+        args: json!({"summary":"生成预览"}),
+        intent_revision: 0,
+        world_version: ver,
+        external_write: false,
+    }).unwrap();
+    assert!(
+        f.service.request(json!({"op":"discard_drafts","taskId":"q-base"})).await.is_err(),
+        "previewed state must not allow erasing preview via discard_drafts"
+    );
+
+    // Move to blocked state with stale goalReport & pendingChanges, then discard_drafts clears both
+    f.store.lock().unwrap().execute(
+        "UPDATE pi_tasks SET status='blocked', metadata_json=json_set(metadata_json,'$.goalReport',json('{\"stale\":true}'),'$.goalResult',json('{\"status\":\"blocked\"}')), result_json=? WHERE id='q-base'",
+        [json!({"status":"blocked","pendingChanges":[{"kind":"settings","summary":"改设定"}]}).to_string()],
+    ).unwrap();
+    let discarded = f.service.request(json!({"op":"discard_drafts","taskId":"q-base"})).await.unwrap();
+    assert_eq!(discarded["discarded"], true);
+    let after_task = gateway.0.task("q-base").unwrap();
+    assert!(after_task["metadata_json"]["goalReport"].is_null());
+    assert!(after_task["metadata_json"]["goalResult"].is_null());
+    assert_eq!(after_task["result_json"]["pendingChanges"], json!([]));
+    f.service.shutdown().await.unwrap();
+}

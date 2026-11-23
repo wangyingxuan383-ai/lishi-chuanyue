@@ -73,7 +73,7 @@ function MyTemplateCard({ t, onUse, onMenu }: { t: UserTemplate; onUse: () => vo
   );
 }
 
-export default function NewGame() {
+export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) {
   const { game, replace, pop, toast, ask, askName } = useApp();
   const [draft, setDraftState] = useState<Draft>(EMPTY);
   const free = draft.settings.mode === "free";
@@ -121,6 +121,7 @@ export default function NewGame() {
   const [error, setError] = useState<string | null>(null);
   /** The opening's failure record, behind 查看原因 (R30). */
   const [failure, setFailure] = useState<{ failure?: Failure; failures?: Failure[]; detail?: string } | null>(null);
+  const [failedRun, setFailedRun] = useState<{ id: string; revision: number; proseSaved?: boolean; partialText?: string } | null>(null);
   const [why, setWhy] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const tip = useMemo(() => pickRandom(TIPS), []);
@@ -159,7 +160,33 @@ export default function NewGame() {
         return { id: r.id as string, name: r.name as string, draft: normalizeOpeningDraft(saved as unknown as Record<string, unknown>) };
       }));
       setLoaded(true);
-      if (autostart && stored && saved.name && saved.identity) void start(restored, d);
+      if (resumeRunId) {
+        const saved = await game.unfinishedOpening(resumeRunId).catch(() => null);
+        if (live && saved) {
+          if (["running", "committing"].includes(saved.status)) {
+            setPhase("writing");
+            if (saved.partialText) setText(saved.partialText);
+            const h = game.followExecution(saved.id, (e) => {
+              if (!alive.current) return;
+              if (e.type === "thinking") setPhase("thinking");
+              else if (e.type === "text") { setPhase("writing"); setText(e.full); }
+              else if (e.type === "organizing") setPhase("organizing");
+              else if (e.type === "done") replace({ name: "play", worldId: e.cursor.worldId });
+              else if (e.type === "failed") {
+                setPhase("form");
+                setError(explainFailure(e.reason, e.status));
+                setFailedRun(e.runId ? { id: e.runId, revision: revision.current, partialText: saved.partialText } : null);
+                setFailure(e.reason === "cancelled" ? null : { failure: e.failure, failures: e.failures, detail: e.detail });
+              }
+            });
+            void h.done;
+            return;
+          }
+          setError(explainFailure(saved.reason ?? "interrupted", saved.failure?.status));
+          setFailedRun({ id: saved.id, revision: revision.current, proseSaved: saved.proseSaved, partialText: saved.partialText });
+          setFailure(saved.reason === "cancelled" ? null : { failure: saved.failure ?? undefined, detail: saved.error ?? undefined });
+        }
+      } else if (autostart && stored && saved.name && saved.identity) void start(restored, d);
     })();
     return () => { live = false; };
   }, []);
@@ -342,16 +369,24 @@ export default function NewGame() {
   const start = async (d: Draft, defs: PlayDefaults | null = defaults) => {
     if (!game.llm) { toast("先连接 AI 服务"); return; }
     if (d.source && !await getBook(game.repo, d.source.bookId)) { setError("这台设备上没有选中的参考书籍，请重新选择或导入。"); return; }
-    setError(null); setFailure(null);
-    setText(d.openingMode === "player" ? d.openingText : "");
+    setError(null); setFailure(null); setFailedRun(null);
+    let streamed = d.openingMode === "player" ? d.openingText : "";
+    let reachedOrg = d.openingMode === "player";
+    setText(streamed);
     setPhase(d.openingMode === "player" ? "organizing" : "loading");
+    const startRev = revision.current;
     const input = toNewWorld(d, defs ? { difficulty: defs.difficulty, autoUpkeep: defs.autoUpkeep, chapterEvery: defs.chapterEvery, fortune: defs.fortune, tabooHints: defs.tabooHints, depth: defs.depth } : undefined);
     window.scrollTo?.(0, 0);
     const onEvent = (e: TurnEvent) => {
       if (e.type === "thinking") setPhase("thinking");
-      else if (e.type === "text") { setPhase("writing"); setText(e.full); }
-      else if (e.type === "organizing") setPhase("organizing");
-      else if (e.type === "failed") { setPhase("form"); setError(explainFailure(e.reason, e.status)); setFailure(e.reason === "cancelled" ? null : { failure: e.failure, failures: e.failures, detail: e.detail }); }
+      else if (e.type === "text") { streamed = e.full; setPhase("writing"); setText(e.full); }
+      else if (e.type === "organizing") { reachedOrg = true; setPhase("organizing"); }
+      else if (e.type === "failed") {
+        setPhase("form");
+        setError(explainFailure(e.reason, e.status));
+        if (e.runId) setFailedRun({ id: e.runId, revision: startRev, proseSaved: reachedOrg, partialText: streamed.trim() || undefined });
+        setFailure(e.reason === "cancelled" ? null : { failure: e.failure, failures: e.failures, detail: e.detail });
+      }
     };
     const worldId = await game.createWorld(d.source && isChosen(openingScope) ? { ...input, sourceScope: openingScope } : input, onEvent);
     // Left while it was written: stay where the player went.
@@ -361,6 +396,34 @@ export default function NewGame() {
       await game.repo.setSetting("newgameDraft", null);
       replace({ name: "play", worldId });
     }
+  };
+
+  const retryOpening = (runId: string, initialText = "") => {
+    if (!game.llm) { toast("先连接 AI 服务"); return; }
+    setError(null); setFailure(null);
+    let streamed = initialText;
+    let reachedOrg = !!failedRun?.proseSaved;
+    setText(streamed);
+    setPhase(reachedOrg ? "organizing" : streamed ? "writing" : "loading");
+    const startRev = revision.current;
+    setFailedRun(null);
+    window.scrollTo?.(0, 0);
+    const h = game.retryRun(runId, (e) => {
+      if (!alive.current) return;
+      if (e.type === "thinking") setPhase("thinking");
+      else if (e.type === "text") { streamed = e.full; setPhase("writing"); setText(e.full); }
+      else if (e.type === "organizing") { reachedOrg = true; setPhase("organizing"); }
+      else if (e.type === "done") {
+        clearTimeout(saveTimer.current);
+        replace({ name: "play", worldId: e.cursor.worldId });
+      } else if (e.type === "failed") {
+        setPhase("form");
+        setError(explainFailure(e.reason, e.status));
+        setFailedRun({ id: e.runId ?? runId, revision: startRev, proseSaved: reachedOrg, partialText: streamed.trim() || undefined });
+        setFailure(e.reason === "cancelled" ? null : { failure: e.failure, failures: e.failures, detail: e.detail });
+      }
+    });
+    void h.done;
   };
 
   const randomStart = async () => {
@@ -552,8 +615,17 @@ export default function NewGame() {
         <button className="icon-btn" aria-label="开局菜单" onClick={() => setSheet("menu")}><Icon name="more" /></button>
       </div>
       <div className="screen-body stack setup-form">
-        {error && <div className="notice"><div className="notice-body"><p>{error}</p>{failure && (failure.failure || failure.detail) && <div className="notice-actions"><button className="ghost" onClick={() => setWhy(true)}>查看原因</button></div>}</div></div>}
-        {why && error && failure && <FailureSheet text={error} failure={failure.failure} failures={failure.failures} detail={failure.detail} onClose={() => setWhy(false)} />}
+        {failedRun?.partialText && (
+          <div className="partial-prose" aria-label="已收到的开场正文">
+            <div className="partial-prose-head">
+              <span>{failedRun.proseSaved ? "已收到的开场正文（待补记）" : "已收到的部分开场正文（仅供参考）"}</span>
+              <button type="button" className="ghost small" onClick={() => void navigator.clipboard?.writeText(failedRun.partialText!).then(() => toast("已复制"), () => toast("没能复制"))}>复制</button>
+            </div>
+            <StoryText text={failedRun.partialText} />
+          </div>
+        )}
+        {error && <div className="notice"><div className="notice-body"><p>{error}{failedRun?.proseSaved ? " 正文已保留，点“接着写完”可直接补记入库。" : ""}</p><div className="notice-actions">{failedRun && failedRun.revision === revision.current && <button className="primary" onClick={() => retryOpening(failedRun.id, failedRun.proseSaved ? failedRun.partialText ?? "" : "")}>{failedRun.proseSaved ? "接着写完" : "再试一次"}</button>}{failure && (failure.failure || failure.detail) && <button className="ghost" onClick={() => setWhy(true)}>查看原因</button>}</div></div></div>}
+        {why && error && failure && <FailureSheet text={error} failure={failure.failure} failures={failure.failures} detail={failure.detail} runId={failedRun?.id} onClose={() => setWhy(false)} />}
         <div className="segmented mode-tabs" role="group" aria-label="故事模式">
           <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
           <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>

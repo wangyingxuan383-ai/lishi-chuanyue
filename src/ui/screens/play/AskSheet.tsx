@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AGENT_TASK_RECIPES, taskRecipeText } from "../../../content/agentTasks";
 import { useApp } from "../../app/context";
 import { MenuSheet, Sheet } from "../../components/Sheet";
-import { StoryText } from "../../components/StoryText";
+import { CompanionMarkdown } from "../companion/CompanionMarkdown";
 import { SourceScopeRow } from "../../components/SourceScope";
 import { RecentUsageLine } from "../../components/TurnUsage";
 import { AUTO_SCOPE, type SourceScope } from "../../../engine/sources/scope";
@@ -10,7 +10,7 @@ import type { SourceBinding } from "../../../engine/sources/types";
 
 /** 查一查 (R07-T001 / R31-P4): multi-turn questions about this world or the era; the story does not move. */
 export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: { worldId: string; bookId?: string; source?: SourceBinding | null; initialQuestion?: string; onClose: () => void }) {
-  const { game, toast } = useApp();
+  const { game, toast, push } = useApp();
   const [saved, setSaved] = useState<number[]>([]);
   const [question, setQuestion] = useState(initialQuestion ?? "");
   const [recipes, setRecipes] = useState(false);
@@ -59,19 +59,45 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: 
         {asked.map((x, i) => (
           <div key={i} className="ask-item">
             <b>{x.q}</b>
-            {x.a ? <StoryText text={x.a} /> : <p className="muted">查找中…</p>}
+            {x.a ? <CompanionMarkdown text={x.a} streaming={x.pending} /> : <p className="muted">查找中…</p>}
             {x.note && <p className="field-hint">{x.note}</p>}
             {!x.pending && x.a && <button className="ghost small" onClick={() => void navigator.clipboard?.writeText(x.a).then(() => toast("已复制"), () => toast("没能复制"))}>复制</button>}
-            {bookId && !x.pending && x.a && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); })}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
+            {bookId && !x.pending && !x.incomplete && x.a && x.a !== "没有查到。" && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a, source?.through ?? null).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); }).catch((e) => toast(e instanceof Error ? e.message : "没能保存札记"))}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
           </div>
         ))}
         {!pending && since && <RecentUsageLine worldId={worldId} purposes={["ask"]} since={since} refreshKey={usageTick} />}
         <SourceScopeRow worldId={worldId} binding={source} value={scope} purpose="ask" disabled={pending} onChange={setScope} />
-        <button className="ghost" onClick={() => setRecipes(true)}>常用问题 ›</button>
+        <div className="row between wrap">
+          <button className="ghost" onClick={() => setRecipes(true)}>常用问题 ›</button>
+          <button
+            className="ghost"
+            onClick={() => {
+              running.current?.abort();
+              const turns = asked
+                .filter((x) => !x.pending && x.a && x.a !== "已停止。")
+                .map(({ q: tq, a: ta }) => ({ q: tq, a: ta }));
+              const draftQuestion = question.trim();
+              onClose();
+              push({
+                name: "companion",
+                worldId,
+                bookId,
+                gear: "research",
+                handoff: {
+                  ...(turns.length ? { asked: turns } : {}),
+                  ...(draftQuestion ? { draftQuestion } : {}),
+                  sourceScope: scope,
+                },
+              });
+            }}
+          >
+            转到伴聊深聊 ↗
+          </button>
+        </div>
         {recipes && <MenuSheet title="常用问题" onClose={() => setRecipes(false)} items={AGENT_TASK_RECIPES.filter(recipe => ["recap", "characters", "canon", "continuity", "clock-ledger"].includes(recipe.id)).map(recipe => ({ label: recipe.name, onSelect: () => setQuestion(taskRecipeText(recipe, recipe.scope, question)) }))} />}
         <div className="row">
           <input className="grow" aria-label="想问什么" value={question} onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void ask(); }} placeholder={asked.length ? "继续追问，或换个问题…" : "如：王掌柜是什么来头？一斗米多少钱？"} />
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); void ask(); } }} placeholder={asked.length ? "继续追问，或换个问题…" : "如：王掌柜是什么来头？一斗米多少钱？"} />
           {pending ? <button onClick={() => running.current?.abort()}>停止</button>
             : <button className="primary" disabled={!question.trim()} onClick={() => void ask()}>问</button>}
         </div>

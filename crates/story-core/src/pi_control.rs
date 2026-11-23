@@ -62,9 +62,23 @@ pub(crate) fn enqueue(store: &PiStore, request: &Value) -> Result<Value> {
         "maxOutputTokens",
         "target",
         "modelUrl",
+        "thinkingMode",
+        "profileId",
+        "protocol",
     ] {
         if let Some(value) = supplied.get(name) {
             next.insert(name.into(), value.clone());
+        }
+    }
+    if let Some(aux) = supplied.get("auxModel") {
+        if let Some(trimmed) = aux.as_str().map(str::trim) {
+            if !trimmed.is_empty() {
+                next.insert("auxModel".into(), trimmed.into());
+            } else {
+                next.insert("auxModel".into(), Value::Null);
+            }
+        } else if aux.is_null() {
+            next.insert("auxModel".into(), Value::Null);
         }
     }
     // Reuse the task's safe model locator unless the player selected another.
@@ -77,12 +91,15 @@ pub(crate) fn enqueue(store: &PiStore, request: &Value) -> Result<Value> {
         "slot",
         "id",
         "model",
+        "auxModel",
+        "name",
         "protocol",
         "inputTokens",
         "contextTokens",
         "contextWindowTokens",
         "maxOutputTokens",
         "reasoning",
+        "thinkingMode",
         "temperature",
         "topP",
         "endpointRef",
@@ -92,6 +109,36 @@ pub(crate) fn enqueue(store: &PiStore, request: &Value) -> Result<Value> {
             .filter(|v| !v.is_array() && !v.is_object())
         {
             model[name] = v.clone();
+        }
+    }
+    if model["profileId"].is_null() {
+        if let Some(pid) = supplied["profileId"].as_str().filter(|s| !s.trim().is_empty()) {
+            model["profileId"] = pid.into();
+        }
+    }
+    if model["thinkingMode"].is_null() {
+        if let Some(tm) = supplied["thinkingMode"].as_str().filter(|s| !s.trim().is_empty()) {
+            model["thinkingMode"] = tm.into();
+        }
+    }
+    if let Some(obj) = model.as_object_mut() {
+        match obj.get("auxModel").cloned() {
+            Some(Value::String(s)) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    obj.remove("auxModel");
+                } else {
+                    obj.insert("auxModel".into(), trimmed.into());
+                }
+            }
+            Some(Value::Null) => {
+                obj.remove("auxModel");
+            }
+            _ => {
+                if let Some(top_aux) = next.get("auxModel").and_then(Value::as_str) {
+                    obj.insert("auxModel".into(), top_aux.into());
+                }
+            }
         }
     }
     next.insert("model".into(), model);

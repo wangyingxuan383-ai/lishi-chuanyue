@@ -7,11 +7,12 @@ import { useEffect, useRef, useState } from "react";
 import { streamChat, ChatError } from "../../engine/llm/chat";
 import {
   PRESETS, chatCompletionsUrl, chatModels, cleanBaseUrl, defaultProfileName, explainFailure, fetchModels, listProfiles,
-  looksLikeUrl, presetForUrl, recommendAuxModel, recommendModel, saveProfile, serviceBase, type Profile,
+  looksLikeUrl, presetForUrl, recommendAuxModel, recommendModel, sameServiceBase, saveProfile, serviceBase, type Profile,
 } from "../../engine/llm/providers";
 import { newId, type Repo } from "../../engine/db/repo";
 import type { Platform } from "../../platform";
 import { useApp } from "../app/context";
+import { applyFallback } from "../app/llmConfig";
 import { openLink } from "../app/update";
 import { Sheet } from "../components/Sheet";
 import { Icon } from "../components/Icon";
@@ -19,7 +20,7 @@ import { Icon } from "../components/Icon";
 type Result = { ok: boolean; text: string } | null;
 
 export default function Setup({ first, profileId }: { first?: boolean; profileId?: string }) {
-  const { game, platform, setProfile, pop, replace, toast } = useApp();
+  const { game, platform, profile: activeProfile, setProfile, pop, replace, toast } = useApp();
   const [presetId, setPresetId] = useState("deepseek");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -27,6 +28,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   const [key, setKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [existing, setExisting] = useState<Profile | null>(null);
+  const [existingHasKey, setExistingHasKey] = useState<boolean | null>(null);
   const [taken, setTaken] = useState<string[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState("");
@@ -47,9 +49,11 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   const preset = PRESETS.find((p) => p.id === presetId)!;
 
   useEffect(() => {
+    let alive = true;
     void (async () => {
       const profiles = await listProfiles(game.repo);
-      const p = profileId === "new" ? null : profiles.find((x) => x.id === profileId) ?? (profileId ? null : profiles[0]) ?? null;
+      const p = profileId === "new" ? null : profiles.find((x) => x.id === profileId) ?? (profileId ? null : profiles.find((x) => x.id === activeProfile?.id) ?? profiles[0]) ?? null;
+      if (!alive) return;
       setTaken(profiles.filter((x) => x.id !== p?.id).map((x) => x.name));
       if (p) {
         setExisting(p);
@@ -60,23 +64,34 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
         setModel(p.mainModel);
         setAuxModel(p.auxModel ?? "");
         setAllowHttp(p.allowHttp);
-        void loadModels(p.keySlot, p.baseUrl, PRESETS.find((x) => x.id === p.provider) ?? PRESETS[0], p.mainModel, p.auxModel ?? "");
-      } else if (platform.name === "web-dev") {
-        const pre = await fetch("/__dev/config").then((r) => r.json()).catch(() => ({}));
-        if (pre.baseUrl) { setPresetId("custom"); setBaseUrl(pre.baseUrl); setModel(pre.model ?? ""); }
+        const secretStatus = await game.platform.secrets.has(p.keySlot).catch(() => ({ configured: false, boundBaseUrl: null }));
+        if (!alive) return;
+        setExistingHasKey(secretStatus.configured);
+        if (secretStatus.configured) {
+          void loadModels(p.keySlot, p.baseUrl, PRESETS.find((x) => x.id === p.provider) ?? PRESETS[0], p.mainModel, p.auxModel ?? "");
+        }
+      } else {
+        setExistingHasKey(false);
+        if (platform.name === "web-dev") {
+          const pre = await fetch("/__dev/config").then((r) => r.json()).catch(() => ({}));
+          if (!alive) return;
+          if (pre.baseUrl) { setPresetId("custom"); setBaseUrl(pre.baseUrl); setModel(pre.model ?? ""); }
+        }
       }
     })();
     // A key typed and then abandoned is not left behind.
-    return () => { if (!saved.current) void dropDraft(platform, draftWrite.current, draftSlot.current); };
+    return () => { alive = false; if (!saved.current) void dropDraft(platform, draftWrite.current, draftSlot.current); };
   }, []);
 
   const cleanUrl = cleanBaseUrl(baseUrl);
   const isHttp = cleanUrl.startsWith("http://");
   const shownName = nameTouched ? name : defaultProfileName(preset, cleanUrl, taken);
+  const savedKeyValid = !!existing && existingHasKey === true;
+  const missingStoredKey = !!existing && existingHasKey === false;
   /** The key in use: the one being typed (in the draft slot), or the saved one. */
-  const keyReady = key.trim().length >= 8 || !!existing;
-  const baseChanged = !!existing && serviceBase(cleanUrl) !== serviceBase(existing.baseUrl);
-  const canSave = !!cleanUrl && (key.trim() || (existing && !baseChanged)) && (!isHttp || allowHttp) && !!model.trim();
+  const keyReady = key.trim().length >= 8 || savedKeyValid;
+  const baseChanged = !!existing && !sameServiceBase(cleanUrl, existing.baseUrl);
+  const canSave = !!cleanUrl && (!!key.trim() || (savedKeyValid && !baseChanged)) && (!isHttp || allowHttp) && !!model.trim();
 
   const choosePreset = (id: string) => {
     setPresetId(id);
@@ -105,7 +120,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
       }
       return draftSlot.current;
     }
-    if (existing && !baseChanged) return existing.keySlot;
+    if (savedKeyValid && !baseChanged) return existing.keySlot;
     return null;
   };
 
@@ -147,7 +162,14 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   const onUrlChange = (value: string) => {
     setBaseUrl(value);
     const match = presetForUrl(value);
-    if (match && match.id !== presetId && presetId === "custom") { setPresetId(match.id); setBaseUrl(match.baseUrl); toast(`认出来了，这是${match.name}`); }
+    if (match && match.id !== presetId && presetId === "custom") {
+      setPresetId(match.id);
+      const cleaned = cleanBaseUrl(value);
+      let hasExplicitPath = false;
+      try { hasExplicitPath = new URL(cleaned).pathname.replace(/\/+$/, "") !== ""; } catch { /* ignore */ }
+      setBaseUrl(hasExplicitPath ? cleaned : match.baseUrl);
+      toast(`认出来了，这是${match.name}`);
+    }
   };
   const paste = async () => {
     const text = await navigator.clipboard?.readText?.().catch(() => "");
@@ -161,7 +183,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
     setResult(null);
     try {
       const slot = await slotFor();
-      if (!slot) { setResult({ ok: false, text: baseChanged ? "换了地址，要重新填一次 Key。" : "先填 Key。" }); return; }
+      if (!slot) { setResult({ ok: false, text: missingStoredKey ? "恢复备份后需重新填入密钥" : baseChanged ? "换了地址，要重新填一次 Key。" : "先填 Key。" }); return; }
       let includeUsage = existing?.includeUsage ?? true;
       let line = "";
       if (!skipTest) {
@@ -184,7 +206,11 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
       }, key.trim() || null);
       saved.current = true;
       void dropDraft(platform, draftWrite.current, draftSlot.current);
-      setProfile(profile);
+      if (existing && activeProfile && existing.id !== activeProfile.id) {
+        await applyFallback(game, activeProfile);
+      } else {
+        setProfile(profile);
+      }
       await game.repo.setSetting("welcomed", true);
       toast(line ? `已连接：${line}` : "已保存");
       if (first) replace({ name: "newgame" }); else pop();
@@ -259,11 +285,13 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
           API Key
           <div className="input-tools">
             <input value={key} onChange={(e) => onKeyChange(e.target.value)} type={showKey ? "text" : "password"}
-              placeholder={existing ? "已保存，不改就留空" : preset.keyHint || "粘贴 Key"} autoComplete="off" autoCapitalize="off" spellCheck={false} />
+              placeholder={savedKeyValid ? "已保存，不改就留空" : missingStoredKey ? "恢复备份后需重新填入密钥" : preset.keyHint || "粘贴 Key"} autoComplete="off" autoCapitalize="off" spellCheck={false} />
             <button className="icon-btn" aria-label={showKey ? "隐藏 Key" : "显示 Key"} onClick={() => setShowKey(!showKey)}>{showKey ? "藏" : "看"}</button>
             <button className="icon-btn" aria-label="粘贴" onClick={() => void paste()}>贴</button>
           </div>
-          {baseChanged && !key.trim() && <small className="field-hint warn">换了地址，要重新填一次 Key。</small>}
+          {missingStoredKey && !key.trim()
+            ? <small className="field-hint warn">恢复备份后需重新填入密钥</small>
+            : baseChanged && !key.trim() && <small className="field-hint warn">换了地址，要重新填一次 Key。</small>}
         </label>
 
         <div className="stack gap-2">
@@ -283,7 +311,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
           ) : (
             <>
               <p className="muted m-0">{busy === "models" ? "正在从服务拿模型列表…" : modelsNote ?? (keyReady ? "" : "填好 Key，模型列表会自己出来。")}</p>
-              {(modelsNote || (keyReady && busy !== "models")) && (
+              {(modelsNote || !!model || (keyReady && busy !== "models")) && (
                 <label className="field">模型名（手动填写）
                   <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="例如 deepseek-flash" autoCapitalize="off" spellCheck={false} />
                 </label>

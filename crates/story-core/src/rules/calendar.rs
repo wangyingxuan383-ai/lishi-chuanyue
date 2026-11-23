@@ -310,8 +310,35 @@ pub fn read_date(raw: &Value, rules: &Value) -> Option<GameDate> {
         coerce_date(raw, rules)
     }
 }
-pub fn month_days(date: &GameDate) -> i64 {
+fn extra_month_day(date: &GameDate) -> i64 {
     if date.lunar {
+        i64::from(date.month % 2 == 0 && date.day == 30)
+    } else {
+        i64::from(date.month == 2 && date.day == 29)
+    }
+}
+pub fn is_leap_ce_year(ce_year: Option<i64>) -> bool {
+    let Some(ce) = ce_year.filter(|n| *n != 0) else {
+        return false;
+    };
+    let a = to_astro(ce);
+    a.rem_euclid(4) == 0 && (a.rem_euclid(100) != 0 || a.rem_euclid(400) == 0)
+}
+pub fn max_valid_day(date: &GameDate) -> i64 {
+    if date.lunar {
+        30
+    } else if date.month == 2 {
+        if is_leap_ce_year(date.ce_year) {
+            29
+        } else {
+            28
+        }
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][date.month.clamp(1, 12) as usize - 1]
+    }
+}
+pub fn month_days(date: &GameDate) -> i64 {
+    let base = if date.lunar {
         if date.month % 2 == 1 {
             30
         } else {
@@ -319,7 +346,8 @@ pub fn month_days(date: &GameDate) -> i64 {
         }
     } else {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][date.month.clamp(1, 12) as usize - 1]
-    }
+    };
+    base + extra_month_day(date)
 }
 fn with_era(mut date: GameDate, rules: &Value) -> GameDate {
     if let Some(ce) = date.ce_year {
@@ -494,33 +522,53 @@ pub fn days_between(a: &GameDate, b: &GameDate) -> Option<i64> {
         _ if a.era == b.era => b.year - a.year,
         _ => return None,
     };
+    let extra_a = if years > 0 || (years == 0 && b.month > a.month) { extra_month_day(a) } else { 0 };
+    let extra_b = if years < 0 || (years == 0 && a.month > b.month) { extra_month_day(b) } else { 0 };
     Some(
-        years * days_before_month(13, a.lunar) + days_before_month(b.month, a.lunar) + b.day
+        years * days_before_month(13, a.lunar) + days_before_month(b.month, b.lunar) + b.day
             - days_before_month(a.month, a.lunar)
-            - a.day,
+            - a.day
+            + extra_a
+            - extra_b,
     )
 }
 
 /// Signed display projection, using the same fixed month lengths as saves.
 pub fn shift_date(date: &GameDate, days: i64, rules: &Value) -> Option<GameDate> {
     let year_days = days_before_month(13, date.lunar);
+    let extra = extra_month_day(date);
     let origin = date.ce_year.map(to_astro).unwrap_or(date.year);
+    let doy = days_before_month(date.month, date.lunar) + date.day - 1;
     let serial = origin
         .checked_mul(year_days)?
-        .checked_add(days_before_month(date.month, date.lunar) + date.day - 1)?
+        .checked_add(doy)?
         .checked_add(days)?;
     if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&serial) { return None; }
-    let year = serial.div_euclid(year_days);
-    let mut left = serial.rem_euclid(year_days);
+    let pos = doy.checked_add(days)?;
+    let origin_year_days = year_days + extra;
+    let (year_delta, mut left) = if pos >= 0 && pos < origin_year_days {
+        (0, pos)
+    } else if pos >= origin_year_days {
+        let after = pos - origin_year_days;
+        (1 + after.div_euclid(year_days), after.rem_euclid(year_days))
+    } else {
+        (pos.div_euclid(year_days), pos.rem_euclid(year_days))
+    };
+    let year = origin.checked_add(year_delta)?;
     let mut next = date.clone();
     next.month = 1;
-    while left >= month_days(&next) {
-        left -= month_days(&next);
+    next.day = 1;
+    loop {
+        let md = month_days(&next) + if year_delta == 0 && next.month == date.month { extra } else { 0 };
+        if left < md {
+            break;
+        }
+        left -= md;
         next.month += 1;
     }
     next.day = left + 1;
     next.ce_year = date.ce_year.map(|_| from_astro(year));
-    next.year = date.year + year - origin;
+    next.year = date.year + year_delta;
     if date.era == "公元" || date.era == "公元前" {
         let ce = next.ce_year.unwrap_or_else(|| from_astro(year));
         next.era = if ce < 0 { "公元前" } else { "公元" }.into();
@@ -532,10 +580,17 @@ pub fn shift_date(date: &GameDate, days: i64, rules: &Value) -> Option<GameDate>
 }
 
 fn new_years_after_days(date: &GameDate, days: f64) -> f64 {
-    ((days_before_month(date.month, date.lunar) as f64 + date.day as f64 - 1.0
-        + days.max(0.0).floor())
-        / days_before_month(13, date.lunar) as f64)
-        .floor()
+    let year_days = days_before_month(13, date.lunar) as f64;
+    let origin_year_days = year_days + extra_month_day(date) as f64;
+    let pos = days_before_month(date.month, date.lunar) as f64
+        + date.day as f64
+        - 1.0
+        + days.max(0.0).floor();
+    if pos < origin_year_days {
+        0.0
+    } else {
+        1.0 + ((pos - origin_year_days) / year_days).floor()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -561,7 +616,7 @@ pub fn read_clock_anchor(raw: &Value, rules: &Value) -> Option<ClockAnchor> {
         || !source["month"].is_number()
         || !source["day"].is_number()
         || source["day"].as_f64()? != date.day as f64
-        || date.day > month_days(&date)
+        || date.day > max_valid_day(&date)
         || !source["ceYear"].is_null()
             && source["ceYear"].as_f64() != date.ce_year.map(|ce| ce as f64)
         || !source["lunar"].is_null() && !source["lunar"].is_boolean()
@@ -753,4 +808,78 @@ pub fn retime(events: &[Value], clock: &Value) -> Vec<Value> {
             .total_cmp(&b["atMinute"].as_f64().unwrap_or(f64::INFINITY))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lunar_day_30_and_feb_29_anchors_do_not_overflow_and_advance_age_across_new_year() {
+        let rules = json!({"lunar": true, "eras": [{"name": "天宝", "startCe": 742, "yearWord": "载"}]});
+        let eve = GameDate {
+            era: "天宝".into(),
+            year: 7,
+            month: 12,
+            day: 30,
+            ce_year: Some(748),
+            lunar: true,
+        };
+        assert_eq!(shift_date(&eve, 0, &rules), Some(eve.clone()));
+        assert_eq!(
+            shift_date(&eve, 1, &rules),
+            Some(GameDate {
+                era: "天宝".into(),
+                year: 8,
+                month: 1,
+                day: 1,
+                ce_year: Some(749),
+                lunar: true,
+            })
+        );
+        assert_eq!(
+            shift_date(&eve, -1, &rules),
+            Some(GameDate { day: 29, ..eve.clone() })
+        );
+        let clock = json!({"mode": "history", "clockStyle": "era", "date": eve, "hour": 20, "rules": rules});
+        assert_eq!(now_of(&clock, 0.0)["text"], "天宝七载 腊月三十 · 戌时");
+        assert_eq!(new_years_between(&clock, 0.0, 120.0), 0.0);
+        assert_eq!(new_years_between(&clock, 0.0, 240.0), 1.0);
+        assert_eq!(now_of(&clock, 240.0)["text"], "天宝八载 正月初一 · 子时");
+
+        // Clock calibration on 腊月三十 and 2月29日 succeeds; 2月30日 and lunar 31 still fail.
+        let before = json!({
+            "era": {"mode": "history", "clockStyle": "era", "timeStyle": "shichen", "calendar": {"lunar": true}},
+            "time": {"elapsedMinutes": 0, "startHour": 20, "date": {"era": "崇祯", "year": 16, "month": 12, "day": 30, "ceYear": 1643, "lunar": true}}
+        });
+        let calibrated = super::super::clock::apply_display(&before, &json!({"timeStyle": "24h"})).unwrap();
+        assert_eq!(calibrated["era"]["timeStyle"], "24h");
+
+        let leap_day = GameDate {
+            era: "公元".into(),
+            year: 2024,
+            month: 2,
+            day: 29,
+            ce_year: Some(2024),
+            lunar: false,
+        };
+        let west = json!({"lunar": false});
+        assert_eq!(shift_date(&leap_day, 0, &west), Some(leap_day.clone()));
+        assert_eq!(
+            shift_date(&leap_day, 1, &west),
+            Some(GameDate { month: 3, day: 1, ..leap_day.clone() })
+        );
+        assert!(read_clock_anchor(
+            &json!({"atElapsedMinutes": 0, "minuteOfDay": 480, "date": leap_day}),
+            &west
+        ).is_some());
+        assert!(read_clock_anchor(
+            &json!({"atElapsedMinutes": 0, "minuteOfDay": 480, "date": {"era": "公元", "year": 2026, "month": 2, "day": 29, "ceYear": 2026, "lunar": false}}),
+            &west
+        ).is_none());
+        assert!(read_clock_anchor(
+            &json!({"atElapsedMinutes": 0, "minuteOfDay": 480, "date": {"era": "公元", "year": 2024, "month": 2, "day": 30, "ceYear": 2024, "lunar": false}}),
+            &west
+        ).is_none());
+    }
 }

@@ -1267,7 +1267,7 @@ async fn standard_tier_looks_up_twice_then_must_write_and_lite_check_fixes_one_s
     drop(requests);
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
     assert_eq!(narrative, "你付了三文，收好一张纸。");
-    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-4");
+    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-5");
     assert_eq!(snapshot.draft["referenceReview"]["skipped"], 0);
     let saved: String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[&node],|r|r.get(0)).unwrap();
     let record: Value=serde_json::from_str(&saved).unwrap();
@@ -2131,5 +2131,170 @@ async fn organizing_stage_never_emits_thinking_events_and_autoplay_parent_live_s
     let seqs = parent_seqs.lock().unwrap();
     assert!(seqs.iter().any(|(_, t)| t == "step"), "parent must receive live step events: {seqs:?}");
     assert!(seqs.iter().any(|(_, t)| t == "finished"), "parent must receive live finished event: {seqs:?}");
-    assert!(seqs.windows(2).all(|w| w[1].0 > w[0].0), "parent live seq must strictly increase: {seqs:?}");
+    assert_eq!(seqs.windows(2).all(|w| w[1].0 > w[0].0), true, "parent live seq must strictly increase: {seqs:?}");
+}
+
+#[tokio::test]
+async fn opening_commit_records_post_codex_seed_and_start_money_in_node_meta() {
+    let codex_reply = json!({
+        "era": {"name": "天宝七载", "content": "盛唐长安坊市"},
+        "cards": [
+            {"kind": "设定", "name": "崇仁坊", "content": "北街多旅舍"},
+            {"kind": "地点", "name": "胡姬酒肆", "content": "旅人落脚处"}
+        ]
+    });
+    let f = Fixture::new(vec![
+        Step::Reply(prose(r#"微雨初歇，你推开酒肆木门。<record>{"money":260,"log":"入酒肆"}</record>"#)),
+        Step::Reply(prose(&codex_reply.to_string())),
+    ]);
+    let mut plan = f.plan("opening-seed-codex");
+    plan.kind = "opening".into();
+    plan.world_id = "w-open-seed".into();
+    plan.line_id = "l-open-seed".into();
+    plan.head_id.clear();
+    plan.base_id = None;
+    plan.new_world = Some(json!({"title": "长安初至", "eraId": "tang-748"}));
+    plan.state["protagonist"]["stats"]["money"] = 0.into();
+    plan.meta["startMoney"] = 300.into();
+    plan.meta["codexMessages"] = json!([{"role": "user", "content": "整理开局设定"}]);
+    f.engine.start(plan).unwrap();
+    let done = f.settled("opening-seed-codex").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    let node_id = done.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    let meta: Value = serde_json::from_str(&f.text(&format!("SELECT meta_json FROM nodes WHERE id='{node_id}'"))).unwrap();
+    let seed = &meta["openingSeed"];
+    assert_eq!(seed["protagonist"]["stats"]["money"], 300, "openingSeed must hold pre-record startMoney=300: {seed}");
+    let card_names: Vec<&str> = seed["cards"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(card_names.contains(&"天宝七载") && card_names.contains(&"崇仁坊"), "openingSeed must preserve AI codex cards: {card_names:?}");
+    let place_names: Vec<&str> = seed["places"].as_array().unwrap().iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(place_names.contains(&"胡姬酒肆"), "openingSeed must preserve AI codex places: {place_names:?}");
+    // Meanwhile the committed state reflects the opening record's money=260.
+    let committed_state: Value = serde_json::from_str(&f.text(&format!("SELECT state_json FROM states WHERE node_id='{node_id}'"))).unwrap();
+    assert_eq!(committed_state["protagonist"]["stats"]["money"], 260);
+}
+
+#[tokio::test]
+async fn in_flight_settings_update_does_not_abort_running_turn_commit() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let f = Fixture::new(vec![Step::Wait {
+        started: started.clone(),
+        release: release.clone(),
+        reply: written(),
+    }]);
+    let mut plan = f.plan("midstream-settings");
+    plan.meta["settingsGuard"] = json!({});
+    f.engine.start(plan).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+    // Player adjusts next-turn preference (`depth`/`choiceCount`) while the current turn is streaming.
+    f.store.lock().unwrap().execute(
+        "UPDATE worlds SET settings_json=? WHERE id='world'",
+        [json!({"depth": "deep", "choiceCount": 4}).to_string()],
+    ).unwrap();
+    release.notify_one();
+    let saved = f.settled("midstream-settings").await;
+    assert_eq!(saved.status, "committed", "in-flight preference change must not kill active turn: {:?}", saved.error);
+    assert_eq!(f.scalar("SELECT COUNT(*) FROM nodes"), 2);
+}
+
+#[tokio::test]
+async fn aux_stage_backup_failover_keeps_main_prose_model_signature() {
+    let fail = || Step::Fail(provider("http", Some(503), false));
+    let f = Fixture::new(vec![
+        Step::Reply(prose("你在灯下展开密信。")),
+        fail(),
+        fail(),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    let mut plan = f.plan("aux-failover-sig");
+    plan.fallback_model = Some(ModelConfig {
+        slot: "backup-slot".into(),
+        url: "https://backup.invalid/v1".into(),
+        model: "backup-writer".into(),
+        aux_model: None,
+        include_usage: true,
+        max_tokens: Some(1024),
+        extra: Default::default(),
+    });
+    f.engine.start(plan).unwrap();
+    let done = f.settled("aux-failover-sig").await;
+    assert_eq!(done.status, "committed", "{:?}", done.error);
+    let node_id = done.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    let meta: Value = serde_json::from_str(&f.text(&format!("SELECT meta_json FROM nodes WHERE id='{node_id}'"))).unwrap();
+    assert_eq!(meta["model"], "fake", "committed prose must keep main writer model name even when extract failed over to backup");
+}
+
+#[tokio::test]
+async fn note_within_scope_accepts_explicit_through_ceiling_and_continue_correction_keeps_backup_model() {
+    // 1. B08: empty-ref person/setting note with `scope.through <= binding.through` is returned, while `scope.through > binding.through` is blocked.
+    let f = Fixture::new(vec![
+        Step::Reply(calls(vec![("n", "read_canon_notes", json!({"query": "掌柜"}))])),
+        Step::Reply(written()),
+    ]);
+    f.store.lock().unwrap().execute_batch(
+        "INSERT INTO source_books VALUES('book','长篇','txt','test','{}');
+         INSERT INTO canon_notes(id,book_id,kind,title,scope_json,content,refs_json,status,created_at,updated_at) VALUES
+         ('scoped-ok','book','person','掌柜','{\"subject\":\"掌柜\",\"through\":4}','掌柜左手缺一指。','[]','done','t','t'),
+         ('scoped-late','book','person','掌柜后记','{\"subject\":\"掌柜\",\"through\":8}','掌柜实为前朝密探。','[]','done','t','t');",
+    ).unwrap();
+    let mut plan = bound(&f, "scoped-through-notes", "standard");
+    plan.state["source"]["through"] = 5.into();
+    f.engine.start(plan).unwrap();
+    assert_eq!(f.settled("scoped-through-notes").await.status, "committed");
+    let requests = f.model.requests.lock().unwrap();
+    let tool_out = requests[1]["messages"].as_array().unwrap().iter().find(|m| m["tool_call_id"] == "n").unwrap()["content"].as_str().unwrap().to_owned();
+    drop(requests);
+    assert!(tool_out.contains("左手缺一指") && !tool_out.contains("前朝密探"), "{tool_out}");
+
+    // 2. B10: paused correction that already failed over to backup continues on backup when resumed ("接着查").
+    let fail = || Step::Fail(provider("http", Some(503), false));
+    let p1 = json!({"kind":"original","section":0,"chunk":0,"title":"第一章","text":"每张纸四文。"});
+    let reply_done = json!({
+        "outcome": "verified",
+        "findings": [{"detail": "纸价四文", "citations": [{"section": 1, "chunk": 1, "quote": "每张纸四文"}]}]
+    });
+    let make_calls = |prefix: &str, count: usize| {
+        calls(
+            (0..count)
+                .map(|i| {
+                    let id: &'static str = Box::leak(format!("{prefix}{i}").into_boxed_str());
+                    (id, "read_canon_notes", json!({"query": format!("{prefix}{i}")}))
+                })
+                .collect(),
+        )
+    };
+    // RUN_TOOL_LIMIT is 60: two batches of 31 tool calls hit Error::Limit ("paused") on the 61st tool call.
+    let batch1 = make_calls("c", 31);
+    let batch2 = make_calls("d", 31);
+    let (fc, mut cplan) = correction_fixture(
+        vec![
+            fail(),
+            fail(),
+            Step::Reply(batch1),
+            Step::Reply(batch2),
+            Step::Reply(prose(&reply_done.to_string())),
+        ],
+        "corr-resume-backup",
+        &[p1],
+        "核对纸价",
+    );
+    cplan.fallback_model = Some(ModelConfig {
+        slot: "backup-slot".into(),
+        url: "https://backup.invalid/v1".into(),
+        model: "backup-corr".into(),
+        aux_model: None,
+        include_usage: true,
+        max_tokens: Some(1024),
+        extra: Default::default(),
+    });
+    fc.engine.start(cplan).unwrap();
+    let paused = fc.settled("corr-resume-backup").await;
+    assert_eq!(paused.status, "paused", "{:?}", paused.error);
+    fc.engine.resume("corr-resume-backup").unwrap();
+    let finished = fc.settled("corr-resume-backup").await;
+    assert_eq!(finished.status, "previewed", "{:?}", finished.error);
+    let services = fc.model.services.lock().unwrap().clone();
+    // First 2 failed attempts hit primary "fake"; all subsequent rounds including post-resume round MUST stay on "backup-corr"!
+    assert_eq!(&services[..2], &["fake", "fake"]);
+    assert!(services[2..].iter().all(|s| s == "backup-corr"), "resumed correction must stick to backup-corr: {services:?}");
 }

@@ -718,3 +718,76 @@ async fn resume_after_initial_user_event_never_duplicates_original_prompt() {
     bounded(f.host.shutdown()).await.unwrap();
     bounded(server).await.unwrap();
 }
+
+#[tokio::test]
+async fn preview_policy_with_staged_edits_and_plain_reply_produces_formal_preview_without_committing() {
+    let (f, mut peer) = Fixture::new();
+    f.store
+        .lock()
+        .unwrap()
+        .execute("UPDATE pi_tasks SET policy='preview' WHERE id='task'", [])
+        .unwrap();
+    let server = tokio::spawn(async move {
+        peer.create().await;
+        let prompt = peer.read().await;
+        assert_eq!(prompt["method"], "prompt");
+        let staged = peer
+            .tool(
+                "edit-preview",
+                "stage_edit",
+                json!({"kind":"settings","path":"/premise","operation":"set","value":"预览新设定","summary":"暂存新设定"}),
+            )
+            .await;
+        assert_eq!(staged["ok"], true, "{staged}");
+        peer.reply(&prompt, json!({"text":"已暂存修改供您预览。"})).await;
+        peer.close().await;
+    });
+    bounded(f.create()).await;
+    let reply = bounded(f.host.prompt()).await.unwrap();
+    assert_eq!(reply["taskReceipt"]["status"], "previewed");
+    assert_eq!(
+        f.saved("SELECT settings_json FROM worlds WHERE id='world'")["premise"],
+        "PRIVATE-WORLD-SENTINEL",
+        "preview closeout must never mutate the formal world before player adoption"
+    );
+    bounded(f.host.shutdown()).await.unwrap();
+    bounded(server).await.unwrap();
+
+    let gateway = StoryToolGateway::new(f.store.clone());
+    let adopted = gateway.adopt_preview("task").unwrap();
+    assert_eq!(adopted["status"], "committed");
+    assert_eq!(
+        f.saved("SELECT settings_json FROM worlds WHERE id='world'")["premise"],
+        "预览新设定"
+    );
+
+    // Canon-verification `preview` task WITHOUT `record_findings` must STILL refuse implicit preview closeout:
+    let (fc, mut peerc) = Fixture::new();
+    fc.store
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE pi_tasks SET policy='preview', text='请遵循原著核对并修改设定' WHERE id='task'",
+            [],
+        )
+        .unwrap();
+    let serverc = tokio::spawn(async move {
+        peerc.create().await;
+        let prompt = peerc.read().await;
+        let staged = peerc
+            .tool(
+                "edit-unverified",
+                "stage_edit",
+                json!({"kind":"settings","path":"/premise","operation":"set","value":"未核对原著设定","summary":"改设定"}),
+            )
+            .await;
+        assert_eq!(staged["ok"], true);
+        peerc.reply(&prompt, json!({"text":"未查原著直接结束"})).await;
+        peerc.close().await;
+    });
+    bounded(fc.create()).await;
+    let replyc = bounded(fc.host.prompt()).await.unwrap();
+    assert_eq!(replyc["taskReceipt"]["status"], "interrupted");
+    bounded(fc.host.shutdown()).await.unwrap();
+    bounded(serverc).await.unwrap();
+}

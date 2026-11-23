@@ -112,7 +112,7 @@ fn sources(raw: &Value) -> Vec<Value> {
         .take(100)
         .filter(|item| item.is_object())
         .map(|item| {
-            let mut clean = strings(item, &["title", "bookId", "quote", "sourceKind", "basis", "playerReferenceId", "scope"], MAX_FIELD);
+            let mut clean = strings(item, &["title", "bookId", "worldId", "originWorldId", "originTitle", "nodeId", "lineId", "quote", "sourceKind", "basis", "playerReferenceId", "scope"], MAX_FIELD);
             if clean.get("quote").is_none() {
                 if let Some(value) = item["text"].as_str() {
                     clean["quote"] = value.chars().take(MAX_FIELD).collect::<String>().into();
@@ -132,9 +132,9 @@ fn sources(raw: &Value) -> Vec<Value> {
         .collect()
 }
 pub(crate) fn formal_source(raw:&Value)->Value {
-    let mut clean=strings(raw,&["findingId","goalId","topic","groupId","basis","title","quote","text","bookId","sourceKind","scope","playerReferenceId","evidenceId","subject","value","sourceClaim","contentHash","readAt"],MAX_FIELD);
+    let mut clean=strings(raw,&["findingId","goalId","topic","groupId","basis","title","quote","text","bookId","worldId","originWorldId","originTitle","sourceKind","scope","playerReferenceId","evidenceId","subject","value","sourceClaim","contentHash","readAt"],MAX_FIELD);
     for key in ["page","section","chunk","offset","start","end","quoteOffset"] {if raw[key].as_u64().is_some(){clean[key]=raw[key].clone();}}
-    if raw["location"].is_object(){let mut location=strings(&raw["location"],&["bookId","nodeId","lineId","title","path","offsetUnit","contentHash","readAt"],MAX_FIELD);for key in ["page","section","chunk","offset","start","end"]{if raw["location"][key].as_u64().is_some(){location[key]=raw["location"][key].clone();}}if let Some(url)=raw["location"]["url"].as_str().and_then(readable_url){location["url"]=url.into();}clean["location"]=location;}
+    if raw["location"].is_object(){let mut location=strings(&raw["location"],&["bookId","nodeId","lineId","worldId","originWorldId","originTitle","title","path","offsetUnit","contentHash","readAt"],MAX_FIELD);for key in ["page","section","chunk","offset","start","end"]{if raw["location"][key].as_u64().is_some(){location[key]=raw["location"][key].clone();}}if let Some(url)=raw["location"]["url"].as_str().and_then(readable_url){location["url"]=url.into();}clean["location"]=location;}
     if raw["revisionDecision"].is_object(){let mut decision=strings(&raw["revisionDecision"],&["summary","reason","appliesTo"],MAX_FIELD);if let Some(refs)=raw["revisionDecision"]["localReferences"].as_array(){decision["localReferences"]=json!(refs.iter().take(12).map(formal_source).collect::<Vec<_>>());}clean["revisionDecision"]=decision;}
     if raw["declaration"].is_object(){clean["declaration"]=strings(&raw["declaration"],&["subject","value","scope"],MAX_FIELD);}
     if let Some(items)=raw["references"].as_array(){clean["references"]=json!(items.iter().take(100).map(formal_source).collect::<Vec<_>>());}
@@ -202,6 +202,11 @@ fn history(raw: &Value) -> Result<Value> {
         }
         required(item, "content", MAX_FIELD)?;
         let mut message = strings(item, &["id", "role", "content", "createdAt"], MAX_FIELD);
+        if message.get("createdAt").is_none() {
+            if let Some(at) = item["at"].as_str() {
+                message["createdAt"] = at.chars().take(MAX_FIELD).collect::<String>().into();
+            }
+        }
         scalar_fields(item, &mut message, &["seq", "truncated"]);
         clean["messages"].as_array_mut().unwrap().push(message);
     }
@@ -281,39 +286,63 @@ pub fn validate_readable(raw: &Value, world: &str, line_ids: &[String]) -> Resul
         return Err(invalid("不是有效的Pi只读历史"));
     }
     let lines: HashSet<_> = line_ids.iter().map(String::as_str).collect();
+    let fallback_line = line_ids.first().map(String::as_str);
     let mut session_ids = HashSet::new();
+    let mut sequel_sessions = HashSet::new();
     let mut task_ids = HashSet::new();
     let mut clean =
         json!({"engine":"pi","version":READABLE_VERSION,"readOnly":true,"sessions":[],"tasks":[]});
     for item in array(raw, "sessions", MAX_SESSIONS)? {
         let id = required(item, "id", 512)?;
-        if !session_ids.insert(id)
-            || text(item, "worldId") != world
-            || !lines.contains(text(item, "lineId"))
-        {
+        let session_world = text(item, "worldId");
+        let origin_world = text(item, "originWorldId");
+        let is_sequel = !origin_world.is_empty() && (session_world == world || session_world == origin_world);
+        let line_ok = lines.contains(text(item, "lineId")) || (is_sequel && fallback_line.is_some());
+        if !session_ids.insert(id.clone()) || (!is_sequel && session_world != world) || !line_ok {
             return Err(invalid("助手只读会话不属于本局或路线"));
         }
+        if is_sequel {
+            sequel_sessions.insert(id);
+        }
         required(item, "title", MAX_FIELD)?;
-        clean["sessions"].as_array_mut().unwrap().push(strings(
+        let mut session = strings(
             item,
-            &["id", "worldId", "lineId", "title", "createdAt", "updatedAt"],
+            &["id", "worldId", "originWorldId", "originTitle", "lineId", "title", "createdAt", "updatedAt"],
             MAX_FIELD,
-        ));
+        );
+        session["worldId"] = world.into();
+        if !lines.contains(text(item, "lineId")) {
+            if let Some(fallback) = fallback_line {
+                session["lineId"] = fallback.into();
+            }
+        }
+        clean["sessions"].as_array_mut().unwrap().push(session);
     }
     for item in array(raw, "tasks", MAX_TASKS)? {
         let id = required(item, "id", 512)?;
+        let session_id = text(item, "sessionId");
         if !task_ids.insert(id)
-            || !session_ids.contains(text(item, "sessionId"))
+            || !session_ids.contains(session_id)
             || !FINISHED.contains(&text(item, "status"))
             || !["auto-reversible", "preview", "auto"].contains(&text(item, "policy"))
         {
             return Err(invalid("助手只读任务引用或状态无效"));
+        }
+        let task_origin = text(item, "originWorldId");
+        let is_sequel = sequel_sessions.contains(session_id) || !task_origin.is_empty();
+        if let Some(task_world) = item["worldId"].as_str().filter(|w| !w.is_empty()) {
+            if task_world != world && (!is_sequel || (!task_origin.is_empty() && task_world != task_origin)) {
+                return Err(invalid("助手只读任务不属于本局路线"));
+            }
         }
         let mut task = strings(
             item,
             &[
                 "id",
                 "sessionId",
+                "worldId",
+                "originWorldId",
+                "originTitle",
                 "lineId",
                 "text",
                 "status",
@@ -323,8 +352,17 @@ pub fn validate_readable(raw: &Value, world: &str, line_ids: &[String]) -> Resul
             ],
             MAX_FIELD,
         );
-        if item.get("lineId").is_some() && !lines.contains(text(item,"lineId")) {
-            return Err(invalid("助手只读任务不属于本局路线"));
+        if task.get("worldId").is_some() {
+            task["worldId"] = world.into();
+        }
+        if let Some(line_id) = item["lineId"].as_str() {
+            if !lines.contains(line_id) {
+                if is_sequel {
+                    task.as_object_mut().unwrap().remove("lineId");
+                } else {
+                    return Err(invalid("助手只读任务不属于本局路线"));
+                }
+            }
         }
         task["history"] = history(&item["history"])?;
         clean["tasks"].as_array_mut().unwrap().push(task);
@@ -351,7 +389,22 @@ pub fn export_readable(db: &Connection, world: &str) -> Result<Value> {
         .into_iter()
         .map(|row| text(&row, "id").to_owned())
         .collect::<Vec<_>>();
-    let sessions=ws::rows(db,"SELECT id,world_id AS worldId,line_id AS lineId,title,created_at AS createdAt,updated_at AS updatedAt FROM pi_sessions WHERE world_id=? AND (EXISTS(SELECT 1 FROM pi_tasks t WHERE t.session_id=pi_sessions.id AND t.status IN ('completed','committed','undone','archived') AND CASE WHEN json_valid(t.metadata_json) THEN COALESCE(json_extract(t.metadata_json,'$._nativeHostActive'),0)=0 ELSE 0 END) OR EXISTS(SELECT 1 FROM pi_session_messages m WHERE m.session_id=pi_sessions.id)) ORDER BY created_at,id",&[&world])?;
+    let fallback_line: Option<String> = db
+        .query_row("SELECT current_line_id FROM worlds WHERE id=?", [world], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .ok()
+        .flatten()
+        .filter(|id| lines.iter().any(|line| line == id))
+        .or_else(|| lines.first().cloned());
+    let mut sessions=ws::rows(db,"SELECT id,world_id AS worldId,line_id AS lineId,title,created_at AS createdAt,updated_at AS updatedAt FROM pi_sessions WHERE world_id=? AND (EXISTS(SELECT 1 FROM pi_tasks t WHERE t.session_id=pi_sessions.id AND t.status IN ('completed','committed','undone','archived') AND CASE WHEN json_valid(t.metadata_json) THEN COALESCE(json_extract(t.metadata_json,'$._nativeHostActive'),0)=0 ELSE 0 END) OR EXISTS(SELECT 1 FROM pi_session_messages m WHERE m.session_id=pi_sessions.id)) ORDER BY created_at,id",&[&world])?;
+    for session in &mut sessions {
+        if !lines.iter().any(|line| line == text(session, "lineId")) {
+            if let Some(fallback) = &fallback_line {
+                session["lineId"] = fallback.clone().into();
+            }
+        }
+    }
     let mut tasks = vec![];
     for session in &sessions {
         let id = text(session, "id");
@@ -373,15 +426,19 @@ pub fn export_readable(db: &Connection, world: &str) -> Result<Value> {
         }
         for row in ws::rows(db,"SELECT id,session_id,world_id,line_id,text,status,policy,plan_json,result_json,created_at,updated_at FROM pi_tasks WHERE session_id=? AND status IN ('completed','committed','undone','archived') AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$._nativeHostActive'),0)=0 ELSE 0 END ORDER BY created_at,id",&[&id])? {
             // Adoption/undo moves the live conversation to the resulting line.
-            // Earlier finished tasks retain their original line in this world.
-            if text(&row,"world_id")!=world || !lines.iter().any(|line|line==text(&row,"line_id")) {return Err(invalid("助手任务属于其他故事或路线"));}
+            // Earlier finished tasks retain their original line if it still exists,
+            // or degrade to None if undo_recovery purged that temporary branch (B27).
+            if text(&row,"world_id")!=world {return Err(invalid("助手任务属于其他故事或路线"));}
+            let valid_line = lines.iter().any(|line| line == text(&row, "line_id"));
             let task=text(&row,"id");
             let stored_result=parsed(&row["result_json"]);
             if row["status"]=="archived" && stored_result["history"].is_object() {
                 // Dedicated imported history is readable data, never a Pi
                 // file or event replay. Re-export it through the same whitelist.
                 let readable=history(&stored_result["history"])?;
-                tasks.push(json!({"id":row["id"],"sessionId":row["session_id"],"lineId":row["line_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable}));
+                let mut exported = json!({"id":row["id"],"sessionId":row["session_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable});
+                if valid_line { exported["lineId"] = row["line_id"].clone(); }
+                tasks.push(exported);
                 continue;
             }
             let mut event_rows=ws::rows(db,"SELECT seq,substr(event_json,1,524289) AS event_json FROM pi_events WHERE task_id=? ORDER BY seq DESC LIMIT 20001",&[&task])?;
@@ -410,7 +467,9 @@ pub fn export_readable(db: &Connection, world: &str) -> Result<Value> {
             let messages=projection::messages(&row,&events,&inputs).into_iter().filter(|message|!text(message,"content").is_empty()).collect::<Vec<_>>();
             truncated|=messages.iter().any(|message|message["truncated"]==true);
             let readable=history(&json!({"messages":messages,"steps":projection::steps(&events,&call_rows),"plan":parsed(&row["plan_json"]),"sources":source_refs,"result":parsed(&row["result_json"]),"truncated":truncated}))?;
-            tasks.push(json!({"id":row["id"],"sessionId":row["session_id"],"lineId":row["line_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable}));
+            let mut exported = json!({"id":row["id"],"sessionId":row["session_id"],"text":row["text"],"status":row["status"],"policy":row["policy"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],"history":readable});
+            if valid_line { exported["lineId"] = row["line_id"].clone(); }
+            tasks.push(exported);
         }
     }
     validate_readable(
@@ -418,4 +477,107 @@ pub fn export_readable(db: &Connection, world: &str) -> Result<Value> {
         world,
         &lines,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::TransactionBehavior;
+
+    #[test]
+    fn sequel_origin_world_id_and_message_timestamps_survive_validation_while_foreign_injection_fails() {
+        let cleaned_source = formal_source(&json!({
+            "findingId": "f1",
+            "worldId": "sequel-w",
+            "originWorldId": "prequel-w",
+            "originTitle": "前作长安",
+            "quote": "前作札记原句",
+            "apiKey": "secret-leak",
+            "location": {
+                "worldId": "prequel-w",
+                "originWorldId": "prequel-w",
+                "originTitle": "前作长安",
+                "nodeId": "n-old",
+                "lineId": "l-old",
+                "url": "https://example.invalid/doc?id=1&token=secret#frag"
+            }
+        }));
+        assert_eq!(cleaned_source["originWorldId"], "prequel-w");
+        assert_eq!(cleaned_source["originTitle"], "前作长安");
+        assert_eq!(cleaned_source["location"]["originWorldId"], "prequel-w");
+        assert_eq!(cleaned_source["location"]["url"], "https://example.invalid/doc?id=1");
+        assert!(!cleaned_source.to_string().contains("secret"));
+
+        let sequel_archive = json!({
+            "engine": "pi",
+            "version": 1,
+            "readOnly": true,
+            "sessions": [{
+                "id": "s-seq",
+                "worldId": "prequel-w",
+                "originWorldId": "prequel-w",
+                "originTitle": "前作长安",
+                "lineId": "prequel-line",
+                "title": "前作整理",
+                "createdAt": "2026-11-23T08:00:00Z",
+                "updatedAt": "2026-11-23T08:05:00Z"
+            }],
+            "tasks": [{
+                "id": "t-seq",
+                "sessionId": "s-seq",
+                "worldId": "prequel-w",
+                "originWorldId": "prequel-w",
+                "lineId": "prequel-line",
+                "text": "整理前作人物",
+                "status": "archived",
+                "policy": "auto",
+                "createdAt": "2026-11-23T08:00:00Z",
+                "updatedAt": "2026-11-23T08:05:00Z",
+                "history": {
+                    "messages": [
+                        {"id": "m1", "role": "user", "content": "整理", "at": "2026-11-23T08:00:01Z"},
+                        {"id": "m2", "role": "assistant", "content": "已整理", "createdAt": "2026-11-23T08:00:09Z"}
+                    ],
+                    "steps": [],
+                    "plan": [],
+                    "sources": [{"title": "前作", "originWorldId": "prequel-w", "quote": "旧事"}],
+                    "result": {"status": "committed", "summary": "完成"}
+                }
+            }]
+        });
+        let valid = validate_readable(&sequel_archive, "sequel-w", &["main-line".to_owned()]).unwrap();
+        assert_eq!(valid["sessions"][0]["worldId"], "sequel-w");
+        assert_eq!(valid["sessions"][0]["originWorldId"], "prequel-w");
+        assert_eq!(valid["sessions"][0]["lineId"], "main-line");
+        assert!(valid["tasks"][0].get("lineId").is_none());
+        assert_eq!(valid["tasks"][0]["history"]["messages"][0]["createdAt"], "2026-11-23T08:00:01Z");
+        assert_eq!(valid["tasks"][0]["history"]["messages"][1]["createdAt"], "2026-11-23T08:00:09Z");
+        assert_eq!(valid["tasks"][0]["history"]["sources"][0]["originWorldId"], "prequel-w");
+
+        // Without originWorldId, foreign worldId or foreign lineId is still rejected.
+        let mut foreign = sequel_archive.clone();
+        foreign["sessions"][0].as_object_mut().unwrap().remove("originWorldId");
+        assert!(validate_readable(&foreign, "sequel-w", &["main-line".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn export_readable_degrades_dangling_line_ids_instead_of_blocking_world_backup() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&mut db, None).unwrap();
+        db.execute_batch(
+            "INSERT INTO worlds(id,title,era_id,created_at,updated_at,played_at) VALUES('w','长安','free','t','t','t');
+             INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n','w',1,'opening','开场','t');
+             INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l1','w','主线','n','t');
+             UPDATE worlds SET current_line_id='l1' WHERE id='w';
+             INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES('s1','w','purged-line','旧分支会话','t','t');
+             INSERT INTO pi_tasks(id,session_id,world_id,line_id,text,status,policy,base_json,base_world_version,result_json,created_at,updated_at)
+               VALUES('t1','s1','w','purged-line','查证','completed','auto','{}','','{\"summary\":\"完成\"}','t','t');",
+        ).unwrap();
+        db.pragma_update(None, "query_only", true).unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Deferred).unwrap();
+        let exported = export_readable(&tx, "w").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(exported["sessions"][0]["lineId"], "l1");
+        assert!(exported["tasks"][0].get("lineId").is_none());
+    }
 }

@@ -3,7 +3,7 @@
 use crate::{Error, Result, RunPlan};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub const SCHEMA: &str = include_str!("execution_lease_schema.sql");
 pub const DEFAULT_TTL_MS: i64 = 45_000;
@@ -37,7 +37,18 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+pub type RoleLivenessCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 static PROCESS_ROLE: OnceLock<String> = OnceLock::new();
+static ROLE_LIVENESS: OnceLock<RwLock<Option<RoleLivenessCheck>>> = OnceLock::new();
+
+/// Register an optional host callback returning `false` when a dedicated role
+/// (e.g. `"android-agent"`) is known to be disconnected/dead, allowing main-process
+/// lease checks and acquisitions to reclaim its dead lease without waiting 45s.
+pub fn set_role_liveness_check(check: Option<RoleLivenessCheck>) {
+    let lock = ROLE_LIVENESS.get_or_init(|| RwLock::new(None));
+    *lock.write().unwrap_or_else(|p| p.into_inner()) = check;
+}
 
 /// Tag this process's execution-lease owner prefix (e.g. `"android-agent"`) before
 /// `process_instance()` is first read so a restarted dedicated process can reclaim
@@ -50,13 +61,57 @@ pub fn init_process_role(role: &str) {
 }
 
 /// Process identity deliberately differs after a restart and between the UI
-/// and dedicated Agent processes. A persisted task ID is not an ownership key.
+/// and dedicated Agent processes. Embeds OS PID so same-UID processes can also
+/// detect dead peers immediately.
 pub fn process_instance() -> &'static str {
     static INSTANCE: OnceLock<String> = OnceLock::new();
-    INSTANCE.get_or_init(|| match PROCESS_ROLE.get() {
-        Some(role) => format!("{role}:{}", uuid::Uuid::new_v4()),
-        None => uuid::Uuid::new_v4().to_string(),
+    INSTANCE.get_or_init(|| {
+        let pid = std::process::id();
+        match PROCESS_ROLE.get() {
+            Some(role) => format!("{role}:{pid}:{}", uuid::Uuid::new_v4()),
+            None => format!("{pid}:{}", uuid::Uuid::new_v4()),
+        }
     })
+}
+
+fn is_owner_instance_dead(owner_instance: &str, current_instance: &str) -> bool {
+    if owner_instance.is_empty() || owner_instance == current_instance {
+        return false;
+    }
+    if let Some((first, _rest)) = owner_instance.split_once(':') {
+        if !first.is_empty() && !first.chars().all(|c| c.is_ascii_digit()) {
+            if let Some(lock) = ROLE_LIVENESS.get() {
+                if let Some(check) = lock.read().unwrap_or_else(|p| p.into_inner()).as_ref() {
+                    if !check(first) {
+                        return true;
+                    }
+                }
+            }
+            #[cfg(all(unix, not(target_os = "android")))]
+            if let Some((pid_str, _)) = _rest.split_once(':') {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    if pid > 0
+                        && std::path::Path::new("/proc/self").exists()
+                        && !std::path::Path::new(&format!("/proc/{pid}")).exists()
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        #[cfg(all(unix, not(target_os = "android")))]
+        if let Ok(pid) = first.parse::<u32>() {
+            if pid > 0
+                && _rest.len() >= 32
+                && std::path::Path::new("/proc/self").exists()
+                && !std::path::Path::new(&format!("/proc/{pid}")).exists()
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Immediately expire leases owned by previous (dead) instances of `role` so
@@ -76,15 +131,106 @@ pub fn expire_dead_role_leases_with(db: &Connection, role: &str, current_instanc
     Ok(changed)
 }
 
+pub fn expire_dead_role_leases_with_store(
+    store: &crate::Store,
+    role: &str,
+    current_instance: &str,
+) -> Result<usize> {
+    let mut db = store.lock()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = expire_dead_role_leases_with(&tx, role, current_instance)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
 pub fn expire_dead_role_leases(db: &Connection, role: &str) -> Result<usize> {
     expire_dead_role_leases_with(db, role, process_instance())
 }
 
 pub fn expire_dead_role_leases_store(store: &crate::Store, role: &str) -> Result<usize> {
+    expire_dead_role_leases_with_store(store, role, process_instance())
+}
+
+pub fn expire_dead_role_leases_except_prefix(
+    db: &Connection,
+    role: &str,
+    live_prefix: &str,
+) -> Result<usize> {
+    let trimmed = role.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    ensure_schema(db)?;
+    let role_like = format!("{trimmed}:%");
+    let changed = if live_prefix.trim().is_empty() {
+        db.execute(
+            "UPDATE world_execution_leases SET expires_at_ms=0 WHERE owner_instance LIKE ?1 AND expires_at_ms>0",
+            params![role_like],
+        )?
+    } else {
+        let keep_like = format!("{}%", live_prefix.trim());
+        db.execute(
+            "UPDATE world_execution_leases SET expires_at_ms=0 WHERE owner_instance LIKE ?1 AND owner_instance NOT LIKE ?2 AND expires_at_ms>0",
+            params![role_like, keep_like],
+        )?
+    };
+    Ok(changed)
+}
+
+pub fn expire_dead_role_leases_except_prefix_store(
+    store: &crate::Store,
+    role: &str,
+    live_prefix: &str,
+) -> Result<usize> {
     let mut db = store.lock()?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = expire_dead_role_leases(&tx, role)?;
+    let changed = expire_dead_role_leases_except_prefix(&tx, role, live_prefix)?;
     tx.commit()?;
+    Ok(changed)
+}
+
+/// Expire single-process desktop leases left behind by a previous crashed app
+/// launch without touching dedicated `android-agent:*` service leases.
+pub fn expire_other_instance_leases(db: &Connection, current_instance: &str) -> Result<usize> {
+    if current_instance.trim().is_empty() {
+        return Ok(0);
+    }
+    ensure_schema(db)?;
+    let changed = db.execute(
+        "UPDATE world_execution_leases SET expires_at_ms=0 WHERE owner_instance<>'' AND owner_instance<>?1 AND owner_instance NOT LIKE 'android-agent:%' AND expires_at_ms>0",
+        params![current_instance],
+    )?;
+    Ok(changed)
+}
+
+pub fn expire_other_instance_leases_store(store: &crate::Store) -> Result<usize> {
+    let mut db = store.lock()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = expire_other_instance_leases(&tx, process_instance())?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Reclaim any lease whose owner process/role is confirmed dead via liveness hook or `/proc`.
+pub fn reclaim_dead_leases(db: &Connection) -> Result<usize> {
+    ensure_schema(db)?;
+    let current_inst = process_instance();
+    let mut stmt = db.prepare(
+        "SELECT world_id, owner_instance FROM world_execution_leases WHERE expires_at_ms>0 AND owner_instance<>''",
+    )?;
+    let candidates: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut changed = 0;
+    for (world_id, owner_inst) in candidates {
+        if is_owner_instance_dead(&owner_inst, current_inst) {
+            changed += db.execute(
+                "UPDATE world_execution_leases SET expires_at_ms=0 WHERE world_id=?1 AND owner_instance=?2 AND expires_at_ms>0",
+                params![world_id, owner_inst],
+            )?;
+        }
+    }
     Ok(changed)
 }
 
@@ -124,7 +270,8 @@ pub fn acquire_tx(
     let expires = expiration(now, ttl)?;
     let previous = current(tx, world)?;
     let fence = if let Some(previous) = previous {
-        if previous.expires_at_ms > now && !previous.ticket.owner_id.is_empty() {
+        let dead_owner = is_owner_instance_dead(&previous.ticket.owner_instance, instance);
+        if previous.expires_at_ms > now && !previous.ticket.owner_id.is_empty() && !dead_owner {
             if previous.ticket.owner_id != owner || previous.ticket.owner_instance != instance {
                 return Err(Error::Busy { holder: holder(tx, &previous.ticket.owner_id), until_ms: previous.expires_at_ms });
             }

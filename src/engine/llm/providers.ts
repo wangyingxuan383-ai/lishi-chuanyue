@@ -4,7 +4,7 @@
 import type { Platform } from "../../platform";
 import type { Repo } from "../db/repo";
 import { newId } from "../db/repo";
-import { chatCompletionsUrl, serviceBase, type ChatError } from "./chat";
+import { chatCompletionsUrl as rawChatCompletionsUrl, serviceBase as rawServiceBase, type ChatError } from "./chat";
 
 export interface ProviderPreset {
   id: string;
@@ -42,8 +42,63 @@ export function cleanBaseUrl(input: string): string {
   let url = input.trim().replace(/[\s　]+/g, "");
   if (!url) return "";
   if (!/^[a-z]+:\/\//i.test(url)) url = `https://${url}`;
-  url = url.replace(/\/(chat\/completions|completions|models)\/?$/i, "").replace(/\/+$/, "");
+  url = url
+    .replace(/\/models\/[^/?#]+:(?:stream)?generateContent(?:\?.*)?$/i, "")
+    .replace(/\/(chat\/completions|completions|responses|messages|models)\/?$/i, "")
+    .replace(/\/+$/, "");
   return url;
+}
+
+/**
+ * Gemini's OpenAI-compatible base (`…/v1beta/openai`) for Chat Completions and `/models`.
+ * Converts a bare host or `…/v1beta` to `…/v1beta/openai` while leaving custom `/v1` relays untouched.
+ */
+export function geminiOpenAiUrl(baseUrl: string): string {
+  const cleaned = cleanBaseUrl(baseUrl);
+  if (!cleaned) return "";
+  try {
+    const parsed = new URL(cleaned);
+    const path = parsed.pathname.replace(/\/+$/, "");
+    if (!path) return `${parsed.origin}/v1beta/openai`;
+    if (/\/v1beta$/i.test(path)) return `${parsed.origin}${path}/openai`;
+    return cleaned;
+  } catch {
+    return cleaned;
+  }
+}
+
+/**
+ * Gemini's native REST base (`…/v1beta`) for `:streamGenerateContent` and Google Search Grounding.
+ * Strips a trailing `/openai` from `…/v1beta/openai` and fills `/v1beta` on a bare host.
+ */
+export function geminiNativeUrl(baseUrl: string): string {
+  const cleaned = cleanBaseUrl(baseUrl);
+  if (!cleaned) return "";
+  try {
+    const parsed = new URL(cleaned);
+    const path = parsed.pathname.replace(/\/+$/, "");
+    if (!path) return `${parsed.origin}/v1beta`;
+    if (/\/v1beta\/openai$/i.test(path)) return `${parsed.origin}${path.slice(0, -"/openai".length)}`;
+    return cleaned;
+  } catch {
+    return cleaned.replace(/\/v1beta\/openai$/i, "/v1beta");
+  }
+}
+
+/** Recognizes `…/v1beta` and `…/v1beta/openai` on the same origin as the same bound service. */
+export function sameServiceBase(a: string, b: string): boolean {
+  const left = serviceBase(cleanBaseUrl(a));
+  const right = serviceBase(cleanBaseUrl(b));
+  if (left === right) return true;
+  try {
+    const u1 = new URL(left);
+    const u2 = new URL(right);
+    if (u1.origin !== u2.origin) return false;
+    const norm = (p: string) => p.replace(/\/+$/, "").replace(/\/v1beta\/openai$/i, "/v1beta");
+    return norm(u1.pathname) === norm(u2.pathname) && /\/v1beta$/i.test(norm(u1.pathname));
+  } catch {
+    return false;
+  }
 }
 
 /** The preset a pasted address belongs to, by its host (so 自定义 with api.deepseek.com is DeepSeek). */
@@ -150,10 +205,21 @@ export async function deleteProfile(repo: Repo, profile: Profile): Promise<void>
 }
 
 export async function fetchModels(platform: Platform, slot: string, baseUrl: string): Promise<string[]> {
-  const response = await platform.llm.get({ slot, url: `${serviceBase(baseUrl)}/models`, timeoutMs: 15_000 });
+  const cleaned = cleanBaseUrl(baseUrl);
+  const openAiBase = /\/v1beta$/i.test(cleaned) ? geminiOpenAiUrl(cleaned) : serviceBase(baseUrl);
+  const isGeminiEndpoint = /\/v1beta(?:\/openai)?$/i.test(openAiBase);
+  const response = await platform.llm.get({ slot, url: `${openAiBase}/models`, timeoutMs: 15_000 });
   if (response.status < 200 || response.status >= 300) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status, body: response.body });
-  const data = JSON.parse(response.body).data ?? [];
-  return data.map((m: { id?: string }) => m.id).filter((id: unknown): id is string => typeof id === "string").sort();
+  const parsed = JSON.parse(response.body);
+  const data = parsed.data ?? parsed.models ?? [];
+  return data
+    .map((m: { id?: string; name?: string }) => {
+      if (typeof m.id === "string") return isGeminiEndpoint ? m.id.replace(/^models\//, "") : m.id;
+      if (typeof m.name === "string") return m.name.replace(/^models\//, "");
+      return undefined;
+    })
+    .filter((id: unknown): id is string => typeof id === "string" && id.length > 0)
+    .sort();
 }
 
 /** Plain-language explanation of a failed connection or turn: one sentence, no raw error text. */
@@ -185,4 +251,24 @@ export function explainFailure(kind: string, status?: number): string {
   return "这次没有写成。";
 }
 
-export { chatCompletionsUrl, serviceBase, type ChatError };
+export function chatCompletionsUrl(base: string): string {
+  const cleaned = cleanBaseUrl(base);
+  if (/\/v1beta$/i.test(cleaned)) return `${geminiOpenAiUrl(cleaned)}/chat/completions`;
+  try {
+    const parsed = new URL(cleaned);
+    if (parsed.hostname.toLowerCase() === "generativelanguage.googleapis.com" && !parsed.pathname.replace(/\/+$/, "")) {
+      return `${parsed.origin}/v1beta/openai/chat/completions`;
+    }
+  } catch {
+    /* fall through */
+  }
+  return rawChatCompletionsUrl(cleaned || base);
+}
+
+export function serviceBase(base: string): string {
+  const cleaned = cleanBaseUrl(base);
+  if (/\/v1beta$/i.test(cleaned)) return cleaned;
+  return rawServiceBase(cleaned || base);
+}
+
+export { type ChatError };

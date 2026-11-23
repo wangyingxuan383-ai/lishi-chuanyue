@@ -4,6 +4,8 @@ use rusqlite::{params,Connection,OptionalExtension};
 use serde_json::{json,Value};
 use base64::Engine;
 
+pub const PARSER_CACHE_PREFIX: &str = "parser2-";
+
 pub fn register(store:&Store,scope:&Value,writable:bool)->Result<Value>{
     if !scope["path"].is_string()&&!scope["uri"].is_string(){return Err(Error::Invalid("请选择有效的资料文件或目录".into()));}
     let mode=if writable{"write"}else{"read"};
@@ -41,13 +43,128 @@ pub(crate) fn request(db:&Connection,task:&Value,plan:&RunPlan,args:&Value,writi
     if enabled!=1||frozen["revision"]!=revision||writing&&(mode!="write"||plan.meta["agent"]["readOnly"]==true){return Err(Error::Invalid("资料授权已撤销、变化或只允许读取，本次操作未执行".into()));}
     let relative=ws::text(args,"path");
     if relative.starts_with('/')||relative.contains(['\\',':','\0'])||relative.split('/').any(|s|s==".."||s=="."){return Err(Error::Invalid("资料路径必须位于所选范围内".into()));}
-    let mut result=args.clone();result["_documentGrant"]=ws::parse(&scope);result["taskId"]=task["id"].clone();result["worldId"]=task["world_id"].clone();
-    let binding=&plan.meta["agent"]["referenceScope"];
-    if let (Some(book),Some(through))=(binding["bookId"].as_str(),binding["through"].as_u64()){
-        let raw:Option<String>=db.query_row("SELECT json FROM source_books WHERE id=?",[book],|r|r.get(0)).optional()?;
-        if let Some(raw)=raw {let value=ws::parse(&raw);let texts=json!(value["sections"].as_array().into_iter().flatten().map(|s|ws::text(s,"text")).collect::<Vec<_>>());result["boundBookHash"]=crate::pi_store::arguments_hash(&texts).into();result["through"]=through.into();}
+    let scope_val = ws::parse(&scope);
+    let mut result = args.clone();
+    result["_documentGrant"] = scope_val.clone();
+    result["taskId"] = task["id"].clone();
+    result["worldId"] = task["world_id"].clone();
+    result["parserCachePrefix"] = PARSER_CACHE_PREFIX.into();
+    for key in ["bookId", "fileHash", "sha256"] {
+        if result.get(key).is_none() && scope_val[key].is_string() {
+            result[key] = scope_val[key].clone();
+        }
+    }
+    if result.get("fileHash").is_none() && result["sha256"].is_string() {
+        result["fileHash"] = result["sha256"].clone();
+    }
+    let binding = &plan.meta["agent"]["referenceScope"];
+    if let (Some(book), Some(through)) = (binding["bookId"].as_str(), binding["through"].as_u64()) {
+        result["boundBookId"] = book.into();
+        result["through"] = through.into();
+        let raw: Option<String> = db
+            .query_row("SELECT json FROM source_books WHERE id=?", [book], |r| r.get(0))
+            .optional()?;
+        if let Some(raw) = raw {
+            let value = ws::parse(&raw);
+            if let Some(fh) = value["fileHash"]
+                .as_str()
+                .or_else(|| value["sha256"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                result["boundFileHash"] = fh.to_ascii_lowercase().into();
+            }
+            let texts = json!(value["sections"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| ws::text(s, "text"))
+                .collect::<Vec<_>>());
+            result["boundBookHash"] = crate::pi_store::arguments_hash(&texts).into();
+        }
+        if matches_bound_book(&result, result["fileHash"].as_str(), None) {
+            if let Some(section) = result["section"].as_u64() {
+                if section > through {
+                    return Err(Error::Invalid("所选章节不存在或超出本次参考范围。".into()));
+                }
+            }
+        }
     }
     Ok(result)
+}
+
+pub(crate) fn matches_bound_book(
+    request: &Value,
+    file_hash: Option<&str>,
+    normalized_hash: Option<&str>,
+) -> bool {
+    let bound_book = ws::text(request, "boundBookId");
+    let req_book = ws::text(request, "bookId");
+    if !bound_book.is_empty() && !req_book.is_empty() && bound_book == req_book {
+        return true;
+    }
+    let bound_file = ws::text(request, "boundFileHash");
+    let candidate_file = file_hash
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| request["fileHash"].as_str().map(str::trim).filter(|s| !s.is_empty()));
+    if !bound_file.is_empty() {
+        if let Some(fh) = candidate_file {
+            if bound_file.eq_ignore_ascii_case(fh) {
+                return true;
+            }
+        }
+    }
+    let bound_norm = ws::text(request, "boundBookHash");
+    if !bound_norm.is_empty() {
+        if let Some(nh) = normalized_hash.map(str::trim).filter(|s| !s.is_empty()) {
+            if bound_norm.eq_ignore_ascii_case(nh) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn enforce_spoiler_fence(
+    request: &Value,
+    file_hash: Option<&str>,
+    data: &mut Value,
+) -> Result<()> {
+    let Some(through) = request["through"].as_u64() else {
+        return Ok(());
+    };
+    let fh = file_hash
+        .or_else(|| data["fileHash"].as_str())
+        .or_else(|| data["version"].as_str());
+    let nh = data["normalizedHash"].as_str();
+    if !matches_bound_book(request, fh, nh) {
+        return Ok(());
+    }
+    if let Some(section) = data["section"].as_u64().or_else(|| request["section"].as_u64()) {
+        if section > through {
+            return Err(Error::Invalid("所选章节不存在或超出本次参考范围。".into()));
+        }
+    }
+    if let Some(sections) = data["sections"].as_array_mut() {
+        sections.retain(|s| {
+            s["index"]
+                .as_u64()
+                .or_else(|| s["section"].as_u64())
+                .is_some_and(|idx| idx <= through)
+        });
+    }
+    if let Some(count) = data["sectionCount"].as_u64() {
+        let capped = count.min(through.saturating_add(1));
+        data["sectionCount"] = capped.into();
+        if data["nextSectionOffset"].as_u64().is_some_and(|next| next >= capped) {
+            data["nextSectionOffset"] = Value::Null;
+        }
+    }
+    if let Some(hits) = data["hits"].as_array_mut() {
+        hits.retain(|h| h["section"].as_u64().is_none_or(|idx| idx <= through));
+    }
+    Ok(())
 }
 
 pub(crate) fn project(task:&Value,args:&Value,value:&mut Value){
@@ -100,5 +217,63 @@ mod tests {
         assert_eq!(updated["id"],public["id"]);assert_eq!(updated["revision"],2);assert_eq!(list(&*store.lock().unwrap()).unwrap().len(),1);
         assert!(request(&*store.lock().unwrap(),&task,&plan,&args,false).is_err(),"reselecting a scope retires the previous task grant");
         revoke(&*store.lock().unwrap(),public["id"].as_str().unwrap()).unwrap();assert!(request(&*store.lock().unwrap(),&task,&plan,&args,false).is_err());
+    }
+    #[test]
+    fn spoiler_fence_matches_by_book_id_or_raw_file_hash_and_uses_parser2_prefix() {
+        let store = Store(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));
+        crate::migration::migrate(&mut store.lock().unwrap(), None).unwrap();
+        crate::pi_store::PiStore(store.clone()).initialize().unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO source_books(id,title,format,json,created_at) VALUES('b1','原著','txt',?,'t')",
+                [json!({
+                    "fileHash": "AA11BB22",
+                    "sections": [{"title":"一","text":"正文一"},{"title":"二","text":"正文二"},{"title":"三","text":"剧透三"}]
+                })
+                .to_string()],
+            )
+            .unwrap();
+        let grant = register(&store, &json!({"path":"native-book","name":"原著","directory":false}), false).unwrap();
+        let task = json!({"id":"task","world_id":"world","metadata_json":json!({"fileGrants":pin(&*store.lock().unwrap()).unwrap()}).to_string()});
+        let plan: RunPlan = serde_json::from_value(json!({
+            "id":"task","worldId":"world","lineId":"line","headId":"head","kind":"pi_task",
+            "model":{"slot":"","url":"","model":"","includeUsage":false},
+            "messages":[],
+            "extractMessages":[],
+            "state":{},
+            "settings":{},
+            "options":{},
+            "action":{},
+            "meta":{"agent":{"readOnly":true,"referenceScope":{"bookId":"b1","through":1}}}
+        }))
+        .unwrap();
+        let req = request(
+            &*store.lock().unwrap(),
+            &task,
+            &plan,
+            &json!({"grantId":grant["id"],"path":"book.txt"}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(req["parserCachePrefix"], "parser2-");
+        assert_eq!(req["boundBookId"], "b1");
+        assert_eq!(req["boundFileHash"], "aa11bb22");
+        assert_eq!(req["through"], 1);
+        let mut parsed = json!({
+            "section": 1,
+            "sectionCount": 3,
+            "nextSectionOffset": 2,
+            "sections": [{"index":0,"title":"一"},{"index":1,"title":"二"},{"index":2,"title":"剧透三"}],
+            "hits": [{"section":0,"snippet":"一"},{"section":2,"snippet":"剧透"}]
+        });
+        enforce_spoiler_fence(&req, Some("aa11bb22"), &mut parsed).unwrap();
+        assert_eq!(parsed["sectionCount"], 2);
+        assert!(parsed["nextSectionOffset"].is_null());
+        assert_eq!(parsed["sections"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["hits"].as_array().unwrap().len(), 1);
+        let mut spoiler_read = json!({"section": 2, "text": "剧透三"});
+        assert!(enforce_spoiler_fence(&req, Some("aa11bb22"), &mut spoiler_read).is_err());
     }
 }

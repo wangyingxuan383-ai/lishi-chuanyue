@@ -33,7 +33,7 @@ export interface SourceFact extends SourceFactData {
   id: string; bookId: string; jobId: string; section: number; chunk: number;
 }
 export interface StructuredSourceAnalysis {
-  version: "source-3"; summary: string; facts: SourceFactData[];
+  version: "source-3" | "source-4"; summary: string; facts: SourceFactData[];
 }
 export interface ReferenceContext {
   bookId: string; title: string; binding: SourceBinding; passages: ReferencePassage[];

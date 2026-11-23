@@ -224,6 +224,156 @@ pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
     format!("【当前】{} · {}\n主角：{}，{}{}，{}{}\n可用的钱：{}（共 {} {}）{}\n身体：健康{}，精力{}\n身上的伤病与状态：{}\n行囊：{}\n已知人物：\n{}{}\n进行中的目标：{}",text(&now["text"]),place,text(&me["name"]),text(&me["gender"]),age,identity,if origin.is_empty(){String::new()}else{format!("（穿越前是{origin}）")},rules::money::format_money(me["stats"]["money"].as_f64().unwrap_or(0.0),currency),me["stats"]["money"],list(&currency["units"]).last().map(|u|text(&u["name"])).unwrap_or("钱"),if debt!=0.0{format!("；欠债 {}",rules::money::format_money(debt,currency))}else{String::new()},level(me["stats"]["health"].as_f64().unwrap_or(80.0),&["康健","微恙","带伤","重伤","垂危"]),level(me["stats"]["energy"].as_f64().unwrap_or(70.0),&["充沛","尚可","疲惫","力竭"]),if statuses.is_empty(){"无"}else{&statuses},if items.is_empty(){"无"}else{&items},if lines.is_empty(){"无"}else{&lines},if rest.is_empty(){String::new()}else{format!("\n另有：{rest}")},if goals.is_empty(){"无"}else{&goals})
 }
 
+const BEAT_FIELD: &str = " \"beat\":当前这一幕的关键事件已在本段正文发生时写 \"done\"，否则不写,";
+const CHALLENGE_FIELD: &str = " \"challenge\":{\"progress\":\"挑战的现状，一句话\",\"result\":\"目标确实达成写 won，失败条件确实出现写 lost，否则不写\",\"why\":\"成败的缘由，一句话\"},";
+
+fn beat_title(raw: &str) -> String {
+    let line = raw.trim().lines().next().unwrap_or("").trim();
+    let clause = line
+        .split(['，', ',', '。', '；', ';', '：', ':', '！', '!', '？', '?'])
+        .next()
+        .unwrap_or(line);
+    let title = if clause.chars().count() >= 2 { clause } else { line };
+    if title.chars().count() > 16 {
+        format!("{}…", title.chars().take(16).collect::<String>())
+    } else {
+        title.to_owned()
+    }
+}
+
+pub(crate) fn script_block(state: &Value, settings: &Value) -> String {
+    let beats = list(&state["script"]["beats"]);
+    if beats.is_empty() {
+        return String::new();
+    }
+    let Some(at) = beats.iter().position(|b| b["status"] == "todo") else {
+        return String::new();
+    };
+    let done: Vec<String> = beats
+        .iter()
+        .filter(|b| b["status"] == "done")
+        .map(|b| beat_title(text(&b["text"])))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let skipped: Vec<String> = beats
+        .iter()
+        .filter(|b| b["status"] == "skipped")
+        .map(|b| beat_title(text(&b["text"])))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let later: Vec<&str> = beats[at + 1..]
+        .iter()
+        .filter(|b| b["status"] == "todo")
+        .map(|b| text(&b["text"]).trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let ai_pilot = settings["pilot"] == "ai";
+    let mut lines = Vec::new();
+    let line = text(&state["script"]["line"]).trim();
+    if !line.is_empty() {
+        lines.push(format!("主线：{line}"));
+    }
+    if !done.is_empty() {
+        lines.push(format!("已演完：{}", done.join("；")));
+    }
+    if !skipped.is_empty() {
+        lines.push(format!("已跳过：{}", skipped.join("；")));
+    }
+    lines.push(format!("这一幕：{}", text(&beats[at]["text"]).trim()));
+    if !later.is_empty() {
+        lines.push(format!("之后：{}", later.join("；")));
+    }
+    let ending = text(&state["script"]["ending"]).trim();
+    if !ending.is_empty() {
+        lines.push(format!("想要的结局：{ending}"));
+    }
+    lines.push(format!(
+        "让这一幕的事在情理之中自然出现：人物、消息、机会和阻碍由你安排，{}；之后几幕先不写。这一幕的关键事件在正文里发生了，就在记录里写 \"beat\":\"done\"。",
+        if ai_pilot {
+            "主角照自己的性格应对"
+        } else {
+            "主角怎么应对仍由玩家决定；玩家没往这一幕走时，只让苗头出现，不替主角行动，也不跳过时间去凑这一幕"
+        }
+    ));
+    if state["script"]["steer"] == "firm" {
+        lines.push("故事偏离时，用情理之中的人和事把它引回这一幕。".to_owned());
+    }
+    format!("\n【剧本】（玩家定的骨架）\n{}", lines.join("\n"))
+}
+
+pub(crate) fn challenge_remaining(state: &Value) -> Option<String> {
+    let c = &state["challenge"];
+    if c["status"] != "active" {
+        return None;
+    }
+    let deadline = c["deadlineMinute"].as_f64()?;
+    let now = state["time"]["elapsedMinutes"].as_f64().unwrap_or(0.0);
+    let left = (deadline - now).max(0.0);
+    Some(if left >= 1440.0 {
+        format!("还剩 {} 天", (left / 1440.0).floor() as i64)
+    } else {
+        "还剩不到一天".to_owned()
+    })
+}
+
+pub(crate) fn challenge_block(state: &Value) -> String {
+    let c = &state["challenge"];
+    if c["status"] != "active" {
+        return String::new();
+    }
+    let goal = text(&c["goal"]).trim();
+    if goal.is_empty() {
+        return String::new();
+    }
+    let limit = text(&c["limit"]).trim();
+    let limit_line = if limit.is_empty() {
+        "期限：不限时".to_owned()
+    } else if let Some(rem) = challenge_remaining(state) {
+        format!("期限：{limit}（{rem}）")
+    } else {
+        format!("期限：{limit}")
+    };
+    let mut lines = vec![limit_line];
+    let fail_if = text(&c["failIf"]).trim();
+    if !fail_if.is_empty() {
+        lines.push(format!("失败条件：{fail_if}"));
+    }
+    let progress = text(&c["progress"]).trim();
+    if !progress.is_empty() {
+        lines.push(format!("最近进展：{progress}"));
+    }
+    lines.push("难处是真实的，不放水也不刻意刁难，进展要靠主角的行动和代价换来。记录里写 \"challenge\":{\"progress\":\"一句话现状\"}；目标确实达成时加 \"result\":\"won\"，失败条件确实出现时加 \"result\":\"lost\",\"why\":\"……\"。".to_owned());
+    format!("\n【挑战】{goal}\n{}", lines.join("\n"))
+}
+
+fn sync_record_spec(raw_spec: &str, state: &Value) -> String {
+    if !raw_spec.contains("\"choices\":") {
+        return raw_spec.to_owned();
+    }
+    let has_beat = list(&state["script"]["beats"]).iter().any(|b| b["status"] == "todo");
+    let has_challenge = state["challenge"]["status"] == "active" && !text(&state["challenge"]["goal"]).trim().is_empty();
+    let mut kept: Vec<&str> = raw_spec
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("\"beat\":") && !trimmed.starts_with("\"challenge\":")
+        })
+        .collect();
+    if let Some(pos) = kept.iter().position(|line| line.trim_start().starts_with("\"choices\":")) {
+        let mut extras = Vec::new();
+        if has_beat {
+            extras.push(BEAT_FIELD);
+        }
+        if has_challenge {
+            extras.push(CHALLENGE_FIELD);
+        }
+        for (offset, extra) in extras.into_iter().enumerate() {
+            kept.insert(pos + offset, extra);
+        }
+    }
+    kept.join("\n")
+}
+
 /// Instruction wording is supplied by the existing prompt template. Selection,
 /// evidence allowance, history fitting and accounting have one native owner.
 pub fn build(input: &Value) -> Result<Value> {
@@ -298,7 +448,7 @@ pub fn build(input: &Value) -> Result<Value> {
     add(
         "spec",
         "输出格式",
-        text(&template["spec"]).to_owned(),
+        sync_record_spec(text(&template["spec"]), state),
         "沿用回合记录格式",
     );
     add(
@@ -340,13 +490,7 @@ pub fn build(input: &Value) -> Result<Value> {
         },
         "玩家要求完整保留",
     );
-    let mut modes = String::new();
-    if !list(&state["script"]["beats"]).is_empty() {
-        modes=format!("\n【剧本】\n主线：{}\n{}\n想要的结局：{}\n当前未完成的这一幕自然发生，之后几幕先不写。",text(&state["script"]["line"]),list(&state["script"]["beats"]).iter().map(|b|format!("{}：{}",if b["status"]=="todo"{"待演"}else{"已演"},text(&b["text"]))).collect::<Vec<_>>().join("\n"),text(&state["script"]["ending"]));
-    }
-    if state["challenge"]["status"] == "active" {
-        modes+=&format!("\n【挑战】{}\n期限：{}；失败条件：{}；最近进展：{}。成败依据实际行动和代价，不放水也不刻意刁难。",text(&state["challenge"]["goal"]),text(&state["challenge"]["limit"]),text(&state["challenge"]["failIf"]),text(&state["challenge"]["progress"]));
-    }
+    let modes = format!("{}{}", script_block(state, settings), challenge_block(state));
     add("modes", "剧本与挑战", modes, "读取本段最新进度");
     add(
         "notes",
@@ -354,13 +498,19 @@ pub fn build(input: &Value) -> Result<Value> {
         text(&template["notes"]).to_owned(),
         "保留结算与用词提示",
     );
+    let director = text(&input["directorNote"]).trim();
+    let director_line = if director.is_empty() {
+        String::new()
+    } else {
+        format!("\n【幕后要求，照做但不要在正文中提及】{director}")
+    };
     let action = if !text(&template["action"]).is_empty() {
         text(&template["action"]).to_owned()
     } else if input["mode"] == "continue" {
         if settings["pilot"] == "ai" {
-            "\n【继续】接着往下演，主角照自己的性格和打算行动。\n（写完正文后，别忘了输出 <record> 记录块。）".to_owned()
+            format!("\n【继续】接着往下演，主角照自己的性格和打算行动。{director_line}\n（写完正文后，别忘了输出 <record> 记录块。）")
         } else {
-            "\n【玩家选择继续】主角不做新的决定，可以顺着已经在做的事继续；由他人和环境推动剧情。\n（写完正文后，别忘了输出 <record> 记录块。）".to_owned()
+            format!("\n【玩家选择继续】主角不做新的决定，可以顺着已经在做的事继续；由他人和环境推动剧情。{director_line}\n（写完正文后，别忘了输出 <record> 记录块。）")
         }
     } else {
         text(&template["action"]).to_owned()
@@ -1193,6 +1343,60 @@ mod tests {
         let idx = |s: &str| s.trim_start_matches('第').split("步行动").next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
         let jump = idx(&first_action_2).saturating_sub(idx(&first_action_1));
         assert!(jump == 0 || jump >= HISTORY_EVICT_STEP, "history eviction should keep oldest anchor stable or evict in a batch step, got {first_action_1} -> {first_action_2}");
+    }
+
+    #[test]
+    fn script_and_challenge_blocks_match_ts_and_continue_preserves_director_note_and_record_reminder() {
+        let mut i = input();
+        i["settings"]["pilot"] = "player".into();
+        i["template"]["spec"] = "【输出格式】\n<record>\n{\"time\":\"一刻\",\n \"choices\":[\"建议行动1\",\"建议行动2\",\"建议行动3\"]}\n</record>".into();
+        i["template"]["action"] = "".into();
+        i["directorNote"] = "让掌柜主动开口".into();
+        i["state"]["time"]["elapsedMinutes"] = (3.5 * 1440.0).into();
+        i["state"]["script"] = json!({
+            "line": "书生闯长安",
+            "ending": "还清旧债",
+            "steer": "firm",
+            "beats": [
+                {"id": "b0", "text": "邸店掌柜催讨房钱", "status": "skipped"},
+                {"id": "b1", "text": "夜探城隍庙，发现密道", "status": "todo"},
+                {"id": "b2", "text": "真相大白，名动西市", "status": "done"}
+            ]
+        });
+        i["state"]["challenge"] = json!({
+            "goal": "凑够三百两",
+            "limit": "十日",
+            "deadlineMinute": 10 * 1440,
+            "failIf": "被告到官府",
+            "progress": "已凑得八十两",
+            "status": "active",
+            "startedMinute": 0
+        });
+        let built = build(&i).unwrap();
+        let sys = built["messages"][0]["content"].as_str().unwrap();
+        let user = built["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(sys.contains("\"beat\":当前这一幕的关键事件已在本段正文发生时写 \"done\""), "{sys}");
+        assert!(sys.contains("\"challenge\":{\"progress\":\"挑战的现状，一句话\""), "{sys}");
+        assert!(user.contains("已演完：真相大白"), "{user}");
+        assert!(user.contains("已跳过：邸店掌柜催讨房钱"), "{user}");
+        assert!(!user.contains("已演：邸店掌柜催讨房钱"), "{user}");
+        assert!(user.contains("这一幕：夜探城隍庙，发现密道"), "{user}");
+        assert!(user.contains("故事偏离时，用情理之中的人和事把它引回这一幕。"), "{user}");
+        assert!(user.contains("\"beat\":\"done\""), "{user}");
+        assert!(user.contains("【挑战】凑够三百两\n期限：十日（还剩 6 天）\n失败条件：被告到官府\n最近进展：已凑得八十两"), "{user}");
+        assert!(user.contains("\"result\":\"won\"") && user.contains("\"result\":\"lost\""), "{user}");
+        assert!(user.contains("【玩家选择继续】") && user.contains("【幕后要求，照做但不要在正文中提及】让掌柜主动开口") && user.contains("<record>"), "{user}");
+
+        // Once all beats are done or skipped, stop injecting the script block and remove beat field from spec.
+        i["state"]["script"]["beats"][1]["status"] = "done".into();
+        i["state"]["challenge"]["status"] = "won".into();
+        let finished = build(&i).unwrap();
+        let fin_sys = finished["messages"][0]["content"].as_str().unwrap();
+        let fin_user = finished["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+        assert!(!fin_user.contains("【剧本】"), "{fin_user}");
+        assert!(!fin_user.contains("【挑战】"), "{fin_user}");
+        assert!(!fin_sys.contains("\"beat\":"), "{fin_sys}");
+        assert!(!fin_sys.contains("\"challenge\":"), "{fin_sys}");
     }
 }
 

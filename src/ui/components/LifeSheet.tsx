@@ -4,7 +4,7 @@
 // the ending card and any time from the ⋯ menu.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { eraContext } from "../../engine/era";
-import { dateText, earnedSeals, lifeSummary, newSeals, playStats, realTimeText, SEALS, spanText, type PlayStats } from "../../engine/life";
+import { dateText, earnedSeals, lifeSummary, newSeals, playStats, realTimeText, sealsForState, spanText, type PlayStats } from "../../engine/life";
 import type { World, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
 import { CardSheet } from "./ShareCard";
@@ -26,7 +26,7 @@ export function LifeSheet({ world, state, headId, dead, onClose }: { world: Worl
       .then(([path, all, lines]) => setStats(playStats({ path, all, lines, gameMinutes: state.time.elapsedMinutes })));
   }, [game, world.id, headId, state]);
   const earned = new Set(stats ? earnedSeals({ turns: stats.turns, lines: stats.lines, state, currency: era.currency }).map((s) => s.id) : []);
-  const seals = state.era.mode === "free" ? SEALS.filter((s) => s.id !== "change") : SEALS;
+  const seals = sealsForState(state);
 
   if (card) {
     return <CardSheet title="小传图片" onClose={() => setCard(false)} content={{

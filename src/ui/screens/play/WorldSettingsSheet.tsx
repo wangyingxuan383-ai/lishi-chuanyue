@@ -86,7 +86,7 @@ export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, 
         </div>
 
         <h3 className="settings-sub">记忆与整理</h3>
-        <details><summary><SourceSummary value={source} /></summary><div className="stack"><SourceSetup value={source} onChange={setSource} disabled={busy || savingSource} />
+        <details><summary><SourceSummary value={source} /></summary><div className="stack"><SourceSetup worldId={world.id} value={source} onChange={setSource} disabled={busy || savingSource} />
           <div className="row"><button disabled={busy || savingSource || !sourceDirty} onClick={() => { setSavingSource(true); void onSourceSave(source).then(() => toast("书籍用法已保存，可撤销")).catch((e) => toast(e.message ?? "没能保存")).finally(() => setSavingSource(false)); }}>保存书籍用法</button>{state.source && <button onClick={() => setReference(true)}>查看参考资料</button>}</div>
         </div></details>
         {reference && state.source && <ReferenceSheet worldId={world.id} binding={state.source} onClose={() => setReference(false)} />}

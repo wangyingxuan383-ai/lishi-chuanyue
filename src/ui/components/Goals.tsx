@@ -1,8 +1,7 @@
 // The 目标 tab of the character panel (PLAN §4.5, R05-T003): goals in progress
 // by kind, how each one went, the player's own wishes, and finished goals.
 // Every change is an edit node that can be undone.
-import { useState } from "react";
-import { rejectedReason } from "../../engine/game";
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "../app/context";
 import { nowOf } from "../../engine/calendar/clock";
 import { formatDate } from "../../engine/calendar/date";
@@ -13,7 +12,7 @@ import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
 
 const ORDER: Goal["kind"][] = ["主线", "支线", "心愿"];
-type Save = (patch: TurnRecord, summary: string) => Promise<void>;
+type Save = (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
 
 /** "天宝七载 冬月十九", or "第 3 日" when the world has no date. */
 function dayOf(era: EraContext, minute: number): string {
@@ -21,12 +20,12 @@ function dayOf(era: EraContext, minute: number): string {
   return now.date ? formatDate(now.date, era.clock.rules) : `第 ${now.day} 日`;
 }
 
-function GoalSheet({ goal, era, onClose, onSave }: { goal: Goal; era: EraContext; onClose: () => void; onSave: Save }) {
+function GoalSheet({ goal, era, headId, onClose, onSave }: { goal: Goal; era: EraContext; headId?: string; onClose: () => void; onSave: Save }) {
   const { toast } = useApp();
   const [saving, setSaving] = useState(false);
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
+    try { await onSave(patch, summary, headId); onClose(); } catch (e) { toast(e instanceof Error ? e.message : "没能保存，请稍后再试"); } finally { setSaving(false); }
   };
   const active = goal.status === "进行中";
   const ref = { id: goal.id, name: goal.name };
@@ -51,7 +50,7 @@ function GoalSheet({ goal, era, onClose, onSave }: { goal: Goal; era: EraContext
   );
 }
 
-function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => void; onSave: Save }) {
+function WishSheet({ goals, headId, onClose, onSave }: { goals: Goal[]; headId?: string; onClose: () => void; onSave: Save }) {
   const { toast } = useApp();
   const [name, setName] = useState("");
   const taken = goals.some((g) => g.name === name.trim());
@@ -60,9 +59,9 @@ function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => v
   const save = async () => {
     setSaving(true);
     try {
-      await onSave({ goals: [{ op: "add", kind: "心愿", name: name.trim(), ...(how.trim() ? { detail: how.trim() } : {}) }] }, `新心愿：${name.trim()}`);
+      await onSave({ goals: [{ op: "add", kind: "心愿", name: name.trim(), ...(how.trim() ? { detail: how.trim() } : {}) }] }, `新心愿：${name.trim()}`, headId);
       onClose();
-    } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
+    } catch (e) { toast(e instanceof Error ? e.message : "没能保存，请稍后再试"); } finally { setSaving(false); }
   };
   return (
     <Sheet title="我的心愿" onClose={onClose}>
@@ -77,9 +76,17 @@ function WishSheet({ goals, onClose, onSave }: { goals: Goal[]; onClose: () => v
   );
 }
 
-export function Goals({ state, era, busy, onSave }: { state: WorldState; era: EraContext; busy: boolean; onSave: Save }) {
+export function Goals({ state, era, headId, busy, onSave }: { state: WorldState; era: EraContext; headId?: string; busy: boolean; onSave: Save }) {
   const [open, setOpen] = useState<Goal | null>(null);
   const [wish, setWish] = useState(false);
+  const prevAnchor = useRef<unknown>(headId ?? state);
+  useEffect(() => {
+    const next = headId ?? state;
+    if (prevAnchor.current === next) return;
+    prevAnchor.current = next;
+    setOpen(null);
+    setWish(false);
+  }, [headId, state]);
   const active = state.goals.filter((g) => g.status === "进行中").sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
   const ended = state.goals.filter((g) => g.status !== "进行中").reverse();
   return (
@@ -103,8 +110,8 @@ export function Goals({ state, era, busy, onSave }: { state: WorldState; era: Er
           </button>
         ))}
       </details>}
-      {open && <GoalSheet goal={open} era={era} onClose={() => setOpen(null)} onSave={onSave} />}
-      {wish && <WishSheet goals={state.goals} onClose={() => setWish(false)} onSave={onSave} />}
+      {open && <GoalSheet goal={open} era={era} headId={headId} onClose={() => setOpen(null)} onSave={onSave} />}
+      {wish && <WishSheet goals={state.goals} headId={headId} onClose={() => setWish(false)} onSave={onSave} />}
     </div>
   );
 }

@@ -630,3 +630,118 @@ fn facts_append_rejects_a_nested_list_before_staging_and_normalizes_new_source_a
     assert_eq!(work["edits"][0]["after"][0]["origin"],"source");
     assert_eq!(row["status"],"running");assert!(row["result_json"].is_null(),"staging must not pretend to adopt a source claim");
 }
+
+#[test]
+fn undo_recovery_rewires_session_and_task_line_ids_before_deleting_new_routes() {
+    let f = Fixture::new();
+    let t1 = f.start("branch-commit", "auto-reversible", false);
+    f.call(&t1, "mk-route", "stage_route", json!({"name":"新支线","activate":true,"summary":"建新支线并切换"}));
+    let committed = f.finish(&t1, "commit-route");
+    let recovery_id = committed["data"]["recoveryId"].as_str().unwrap().to_owned();
+    let new_line: String = f.store.lock().unwrap().query_row("SELECT current_line_id FROM worlds WHERE id='world'", [], |r| r.get(0)).unwrap();
+    assert_ne!(new_line, "line");
+    // Start a second task on the newly created route so pi_tasks.line_id references new_line
+    let t2 = f.start("task-on-new-line", "auto-reversible", true);
+    f.gateway.interrupt(&t2.permit, "暂停").unwrap();
+    // Undo recovery deletes new_line; both pi_sessions and pi_tasks must rewire to restored 'line'
+    let undone = f.gateway.undo_recovery(&recovery_id).unwrap();
+    assert_eq!(undone["undone"], true);
+    let dangling: i64 = f.store.lock().unwrap().query_row(
+        "SELECT (SELECT COUNT(*) FROM pi_tasks WHERE world_id='world' AND line_id NOT IN (SELECT id FROM lines WHERE world_id='world'))
+              + (SELECT COUNT(*) FROM pi_sessions WHERE world_id='world' AND line_id NOT IN (SELECT id FROM lines WHERE world_id='world'))",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(dangling, 0);
+    // Readable archive export must succeed cleanly with zero orphan route errors
+    let exported = story_core::world_archive::export(&f.store, "world").unwrap();
+    assert_eq!(exported["world"]["id"], "world");
+}
+
+#[test]
+fn stage_edits_accepts_same_container_pre_batch_refs_and_returns_changes_and_refreshed_refs() {
+    let f = Fixture::new();
+    let task = f.start("batch-cards", "auto-reversible", false);
+    let initial = f.call(&task, "read-cards", "read_resource", json!({"kind":"cards"}));
+    let card_ref = initial["data"]["ref"].clone();
+    let batch = f.call(
+        &task,
+        "batch-append",
+        "stage_edits",
+        json!({
+            "edits": [
+                {"ref": card_ref.clone(), "operation": "append", "value": {"id":"c1","title":"卡一","content":"甲"}, "summary": "加卡一"},
+                {"ref": card_ref, "operation": "append", "value": {"id":"c2","title":"卡二","content":"乙"}, "summary": "加卡二"}
+            ]
+        }),
+    );
+    assert_eq!(batch["data"]["staged"], 2);
+    assert_eq!(batch["data"]["changes"].as_array().unwrap().len(), 2);
+    assert_eq!(batch["data"]["refs"].as_array().unwrap().len(), 1);
+    assert!(batch["data"]["ref"]["revision"].is_string());
+    // Intra-batch entity relocation when item 0 is removed and item 1 is edited in the same batch
+    let read2 = f.call(&task, "read-cards-2", "read_resource", json!({"kind":"cards"}));
+    let ref_c1 = read2["data"]["items"][0]["ref"].clone();
+    let ref_c2 = read2["data"]["items"][1]["ref"].clone();
+    let batch2 = f.call(
+        &task,
+        "batch-remove-and-edit",
+        "stage_edits",
+        json!({
+            "edits": [
+                {"ref": ref_c1, "operation": "remove", "summary": "删卡一"},
+                {"ref": ref_c2, "path": "/content", "operation": "set", "value": "乙已更新", "summary": "改卡二"}
+            ]
+        }),
+    );
+    assert_eq!(batch2["data"]["staged"], 2);
+    let after_cards = f.call(&task, "read-cards-3", "read_resource", json!({"kind":"cards"}));
+    assert_eq!(after_cards["data"]["value"].as_array().unwrap().len(), 1);
+    assert_eq!(after_cards["data"]["value"][0]["id"], "c2");
+    assert_eq!(after_cards["data"]["value"][0]["content"], "乙已更新");
+}
+
+#[test]
+fn workspace_allows_abc_b_edits_repeated_remove_zero_soft_pin_rebase_and_checks_readonly_findings() {
+    let f = Fixture::new();
+    f.store.lock().unwrap().execute(
+        "INSERT INTO pins(id,world_id,text,created_at) VALUES('p1','world','旧内容','t')",
+        [],
+    ).unwrap();
+    let task = f.start("abc-b", "auto-reversible", false);
+    // 1) A -> B -> C -> B edits all apply
+    f.call(&task, "e1", "stage_edit", json!({"kind":"settings","path":"/premise","operation":"set","value":"B","summary":"改B"}));
+    f.call(&task, "e2", "stage_edit", json!({"kind":"settings","path":"/premise","operation":"set","value":"C","summary":"改C"}));
+    let back_to_b = f.call(&task, "e3", "stage_edit", json!({"kind":"settings","path":"/premise","operation":"set","value":"B","summary":"回B"}));
+    assert!(back_to_b["data"]["deduped"].is_null());
+    assert_eq!(f.call(&task, "r-set", "read_resource", json!({"kind":"settings"}))["data"]["value"]["premise"], "B");
+
+    // 2) Repeated remove /0 removes consecutive elements
+    f.call(&task, "a1", "stage_edit", json!({"kind":"cards","operation":"append","value":{"id":"k1","title":"一","content":"1"},"summary":"加1"}));
+    f.call(&task, "a2", "stage_edit", json!({"kind":"cards","operation":"append","value":{"id":"k2","title":"二","content":"2"},"summary":"加2"}));
+    f.call(&task, "rm1", "stage_edit", json!({"kind":"cards","path":"/0","operation":"remove","summary":"删首项1"}));
+    f.call(&task, "rm2", "stage_edit", json!({"kind":"cards","path":"/0","operation":"remove","summary":"删首项2"}));
+    assert!(f.call(&task, "r-cards", "read_resource", json!({"kind":"cards"}))["data"]["value"].as_array().unwrap().is_empty());
+
+    // 3) Stage pin edit, interrupt, delete pin in DB, resume_task degrades to soft needsRelocation instead of error
+    f.call(&task, "pin-edit", "stage_edit", json!({"kind":"pin","id":"p1","path":"/text","operation":"set","value":"新置顶","summary":"改置顶"}));
+    f.gateway.interrupt(&task.permit, "暂停测试").unwrap();
+    f.store.lock().unwrap().execute("DELETE FROM pins WHERE id='p1'", []).unwrap();
+    let resumed_permit = f.gateway.resume_task(&task.id).expect("deleted pin must degrade to soft relocation");
+    let resumed_row = f.gateway.0.task(&task.id).unwrap();
+    let pin_draft = resumed_row["workspace_json"]["edits"].as_array().unwrap().iter().find(|e| e["kind"] == "pin").unwrap();
+    assert_eq!(pin_draft["needsRelocation"], true);
+    f.gateway.interrupt(&resumed_permit, "完成检查").unwrap();
+
+    // 4) finish_readonly_reply refuses to mark blocked research findings as completed
+    let ro = f.start("ro-blocked", "auto-reversible", true);
+    f.call(&ro, "rec-blocked", "record_findings", json!({
+        "report": {
+            "worldVersion": ro.world_version,
+            "intentRevision": 0,
+            "goals": [{"id": "g1", "status": "blocked", "summary": "缺少原著章节"}],
+            "findings": []
+        }
+    }));
+    assert_eq!(f.gateway.finish_readonly_reply(&ro.permit, "目前资料不足，无法确认。").unwrap(), false);
+}

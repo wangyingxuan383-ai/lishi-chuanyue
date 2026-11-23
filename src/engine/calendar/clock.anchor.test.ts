@@ -5,6 +5,7 @@ import { sampleState } from "../testing/fixtures";
 import { TANG_748 } from "../../content/eras/tang-748";
 import { addDays } from "./date";
 import { clockOffsetMinutes, newYearsBetween, nowOf, readClockAnchor, timeOfDay, timeRows, type GameClock } from "./clock";
+import { applyDisplayClock, validClockDate } from "./clockEdit";
 
 const elapsed = 4054 * 1440 + 12 * 60 + 5;
 const anchor = { atElapsedMinutes: elapsed, date: { era: "玄元", year: 2631, month: 5, day: 8, ceYear: null, lunar: false }, minuteOfDay: 20 * 60 + 5 };
@@ -65,10 +66,28 @@ describe("independent clock calibration", () => {
       { ...anchor, atElapsedMinutes: -1 }, { ...anchor, minuteOfDay: 1440 },
       { ...anchor, atElapsedMinutes: Number.MAX_SAFE_INTEGER + 1 },
       { ...anchor, date: { ...anchor.date, month: 2, day: 29 } },
-      { ...anchor, date: { ...anchor.date, month: 2, day: 30, lunar: true } },
+      { ...anchor, date: { era: "公元", year: 2026, month: 2, day: 29, ceYear: 2026, lunar: false } },
+      { ...anchor, date: { era: "公元", year: 2024, month: 2, day: 30, ceYear: 2024, lunar: false } },
+      { ...anchor, date: { ...anchor.date, month: 4, day: 31 } },
+      { ...anchor, date: { ...anchor.date, month: 2, day: 31, lunar: true } },
       { ...anchor, date: { era: "公元", year: 2026, month: 1, day: 1, ceYear: 2025, lunar: false } },
     ]) expect(readClockAnchor(bad, clock.rules)).toBeNull();
     expect(nowOf({ ...clock, anchor: { ...anchor, minuteOfDay: 1440 } }, 0).hour).toBe(8);
+  });
+
+  it("allows calibrating 腊月三十, even lunar day 30, and leap-year 2月29日 without blocking RulesSheet", () => {
+    const state = sampleState();
+    state.era = { mode: "history", clockStyle: "era", timeStyle: "shichen", packId: null, calendar: { lunar: true } };
+    state.time = { start: "崇祯十六年腊月三十", startHour: 20, elapsedMinutes: 0, date: { era: "崇祯", year: 16, month: 12, day: 30, ceYear: 1643, lunar: true } };
+    const updated = applyDisplayClock(state, { timeStyle: "24h" });
+    expect(updated.era.timeStyle).toBe("24h");
+    expect(validClockDate({ era: "崇祯", year: 16, month: 2, day: 30, ceYear: 1643, lunar: true }, { lunar: true })).not.toBeNull();
+    expect(validClockDate({ era: "公元", year: 2024, month: 2, day: 29, ceYear: 2024, lunar: false }, { lunar: false })).not.toBeNull();
+    expect(validClockDate({ era: "公元", year: 2026, month: 2, day: 29, ceYear: 2026, lunar: false }, { lunar: false })).toBeNull();
+    // Unchanged legacy opening date with coerced 2025-02-29 still permits timeStyle toggles without blocking RulesSheet.
+    state.era = { mode: "history", clockStyle: "era", timeStyle: "shichen", packId: null, calendar: { lunar: false } };
+    state.time = { start: "公元2025年2月29日", startHour: 8, elapsedMinutes: 0, date: { era: "公元", year: 2025, month: 2, day: 29, ceYear: 2025, lunar: false } };
+    expect(applyDisplayClock(state, { timeStyle: "24h" }).era.timeStyle).toBe("24h");
   });
 
   it("projects a fictional year above 9999 without giving it a CE identity", () => {

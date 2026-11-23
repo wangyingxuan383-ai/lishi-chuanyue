@@ -230,12 +230,30 @@ export class Repo {
   }
 
   async updateSettings(worldId: string, settings: WorldSettings): Promise<void> {
-    await this.q("UPDATE worlds SET settings_json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(settings), now(), worldId]);
+    const entries = Object.entries(settings).filter(([k, v]) => v !== undefined && /^[A-Za-z0-9_]+$/.test(k));
+    if (!entries.length) {
+      await this.q("UPDATE worlds SET updated_at = ? WHERE id = ?", [now(), worldId]);
+      return;
+    }
+    const args = entries.flatMap(([k]) => [`'$.${k}'`, "json(?)"]);
+    const values = entries.map(([, v]) => JSON.stringify(v));
+    await this.q(
+      `UPDATE worlds SET settings_json = json_set(COALESCE(settings_json, '{}'), ${args.join(", ")}), updated_at = ? WHERE id = ?`,
+      [...values, now(), worldId],
+    );
   }
 
   async deleteWorld(worldId: string): Promise<void> {
+    if (this.platform.execution?.agent) {
+      for (const s of await this.q("SELECT id FROM pi_sessions WHERE world_id = ?", [worldId]).catch(() => [])) {
+        await this.platform.execution.agent({ op: "delete", id: String(s.id) }).catch(() => null);
+      }
+    }
     // Pins point at their node without a cascade, so they go first; states and chapters cascade.
     await this.platform.sql.batch([
+      { sql: "DELETE FROM pi_external_effects WHERE world_id = ?", params: [worldId] },
+      { sql: "DELETE FROM world_execution_leases WHERE world_id = ?", params: [worldId] },
+      { sql: "DELETE FROM execution_runs WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM pins WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM lines WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM nodes WHERE world_id = ?", params: [worldId] },
@@ -567,30 +585,42 @@ export class Repo {
     return (await this.getNode(nodeId))!;
   }
 
-  /** Adds fields to a node's meta, keeping what others wrote meanwhile. */
+  /** Adds fields to a node's meta atomically inside SQLite, keeping what background upkeep wrote meanwhile (B06). */
   async mergeMeta(nodeId: string, patch: Record<string, unknown>): Promise<void> {
-    const node = await this.getNode(nodeId);
-    if (node) await this.q("UPDATE nodes SET meta_json = ? WHERE id = ?", [JSON.stringify({ ...node.meta, ...patch }), nodeId]);
+    const entries = Object.entries(patch).filter(([k, v]) => v !== undefined && /^[A-Za-z0-9_]+$/.test(k));
+    if (!entries.length) return;
+    const args = entries.flatMap(([k]) => [`'$.${k}'`, "json(?)"]);
+    const values = entries.map(([, v]) => JSON.stringify(v));
+    await this.q(`UPDATE nodes SET meta_json = json_set(COALESCE(meta_json, '{}'), ${args.join(", ")}) WHERE id = ?`, [...values, nodeId]);
   }
 
   /** The player rewrote a passage; the first original is kept in meta.original so it can come back (AUDIT_V4_FUNCTION E2). */
   async updateNarrative(nodeId: string, narrative: string): Promise<void> {
     const node = await this.getNode(nodeId);
     if (!node) return;
-    const original = typeof node.meta.original === "string" ? node.meta.original : node.narrative;
     await this.platform.sql.batch([
-      { sql: "UPDATE nodes SET narrative = ?, rewritten = 1, meta_json = ? WHERE id = ?", params: [narrative, JSON.stringify({ ...node.meta, original }), nodeId] },
+      {
+        sql: `UPDATE nodes SET narrative = ?, rewritten = 1,
+          meta_json = json_set(COALESCE(meta_json, '{}'), '$.original',
+            CASE WHEN json_type(meta_json, '$.original') = 'text' THEN json_extract(meta_json, '$.original') ELSE narrative END)
+          WHERE id = ?`,
+        params: [narrative, nodeId],
+      },
       staleChaptersStatement(node.worldId, nodeId),
     ]);
   }
 
-  /** Puts the AI's original text back after a rewrite. */
+  /** Puts the AI's original text back after a rewrite without clobbering concurrent meta fields (B06). */
   async restoreNarrative(nodeId: string): Promise<boolean> {
     const node = await this.getNode(nodeId);
     if (!node || typeof node.meta.original !== "string") return false;
-    const { original, ...meta } = node.meta;
     await this.platform.sql.batch([
-      { sql: "UPDATE nodes SET narrative = ?, rewritten = 0, meta_json = ? WHERE id = ?", params: [original as string, JSON.stringify(meta), nodeId] },
+      {
+        sql: `UPDATE nodes SET narrative = json_extract(meta_json, '$.original'), rewritten = 0,
+          meta_json = json_remove(COALESCE(meta_json, '{}'), '$.original')
+          WHERE id = ? AND json_type(meta_json, '$.original') = 'text'`,
+        params: [nodeId],
+      },
       staleChaptersStatement(node.worldId, nodeId),
     ]);
     return true;

@@ -1,6 +1,6 @@
 // Shared display-only contract. It never edits elapsedMinutes, ages or deadlines.
 import type { WorldState } from "../types";
-import { coerceDate, monthDays, readDate, type CalendarRules } from "./date";
+import { coerceDate, maxValidDay, readDate, type CalendarRules } from "./date";
 import { readClockAnchor, readElapsedClockAnchor, type ClockAnchor, type ElapsedClockAnchor } from "./clock";
 
 export interface ClockDisplayChange {
@@ -28,7 +28,8 @@ export function applyDisplayClock(before: WorldState, changes: ClockDisplayChang
   if (next.era.calendar != null) validateCalendar(next.era.calendar);
   if (next.time.date != null) {
     const date = coerceDate(next.time.date, rules);
-    if (!date || next.time.date.day !== date.day || date.day > monthDays(date) || next.time.date.ceYear != null && next.time.date.ceYear !== date.ceYear) throw new Error("开局日期无效，请先核对原有纪年和历法。");
+    const dateChanged = JSON.stringify(before.time.date) !== JSON.stringify(next.time.date) || JSON.stringify(before.era.calendar) !== JSON.stringify(next.era.calendar);
+    if (!date || dateChanged && (next.time.date.day !== date.day || date.day > maxValidDay(date) || next.time.date.ceYear != null && next.time.date.ceYear !== date.ceYear)) throw new Error("开局日期无效，请先核对原有纪年和历法。");
   }
   if (next.time.anchor != null && !readClockAnchor(next.time.anchor, rules)) throw new Error("日期锚点无效：请提供有效日期、非负经过分钟和0至1439的当天分钟");
   if (changes.anchor && next.era.mode === "free" && !["公元", "公元前"].includes(changes.anchor.date.era) && changes.anchor.date.ceYear !== null) throw new Error("自由世界的自定纪年不映射为公元年，请保留未知公元年");
@@ -61,5 +62,6 @@ function validateCalendar(raw: CalendarRules) {
 export function validClockDate(raw: unknown, rules: CalendarRules) {
   const date = coerceDate(raw, rules);
   const value = raw as Record<string, unknown> | null;
-  return date && value && value.day === date.day && date.day <= monthDays(date) ? date : null;
+  if (date && value?.ceYear === null && date.era !== "公元" && date.era !== "公元前") date.ceYear = null;
+  return date && value && Number(value.day) === date.day && date.day <= maxValidDay(date) ? date : null;
 }

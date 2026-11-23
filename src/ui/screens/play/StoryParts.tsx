@@ -13,7 +13,7 @@ import { diffStats, diffText } from "../../components/textDiff";
 import { useLongPress } from "../../components/useLongPress";
 import { ChoiceButton } from "./ChoiceButton";
 import type { Gen } from "./types";
-import type { Notice } from "./useGeneration";
+import type { Notice, NoticeAction } from "./useGeneration";
 
 /** 接下来: the suggested next moves, in the story right after the latest passage. */
 export function NextChoices({ choices, watch, mouse, onPick, onFill }: {
@@ -42,8 +42,15 @@ function variantOrigin(node: StoryNode, index: number): string {
     const h = node.meta.rewriteHint.trim();
     return h.length > 10 ? `${h.slice(0, 10)}…` : h;
   }
-  if (node.meta.factSync || node.meta.playerRevision) return "改后同步";
-  if (node.meta.canonCorrection) return "原著纠错";
+  const rev = node.meta.revision && typeof node.meta.revision === "object"
+    ? (node.meta.revision as { kind?: string; hint?: string })
+    : null;
+  if (rev?.kind === "factSync" || node.meta.factSync) return "改后同步";
+  if (rev?.kind === "canonCorrection" || node.meta.canonCorrection) return "原著纠错";
+  if (rev?.kind === "playerRevision" || node.meta.playerRevision) {
+    const h = typeof rev?.hint === "string" ? rev.hint.trim() : "";
+    return h ? (h.length > 10 ? `${h.slice(0, 10)}…` : h) : "按要求改";
+  }
   return "重说";
 }
 
@@ -120,7 +127,7 @@ export function WritingTurn({ gen, statusText, waitLine, waited, slow }: { gen: 
 /** What happened and what to do now; the first action is the main one. */
 const PAUSED = new Set(["cancelled", "limit", "interrupted", "system_stop", "busy"]);
 
-export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; onAction: (run: () => void) => void; onOpenUsage?: () => void }) {
+export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; onAction: (action: NoticeAction) => void; onOpenUsage?: () => void }) {
   const { toast } = useApp();
   const [why, setWhy] = useState(false);
   const tone = notice.reason ? (PAUSED.has(notice.reason) ? "pause" : "bad")
@@ -153,7 +160,7 @@ export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; 
           {promptBrief && <p className="muted m-0">原输入：{promptBrief}</p>}
           <RunUsageLine runId={notice.runId} />
           {(notice.actions.length > 0 || explained) && <div className="notice-actions">
-            {notice.actions.map((a, i) => <button key={a.label} className={i === 0 ? "primary" : ""} onClick={() => onAction(a.run)}>{a.label}</button>)}
+            {notice.actions.map((a, i) => <button key={a.label} className={i === 0 ? "primary" : ""} onClick={() => onAction(a)}>{a.label}</button>)}
             {explained && <button className="ghost" onClick={() => setWhy(true)}>{notice.reason === "cancelled" ? "查看明细" : "查看原因"}</button>}
           </div>}
         </div>

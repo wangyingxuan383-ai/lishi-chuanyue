@@ -4,9 +4,9 @@ import { ContextState } from "./context-state.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { loadPiSdk, UPSTREAM } from "./upstream.mjs";
-import { contextBudget, checkRequestBudget, estimateRequestTokens } from "./context-budget.mjs";
+import { contextBudget, checkRequestBudget, estimateRequestTokens, auxModelSpec } from "./context-budget.mjs";
 import { modelTransport, withModelTransport } from "./model-config.mjs";
-import { taskContextExtensions } from "./task-context.mjs";
+import { taskContextExtensions, coalesceConsecutiveUsers, wrapConvertToLlm } from "./task-context.mjs";
 import { NativeModelFetch } from "./model-fetch.mjs";
 import { ProgressReview } from "./progress-review.mjs";
 import { ReadonlyChildren } from "./children.mjs";
@@ -30,19 +30,230 @@ function resourceLoader(pi, systemPrompt, extensions) {
   };
 }
 
-function resolveThinking(model) {
+function hostNameOf(baseUrl) {
+  try { return new URL(baseUrl).hostname.toLowerCase(); } catch { return ""; }
+}
+
+function classifyGeminiFamily(rawId) {
+  const cleanId = String(rawId ?? "").trim().replace(/^models\//iu, "").toLowerCase();
+  const isLegacy = /^gemini-(?:1(?:\.\d+)?|2\.0)(?:[-.]|$)/u.test(cleanId);
+  const is25Pro = /^gemini-2\.5-pro/u.test(cleanId);
+  const is25Flash = /^gemini-2\.5-flash/u.test(cleanId);
+  const isLevelFamily = /^gemini-(?:3(?:\.\d+)?|[4-9]|[1-9]\d)(?:[-.]|$)/u.test(cleanId)
+    || /^gemma-?4/u.test(cleanId)
+    || cleanId === "gemini-flash-latest"
+    || cleanId === "gemini-flash-lite-latest";
+  return { cleanId, isLegacy, is25Pro, is25Flash, isLevelFamily };
+}
+
+function classifyOpenAiFamily(rawId) {
+  const leafId = String(rawId ?? "").trim().replace(/^[^/]+\//u, "").toLowerCase();
+  const supportsNoneEffort = /^gpt-5\.[1-9]\d*/u.test(leafId) && !/codex/u.test(leafId);
+  const isReasoningFamily = supportsNoneEffort || /^(?:o[134](?:[-.]|$)|gpt-5(?:[-.]|$)|codex)/u.test(leafId);
+  const isNonReasoningGpt = /^gpt-(?:3\.5|4(?:\.|o|-|$))/u.test(leafId);
+  return { leafId, supportsNoneEffort, isReasoningFamily, isNonReasoningGpt };
+}
+
+function resolveThinking(model, transport) {
   const mode = model.thinkingMode ?? "off";
-  if (mode === "deep") return { mode, reasoning: true, thinkingLevel: "high" };
-  if (mode === "default") return { mode, reasoning: model.reasoning === true, thinkingLevel: "off" };
-  const protocol = model.protocol ?? "chat-completions";
-  const reasoning = protocol === "gemini"
-    ? true
-    : protocol === "openai-responses"
-      ? (/^(?:o[134]|gpt-5|codex)/i.test(model.id ?? "") || model.reasoning === true)
-      : protocol === "chat-completions"
-        ? (Boolean(model.compat) || model.reasoning === true)
-        : false;
-  return { mode: "off", reasoning, thinkingLevel: "off" };
+  const protocol = transport?.protocol ?? model.protocol ?? "chat-completions";
+  const rawId = String(model.id ?? "").trim();
+  const hostname = hostNameOf(transport?.baseUrl ?? model.baseUrl ?? "");
+  const isOfficialOpenAI = hostname === "api.openai.com" || hostname.endsWith(".api.openai.com");
+
+  if (protocol === "gemini") {
+    const { cleanId, isLegacy, is25Pro, is25Flash, isLevelFamily } = classifyGeminiFamily(rawId);
+    if (isLegacy || mode === "default") {
+      return { mode, reasoning: false, thinkingLevel: "off", thinkingLevelMap: { off: null } };
+    }
+    if (mode === "deep") {
+      return { mode, reasoning: true, thinkingLevel: "high", ...(isLevelFamily ? { thinkingLevelMap: { off: null } } : {}) };
+    }
+    if (is25Flash) return { mode: "off", reasoning: true, thinkingLevel: "off" };
+    if (is25Pro) return { mode: "off", reasoning: true, thinkingLevel: "minimal", thinkingLevelMap: { off: null } };
+    if (isLevelFamily) return { mode: "off", reasoning: true, thinkingLevel: /flash/u.test(cleanId) ? "minimal" : "low", thinkingLevelMap: { off: null } };
+    return { mode: "off", reasoning: false, thinkingLevel: "off", thinkingLevelMap: { off: null } };
+  }
+
+  if (protocol === "openai-responses") {
+    const { supportsNoneEffort, isReasoningFamily, isNonReasoningGpt } = classifyOpenAiFamily(rawId);
+    if (mode === "default") return { mode, reasoning: Boolean(model.reasoning), thinkingLevel: "off", thinkingLevelMap: { off: null } };
+    if (mode === "deep") {
+      if (isNonReasoningGpt) return { mode, reasoning: false, thinkingLevel: "off", thinkingLevelMap: { off: null } };
+      return { mode, reasoning: true, thinkingLevel: "high", thinkingLevelMap: supportsNoneEffort ? { off: "none" } : { off: "low" } };
+    }
+    if (supportsNoneEffort) return { mode: "off", reasoning: true, thinkingLevel: "off", thinkingLevelMap: { off: "none" } };
+    if (isReasoningFamily) return { mode: "off", reasoning: true, thinkingLevel: "off", thinkingLevelMap: { off: "low" } };
+    return { mode: "off", reasoning: false, thinkingLevel: "off", thinkingLevelMap: { off: null } };
+  }
+
+  if (protocol === "anthropic") {
+    if (mode === "deep") return { mode: "deep", reasoning: true, thinkingLevel: "high", thinkingLevelMap: { off: null } };
+    return { mode, reasoning: false, thinkingLevel: "off", thinkingLevelMap: { off: null } };
+  }
+
+  // chat-completions
+  const needsReasoningContent = /deepseek-reasoner|deepseek-r1|kimi-k2-thinking/iu.test(rawId);
+  const baseCompat = isOfficialOpenAI ? {} : {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+    supportsReasoningEffort: false,
+    ...(needsReasoningContent ? { requiresReasoningContentOnAssistantMessages: true } : {}),
+  };
+  const compat = { ...baseCompat, ...(model.compat ?? {}) };
+  if (isOfficialOpenAI) {
+    const { supportsNoneEffort, isReasoningFamily, isNonReasoningGpt } = classifyOpenAiFamily(rawId);
+    compat.supportsReasoningEffort = model.compat?.supportsReasoningEffort ?? true;
+    if (mode === "default") return { mode, reasoning: false, thinkingLevel: "off", compat, thinkingLevelMap: { off: null } };
+    if (mode === "deep") {
+      return isNonReasoningGpt
+        ? { mode, reasoning: false, thinkingLevel: "off", compat, thinkingLevelMap: { off: null } }
+        : { mode, reasoning: true, thinkingLevel: "high", compat };
+    }
+    if (supportsNoneEffort) return { mode: "off", reasoning: true, thinkingLevel: "off", compat, thinkingLevelMap: { off: "none" } };
+    if (isReasoningFamily) return { mode: "off", reasoning: true, thinkingLevel: "off", compat, thinkingLevelMap: { off: "low" } };
+    return { mode: "off", reasoning: false, thinkingLevel: "off", compat, thinkingLevelMap: { off: null } };
+  }
+  return {
+    mode,
+    reasoning: mode === "deep" || needsReasoningContent || Boolean(model.compat) || model.reasoning === true,
+    thinkingLevel: mode === "deep" ? "high" : "off",
+    compat,
+  };
+}
+
+function adaptProviderPayload(params, spec, transport, budget, estimatedInputTokens) {
+  if (!params || typeof params !== "object") return params;
+  const protocol = transport.protocol;
+  const mode = spec.thinkingMode ?? "off";
+  const rawId = String(spec.id ?? "").trim();
+
+  if (protocol === "gemini") {
+    const { cleanId, isLegacy, is25Pro, is25Flash, isLevelFamily } = classifyGeminiFamily(rawId);
+    params.config = { ...(params.config ?? {}) };
+    if (isLegacy || mode === "default") {
+      delete params.config.thinkingConfig;
+    } else if (mode === "off") {
+      if (is25Flash) params.config.thinkingConfig = { thinkingBudget: 0 };
+      else if (is25Pro) params.config.thinkingConfig = { thinkingBudget: 128 };
+      else if (isLevelFamily) params.config.thinkingConfig = { thinkingLevel: /flash/u.test(cleanId) ? "MINIMAL" : "LOW" };
+      else delete params.config.thinkingConfig;
+    } else if (mode === "deep") {
+      if (isLevelFamily) params.config.thinkingConfig = { includeThoughts: true, thinkingLevel: "HIGH" };
+      else if (is25Pro) params.config.thinkingConfig = { includeThoughts: true, thinkingBudget: 32768 };
+      else if (is25Flash) params.config.thinkingConfig = { includeThoughts: true, thinkingBudget: 24576 };
+    }
+    return params;
+  }
+
+  if (protocol === "openai-responses") {
+    const { supportsNoneEffort, isReasoningFamily, isNonReasoningGpt } = classifyOpenAiFamily(rawId);
+    if (mode === "default") {
+      delete params.reasoning;
+      delete params.include;
+    } else if (mode === "off") {
+      if (supportsNoneEffort) { params.reasoning = { effort: "none" }; delete params.include; }
+      else if (isReasoningFamily) { params.reasoning = { effort: "low" }; delete params.include; }
+      else { delete params.reasoning; delete params.include; }
+    } else if (mode === "deep") {
+      if (isNonReasoningGpt) { delete params.reasoning; delete params.include; }
+      else {
+        params.reasoning = { effort: "high", summary: params.reasoning?.summary || "auto" };
+        params.include = ["reasoning.encrypted_content"];
+      }
+    }
+    return params;
+  }
+
+  if (protocol === "anthropic") {
+    if (mode !== "deep") {
+      delete params.thinking;
+      delete params.output_config;
+      if (Array.isArray(params.betas)) {
+        params.betas = params.betas.filter(beta => !String(beta).startsWith("interleaved-thinking-"));
+        if (!params.betas.length) delete params.betas;
+      }
+    } else {
+      const maxAvailableOutput = Math.max(0, budget.runtimeContextWindowTokens - estimatedInputTokens);
+      if (maxAvailableOutput < 3072) {
+        delete params.thinking;
+        delete params.output_config;
+        params.max_tokens = Math.max(1, Math.min(params.max_tokens ?? budget.outputReserveTokens, maxAvailableOutput || budget.outputReserveTokens));
+      } else {
+        const configuredMax = Math.min(maxAvailableOutput, Math.max(3072, budget.outputReserveTokens));
+        const desiredBudget = Math.min(16384, Math.max(1024, configuredMax - 2048));
+        const finalMaxTokens = Math.min(maxAvailableOutput, Math.max(configuredMax, desiredBudget + 2048));
+        const finalBudgetTokens = Math.max(1024, Math.min(desiredBudget, finalMaxTokens - 2048));
+        params.max_tokens = finalMaxTokens;
+        params.thinking = {
+          ...(params.thinking?.type === "enabled" ? params.thinking : { type: "enabled", display: "summarized" }),
+          type: "enabled",
+          budget_tokens: finalBudgetTokens,
+        };
+        delete params.temperature;
+      }
+    }
+    return params;
+  }
+
+  // chat-completions
+  const hostname = hostNameOf(transport.baseUrl);
+  const isOfficialOpenAI = hostname === "api.openai.com" || hostname.endsWith(".api.openai.com");
+  const leafId = rawId.replace(/^[^/]+\//u, "").toLowerCase();
+  if (!isOfficialOpenAI) {
+    if (spec.compat?.supportsStore !== true) delete params.store;
+    if (params.max_completion_tokens !== undefined && spec.compat?.maxTokensField !== "max_completion_tokens") {
+      params.max_tokens = params.max_tokens ?? params.max_completion_tokens;
+      delete params.max_completion_tokens;
+    }
+    if (Array.isArray(params.messages) && spec.compat?.supportsDeveloperRole !== true) {
+      for (const msg of params.messages) {
+        if (msg?.role === "developer") msg.role = "system";
+      }
+    }
+    const needsReasoningContent = /deepseek-reasoner|deepseek-r1|kimi-k2-thinking/iu.test(rawId)
+      || (Array.isArray(params.messages) && params.messages.some(msg => msg?.role === "assistant" && typeof msg.reasoning_content === "string"));
+    if (needsReasoningContent && Array.isArray(params.messages)) {
+      for (const msg of params.messages) {
+        if (msg?.role === "assistant" && msg.reasoning_content === undefined) {
+          msg.reasoning_content = "";
+        }
+      }
+    }
+    if (!spec.compat?.thinkingFormat) {
+      delete params.thinking;
+      delete params.enable_thinking;
+      delete params.reasoning;
+    }
+    if (!spec.compat?.supportsReasoningEffort) {
+      delete params.reasoning_effort;
+    }
+    if (mode !== "default" && !spec.compat?.thinkingFormat) {
+      const isOpenRouter = hostname === "openrouter.ai" || hostname.endsWith(".openrouter.ai");
+      const isDeepSeekHost = hostname === "api.deepseek.com" || hostname.endsWith(".deepseek.com");
+      const isDashScope = hostname.includes("dashscope.aliyuncs.com");
+      const isZhipuHost = hostname.includes("open.bigmodel.cn") || hostname.includes("api.z.ai");
+      const isQwenHybrid = /^qwen3(?!.*-instruct)/u.test(leafId) || (isDashScope && /^qwen-(?:plus|turbo|flash)/u.test(leafId));
+      const isGlmThinking = /^glm-(?:4\.[5-9]|5|z1)/u.test(leafId)
+        || (isZhipuHost && /^glm-/u.test(leafId) && !/^glm-(?:3|4-(?:flash|air|plus|0520|9b|long))/u.test(leafId));
+      const isDoubaoThinking = /^doubao-(?:seed|1[-.]5-thinking)/u.test(leafId);
+      if (isOpenRouter) {
+        params.reasoning = mode === "deep" ? { effort: "high" } : { enabled: false };
+      } else if (isDeepSeekHost && /^deepseek-(?:chat|reasoner|v3)/u.test(leafId)) {
+        params.thinking = { type: mode === "deep" ? "enabled" : "disabled" };
+      } else if (isQwenHybrid) {
+        params.enable_thinking = mode === "deep";
+      } else if (isGlmThinking) {
+        if (mode === "deep") params.thinking = { type: "enabled" };
+        else if (!/^glm-z1/u.test(leafId)) params.thinking = { type: "disabled" };
+      } else if (isDoubaoThinking) {
+        if (mode === "deep") params.thinking = { type: "enabled" };
+        else if (/seed/u.test(leafId)) params.thinking = { type: "disabled" };
+      }
+    }
+  }
+  return params;
 }
 
 function providerModel(model, budget) {
@@ -58,6 +269,7 @@ function providerModel(model, budget) {
     contextWindow: budget.runtimeContextWindowTokens,
     maxTokens: budget.outputReserveTokens,
     ...(model.compat ? { compat: model.compat } : {}),
+    ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
   };
 }
 
@@ -132,13 +344,17 @@ export class PiHost {
     });
     host.taskContext = taskContext?.context;
     host.progressReview = new ProgressReview(host, options=>PiHost.create(options));
+    const mainModelId = typeof options.model.id === "string" ? options.model.id.trim() : options.model.id;
     const { session } = await pi.createAgentSession({
       cwd: directory, agentDir: directory, modelRuntime: runtime,
-      model: runtime.getModel("lishi", options.model.id), thinkingLevel: host.thinkingLevel ?? "off",
+      model: runtime.getModel("lishi", mainModelId), thinkingLevel: host.thinkingLevel ?? "off",
       noTools: "builtin", tools: tools.map((tool) => tool.name),
       customTools: tools, resourceLoader: resourceLoader(pi, options.systemPrompt, taskContext?.extensions),
       sessionManager: manager, settingsManager: settings,
     });
+    if (typeof session.agent?.convertToLlm === "function") {
+      session.agent.convertToLlm = wrapConvertToLlm(session.agent.convertToLlm.bind(session.agent));
+    }
     host.session = session;
     host.children = new ReadonlyChildren(host, options => PiHost.create(options));
     host.manualCompact = createManualCompactControl({
@@ -242,9 +458,12 @@ export class PiHost {
     const streamSimple = runtime.streamSimple.bind(runtime);
     // Guard the public request boundary, after Pi has prepared/compacted its
     // own transcript. completeSimple and summarization use this same method.
-    runtime.streamSimple = (model, context, requestOptions) => {
+    runtime.streamSimple = (model, rawContext, requestOptions) => {
       this.taskContext?.assertRequest();
       if (this.lastAccountingError) throw this.lastAccountingError;
+      const context = Array.isArray(rawContext?.messages)
+        ? { ...rawContext, messages: coalesceConsecutiveUsers(rawContext.messages) }
+        : rawContext;
       const generation = this.requestGeneration = (this.requestGeneration ?? 0) + 1;
       const priorWrites = [...this.accountingWrites];
       this.lastModelTransportError = undefined;
@@ -266,16 +485,43 @@ export class PiHost {
       const receipts = contextReceipts(context.messages ?? [], { actorId: this.options.nativeActor });
       const purpose = this.options.reviewSession ? "progress_review" : this.manualCompact?.active || this.session?.isCompacting ? "compaction" : "model";
       this.contextState?.request(this.lastRequestBudget,purpose);
+      const useAuxForPurpose = purpose === "compaction" && Boolean(
+        this.auxModelId && this.auxTransport && this.auxBudget
+        && this.lastRequestBudget.estimatedInputTokens <= this.auxBudget.effectiveInputBudgetTokens,
+      );
+      const effectiveModel = useAuxForPurpose ? (this.runtime.getModel("lishi", this.auxModelId) ?? model) : model;
+      const effectiveSpec = useAuxForPurpose ? this.auxSpec : this.modelSpec;
+      const effectiveBudget = useAuxForPurpose ? this.auxBudget : this.budget;
+      const effectiveTransport = useAuxForPurpose ? this.auxTransport : this.transport;
+      const callerOnPayload = requestOptions?.onPayload;
+      const onPayload = async (params, payloadModel) => {
+        const modified = callerOnPayload ? await callerOnPayload(params, payloadModel) : undefined;
+        return adaptProviderPayload(
+          modified !== undefined ? modified : params,
+          effectiveSpec,
+          effectiveTransport,
+          effectiveBudget,
+          this.lastRequestBudget.estimatedInputTokens,
+        );
+      };
+      const effectiveOptions = useAuxForPurpose
+        ? { ...boundedOptions, maxTokens: Math.min(boundedOptions.maxTokens, effectiveBudget.outputReserveTokens), reasoning: undefined, onPayload }
+        : { ...boundedOptions, onPayload };
       const delegate = this.nativeFetch ? async (input, init) => {
         await Promise.all(priorWrites);
         if (this.lastAccountingError) throw this.lastAccountingError;
-        try { return await this.nativeFetch.fetch(input, init, { onRequest: id => { ids.push(id); this.contextState?.identifyRequest(id,purpose); }, receipts, purpose }); }
-        catch (error) { if (error?.name !== "AbortError" && this.requestGeneration === generation) this.lastModelTransportError = error; throw error; }
+        try {
+          return await this.nativeFetch.fetch(input, init, {
+            onRequest: id => { ids.push(id); this.contextState?.identifyRequest(id,purpose); },
+            receipts,
+            purpose,
+            model: effectiveModel.id,
+          });
+        } catch (error) {
+          if (error?.name !== "AbortError" && this.requestGeneration === generation) this.lastModelTransportError = error;
+          throw error;
+        }
       } : undefined;
-      const useAuxForPurpose = purpose === "compaction" && this.auxModelId && this.auxTransport;
-      const effectiveModel = useAuxForPurpose ? (this.runtime.getModel("lishi", this.auxModelId) ?? model) : model;
-      const effectiveTransport = useAuxForPurpose ? this.auxTransport : this.transport;
-      const effectiveOptions = useAuxForPurpose ? { ...boundedOptions, reasoning: undefined } : boundedOptions;
       const stream = withModelTransport(effectiveTransport, () => streamSimple(effectiveModel, context, effectiveOptions), delegate);
       if (this.nativeFetch) {
         const write = stream.result().then(async message => {
@@ -285,8 +531,8 @@ export class PiHost {
             error.code = overflow ? "model_context_window" : "model_response_failed";
             this.lastModelTransportError = error;
           }
-          await this.nativeFetch.recordUsage(ids, message);
-        }, () => this.nativeFetch.recordUsage(ids, { stopReason: "error" })).catch(() => {
+          await this.nativeFetch.recordUsage(ids, message ? { ...message, model: message.model ?? effectiveModel.id } : message);
+        }, () => this.nativeFetch.recordUsage(ids, { stopReason: "error", model: effectiveModel.id })).catch(() => {
           const error = new Error("模型用量尚未确认，未重复发送请求");
           error.code = "model_accounting_unconfirmed"; this.lastAccountingError = error;
         });
@@ -297,22 +543,37 @@ export class PiHost {
     };
   }
 
-  registerModel(model) {
+  registerModel(rawModel) {
+    const model = { ...rawModel, id: typeof rawModel.id === "string" ? rawModel.id.trim() : rawModel.id };
     const transport = modelTransport(model);
     const budget = contextBudget(model);
-    const thinking = resolveThinking(model);
-    const models = [providerModel({ ...model, reasoning: thinking.reasoning }, budget)];
+    const thinking = resolveThinking(model, transport);
+    const models = [providerModel({
+      ...model,
+      reasoning: thinking.reasoning,
+      ...(thinking.compat ? { compat: thinking.compat } : {}),
+      ...(thinking.thinkingLevelMap ? { thinkingLevelMap: thinking.thinkingLevelMap } : {}),
+    }, budget)];
+    this.modelSpec = model;
     this.auxModelId = null;
+    this.auxSpec = null;
+    this.auxBudget = null;
     this.auxTransport = null;
-    if (typeof model.auxModel === "string" && model.auxModel.trim()
-        && model.auxModel.trim() !== model.id
-        && !(model.endpointRef && model.protocol === "gemini")) {
-      const auxId = model.auxModel.trim();
-      const auxSpec = { ...model, id: auxId, thinkingMode: "off" };
-      const auxThinking = resolveThinking(auxSpec);
-      models.push(providerModel({ ...auxSpec, reasoning: auxThinking.reasoning }, budget));
-      this.auxModelId = auxId;
-      this.auxTransport = modelTransport(auxSpec);
+    const auxSpec = auxModelSpec(model);
+    if (auxSpec) {
+      const auxTransport = modelTransport(auxSpec);
+      const auxBudget = contextBudget(auxSpec);
+      const auxThinking = resolveThinking(auxSpec, auxTransport);
+      models.push(providerModel({
+        ...auxSpec,
+        reasoning: auxThinking.reasoning,
+        ...(auxThinking.compat ? { compat: auxThinking.compat } : {}),
+        ...(auxThinking.thinkingLevelMap ? { thinkingLevelMap: auxThinking.thinkingLevelMap } : {}),
+      }, auxBudget));
+      this.auxModelId = auxSpec.id;
+      this.auxSpec = auxSpec;
+      this.auxBudget = auxBudget;
+      this.auxTransport = auxTransport;
     }
     this.runtime.registerProvider("lishi", {
       api: transport.api, baseUrl: transport.baseUrl, apiKey: model.apiKey,
@@ -357,6 +618,87 @@ export class PiHost {
     }
   }
 
+  async continueSession() {
+    const session = this.session;
+    if (session._isEmittingAgentSettled) {
+      return new Promise((resolve, reject) => {
+        session._deferredSettledActions.push(() => this.continueSession().then(resolve, reject));
+      });
+    }
+    if (session._compactionAbortController !== undefined) {
+      throw new Error("Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.");
+    }
+    if (!session.model) throw new Error("No model selected");
+    session._isAgentRunActive = true;
+    session._agentRunAbortRequested = false;
+    try {
+      session._refreshFinalizedContext?.();
+      const lastAssistant = session._findLastAssistantMessage?.();
+      if (lastAssistant) await session._checkCompaction?.(lastAssistant, false);
+      const baseOpts = session._baseSystemPromptOptions;
+      if (baseOpts) {
+        const selectedToolsBefore = baseOpts.selectedTools;
+        const result = session._extensionRunner
+          ? await session._extensionRunner.emitBeforeAgentStart({ messageType: "user", prompt: "" }, baseOpts)
+          : { messages: [], systemPromptOptions: { ...baseOpts } };
+        if (
+          result.systemPromptOptions.selectedTools.length === selectedToolsBefore.length
+          && !result.systemPromptOptions.selectedTools.some((name, idx) => name !== selectedToolsBefore[idx])
+        ) {
+          result.systemPromptOptions.selectedTools = session.getActiveToolNames();
+        }
+        const updateMessage = session._preparePromptAndToolLoadout?.(result.systemPromptOptions);
+        session._runSystemPromptOptions = result.systemPromptOptions;
+        if (updateMessage) {
+          const entryId = session.sessionManager.appendMessage(updateMessage);
+          if (entryId) session._entryIdsByMessage?.set(updateMessage, entryId);
+        }
+        if (Array.isArray(session._pendingNextTurnMessages) && session._pendingNextTurnMessages.length) {
+          for (const msg of session._pendingNextTurnMessages.splice(0)) {
+            const entryId = session.sessionManager.appendMessage(msg);
+            if (entryId) session._entryIdsByMessage?.set(msg, entryId);
+          }
+        }
+        for (const msg of result.messages ?? []) {
+          session.sessionManager.appendCustomMessageEntry(msg.customType, msg.content ?? [], msg.display, msg.details);
+        }
+        session._refreshFinalizedContext?.();
+      }
+    } catch (error) {
+      session._isAgentRunActive = false;
+      session._flushPendingBashMessages?.();
+      session._flushPendingCustomMessages?.();
+      session._resolveIdleWaitIfIdle?.();
+      throw error;
+    }
+    session._flushPendingBashMessages?.();
+    session._flushPendingCustomMessages?.();
+    session._failedResponse = undefined;
+    session._recordSelection?.();
+    session._pendingToolNames?.clear?.();
+    try {
+      await session.agent.continue();
+      while (!session._agentRunAbortRequested) {
+        if (await session._handlePostAgentRun()) {
+          if (session._agentRunAbortRequested) break;
+          await session.agent.continue();
+          continue;
+        }
+        if (session._agentRunAbortRequested || !(await session._runBeforeSettleBoundary()) || session._agentRunAbortRequested) {
+          break;
+        }
+        await session.agent.continue();
+      }
+    } finally {
+      if (session._agentRunAbortRequested) session._finishCancelledRetry?.();
+      session._failedResponse = undefined;
+      session._runSystemPromptOptions = undefined;
+      session._flushPendingBashMessages?.();
+      session._flushPendingCustomMessages?.();
+      await session._emitAgentSettled?.();
+    }
+  }
+
   async prompt(text, taskId, { resume = false } = {}) {
     this.manualCompact.assertCanPrompt();
     if (this.activePrompt || this.session.isStreaming) throw new Error("Use steer or followUp while a task is running");
@@ -370,7 +712,7 @@ export class PiHost {
     this.waitingForUser = false;
     try {
       const hasText = typeof text === "string" && text.length > 0;
-      const tailRole = this.manager.buildSessionProjection().messages.at(-1)?.role;
+      const tailRole = this.manager.buildSessionProjection().messages.findLast(message => message.role !== "system")?.role;
       const canContinueDirectly = resume && !hasText
         && (tailRole === "user" || tailRole === "toolResult")
         && typeof this.session.agent?.continue === "function";
@@ -383,7 +725,7 @@ export class PiHost {
         error.code = "aborted"; throw error;
       }
       if (canContinueDirectly) {
-        await this.session.agent.continue();
+        await this.continueSession();
       } else {
         await this.session.prompt(effectiveText);
       }
@@ -422,9 +764,10 @@ export class PiHost {
     this.manualCompact.assertCanPrompt();
     if (this.activePrompt || this.session.isStreaming) throw new Error("Cannot switch a running task's model");
     const budget = this.registerModel(model);
-    await this.session.setModel(this.runtime.getModel("lishi", model.id));
+    const nextId = typeof model.id === "string" ? model.id.trim() : model.id;
+    await this.session.setModel(this.runtime.getModel("lishi", nextId));
     if (typeof this.session.setThinkingLevel === "function") this.session.setThinkingLevel(this.thinkingLevel ?? "off");
-    this.options.model = model;
+    this.options.model = { ...model, id: nextId };
     this.budget = budget;
     this.settings.applyOverrides({ compaction: this.compactionSettings() });
   }

@@ -165,7 +165,7 @@ pub(crate) fn request_stop_with_source(
         .is_some_and(|state| state.ticket == saved && state.expires_at_ms > lease::now_ms());
     if !live || (!system_timeout && row["status"] == "waiting_user" && !ongoing(&row)) {
         let reason = if system_timeout {
-            "系统后台运行时间已到，任务已暂停，进度与草稿已保留"
+            "系统后台运行时间受限已暂停，可点继续接着处理"
         } else {
             "玩家已停止，要求与未采用草稿保留"
         };

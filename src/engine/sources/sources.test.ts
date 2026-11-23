@@ -175,4 +175,40 @@ describe("external books", () => {
     expect(rendered).toContain("第 27 节（第27章 过渡）");
   });
 
+  it("handles PDF >1024B preambles (F15), 上/中/下卷 headings (F16), and subtitled 楔子/序章 (F17)", async () => {
+    const platform = await createMemoryPlatform();
+    platform.files.extractPdf = async () => ({
+      pages: ["第一章 朔风起\n正文第一页。"],
+      headings: [{ page: 1, title: "上卷 西市胡风" }, { page: 1, title: "第一章 朔风起" }],
+    });
+    const preamble = new Uint8Array(1300).fill(0x20);
+    const pdfMagic = strToU8("%PDF-1.4\n%%EOF");
+    const pdfBytes = new Uint8Array(preamble.length + pdfMagic.length);
+    pdfBytes.set(preamble, 0);
+    pdfBytes.set(pdfMagic, preamble.length);
+
+    const pdfBook = await parseBook({ name: "long-header.pdf", bytes: pdfBytes }, platform);
+    expect(pdfBook.format).toBe("pdf");
+    expect(pdfBook.sections[0]?.title).toBe("上卷 西市胡风 · 第一章 朔风起 · 第 1 页");
+
+    const txt = [
+      "楔子 寒鸦渡口",
+      "渡口风雪交加，楔子打进木缝里也挡不住寒风！",
+      "上卷 西市胡风",
+      "第一章 胡商遗匣",
+      "上卷书说到胡商留下一只紫檀匣。",
+      "下卷 曲江暗流",
+      "第一章 夜宴惊变",
+      "曲江池畔灯火通明。",
+    ].join("\n");
+    const txtBook = await parseBook({ name: "shang-xia.txt", bytes: strToU8(txt) }, platform);
+    expect(txtBook.sections.map((s) => s.title)).toEqual([
+      "楔子 寒鸦渡口",
+      "上卷 西市胡风 · 第一章 胡商遗匣",
+      "下卷 曲江暗流 · 第一章 夜宴惊变",
+    ]);
+    expect(txtBook.sections[0]?.text).toContain("楔子打进木缝里");
+    expect(txtBook.sections[1]?.text).toContain("上卷书说到");
+  });
+
 });

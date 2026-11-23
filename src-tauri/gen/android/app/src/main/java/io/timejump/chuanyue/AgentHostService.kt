@@ -45,6 +45,7 @@ class AgentHostService : Service(), AgentNative.Sink {
     @Volatile private var active = false
     @Volatile private var nodeEnded = false
     @Volatile private var cleanupConfirmed = false
+    private val stateLock = Any()
     private var activeTask: String? = null
     private var activeAttempt: String? = null
     private var nodeThread: Thread? = null
@@ -74,8 +75,14 @@ class AgentHostService : Service(), AgentNative.Sink {
                     }
                     if (command.optString("op")=="force_stop_attempt") {
                         main.post {
-                            val matched=command.optString("taskId")==activeTask && command.optString("attemptId")==activeAttempt
-                            send(client,id,JSONObject().put("ok",true).put("data",JSONObject().put("matched",matched)).toString())
+                            val reqTask = command.optString("taskId")
+                            val reqAttempt = command.optString("attemptId")
+                            val (currentTask, matched) = synchronized(stateLock) {
+                                activeTask to (reqTask.isNotEmpty() && reqTask == activeTask && reqAttempt == activeAttempt)
+                            }
+                            val replyData = JSONObject().put("matched", matched).put("active", active).put("pid", Process.myPid())
+                            if (currentTask != null) replyData.put("activeTask", currentTask)
+                            send(client, id, JSONObject().put("ok", true).put("data", replyData).toString())
                             if (matched) { idle(); terminateDedicatedProcess() }
                         }
                         return@execute
@@ -192,15 +199,19 @@ class AgentHostService : Service(), AgentNative.Sink {
         if (requestId == 0L) {
             val notice = try { JSONObject(response) } catch (_: Exception) { null }
             if (notice?.optString("event")=="execution_started") {
-                val task=notice.optString("taskId");val attempt=notice.optString("attemptId")
-                main.post {activeTask=task;activeAttempt=attempt}
+                val task = notice.optString("taskId")
+                val attempt = notice.optString("attemptId")
+                main.post { synchronized(stateLock) { activeTask = task; activeAttempt = attempt } }
                 return
             }
             if (notice?.optString("event") == "stop_timeout") {
                 val task = notice.optString("taskId")
                 val attempt = notice.optString("attemptId")
                 main.post {
-                    if (task == activeTask && attempt == activeAttempt) {
+                    val matched = synchronized(stateLock) {
+                        task.isNotEmpty() && task == activeTask && attempt == activeAttempt
+                    }
+                    if (matched) {
                         idle()
                         // Rust has already fenced and settled this attempt.
                         // Fresh service bootstrap must use a new V8 process.
@@ -232,7 +243,10 @@ class AgentHostService : Service(), AgentNative.Sink {
             val parsed = JSONObject(response)
             val data = parsed.optJSONObject("data")
             if (JSONObject(request.payload).optString("op") in setOf("start", "continue")) {
-                data?.optString("taskId")?.takeIf { it.isNotEmpty() }?.let { main.post { activeTask = it; activeAttempt = data?.optString("attemptId") } }
+                data?.optString("taskId")?.takeIf { it.isNotEmpty() }?.let { taskId ->
+                    val attemptId = data.optString("attemptId")
+                    main.post { synchronized(stateLock) { activeTask = taskId; activeAttempt = attemptId } }
+                }
             }
         } catch (_: Exception) { }
         send(request.client, requestId, response)
@@ -273,6 +287,10 @@ class AgentHostService : Service(), AgentNative.Sink {
     private fun idle() {
         main.removeCallbacks(timeout)
         main.removeCallbacks(prepareTimeout)
+        synchronized(stateLock) {
+            activeTask = null
+            activeAttempt = null
+        }
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -281,11 +299,21 @@ class AgentHostService : Service(), AgentNative.Sink {
     private fun stopForSystemTimeout() {
         main.removeCallbacks(timeout)
         val current = handle
-        val task = activeTask
+        val (task, attempt) = synchronized(stateLock) { activeTask to activeAttempt }
         worker.execute {
             try {
-                if (current != 0L && task != null) AgentNative.nativeDispatch(current, internalIds.getAndIncrement(), "agent", JSONObject().put("op", "stop").put("taskId", task).put("attemptId", activeAttempt).put("requestId", "system-${internalIds.getAndIncrement()}").put("systemTimeout", true).toString())
-                else NodeRuntime.abortRuntime()
+                if (current != 0L && !task.isNullOrEmpty()) {
+                    val stopPayload = JSONObject()
+                        .put("op", "stop")
+                        .put("taskId", task)
+                        .apply { if (!attempt.isNullOrEmpty()) put("attemptId", attempt) }
+                        .put("requestId", "system-${internalIds.getAndIncrement()}")
+                        .put("systemTimeout", true)
+                        .toString()
+                    AgentNative.nativeDispatch(current, internalIds.getAndIncrement(), "agent", stopPayload)
+                } else {
+                    NodeRuntime.abortRuntime()
+                }
             } catch (_: Throwable) { try { NodeRuntime.abortRuntime() } catch (_: Throwable) { } }
         }
         // Android's timeout callback must return promptly. Rust's stop marker,

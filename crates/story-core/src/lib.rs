@@ -8,6 +8,8 @@ mod agent_tools;
 mod agent_workspace;
 mod autoplay;
 pub mod chat;
+pub mod companion_runtime;
+pub mod companion_store;
 pub mod context;
 pub(crate) mod continuity;
 pub(crate) mod ordinary_resources;

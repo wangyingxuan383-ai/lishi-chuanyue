@@ -7,6 +7,7 @@ import { startRun, type RunPlan } from "./execution";
 import { ChatError, type ChatResult } from "./llm/chat";
 import { fakeLlm, type Script } from "./testing/fakeLlm";
 import { sampleState } from "./testing/fixtures";
+import { listStoryNotes } from "./sources/notes";
 import * as tree from "./tree";
 
 // These regressions use only memory SQLite and synthetic streams, never a credential store or server.
@@ -246,5 +247,102 @@ describe("auxiliary request accounting", () => {
     expect(resumed).toEqual(["failed-run"]);
     const updatedPlan = JSON.parse(String((await s.platform.sql.query("SELECT plan_json FROM execution_runs WHERE id='failed-run'"))[0].plan_json));
     expect("depth" in updatedPlan.meta.settingsGuard).toBe(false);
+  });
+
+  it("retries failed opening runs reusing completed prose, tolerates next-turn preference tweaks, and drains background runs before restore (B04, B05, W01)", async () => {
+    const s = await seed();
+    const resumed: string[] = [];
+    s.platform.execution = {
+      agent: async () => null, settle: async () => null, list: async () => [],
+      stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }),
+      resume: async (id) => {
+        resumed.push(id);
+        if (id === "open-1") {
+          await s.platform.sql.batch([
+            { sql: "INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w-open-new','新开局','free','l-open-new','{}','t','t','t')", params: [] },
+            { sql: "INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n-open-new','w-open-new',0,'opening','完整开场正文','t')", params: [] },
+            { sql: "INSERT INTO states(node_id,state_json) VALUES('n-open-new',?)", params: [JSON.stringify(s.state)] },
+            { sql: "INSERT INTO lines(id,world_id,name,node_id,kind,created_at) VALUES('l-open-new','w-open-new','主线','n-open-new','line','t')", params: [] },
+            { sql: "UPDATE execution_runs SET status='committed', result_json=? WHERE id=?", params: [JSON.stringify({ nodeId: "n-open-new" }), id] },
+          ]);
+          return;
+        }
+        await s.platform.sql.batch([{ sql: "UPDATE execution_runs SET status='committed', result_json=? WHERE id=?", params: [JSON.stringify({ nodeId: s.node.id }), id] }]);
+      },
+      start: async () => "unexpected-new-run",
+      snapshot: async (id) => {
+        const rows = await s.platform.sql.query("SELECT world_id, status, draft_json, result_json, error FROM execution_runs WHERE id=?", [id]);
+        const r = rows[0] ?? {};
+        return {
+          id, worldId: String(r.world_id ?? "w-open-new"), status: (r.status as ExecutionSnapshot["status"]) ?? "failed",
+          budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 },
+          draft: r.draft_json ? JSON.parse(String(r.draft_json)) : null,
+          result: r.result_json ? JSON.parse(String(r.result_json)) : null,
+          error: (r.error as string | null) ?? null, events: [],
+        };
+      },
+    };
+    await s.game.repo.setSetting("newgameDraft", { title: "未完开场草稿" });
+    // 1. Failed opening before world row exists -> unfinishedOpening() finds it & retryRun resumes in-place and applies carry notes once!
+    await s.platform.sql.batch([
+      {
+        sql: "INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('prev-w','旧世','free','','{}','t','t','t')",
+        params: [],
+      },
+      {
+        sql: "INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        params: [
+          "open-1", "w-open-new", "l-open-new", "", "failed",
+          JSON.stringify({
+            id: "open-1", worldId: "w-open-new", lineId: "l-open-new", headId: "", baseId: null, kind: "opening",
+            newWorld: { title: "新开局", eraId: "free" },
+            model: { ...LLM, model: "old-model" },
+            settings: SETTINGS,
+            meta: { carry: { ids: ["cn-1"], fromWorldId: "prev-w", fromTitle: "旧世" } },
+          }),
+          "{}", JSON.stringify({ prose: "半截开场正文", completedStages: { prose: { text: "完整开场正文" } } }),
+          "HTTP 502", new Date().toISOString(), new Date().toISOString(),
+        ],
+      },
+      {
+        sql: "INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES('cn-1','prev-w','person','前世记忆','{}','老掌柜左臂有疤','[]','aux','done',1,'{\"parts\":[],\"total\":0}','t','t')",
+        params: [],
+      },
+      { sql: "INSERT INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES('open-1','model:1','writing:0','done','{}','{\"text\":\"ok\"}')", params: [] },
+    ]);
+    await expect(s.game.unfinishedOpening()).resolves.toMatchObject({ id: "open-1", worldId: "w-open-new", partialText: "完整开场正文" });
+    await s.game.retryRun("open-1", () => {}).done;
+    expect(resumed).toEqual(["open-1"]);
+    expect(await s.game.repo.getSetting("newgameDraft", null)).toBeNull();
+    const notes = await listStoryNotes(s.game.repo, "w-open-new");
+    expect(notes.map((n) => n.title)).toEqual(["前世记忆"]);
+    expect(notes[0].originWorldId).toBe("prev-w");
+
+    // 2. Changing next-turn preference (e.g. choiceCount / depth) on an existing world with completed prose still reuses steps on retryRun (B05)
+    await s.game.repo.updateSettings(s.world.id, { ...s.world.settings, choiceCount: 4, depth: "deep" });
+    await s.platform.sql.batch([
+      {
+        sql: "INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        params: [
+          "turn-pref", s.world.id, s.line.id, s.node.id, "failed",
+          JSON.stringify({
+            id: "turn-pref", worldId: s.world.id, lineId: s.line.id, headId: s.node.id, baseId: s.node.id, kind: "turn",
+            model: LLM, settings: SETTINGS, meta: { settingsGuard: SETTINGS, sourceGuard: null },
+          }),
+          "{}", JSON.stringify({ completedStages: { prose: { text: "已出正文" } } }), "HTTP 503", new Date().toISOString(), new Date().toISOString(),
+        ],
+      },
+      { sql: "INSERT INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES('turn-pref','model:1','writing:0','done','{}','{\"text\":\"已出正文\"}')", params: [] },
+    ]);
+    await s.game.retryRun("turn-pref", () => {}).done;
+    expect(resumed).toEqual(["open-1", "turn-pref"]);
+
+    // 3. prepareForRestore aborts and awaits background noteRuns / sourceRuns (W01)
+    let aborted = false;
+    const ctrl = new AbortController();
+    ctrl.signal.addEventListener("abort", () => { aborted = true; });
+    s.game["noteRuns"].set("bg-note", ctrl);
+    await s.game.prepareForRestore();
+    expect(aborted).toBe(true);
   });
 });

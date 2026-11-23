@@ -74,8 +74,90 @@ fn refresh_entity(value:&Value,reference:&Value,mut refresh:Value)->Value {
     refresh
 }
 
+pub(crate) type BatchSnapshots = std::collections::HashMap<(String, String), Value>;
+
+pub(crate) fn record_batch_snapshot(
+    db: &Connection,
+    task: &Value,
+    plan: &RunPlan,
+    kind: &str,
+    id: &str,
+    snapshots: &mut BatchSnapshots,
+) -> Result<()> {
+    let canonical = ws::canonical_kind(kind).to_owned();
+    let cid = container(db, plan, &canonical, id)?;
+    let key = (canonical.clone(), cid);
+    if !snapshots.contains_key(&key) {
+        let val = resource(db, task, plan, &canonical, id, false)?;
+        snapshots.insert(key, val);
+    }
+    Ok(())
+}
+
+fn find_entity_paths(value: &Value, id: &str) -> Vec<String> {
+    fn walk(
+        value: &Value,
+        id: &str,
+        path: &str,
+        depth: usize,
+        remaining: &mut usize,
+        found: &mut Vec<String>,
+    ) {
+        if depth > 16 || *remaining == 0 || found.len() > 1 {
+            return;
+        }
+        *remaining -= 1;
+        if value["id"] == id {
+            found.push(path.into());
+        }
+        match value {
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, id, &format!("{path}/{index}"), depth + 1, remaining, found);
+                }
+            }
+            Value::Object(items) => {
+                for (key, item) in items {
+                    walk(
+                        item,
+                        id,
+                        &format!("{path}/{}", key.replace('~', "~0").replace('/', "~1")),
+                        depth + 1,
+                        remaining,
+                        found,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = vec![];
+    walk(value, id, "", 0, &mut 50_000, &mut found);
+    found
+}
+
 pub(crate) fn resolve(db:&Connection,task:&Value,plan:&RunPlan,tool:&str,args:&Value)->Result<Value> {
     if !["read_resource","stage_edit"].contains(&tool){return Ok(args.clone());}
+    resolve_with_snapshots(db, task, plan, args, None)
+}
+
+pub(crate) fn resolve_in_batch(
+    db: &Connection,
+    task: &Value,
+    plan: &RunPlan,
+    args: &Value,
+    snapshots: &BatchSnapshots,
+) -> Result<Value> {
+    resolve_with_snapshots(db, task, plan, args, Some(snapshots))
+}
+
+fn resolve_with_snapshots(
+    db: &Connection,
+    task: &Value,
+    plan: &RunPlan,
+    args: &Value,
+    snapshots: Option<&BatchSnapshots>,
+) -> Result<Value> {
     let Some(reference)=args.get("ref") else{return Ok(args.clone());};
     let mut fresh=json!({"kind":reference["kind"],"limit":1200});
     for key in ["id","path"] {if reference[key].as_str().is_some_and(|s|!s.is_empty()){fresh[key]=reference[key].clone();}}
@@ -96,31 +178,100 @@ pub(crate) fn resolve(db:&Connection,task:&Value,plan:&RunPlan,tool:&str,args:&V
     if path.len()>4096 || !path.is_empty()&&!path.starts_with('/') {
         return Err(failure("resource_ref_invalid","ref.path","定位路径须为有效JSON Pointer。",refresh));
     }
-    if reference["containerId"]!=container(db,plan,kind,id)? {
+    let cid = container(db, plan, kind, id)?;
+    if reference["containerId"] != cid {
         return Err(failure("resource_ref_container","ref.containerId","实体与所属回合或资料容器不一致，请重新读取，不能猜测回合ID。",refresh));
     }
     if args["kind"].as_str().is_some_and(|k|ws::canonical_kind(k)!=kind) || args["id"].as_str().is_some_and(|i|i!=id) {
         return Err(failure("resource_ref_conflict","ref","ref与另外填写的kind/id冲突；直接回传ref即可。",refresh));
     }
-    let value=resource(db,task,plan,kind,id,false)?;
-    if reference["revision"]!=arguments_hash(&value) {
-        return Err(failure("resource_ref_stale","ref.revision","该资料或草稿已变化，原定位已过期；重新读取并核对后再改。",refresh_entity(&value,reference,refresh)));
-    }
-    if kind!="book"&&!path.is_empty()&&value.pointer(path).is_none(){return Err(failure("resource_ref_missing","ref.path","该目标已不存在，请重新定位。",refresh));}
     let entity_path=ws::text(reference,"entityPath");
-    if reference["entityId"].is_string() && !(path==entity_path || path.starts_with(&format!("{entity_path}/"))) {
-        return Err(failure("resource_ref_invalid","ref.entityPath","目标字段必须位于所定位实体之内。",refresh));
-    }
-    let entity=if entity_path.is_empty(){&value}else{value.pointer(entity_path).unwrap_or(&Value::Null)};
-    if reference["entityId"].as_str().is_some_and(|id|entity["id"]!=id) {
-        return Err(failure("resource_ref_entity","ref.entityId","实体位置已变化，不能把旧数组下标用于另一个人物或设定。",refresh));
-    }
     let relative=ws::text(args,"path");
     if !relative.is_empty()&&!relative.starts_with('/') {
         return Err(failure("resource_ref_invalid","path","带ref时path为相对目标的JSON Pointer，例如/description；省略即目标本身。",refresh));
     }
+    let is_root_collection_append = ws::text(args, "operation") == "append"
+        && matches!(kind, "cards" | "people" | "places" | "goals" | "facts")
+        && matches!(relative, "" | "/" | "/-")
+        && (path.is_empty() || path.split('/').count() == 2);
+    if !is_root_collection_append
+        && reference["entityId"].is_string()
+        && !(path == entity_path || path.starts_with(&format!("{entity_path}/")))
+    {
+        return Err(failure("resource_ref_invalid","ref.entityPath","目标字段必须位于所定位实体之内。",refresh));
+    }
+    let value=resource(db,task,plan,kind,id,false)?;
+    if is_root_collection_append {
+        let revision_ok = reference["revision"] == arguments_hash(&value)
+            || snapshots
+                .and_then(|s| s.get(&(kind.to_owned(), cid)))
+                .is_some_and(|pre| reference["revision"] == arguments_hash(pre));
+        if !revision_ok {
+            return Err(failure("resource_ref_stale","ref.revision","该资料或草稿已变化，原定位已过期；重新读取并核对后再改。",refresh_entity(&value,reference,refresh)));
+        }
+        let mut result = args.clone();
+        result.as_object_mut().unwrap().remove("ref");
+        result["kind"] = kind.into();
+        result["id"] = id.into();
+        result["path"] = "".into();
+        return Ok(result);
+    }
+    let effective_path = if reference["revision"] == arguments_hash(&value) {
+        if kind!="book"&&!path.is_empty()&&value.pointer(path).is_none(){
+            return Err(failure("resource_ref_missing","ref.path","该目标已不存在，请重新定位。",refresh));
+        }
+        let entity=if entity_path.is_empty(){&value}else{value.pointer(entity_path).unwrap_or(&Value::Null)};
+        if reference["entityId"].as_str().is_some_and(|eid|entity["id"]!=eid) {
+            return Err(failure("resource_ref_entity","ref.entityId","实体位置已变化，不能把旧数组下标用于另一个人物或设定。",refresh));
+        }
+        path.to_owned()
+    } else if let Some(pre_batch) = snapshots
+        .and_then(|s| s.get(&(kind.to_owned(), cid)))
+        .filter(|pre| reference["revision"] == arguments_hash(pre))
+    {
+        if kind != "book" && !path.is_empty() && pre_batch.pointer(path).is_none() {
+            return Err(failure("resource_ref_missing","ref.path","该目标已不存在，请重新定位。",refresh));
+        }
+        if let Some(eid) = reference["entityId"].as_str() {
+            let pre_entity = if entity_path.is_empty() {
+                pre_batch
+            } else {
+                pre_batch.pointer(entity_path).unwrap_or(&Value::Null)
+            };
+            if pre_entity["id"] != eid {
+                return Err(failure("resource_ref_entity","ref.entityId","实体位置已变化，不能把旧数组下标用于另一个人物或设定。",refresh));
+            }
+            let cur_entity = if entity_path.is_empty() {
+                &value
+            } else {
+                value.pointer(entity_path).unwrap_or(&Value::Null)
+            };
+            let relocated = if cur_entity["id"] == eid {
+                path.to_owned()
+            } else {
+                let found = find_entity_paths(&value, eid);
+                if found.len() == 1 {
+                    let suffix = path.strip_prefix(entity_path).unwrap_or("");
+                    format!("{}{suffix}", found[0])
+                } else {
+                    return Err(failure("resource_ref_missing","ref.entityId","同一批次前序修改已移除该实体，请核对后再改。",refresh_entity(&value,reference,refresh)));
+                }
+            };
+            if kind != "book" && !relocated.is_empty() && value.pointer(&relocated).is_none() {
+                return Err(failure("resource_ref_missing","ref.path","该目标已不存在，请重新定位。",refresh_entity(&value,reference,refresh)));
+            }
+            relocated
+        } else {
+            if kind != "book" && !path.is_empty() && value.pointer(path).is_none() {
+                return Err(failure("resource_ref_missing","ref.path","该目标已不存在，请重新定位。",refresh));
+            }
+            path.to_owned()
+        }
+    } else {
+        return Err(failure("resource_ref_stale","ref.revision","该资料或草稿已变化，原定位已过期；重新读取并核对后再改。",refresh_entity(&value,reference,refresh)));
+    };
     let mut result=args.clone();result.as_object_mut().unwrap().remove("ref");
-    result["kind"]=kind.into();result["id"]=id.into();result["path"]=format!("{path}{relative}").into();
+    result["kind"]=kind.into();result["id"]=id.into();result["path"]=format!("{effective_path}{relative}").into();
     Ok(result)
 }
 fn read_locator(db:&Connection,task:&Value,plan:&RunPlan,kind:&str,id:&str,locator:&Value)->Result<Value> {
@@ -161,7 +312,48 @@ pub(crate) fn project(db:&Connection,task:&Value,plan:&RunPlan,tool:&str,args:&V
             if !items.is_empty(){value["items"]=json!(items);}
         }
         "stage_edit"=>{
-            value["ref"]=make(db,task,plan,ws::text(args,"kind"),ws::text(args,"id"),ws::text(args,"path"),false)?;
+            let kind = ws::canonical_kind(ws::text(args, "kind"));
+            let id = ws::text(args, "id");
+            let req_path = ws::text(args, "path");
+            let after_val = resource(db, task, plan, kind, id, false)?;
+            let ref_path = if !req_path.is_empty()
+                && kind != "book"
+                && after_val.pointer(req_path).is_none()
+            {
+                ""
+            } else {
+                req_path
+            };
+            value["ref"] = make(db, task, plan, kind, id, ref_path, false)?;
+        }
+        "stage_edits"=>{
+            let mut containers: Vec<(String, String)> = Vec::new();
+            for item in value["results"].as_array_mut().into_iter().flatten() {
+                let kind = ws::canonical_kind(ws::text(item, "kind")).to_owned();
+                let id = ws::text(item, "id").to_owned();
+                let item_path = ws::text(item, "path");
+                let after_val = resource(db, task, plan, &kind, &id, false)?;
+                let ref_path = if !item_path.is_empty()
+                    && kind != "book"
+                    && after_val.pointer(item_path).is_none()
+                {
+                    ""
+                } else {
+                    item_path
+                };
+                item["ref"] = make(db, task, plan, &kind, &id, ref_path, false)?;
+                if !containers.iter().any(|(k, i)| k == &kind && i == &id) {
+                    containers.push((kind, id));
+                }
+            }
+            let refs = containers
+                .iter()
+                .map(|(k, i)| make(db, task, plan, k, i, "", false))
+                .collect::<Result<Vec<_>>>()?;
+            if refs.len() == 1 {
+                value["ref"] = refs[0].clone();
+            }
+            value["refs"] = json!(refs);
         }
         "read_world"=>{
             if let Some(id)=value["currentHead"]["id"].as_str().map(str::to_owned){value["currentHead"]["ref"]=make(db,task,plan,"node",&id,"",false)?;}

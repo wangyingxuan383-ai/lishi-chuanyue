@@ -82,10 +82,14 @@ pub fn control_state(store:&Store,request:&Value)->Result<Value>{crate::pi_lifec
 pub fn timeout_stop(store:&Store,request:&Value)->Result<Option<Value>>{
     crate::pi_lifecycle::timeout_stop(store,required(request,"taskId")?,required(request,"attemptId")?)
 }
+pub fn reconcile_store(store: &Store) -> Result<usize> {
+    crate::pi_lifecycle::reconcile(store)
+}
 /// Never forward secret material or an endpoint supplied by a UI into the
 /// resolver. The platform resolves its current slot binding independently.
 fn model_reference(saved: &Value, request: &Value) -> Value {
     let mut result = Map::new();
+    let live_model_supplied = request["model"].is_object();
     for source in [saved, &request["model"]] {
         if source["slot"].as_str().is_some_and(|slot|result.get("slot").and_then(Value::as_str)!=Some(slot)) && !source["profileId"].is_string() {
             result.remove("profileId");
@@ -113,9 +117,35 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
             "topP",
             "endpointRef",
         ] {
-            if let Some(value) = source.get(key).filter(|v| !v.is_object() && !v.is_array()) {
+            if let Some(value) = source.get(key).filter(|v| !v.is_object() && !v.is_array() && !v.is_null()) {
                 result.insert(key.into(), value.clone());
             }
+        }
+    }
+    if live_model_supplied {
+        let model_obj = &request["model"];
+        let has_live_aux = model_obj
+            .get("auxModel")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+            || request
+                .get("auxModel")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+        if !has_live_aux {
+            result.remove("auxModel");
+        }
+        let has_live_window = model_obj
+            .get("contextWindowTokens")
+            .is_some_and(|v| !v.is_null())
+            || request
+                .get("contextWindowTokens")
+                .is_some_and(|v| !v.is_null());
+        if !has_live_window {
+            result.remove("contextWindowTokens");
+        }
+        if model_obj.get("endpointRef").is_none_or(Value::is_null) {
+            result.remove("endpointRef");
         }
     }
     for key in [
@@ -126,12 +156,31 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
         "inputTokens",
         "thinkingMode",
     ] {
-        if let Some(value) = request
-            .get(key)
-            .filter(|v| !v.is_object() && !v.is_array() && !v.is_null())
-        {
-            if key=="profileId" && result.get(key)!=Some(value) && !request["model"]["slot"].is_string() {result.remove("slot");}
-            result.insert(key.into(), value.clone());
+        if let Some(value) = request.get(key) {
+            if value.is_null() && key == "contextWindowTokens" {
+                result.remove("contextWindowTokens");
+            } else if !value.is_object() && !value.is_array() && !value.is_null() {
+                if key=="profileId" && result.get(key)!=Some(value) && !request["model"]["slot"].is_string() {result.remove("slot");}
+                result.insert(key.into(), value.clone());
+            }
+        }
+    }
+    if let Some(top_aux) = request.get("auxModel") {
+        match top_aux.as_str().map(str::trim) {
+            Some(s) if !s.is_empty() => {
+                result.insert("auxModel".into(), s.into());
+            }
+            _ => {
+                result.remove("auxModel");
+            }
+        }
+    }
+    if let Some(aux) = result.get("auxModel").and_then(Value::as_str).map(str::to_owned) {
+        let trimmed = aux.trim();
+        if trimmed.is_empty() {
+            result.remove("auxModel");
+        } else {
+            result.insert("auxModel".into(), trimmed.into());
         }
     }
     let input = result
@@ -146,7 +195,16 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
     if ["profileId","slot","protocol"].iter().any(|key|saved.get(*key).is_some()&&result.get(*key)!=saved.get(*key)) {result.remove("endpointRef");}
     if let Some(url)=request.get("modelUrl") {
         result.remove("endpointRef");
-        if url.as_str().is_some_and(|v|!v.trim().is_empty()){result.insert("modelUrl".into(),url.clone());}
+        if let Some(trimmed) = url.as_str().map(str::trim).filter(|v| !v.is_empty()) {
+            result.insert("modelUrl".into(), trimmed.into());
+        } else {
+            result.remove("modelUrl");
+        }
+    }
+    // Single-endpoint custom modelUrl grants bind one exact model endpoint;
+    // safely fall back to the primary model rather than sending auxModel there.
+    if result.contains_key("endpointRef") || result.contains_key("modelUrl") {
+        result.remove("auxModel");
     }
     Value::Object(result)
 }
@@ -196,6 +254,20 @@ mod reference_tests {
         assert_eq!(profile["profileId"],"chosen-profile");assert!(profile["slot"].is_null());
         let unchanged=model_reference(&saved,&json!({"model":{"slot":"old-slot","model":"new-name"}}));
         assert_eq!(unchanged["profileId"],"old-profile");assert!(unchanged["id"].is_null());assert_eq!(unchanged["model"],"new-name");
+        // Live continue/compact clears stale auxModel, contextWindowTokens and endpointRef when omitted/empty
+        let stale_saved = json!({
+            "profileId":"old-profile","slot":"old-slot","model":"main-m",
+            "auxModel":"stale-aux","contextWindowTokens":64000,"endpointRef":"deadbeef"
+        });
+        let cleared = model_reference(&stale_saved, &json!({"model":{"profileId":"old-profile","slot":"old-slot","model":"main-m","auxModel":""}}));
+        assert!(cleared["auxModel"].is_null());
+        assert!(cleared["contextWindowTokens"].is_null());
+        assert!(cleared["endpointRef"].is_null());
+        // Trims auxModel and drops auxModel when custom modelUrl is active
+        let trimmed = model_reference(&json!({}), &json!({"model":{"slot":"s","model":"m","auxModel":"  mini-m  "}}));
+        assert_eq!(trimmed["auxModel"], "mini-m");
+        let custom_ep = model_reference(&json!({}), &json!({"model":{"slot":"s","model":"m","auxModel":"mini-m"},"modelUrl":"https://custom.invalid/v1/chat/completions"}));
+        assert!(custom_ep["auxModel"].is_null());
     }
 }
 
@@ -340,7 +412,7 @@ impl AgentHostService {
                             // fences writes, and expiry reconciliation settles it.
                             let _=crate::pi_lifecycle::reconcile(&this.0.gateway.0.0);
                             tokio::time::sleep(Duration::from_secs(15)).await;
-                            let reason=if system_timeout{"系统后台运行时间已到，任务已暂停，进度与草稿已保留"}else{"停止已保存，失联执行已隔离，要求与草稿保留"};
+                            let reason=if system_timeout{"系统后台运行时间受限已暂停，可点继续接着处理"}else{"停止已保存，失联执行已隔离，要求与草稿保留"};
                             let _=crate::pi_lifecycle::settle(&this.0.gateway.0.0,&id,&expected,reason);
                             return;
                         }
@@ -348,7 +420,7 @@ impl AgentHostService {
                         if !matches!(stopped,Ok(Ok(_))) {
                             this.0.closing.store(true,Ordering::Release);
                             this.0.connection.close_transport().await;
-                            let reason=if system_timeout{"系统后台运行时间已到，专用宿主收尾超时，进度与草稿已保留"}else{"玩家已停止，专用宿主收尾超时，进度与草稿已保留"};
+                            let reason=if system_timeout{"系统后台运行时间受限已暂停，可点继续接着处理"}else{"玩家已停止，专用宿主收尾超时，进度与草稿已保留"};
                             let _=crate::pi_lifecycle::settle(&this.0.gateway.0.0,&id,&expected,reason);
                             (this.0.activity)(false);
                             let callback=this.0.control_timeout.read().unwrap_or_else(|p|p.into_inner()).clone();
@@ -366,28 +438,76 @@ impl AgentHostService {
                     crate::maintenance::guard(&tx)?;
                     let row = crate::agent_workspace::rows(
                         &tx,
-                        "SELECT id,status,metadata_json FROM pi_tasks WHERE id=?",
+                        "SELECT id,status,metadata_json,result_json FROM pi_tasks WHERE id=?",
                         &[&id],
                     )?
                     .into_iter()
                     .next()
                     .ok_or_else(|| invalid("这项助手记录不存在"))?;
+                    let status = text(&row, "status");
                     let mut meta = crate::agent_workspace::parse(text(&row, "metadata_json"));
-                    if ["running", "committing"].contains(&text(&row, "status"))
+                    if ["running", "committing"].contains(&status)
                         || meta["_nativeHostActive"] == true
                     {
                         return Err(invalid("请先停止正在执行的任务，再清空未采用草稿"));
                     }
-                    if ["committed", "completed"].contains(&text(&row, "status")) {
+                    if status == "waiting_user" {
+                        return Err(invalid("请先回答或取消当前等待的问题，再清空未采用草稿"));
+                    }
+                    if status == "previewed" {
+                        return Err(invalid("当前修改预览已生成，请采用预览或继续任务修改，不能在此状态直接清空草稿"));
+                    }
+                    if !["paused", "cancelled", "interrupted", "failed", "stale", "blocked"]
+                        .contains(&status)
+                    {
                         return Err(invalid("这项任务已结束，没有可清空的未采用草稿"));
                     }
-                    let res = crate::agent_workspace::discard_draft(&tx, id, &json!({"all": true}))?;
+                    let discard_args = if !text(&request, "kind").is_empty() {
+                        json!({"kind": request["kind"], "id": request["id"]})
+                    } else {
+                        json!({"all": true})
+                    };
+                    let res = crate::agent_workspace::discard_draft(&tx, id, &discard_args)?;
+                    let remaining_work = crate::agent_workspace::workspace(&tx, id)?;
+                    let remaining_empty =
+                        crate::agent_workspace::preview_changes(&remaining_work).is_empty();
                     if let Some(obj) = meta.as_object_mut() {
                         obj.remove("rebase");
+                        obj.remove("goalReport");
+                        obj.remove("goalResult");
+                    }
+                    let mut updated_result: Option<String> =
+                        row["result_json"].as_str().map(str::to_owned);
+                    if let Some(raw_res) = row["result_json"].as_str() {
+                        let mut parsed_res = crate::agent_workspace::parse(raw_res);
+                        if parsed_res.is_object() {
+                            if remaining_empty {
+                                parsed_res["pendingChanges"] = json!([]);
+                                parsed_res["pendingContinue"] = false.into();
+                            } else {
+                                parsed_res["pendingChanges"] =
+                                    json!(crate::agent_workspace::changes(&remaining_work));
+                            }
+                            if parsed_res["status"] != "committed" {
+                                if let Some(ro) = parsed_res.as_object_mut() {
+                                    ro.remove("goalResult");
+                                    if remaining_empty {
+                                        ro.remove("preview");
+                                        ro.insert("changes".into(), json!([]));
+                                    }
+                                }
+                            }
+                            updated_result = Some(parsed_res.to_string());
+                        }
                     }
                     tx.execute(
-                        "UPDATE pi_tasks SET metadata_json=?,updated_at=? WHERE id=?",
-                        params![meta.to_string(), chrono::Utc::now().to_rfc3339(), id],
+                        "UPDATE pi_tasks SET metadata_json=?,result_json=?,updated_at=? WHERE id=?",
+                        params![
+                            meta.to_string(),
+                            updated_result,
+                            chrono::Utc::now().to_rfc3339(),
+                            id
+                        ],
                     )?;
                     tx.commit()?;
                     res["removedChanges"].as_u64().unwrap_or(0)
@@ -795,14 +915,50 @@ impl AgentHostService {
                     if !["read_document","find_document"].contains(&original["op"].as_str().unwrap_or(""))
                         || !original["_documentGrant"].is_object() || !value["_documentRead"].is_object(){return Ok(value);}
                     let id=uuid::Uuid::new_v4().to_string();let mut params=value["_documentRead"].clone();
-                    for key in ["taskId","section","offset","charBudget","boundBookHash","through","query","sectionOffset","pageSize"]{if let Some(v)=original.get(key){params[key]=v.clone();}}
+                    let doc_file_hash = params["version"]
+                        .as_str()
+                        .or_else(|| original["fileHash"].as_str())
+                        .map(str::to_owned);
+                    if let Some(ref fh) = doc_file_hash {
+                        if crate::pi_documents::matches_bound_book(&original, Some(fh), None) {
+                            if let (Some(sec), Some(through)) =
+                                (original["section"].as_u64(), original["through"].as_u64())
+                            {
+                                if sec > through {
+                                    return Err(invalid("所选章节不存在或超出本次参考范围。"));
+                                }
+                            }
+                        }
+                        params["fileHash"] = fh.clone().into();
+                    }
+                    for key in [
+                        "taskId",
+                        "section",
+                        "offset",
+                        "charBudget",
+                        "boundBookId",
+                        "boundFileHash",
+                        "boundBookHash",
+                        "bookId",
+                        "parserCachePrefix",
+                        "through",
+                        "query",
+                        "sectionOffset",
+                        "pageSize",
+                    ] {
+                        if let Some(v) = original.get(key) {
+                            params[key] = v.clone();
+                        }
+                    }
                     params["id"]=id.clone().into();params["operation"]=if original["op"]=="find_document"{"find"}else{"read"}.into();
                     let response=tokio::select!{biased;
                         _=stop.cancelled()=>{let _=connection.request("cancel_document",json!({"id":id})).await;return Err(Error::Cancelled);},
                         reply=connection.request("parse_document",params)=>reply.map_err(|_|invalid("资料解析宿主已失联，任务与来源定位保留"))?,
                     };
                     if response["ok"]!=true{return Err(invalid(response["error"]["message"].as_str().unwrap_or("资料解析未完成")));}
-                    let mut data=response["data"].clone();data["grantId"]=original["grantId"].clone();data["path"]=original["path"].clone();
+                    let mut data=response["data"].clone();
+                    crate::pi_documents::enforce_spoiler_fence(&original, doc_file_hash.as_deref(), &mut data)?;
+                    data["grantId"]=original["grantId"].clone();data["path"]=original["path"].clone();
                     Ok(data)
                 })
             }) as NetworkHost

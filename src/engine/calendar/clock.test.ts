@@ -27,6 +27,11 @@ describe("game clock", () => {
     expect(newYearsBetween(eve, 0, 240)).toBe(1);
     expect(newYearsBetween(eve, 240, 300)).toBe(0);
     expect(newYearsBetween(eve, 0, 400 * 1440)).toBe(2);
+    const eve30: GameClock = { ...tang, date: { ...tang.date!, month: 12, day: 30 }, hour: 20 };
+    expect(nowOf(eve30, 0).text).toBe("天宝七载 腊月三十 · 戌时");
+    expect(newYearsBetween(eve30, 0, 120)).toBe(0);
+    expect(newYearsBetween(eve30, 0, 240)).toBe(1);
+    expect(nowOf(eve30, 240).text).toBe("天宝八载 正月初一 · 子时");
     // Without a usable date there is no New Year to cross: a full year of play still adds one.
     expect(newYearsBetween(vague, 0, 364 * 1440)).toBe(0);
     expect(newYearsBetween(vague, 0, 400 * 1440)).toBe(1);

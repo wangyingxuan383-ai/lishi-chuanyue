@@ -110,7 +110,15 @@ export default function Home() {
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
   const exporting = useRef(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const importingRef = useRef(false);
+  const [importing, setImporting] = useState(false);
   const [incoming, setIncoming] = useState<{ file: unknown; title: string } | null>(null);
+
+  const importErrorText = (error: unknown): string => {
+    const raw = error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String((error as { message: unknown }).message) : "";
+    if (/worlds\.title|archive-guard|lease|busy/i.test(raw)) return "这个世界正在后台续写或执行任务，请先停止或等完成后再导入";
+    return raw || "文件读取或校验失败，请稍后重试";
+  };
 
   // R08-T001: a world as one file.
   const exportOne = async (card: WorldCard) => {
@@ -125,26 +133,46 @@ export default function Home() {
     } finally { exporting.current = false; }
   };
   const importOne = async () => {
-    const text = await game.platform.files.importText().catch(() => null);
-    if (!text) return;
-    let file: unknown = null;
-    try { file = JSON.parse(text); } catch { /* reported below */ }
-    const problems = archiveProblems(file);
-    if (problems.length) { toast(`没有导入：${problems[0]}`); return; }
-    const world = (file as { world: { id: string; title: string } }).world;
-    // The same world is already here: ask whether to replace it or keep both.
-    if (await game.repo.getWorld(world.id)) { setIncoming({ file, title: world.title }); return; }
-    await importWorld(game.repo, file, "replace");
-    toast(`已导入“${world.title}”`);
-    void load();
+    if (importingRef.current) return;
+    importingRef.current = true;
+    setImporting(true);
+    try {
+      const text = await game.platform.files.importText();
+      if (!text) return;
+      let file: unknown = null;
+      try { file = JSON.parse(text); } catch { /* reported below */ }
+      const problems = archiveProblems(file);
+      if (problems.length) { toast(`没有导入：${problems[0]}`); return; }
+      const world = (file as { world: { id: string; title: string } }).world;
+      // The same world is already here: ask whether to replace it or keep both.
+      if (await game.repo.getWorld(world.id)) { setIncoming({ file, title: world.title }); return; }
+      await importWorld(game.repo, file, "replace");
+      toast(`已导入“${world.title}”`);
+      await load();
+    } catch (error) {
+      toast(`没有导入：${importErrorText(error)}`);
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
+    }
   };
   const finishImport = async (mode: "new" | "replace") => {
-    if (!incoming) return;
-    if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
-    await importWorld(game.repo, incoming.file, mode);
-    toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${incoming.title}”`);
+    if (!incoming || importingRef.current) return;
+    const pending = incoming;
     setIncoming(null);
-    void load();
+    importingRef.current = true;
+    setImporting(true);
+    try {
+      if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
+      await importWorld(game.repo, pending.file, mode);
+      toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${pending.title}”`);
+      await load();
+    } catch (error) {
+      toast(`没有导入：${importErrorText(error)}`);
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
+    }
   };
 
   const load = async () => {
@@ -198,10 +226,12 @@ export default function Home() {
     <div className="screen">
       <div className="topbar home-topbar">
         <div className="title brand"><span className="brand-mark" aria-hidden="true">穿越</span><h1>穿越小说模拟</h1></div>
+        <button className="ghost" aria-label="伴聊" onClick={() => push({ name: "companion" })}>伴聊</button>
         <button className="icon-btn update-mark" aria-label={unread ? "设置，有新版本" : "设置"} onClick={() => push({ name: "settings" })}><Icon name="settings" />{unread && <i className="update-dot" aria-hidden="true" />}</button>
       </div>
       <div className="screen-body stack">
         {exportStatus && <div className="notice" role="status">{exportStatus}</div>}
+        {importing && <div className="notice" role="status">正在导入存档…</div>}
         <BudgetReminder />
         <WhatsNewNotice />
         {!cards && <ShelfSkeleton />}
@@ -237,9 +267,9 @@ export default function Home() {
         </details>}
         <div className="row home-links">
           <button className="ghost" onClick={() => push({ name: "guide" })}>游玩指南</button>
-          <button className="ghost" onClick={() => void importOne()}>从文件导入世界…</button>
+          <button className="ghost" disabled={importing} onClick={() => void importOne()}>{importing ? "正在导入存档…" : "从文件导入世界…"}</button>
         </div>
-        {incoming && <MenuSheet
+        {incoming && !importing && <MenuSheet
           title={`已经有“${incoming.title}”了`}
           onClose={() => setIncoming(null)}
           items={[

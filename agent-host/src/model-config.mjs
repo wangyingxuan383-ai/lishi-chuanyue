@@ -50,11 +50,14 @@ export function modelTransport(model) {
   const bound = urlOf(model.baseUrl, "invalid_model_base");
   if (bound.search) throw invalid("invalid_model_base");
   bound.pathname = bound.pathname.replace(/\/+$/u, "");
-  const baseUrl = bound.href.replace(/\/$/u, "");
-  const boundPath = scopePath(bound.pathname);
   const fullEndpoint = model.endpointRef !== undefined && model.endpointRef !== null;
   if (fullEndpoint && (typeof model.endpointRef !== "string" || !/^[0-9a-f]{64}$/u.test(model.endpointRef))) throw invalid("invalid_model_base");
-  const modelId = typeof model.id === "string" ? model.id : "";
+  if (!fullEndpoint && protocol === "gemini") {
+    bound.pathname = bound.pathname.replace(/\/v1beta\/openai$/iu, "/v1beta");
+  }
+  const baseUrl = bound.href.replace(/\/$/u, "");
+  const boundPath = scopePath(bound.pathname);
+  const modelId = typeof model.id === "string" ? model.id.trim() : "";
   if (fullEndpoint && protocol === "gemini") {
     let decoded = modelId;
     if (!decoded || decoded.length > 512) throw invalid("invalid_model_base");

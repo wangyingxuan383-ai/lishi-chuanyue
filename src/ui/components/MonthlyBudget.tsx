@@ -105,10 +105,12 @@ export function MonthlyBudgetSettings() {
     }
     const value = (v: string) => (v.trim() === "" ? null : Number(v));
     const config: BudgetConfig = { limit: value(fields.limit), input: value(fields.input), output: value(fields.output) };
+    const limitChanged = saved !== null && config.limit !== saved.limit;
     setSaving(true);
     setError("");
     try {
       await game.repo.setSetting("monthlyBudget", config);
+      if (limitChanged) await game.repo.setSetting("budgetReminderMonth", "");
       setSaved(config);
       setSpend(await monthSpend(game.platform, config));
       toast("已保存");

@@ -101,7 +101,7 @@
 :root[data-style="ink"][data-theme="night"] {
   color-scheme: dark;
   --bg: #121212; --surface: #1c1c1d; --raised: #252527; --fg: #ede6da; --muted: #9b958b; --line: #2e2e30;
-  --accent: #e0503c; --on-accent: #ffffff; --accent-soft: #3a211d;
+  --accent: #be2f21; --on-accent: #fffaf4; --accent-soft: #3a211d;
   --gain: #8fd0a3; --loss: #f08068; --warn: #e8b85c; --chip: #cfc6b8;
   --shadow: rgba(0, 0, 0, 0.5);
   --backdrop: rgba(0, 0, 0, 0.6);

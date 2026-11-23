@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { eraContext } from "./era";
-import { earnedSeals, excerpt, lifeSeal, lifeSummary, newSeals, playStats, realMinutes, realTimeText, richThreshold, spanText, type SealFacts } from "./life";
+import { earnedSeals, excerpt, lifeSeal, lifeSummary, newSeals, playStats, realMinutes, realTimeText, richThreshold, sealsForState, spanText, type SealFacts } from "./life";
 import { TANG_CURRENCY } from "./money";
 import { sampleState } from "./testing/fixtures";
 import type { StoryNode, WorldState } from "./types";
@@ -135,6 +135,16 @@ describe("seals", () => {
     expect(newSeals(facts(s), ["arrive", "change", "wish"])).toBeNull();
     expect(newSeals(facts(s), ["arrive", "change"])?.text).toBe("得一枚印：“得偿所愿”");
     expect(newSeals(facts(s), [])?.ids).toEqual(["arrive", "wish", "change"]);
+  });
+  it("excludes both change and turn history seals in free worlds", () => {
+    const s = rich();
+    s.deviations = ["其一", "其二", "其三"];
+    expect(earnedSeals(facts(s)).map((x) => x.id)).toEqual(expect.arrayContaining(["change", "turn"]));
+    s.era.mode = "free";
+    expect(sealsForState(s).map((x) => x.id)).not.toContain("change");
+    expect(sealsForState(s).map((x) => x.id)).not.toContain("turn");
+    expect(earnedSeals(facts(s)).map((x) => x.id)).not.toContain("change");
+    expect(earnedSeals(facts(s)).map((x) => x.id)).not.toContain("turn");
   });
 });
 

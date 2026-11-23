@@ -46,8 +46,8 @@ export function BackupRestore({ backups, deleting, onDelete }: {
     if (!ok) return;
     setBusy(true);
     try {
-      // Background upkeep from the last turn finishes first, so it cannot write into the restored save.
-      await game.settled();
+      // Stop in-flight note/source jobs and wait for background upkeep to settle before restoring (W01).
+      await game.prepareForRestore();
       await platform.sql.restore(b.name);
       toast("已恢复，正在重新打开");
       location.reload();
@@ -58,7 +58,8 @@ export function BackupRestore({ backups, deleting, onDelete }: {
         code === "sql_restore_invalid" ? "这份备份已损坏，没有恢复"
           : code === "sql_restore_newer" ? "这份备份来自更新的版本，请先更新应用"
             : code === "sql_restore_unsupported" ? "这里不支持从备份恢复"
-              : "恢复没成功，存档没有变化",
+              : code === "sql_restore_busy" || code === "sql_restore_context" ? "后台还在整理资料或生成剧情，请等几秒再恢复（原存档没有动）"
+                : "恢复没成功，存档没有变化",
       );
     }
   };

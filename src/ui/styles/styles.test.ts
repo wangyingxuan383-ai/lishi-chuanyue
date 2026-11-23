@@ -41,4 +41,10 @@ describe("stylesheets", () => {
   it("would have caught the 0.14.0 build break", () => {
     expect(preludes(".a { x: 1; }\n.b @media (min-width: 1px) { .c { y: 2; } }").some((p) => !p.text.startsWith("@") && /(^|\s)@media/.test(p.text))).toBe(true);
   });
+
+  it("guards active companion gear pill and ghost buttons under ink style (F05)", () => {
+    const companionCss = readFileSync(join(dir, "screens", "companion", "companion.css"), "utf8");
+    expect(companionCss).toContain(':root[data-style="ink"] .companion-gear-btn[aria-pressed="true"]');
+    expect(companionCss).toContain(':root[data-style="ink"] .companion-gear-btn');
+  });
 });

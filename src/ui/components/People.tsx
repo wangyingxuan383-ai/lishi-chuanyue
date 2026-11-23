@@ -2,8 +2,8 @@
 // Each person opens on their own and can be edited or removed; every save
 // becomes an edit node that can be undone.
 import { useApp } from "../app/context";
-import { rejectedReason } from "../../engine/game";
-import { useContext, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { personaFromStoryPerson } from "../../engine/companion";
 import { NoteEntry } from "./CanonNotes";
 import { agoText } from "../../engine/calendar/clock";
 import type { EraContext } from "../../engine/era";
@@ -23,10 +23,10 @@ export function attitudeClass(a: Attitude): string {
   return a === "仇视" || a === "敌意" ? "att-hostile" : a === "冷淡" ? "att-cold" : a === "友善" ? "att-friendly" : a === "亲近" || a === "生死之交" ? "att-close" : "att-plain";
 }
 
-function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = false, onContinuitySaved }: {
-  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onSave: (patch: TurnRecord, summary: string) => Promise<void>; worldId?: string; headId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
+function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, headId, busy = false, onContinuitySaved }: {
+  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
 }) {
-  const { ask, toast } = useApp();
+  const { game, push, ask, toast } = useApp();
   const noteEntry = useContext(NoteEntry);
   const [name, setName] = useState(person?.name ?? "");
   const [aliases, setAliases] = useState(person?.aliases.join("、") ?? "");
@@ -43,7 +43,7 @@ function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = f
 
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
+    try { await onSave(patch, summary, headId); onClose(); } catch (e) { toast(e instanceof Error ? e.message : "没能保存，请稍后再试"); } finally { setSaving(false); }
   };
   const save = () => {
     if (!clean || clash) return;
@@ -59,9 +59,33 @@ function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = f
     <Sheet title={person ? person.name : "添加人物"} onClose={onClose}>
       <div className="stack gap-10">
         {person && (
-          <div className="person-head">
-            <PersonAvatar name={name || person.name} dead={!alive} />
-            <span className="muted">{person.lastSeenMinute != null && `最近相见：${agoText(era.clock, person.lastSeenMinute, state.time.elapsedMinutes)}`}</span>
+          <div className="person-head row between wrap">
+            <div className="row">
+              <PersonAvatar name={name || person.name} dead={!alive} />
+              <span className="muted">{person.lastSeenMinute != null && `最近相见：${agoText(era.clock, person.lastSeenMinute, state.time.elapsedMinutes)}`}</span>
+            </div>
+            {worldId && (
+              <button
+                type="button"
+                className="ghost small"
+                disabled={saving}
+                onClick={async () => {
+                  setSaving(true);
+                  try {
+                    const invited = await personaFromStoryPerson(game, worldId, person.id);
+                    onClose();
+                    onClosePanel?.();
+                    push({ name: "companion", worldId, personaId: invited.id, gear: "chat" });
+                  } catch (e) {
+                    toast(e instanceof Error ? e.message : "没能发起私聊");
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+              >
+                找TA私聊 ›
+              </button>
+            )}
           </div>
         )}
         <label>名字<input value={name} onChange={(e) => setName(e.target.value)} placeholder="名字或称呼" /></label>
@@ -80,6 +104,28 @@ function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = f
         {person && worldId && headId && <KnowledgeRecords worldId={worldId} headId={headId} person={person} busy={busy || saving} onSaved={onContinuitySaved} />}
         <label className="row"><input type="checkbox" className="check-20" checked={!alive} onChange={(e) => setAlive(!e.target.checked)} />已故</label>
         {clash && <p className="notice m-0">人物表里已经有“{clash.name}”了，点开它修改即可。</p>}
+        {person && worldId && (
+          <button
+            type="button"
+            className="ghost"
+            disabled={saving}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                const invited = await personaFromStoryPerson(game, worldId, person.id);
+                onClose();
+                onClosePanel?.();
+                push({ name: "companion", worldId, personaId: invited.id, gear: "chat" });
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "没能发起私聊");
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            找{person.name}私聊（伴聊扮演，不改存档）
+          </button>
+        )}
         {person && noteEntry && <button className="ghost" onClick={() => { onClose(); noteEntry({ kind: "person", subject: person.name, aliases: person.aliases }); }}>整理成札记（这个人在本局的经历）</button>}
         <div className="row">
           {person && <button className="danger-text" disabled={saving} onClick={remove}>删除</button>}
@@ -90,10 +136,17 @@ function Editor({ person, state, era, onClose, onSave, worldId, headId, busy = f
   );
 }
 
-export function People({ state, era, busy, onSave, worldId, headId, onContinuitySaved }: {
-  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string) => Promise<void>; worldId?: string; headId?: string; onContinuitySaved?: () => void | Promise<void>;
+export function People({ state, era, busy, onSave, worldId, headId, onContinuitySaved, onClosePanel }: {
+  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; onContinuitySaved?: () => void | Promise<void>; onClosePanel?: () => void;
 }) {
   const [editing, setEditing] = useState<{ person: Person | null } | null>(null);
+  const prevAnchor = useRef<unknown>(headId ? `${worldId ?? ""}:${headId}` : state);
+  useEffect(() => {
+    const next = headId ? `${worldId ?? ""}:${headId}` : state;
+    if (prevAnchor.current === next) return;
+    prevAnchor.current = next;
+    setEditing(null);
+  }, [worldId, headId, state]);
   const people = [...state.people].sort((a, b) => Number(b.alive) - Number(a.alive) || (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1));
   const now = state.time.elapsedMinutes;
 
@@ -117,7 +170,7 @@ export function People({ state, era, busy, onSave, worldId, headId, onContinuity
           </div>
         </button>
       )) : <p className="muted">还没有结识什么人。</p>}
-      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={headId} busy={busy} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onSave={onSave} />}
+      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={headId} busy={busy} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
     </div>
   );
 }

@@ -15,7 +15,7 @@ import type { SourceBinding } from "./types";
 import type { StoryNode } from "../types";
 import * as tree from "../tree";
 
-export const NOTES_PROMPT_VERSION = "canon-notes-4";
+export const NOTES_PROMPT_VERSION = "canon-notes-5";
 export type NoteKind = "plot" | "person" | "setting" | "timeline" | "question";
 export const NOTE_KINDS: [NoteKind, string, string][] = [
   ["plot", "主线剧情", "某段章节里主角的主要经历、奇遇和转折"],
@@ -194,7 +194,7 @@ function parseNoteChapterNum(raw: string): number | null {
 }
 
 /** Chapter labels describe the supplied text, not verified original passages. */
-function mentionedChapters(text: string): number[] {
+export function mentionedChapters(text: string): number[] {
   const found: number[] = [];
   for (const match of text.matchAll(/第\s*([0-9零〇一二两三四五六七八九十百千万]+)\s*(?:[～~—–至-]\s*(?:第\s*)?([0-9零〇一二两三四五六七八九十百千万]+)\s*)?[章回节]/g)) {
     const a = parseNoteChapterNum(match[1]);
@@ -431,9 +431,35 @@ async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"
   const path = capturedPath ?? await storyPath(repo, note.worldId);
   if (!path.length) return [];
   const range = note.progress?.update ?? { from: Math.max(0, note.scope.from ?? 0), to: Math.min(path.length - 1, note.scope.to ?? path.length - 1) };
-  const piece = (index: number) => {
+  const splitLongText = (raw: string, limit = NOTE_BATCH_CHARS): string[] => {
+    if (raw.length <= limit) return [raw];
+    const chunks: string[] = [];
+    let current = "";
+    for (const para of raw.split(/\n{2,}/)) {
+      if (para.length > limit) {
+        if (current) { chunks.push(current); current = ""; }
+        for (let i = 0; i < para.length; i += limit) chunks.push(para.slice(i, i + limit));
+      } else if (current && current.length + 2 + para.length > limit) {
+        chunks.push(current);
+        current = para;
+      } else {
+        current = current ? `${current}\n\n${para}` : para;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  };
+  const piecesForNode = (index: number): (NoteMaterial & { ordinal: number })[] => {
     const node = path[index];
-    return { ordinal: index, section: index, title: turnLabel(index), text: `${node.actionText?.trim() ? `【行动】${node.actionText.trim()}\n` : ""}${node.narrative}`, digest: false };
+    const full = `${node.actionText?.trim() ? `【行动】${node.actionText.trim()}\n` : ""}${node.narrative}`;
+    const parts = splitLongText(full);
+    return parts.map((text, partIdx) => ({
+      ordinal: index * 1000 + partIdx,
+      section: index,
+      title: parts.length > 1 ? `${turnLabel(index)}（${partIdx + 1}/${parts.length}）` : turnLabel(index),
+      text,
+      digest: false,
+    }));
   };
   const inRange = path.map((_, index) => index).filter((index) => index >= range.from && index <= range.to);
   if (note.kind === "plot" || note.kind === "timeline") {
@@ -444,10 +470,10 @@ async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"
     chapters.forEach((chapter, index) => {
       const first = at.get(chapter.firstNodeId), last = at.get(chapter.lastNodeId);
       if (chapter.stale || first === undefined || last === undefined || first < range.from || last > range.to || !chapter.summary.trim()) return;
-      pieces.push({ ordinal: 1_000_000 + index, section: last, title: `${chapter.title}（${turnLabel(first)}～${turnLabel(last)}）`, text: chapter.summary, digest: true });
+      pieces.push({ ordinal: 1_000_000_000 + index, section: last, title: `${chapter.title}（${turnLabel(first)}～${turnLabel(last)}）`, text: chapter.summary, digest: true });
       for (let i = first; i <= last; i++) covered.add(i);
     });
-    for (const index of inRange) if (!covered.has(index) && path[index].narrative.trim()) pieces.push(piece(index));
+    for (const index of inRange) if (!covered.has(index) && path[index].narrative.trim()) pieces.push(...piecesForNode(index));
     return pieces.sort((a, b) => a.section - b.section || a.ordinal - b.ordinal);
   }
   let picked: number[];
@@ -465,7 +491,7 @@ async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"
     // Where it first appeared matters, and what happened lately matters most.
     picked = hits.length > 40 ? [...hits.slice(0, 6), ...hits.slice(-34)] : hits;
   }
-  return picked.sort((a, b) => a - b).map(piece);
+  return picked.sort((a, b) => a - b).flatMap(piecesForNode);
 }
 
 /** Material in request-sized batches, never splitting one piece. */
@@ -605,8 +631,8 @@ export function noteBatchMessages(bookTitle: string, note: Pick<CanonNote, "kind
   // A batch the service would not take is tried once more as a plain, neutral summary (R30 step 2).
   const calm = neutral ? NEUTRAL : "";
   const intro = story
-    ? `你在为互动小说《${bookTitle}》整理“本局札记”：这局故事已经写出的内容，供之后接着写时参考。只依据下面给出的本局正文，不补材料以外的情节，不评价。${focus(note)}每条末尾用括号标出处，如（第12回合）。`
-    : `你在为小说《${bookTitle}》整理“原著札记”，供之后写同人故事时参考。只依据下面给出的原著材料，不补材料以外的情节，不评价。${focus(note)}每条末尾用括号标出处章节，如（第12章）。`;
+    ? `你在为互动小说《${bookTitle}》整理“本局札记”：这局故事已经写出的内容，供之后接着写时参考。只依据下面给出的本局正文，不补材料以外的情节，不评价。${focus(note)}每条末尾必须用括号标明出处回合，如（第1回合）或（第12回合）。`
+    : `你在为小说《${bookTitle}》整理“原著札记”，供之后写同人故事时参考。只依据下面给出的原著材料，不补材料以外的情节，不评价。${focus(note)}每条末尾必须用括号标明出处章节，如（第12章）。`;
   return [
     { role: "system", content: `${intro}${calm}只输出札记正文，不超过 ${compact ? 600 : final ? NOTE_MAX : PART_MAX} 字。${compact ? "直接写简短要点，优先保留推进情节或回答问题的事实。" : ""}` },
     { role: "user", content: `${story ? "【本局正文】" : "【原著材料】"}${material}` },

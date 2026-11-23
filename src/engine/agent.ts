@@ -80,14 +80,23 @@ export type AgentSnapshot = AgentExecutionSnapshot<AgentTask>;
 export interface AgentToolStep extends AgentProjectionStep {}
 
 /** Select a saved native service. The host resolves its credentials and endpoint grant. */
-export function agentModelReference(model: LlmConfig, inputTokens = model.contextTokens, thinkingMode?: AgentThinkingMode): Json {
-  const resolvedThinking = thinkingMode ?? (model as { thinkingMode?: AgentThinkingMode }).thinkingMode;
-  return asJson({ slot: model.slot, model: model.model, protocol: model.protocol,
-    ...(model.auxModel?.trim() ? { auxModel: model.auxModel.trim() } : {}),
+export function agentModelReference(
+  model: LlmConfig & { profileId?: string; thinkingMode?: AgentThinkingMode },
+  inputTokens = model.contextTokens,
+  thinkingMode?: AgentThinkingMode,
+): Json {
+  const resolvedThinking = thinkingMode ?? model.thinkingMode;
+  const maxOutput = model.maxOutputTokens ?? model.maxTokens;
+  return asJson({
+    ...(model.profileId ? { profileId: model.profileId } : {}),
+    slot: model.slot,
+    model: model.model.trim(),
+    protocol: model.protocol,
+    auxModel: model.auxModel?.trim() || "",
     ...(resolvedThinking ? { thinkingMode: resolvedThinking } : {}),
     ...(inputTokens !== undefined ? { inputTokens, contextTokens: inputTokens } : {}),
-    ...(model.contextWindowTokens !== undefined ? { contextWindowTokens: model.contextWindowTokens } : {}),
-    ...((model.maxOutputTokens ?? model.maxTokens) !== undefined ? { maxOutputTokens: model.maxOutputTokens ?? model.maxTokens } : {}),
+    contextWindowTokens: model.contextWindowTokens ?? null,
+    maxOutputTokens: maxOutput ?? null,
   });
 }
 function taskModel(task: AgentTask): AgentTask {
@@ -180,15 +189,15 @@ export function mergeAgentSessionPage(current: AgentSessionDetail | null, page: 
 
 export const BUILTIN_AGENT_SKILLS = [
   { id: "canon-reference", name: "遵循原著", description: "搜索和阅读原文，逐项核对人物、设定与剧情，保留本局合理改写。", version: "1.8.0" },
-  { id: "story-writing", name: "故事写作", description: "按任务创作正式剧情，区分正文与执行说明。", version: "1.6.0" },
-  { id: "world-upkeep", name: "世界整理", description: "校对和整理人物、记忆、规则与关联状态。", version: "1.5.0" },
+  { id: "story-writing", name: "故事写作", description: "按任务创作正式剧情，区分正文与执行说明。", version: "1.7.0" },
+  { id: "world-upkeep", name: "世界整理", description: "校对和整理人物、记忆、规则与关联状态。", version: "1.6.0" },
   { id: "story-recap", name: "故事回顾", description: "回顾当前处境、关键选择与未完事项，保留本局依据。", version: "1.1.0" },
   { id: "character-knowledge", name: "人物与知情", description: "核对身份、称呼、关系，以及人物何时获知或相信某件事。", version: "1.3.0" },
   { id: "continuity-check", name: "情节连续性", description: "检查指定情节的人物、物件、地点、时间与因果衔接。", version: "1.1.1" },
   { id: "story-threads", name: "线索与承诺", description: "按路线查阅关键线索、约定与实际进展，保留出处。", version: "1.1.0" },
-  { id: "historical-world", name: "历史世界", description: "核对时代、称谓、日期和历史背景。", version: "1.2.0" },
+  { id: "historical-world", name: "历史世界", description: "核对时代、称谓、日期和历史背景。", version: "1.3.0" },
   { id: "script-play", name: "剧本", description: "参考本局可编辑剧本，尊重玩家行动。", version: "1.0.0" },
-  { id: "challenge-play", name: "挑战", description: "处理本局挑战目标与期限。", version: "1.1.0" },
+  { id: "challenge-play", name: "挑战", description: "处理本局挑战目标与期限。", version: "1.2.0" },
   { id: "spectator-play", name: "旁观", description: "依照玩家幕后要求推进旁观故事。", version: "1.0.0" },
 ] as const;
 
@@ -280,8 +289,31 @@ export class AgentClient {
   }
   answer(taskId: string, questionId: string, answers: Record<string, string>, cancelled = false): Promise<unknown> { return this.call({ op: "answer_question", id: crypto.randomUUID(), taskId, questionId, answers, cancelled }); }
   cancelQueued(inputId: string): Promise<unknown> { return this.call({ op: "cancel_queued", inputId }); }
-  compact(taskId: string, inputTokens?: number, taskModel?: LlmConfig, limits?: AgentLimits, modelUrl?: string): Promise<unknown> {
-    return this.call({ op: "compact", taskId, ...(inputTokens !== undefined ? { inputTokens } : {}), ...(taskModel ? { model: agentModelReference(taskModel, inputTokens) } : {}), ...(limits ? { limits } : {}), ...(modelUrl ? { modelUrl } : {}) });
+  compact(
+    taskId: string,
+    inputTokens?: number,
+    taskModel?: LlmConfig & { profileId?: string; thinkingMode?: AgentThinkingMode },
+    limits?: AgentLimits,
+    modelUrl?: string,
+    profileId?: string,
+    thinkingMode?: AgentThinkingMode,
+  ): Promise<unknown> {
+    const resolvedProfileId = profileId ?? taskModel?.profileId;
+    const resolvedThinking = thinkingMode ?? taskModel?.thinkingMode;
+    return this.call({
+      op: "compact",
+      taskId,
+      ...(resolvedProfileId ? { profileId: resolvedProfileId } : {}),
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(taskModel ? {
+        model: agentModelReference(taskModel, inputTokens, resolvedThinking),
+        contextWindowTokens: taskModel.contextWindowTokens ?? null,
+        maxOutputTokens: (taskModel.maxOutputTokens ?? taskModel.maxTokens) ?? null,
+      } : {}),
+      ...(resolvedThinking ? { thinkingMode: resolvedThinking } : {}),
+      ...(limits ? { limits } : {}),
+      modelUrl: modelUrl?.trim() ?? "",
+    });
   }
   async authorizeNetwork(network: AgentNetwork): Promise<AgentNetwork> { return (await this.call<{ network: AgentNetwork }>({ op: "network_authorize", network })).network; }
   async toolPackages(): Promise<AgentToolPackage[]> { return (await this.call<{ packages: AgentToolPackage[] }>({ op: "toolpkg_list" })).packages; }
@@ -304,8 +336,35 @@ export class AgentClient {
     const res = await this.call<{ discarded: boolean; removedChanges: number; task: AgentTask }>({ op: "discard_drafts", taskId });
     return { ...res, task: taskModel(res.task) };
   }
-  async continue(taskId: string, text?: string, limits?: AgentLimits, inputTokens?: number, taskModel?: LlmConfig, modelUrl?: string, recheck = false): Promise<{ taskId: string; runId: string }> {
-    return this.call({ op: "continue", taskId, text, limits, recheck, ...(inputTokens !== undefined ? { inputTokens } : {}), ...(taskModel ? { model: agentModelReference(taskModel, inputTokens) } : {}), ...(modelUrl ? { modelUrl } : {}) });
+  async continue(
+    taskId: string,
+    text?: string,
+    limits?: AgentLimits,
+    inputTokens?: number,
+    taskModel?: LlmConfig & { profileId?: string; thinkingMode?: AgentThinkingMode },
+    modelUrl?: string,
+    recheck = false,
+    profileId?: string,
+    thinkingMode?: AgentThinkingMode,
+  ): Promise<{ taskId: string; runId: string }> {
+    const resolvedProfileId = profileId ?? taskModel?.profileId;
+    const resolvedThinking = thinkingMode ?? taskModel?.thinkingMode;
+    return this.call({
+      op: "continue",
+      taskId,
+      text,
+      limits,
+      recheck,
+      ...(resolvedProfileId ? { profileId: resolvedProfileId } : {}),
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(taskModel ? {
+        model: agentModelReference(taskModel, inputTokens, resolvedThinking),
+        contextWindowTokens: taskModel.contextWindowTokens ?? null,
+        maxOutputTokens: (taskModel.maxOutputTokens ?? taskModel.maxTokens) ?? null,
+      } : {}),
+      ...(resolvedThinking ? { thinkingMode: resolvedThinking } : {}),
+      modelUrl: modelUrl?.trim() ?? "",
+    });
   }
   preferences(): Promise<AgentPreferences> { return getAgentPreferences(this.game); }
   savePreferences(value: AgentPreferences): Promise<void> { return saveAgentPreferences(this.game, value); }

@@ -9,6 +9,10 @@ describe("每段用量 (R29-T004)", () => {
     expect(purposeLabel("reference-review:0:1")).toBe("原著核对");
     expect(purposeLabel("canon-notes")).toBe("札记");
     expect(purposeLabel("agent")).toBe("助手");
+    expect(purposeLabel("companion")).toBe("伴聊");
+    expect(purposeLabel("companion:compact")).toBe("伴聊");
+    expect(purposeLabel("agent-context")).toBe("助手记忆整理");
+    expect(purposeLabel("status-tidy")).toBe("状况整理");
     expect(purposeLabel("sync-facts")).toBe("改后同步");
     const platform = await createMemoryPlatform();
     await Game.open(platform, null);

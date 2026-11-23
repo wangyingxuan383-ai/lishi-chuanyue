@@ -30,8 +30,10 @@ export function comboOf(e: KeyboardEvent): string {
 
 function editable(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
-  if (!el || !el.closest) return false;
-  return !!el.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']");
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (!el.closest) return false;
+  return !!el.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])");
 }
 
 const OVERLAY = ".sheet, .dialog, .panel:not(.docked)";
@@ -47,12 +49,13 @@ export function useShortcuts(map: Record<string, Shortcut>, enabled: boolean) {
       if (!shortcut) return;
       const modified = e.ctrlKey || e.metaKey || e.altKey || /^F\d+$/.test(e.key);
       if (editable(e.target) && (!modified || !shortcut.inInputs)) return;
-      // A Ctrl combination of ours never falls through to the WebView's own
-      // (Ctrl+R would reload the page and lose what is on screen).
-      if (e.ctrlKey || e.metaKey) e.preventDefault();
-      if (e.repeat) return;
       if (!shortcut.overSheets && document.querySelector(OVERLAY)) return;
+      if (e.repeat) {
+        if (e.ctrlKey || e.metaKey) e.preventDefault();
+        return;
+      }
       if (shortcut.run() === false) return;
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
       e.preventDefault();
       e.stopPropagation();
     };

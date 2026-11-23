@@ -10,7 +10,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 const NORMAL_BODY = 1024 * 1024;
 const IMPORT_BODY = 64 * 1024 * 1024;
 const MAX_RESPONSE = 128 * 1024 * 1024;
-const METHODS = new Set(["status", "importLegacy", "sqlQuery", "sqlBatch", "sqlBackup", "sqlListBackups", "sqlBackupInventory", "sqlDeleteBackups", "sqlRestore", "start", "snapshot", "list", "stop", "resume", "settle", "context", "agent", "pi_agent"]);
+const METHODS = new Set(["status", "importLegacy", "sqlQuery", "sqlBatch", "sqlBackup", "sqlListBackups", "sqlBackupInventory", "sqlDeleteBackups", "sqlRestore", "start", "snapshot", "list", "stop", "resume", "settle", "context", "agent", "pi_agent", "companion"]);
 
 export class HostError extends Error {
   constructor(readonly code: string, message: string, readonly status = 500, readonly failure?: unknown) { super(message); }

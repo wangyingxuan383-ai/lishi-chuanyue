@@ -441,16 +441,52 @@ impl StoryToolGateway {
                 if edits.is_empty() || edits.len() > 30 {
                     return Err(Error::Invalid("批量暂存仅支持1至30项修改".into()));
                 }
+                let mut batch_snapshots = crate::pi_resources::BatchSnapshots::new();
                 let mut results = Vec::with_capacity(edits.len());
+                let mut batch_changes = Vec::with_capacity(edits.len());
                 for (idx, item) in edits.iter().enumerate() {
-                    let resolved = crate::pi_resources::resolve(&tx, &task, &plan, "stage_edit", item)?;
+                    let resolved = crate::pi_resources::resolve_in_batch(&tx, &task, &plan, item, &batch_snapshots)?;
                     let mut item_args = ws::scoped_resource_args(&tx, &plan, &request.task_id, &resolved)?;
+                    crate::pi_resources::record_batch_snapshot(
+                        &tx,
+                        &task,
+                        &plan,
+                        ws::text(&item_args, "kind"),
+                        ws::text(&item_args, "id"),
+                        &mut batch_snapshots,
+                    )?;
                     item_args["_agentCall"] = format!("{}:{idx}", request.call_id).into();
                     let staged = ws::stage(&tx, &plan, &request.task_id, &item_args)?;
-                    results.push(json!({"index": idx, "kind": item_args["kind"], "id": item_args["id"], "summary": item_args["summary"], "changes": staged["changes"]}));
+                    let canonical = ws::canonical_kind(ws::text(&item_args, "kind"));
+                    let change = json!({
+                        "kind": canonical,
+                        "id": ws::text(&item_args, "id"),
+                        "path": ws::text(&item_args, "path"),
+                        "operation": ws::text(&item_args, "operation"),
+                        "summary": item_args["summary"],
+                    });
+                    batch_changes.push(change.clone());
+                    results.push(json!({
+                        "index": idx,
+                        "kind": canonical,
+                        "id": ws::text(&item_args, "id"),
+                        "path": ws::text(&item_args, "path"),
+                        "operation": ws::text(&item_args, "operation"),
+                        "summary": item_args["summary"],
+                        "reused": staged["reused"] == true,
+                        "deduped": staged["deduped"] == true,
+                        "changes": [change],
+                    }));
                 }
                 let w = ws::workspace(&tx, &request.task_id)?;
-                json!({"staged": results.len(), "results": results, "changesCount": ws::changes(&w).len()})
+                let all_changes = ws::changes(&w);
+                json!({
+                    "staged": results.len(),
+                    "results": results,
+                    "changes": batch_changes,
+                    "changesCount": all_changes.len(),
+                    "message": "已批量放入修改草稿（尚未生成预览或完成回执）；全部修改暂存完毕后，必须调用 finish_task（先看预览策略下调用 finish_task 不会直接写存档，而是生成供玩家确认的修改预览按钮）",
+                })
             }
             "stage_story_turn" => ws::stage_story(&tx, &request.task_id, &args)?,
             "stage_route" => ws::stage_route(&tx, &plan, &request.task_id, &args)?,
@@ -597,7 +633,7 @@ impl StoryToolGateway {
     /// reply is the whole result when nothing is staged, no question waits,
     /// no child is checking and no canon finding is owed. Anything else stays
     /// an interruption so a missing receipt is never faked (R26).
-    pub(crate) fn finish_readonly_reply(&self, permit: &TaskPermit, answer: &str) -> Result<bool> {
+    pub fn finish_readonly_reply(&self, permit: &TaskPermit, answer: &str) -> Result<bool> {
         if answer.trim().is_empty() { return Ok(false); }
         let mut db = self.0 .0.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -629,10 +665,94 @@ impl StoryToolGateway {
                 return Ok(false);
             }
         }
+        let steps = ws::parse(ws::text(&task, "plan_json"));
+        if steps
+            .as_array()
+            .is_some_and(|items| items.iter().any(|s| s["status"] == "blocked"))
+        {
+            return Ok(false);
+        }
+        let mut verified_goal_result = Value::Null;
+        if !metadata["goalReport"].is_null() {
+            let plan = task_plan(&tx, &task)?;
+            let Ok(Some(checked)) = crate::pi_goal_report::for_finish(&tx, &task, &plan) else {
+                return Ok(false);
+            };
+            if checked["status"] != "completed"
+                || checked["unresolvedGoals"].as_array().is_some_and(|v| !v.is_empty())
+                || checked["unresolvedGroupIds"].as_array().is_some_and(|v| !v.is_empty())
+            {
+                return Ok(false);
+            }
+            verified_goal_result = checked;
+        } else if metadata["goalResult"].is_object()
+            && metadata["goalResult"]["status"] != "completed"
+        {
+            return Ok(false);
+        }
         let summary: String = answer.chars().take(2000).collect();
-        let result = json!({"status":"answered","goalStatus":"completed","goalCompleted":true,"summary":summary,"changed":false,"changes":[],"implicitFinish":true});
+        let mut result = json!({"status":"answered","goalStatus":"completed","goalCompleted":true,"summary":summary,"changed":false,"changes":[],"implicitFinish":true});
+        if !verified_goal_result.is_null() {
+            result["goalResult"] = verified_goal_result;
+        }
         tx.execute("UPDATE pi_tasks SET status='completed',result_json=?,updated_at=? WHERE id=?", params![result.to_string(), ws::now(), permit.task_id])?;
         release_finished(&tx, &task)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// When `policy == "preview"`, a model that staged valid edits and replied in
+    /// plain text (thinking `finish_task` would prematurely commit) can safely
+    /// materialize the formal `previewed` state (`changed: false`, zero formal
+    /// world writes) provided all skill, conflict, and canon checks pass.
+    pub fn finish_preview_reply(&self, permit: &TaskPermit, answer: &str) -> Result<bool> {
+        if answer.trim().is_empty() {
+            return Ok(false);
+        }
+        let mut db = self.0 .0.lock()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = task_row(&tx, &permit.task_id)?;
+        if task["policy"] != "preview"
+            || task["read_only"] == 1
+            || !["running", "committing"].contains(&ws::text(&task, "status"))
+            || !task["question_json"].is_null()
+            || task["stop_revision"].as_i64().unwrap_or(0) > 0
+            || crate::pi_lifecycle::attempt(&task) != permit.attempt_id()
+        {
+            return Ok(false);
+        }
+        let workspace = ws::workspace(&tx, &permit.task_id)?;
+        if ws::changes(&workspace).is_empty()
+            || tx.query_row("SELECT EXISTS(SELECT 1 FROM pi_children WHERE task_id=? AND status IN ('prepared','running'))", [&permit.task_id], |r| r.get::<_, bool>(0))?
+            || task["intent_revision"].as_i64().unwrap_or(0) != task["consumed_intent_revision"].as_i64().unwrap_or(0)
+            || tx.query_row("SELECT EXISTS(SELECT 1 FROM pi_inputs WHERE task_id=? AND status='pending' AND delivery IN ('steer','answer'))", [&permit.task_id], |r| r.get::<_, bool>(0))?
+        {
+            return Ok(false);
+        }
+        let steps = ws::parse(ws::text(&task, "plan_json"));
+        if steps
+            .as_array()
+            .is_some_and(|items| items.iter().any(|s| s["status"] == "blocked"))
+        {
+            return Ok(false);
+        }
+        let summary: String = answer.chars().take(2000).collect();
+        let request = PiCallRequest {
+            task_id: permit.task_id.clone(),
+            call_id: format!("preview:{}", ws::id()),
+            tool: "finish_task".into(),
+            args: json!({"summary": summary}),
+            intent_revision: task["intent_revision"].as_i64().unwrap_or(0),
+            world_version: ws::text(&task, "base_world_version").into(),
+            external_write: false,
+        };
+        let plan = task_plan(&tx, &task)?;
+        let Ok(result) = finish(&tx, &task, &plan, &request, false) else {
+            return Ok(false);
+        };
+        if result["status"] != "previewed" {
+            return Ok(false);
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -662,6 +782,7 @@ impl StoryToolGateway {
         {
             return Err(Error::Invalid("这项任务不能继续执行".into()));
         }
+        let _ = lease::reclaim_dead_leases(&tx);
         let now = lease::now_ms();
         if lease::current(&tx, ws::text(&task, "world_id"))?
             .is_some_and(|l| !l.ticket.owner_id.is_empty() && l.expires_at_ms > now)
@@ -772,9 +893,23 @@ impl StoryToolGateway {
             lease::now_ms(),
             lease::DEFAULT_TTL_MS,
         )?;
-        let backup = json!({"worldId":row["world_id"],"postFingerprint":row["post_fingerprint"],"before":ws::parse(ws::text(&row,"before_json"))});
+        let world_id = ws::text(&row, "world_id");
+        let task_id = ws::text(&row, "task_id");
+        let backup = json!({"worldId":world_id,"postFingerprint":row["post_fingerprint"],"before":ws::parse(ws::text(&row,"before_json"))});
         ws::restore_backup(&tx, &backup)?;
-        tx.execute("UPDATE pi_sessions SET line_id=(SELECT current_line_id FROM worlds WHERE id=?) WHERE id IN (SELECT session_id FROM pi_tasks WHERE id=?)",params![ws::text(&row,"world_id"),ws::text(&row,"task_id")])?;
+        let restored_line: String = tx.query_row(
+            "SELECT current_line_id FROM worlds WHERE id=?",
+            [world_id],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "UPDATE pi_sessions SET line_id=?1 WHERE world_id=?2 AND (id IN (SELECT session_id FROM pi_tasks WHERE id=?3) OR line_id NOT IN (SELECT id FROM lines WHERE world_id=?2))",
+            params![restored_line, world_id, task_id],
+        )?;
+        tx.execute(
+            "UPDATE pi_tasks SET line_id=?1 WHERE world_id=?2 AND line_id NOT IN (SELECT id FROM lines WHERE world_id=?2)",
+            params![restored_line, world_id],
+        )?;
         tx.execute(
             "DELETE FROM story_recovery_points WHERE id=?",
             [recovery_id],

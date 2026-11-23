@@ -205,8 +205,12 @@ export const SEALS: SealRule[] = [
   { id: "lines", name: "另辟蹊径", how: "走出三条世界线", test: (f) => f.lines >= 3 },
 ];
 
+export function sealsForState(state: Pick<WorldState, "era">): SealRule[] {
+  return state.era.mode === "free" ? SEALS.filter((s) => s.id !== "change" && s.id !== "turn") : SEALS;
+}
+
 export function earnedSeals(facts: SealFacts): SealRule[] {
-  return SEALS.filter((s) => (facts.state.era.mode !== "free" || s.id !== "change") && s.test(facts));
+  return sealsForState(facts.state).filter((s) => s.test(facts));
 }
 
 /** Seals earned now that are not in `shown`; the toast text for them, or null. */
