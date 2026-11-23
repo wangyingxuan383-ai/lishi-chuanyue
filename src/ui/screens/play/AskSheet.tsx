@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AGENT_TASK_RECIPES, taskRecipeText } from "../../../content/agentTasks";
 import { useApp } from "../../app/context";
+import { Icon } from "../../components/Icon";
 import { MenuSheet, Sheet } from "../../components/Sheet";
 import { CompanionMarkdown } from "../companion/CompanionMarkdown";
 import { SourceScopeRow } from "../../components/SourceScope";
@@ -91,7 +92,8 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: 
               });
             }}
           >
-            转到伴聊深聊 ↗
+            <span>转到伴聊深聊</span>
+            <Icon name="external" size={16} />
           </button>
         </div>
         {recipes && <MenuSheet title="常用问题" onClose={() => setRecipes(false)} items={AGENT_TASK_RECIPES.filter(recipe => ["recap", "characters", "canon", "continuity", "clock-ledger"].includes(recipe.id)).map(recipe => ({ label: recipe.name, onSelect: () => setQuestion(taskRecipeText(recipe, recipe.scope, question)) }))} />}

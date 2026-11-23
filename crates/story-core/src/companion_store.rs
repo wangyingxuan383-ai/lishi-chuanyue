@@ -171,7 +171,13 @@ pub fn is_builtin_persona_id(id: &str) -> bool {
 fn read_persona_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let id: String = row.get(0)?;
     let builtin = is_builtin_persona_id(&id);
-    Ok(json!({
+    let metadata = parse_json_or(&row.get::<_, String>(15)?, json!({}));
+    let bound_line_id = metadata
+        .get("boundLineId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let mut out = json!({
         "id": id,
         "name": row.get::<_, String>(1)?,
         "avatar": row.get::<_, String>(2)?,
@@ -189,10 +195,14 @@ fn read_persona_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "sortOrder": row.get::<_, i64>(14)?,
         "builtin": builtin,
         "customized": builtin,
-        "metadata": parse_json_or(&row.get::<_, String>(15)?, json!({})),
+        "metadata": metadata,
         "createdAt": row.get::<_, String>(16)?,
         "updatedAt": row.get::<_, String>(17)?,
-    }))
+    });
+    if let Some(lid) = bound_line_id {
+        out["boundLineId"] = lid.into();
+    }
+    Ok(out)
 }
 
 fn read_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -783,6 +793,77 @@ pub(crate) fn next_message_seq_tx(tx: &Transaction<'_>, session_id: &str) -> Res
     )?)
 }
 
+pub(crate) fn heal_orphan_streaming_db(
+    db: &mut Connection,
+    session_id: &str,
+    active_run_id: Option<&str>,
+) -> Result<usize> {
+    ensure_schema_db(db)?;
+    let orphan_rows: Vec<(String, String)> = {
+        let mut stmt = db.prepare(
+            "SELECT id, steps_json FROM companion_messages
+             WHERE session_id=?1 AND status='streaming' AND (?2 IS NULL OR id<>?2)",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id, active_run_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let cleaned_meta: Option<String> = if active_run_id.is_none() {
+        let raw_meta: Option<String> = db
+            .query_row(
+                "SELECT metadata_json FROM companion_sessions WHERE id=?1",
+                [session_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        raw_meta.and_then(|s| {
+            let mut v: Value = serde_json::from_str(&s).ok()?;
+            let obj = v.as_object_mut()?;
+            let removed_a = obj.remove("activeRunId").is_some();
+            let removed_b = obj.remove("active_run_id").is_some();
+            (removed_a || removed_b).then(|| v.to_string())
+        })
+    } else {
+        None
+    };
+
+    if orphan_rows.is_empty() && cleaned_meta.is_none() {
+        return Ok(0);
+    }
+    crate::maintenance::guard(db)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = now_iso();
+    for (msg_id, steps_raw) in &orphan_rows {
+        let mut steps: Value = serde_json::from_str(steps_raw).unwrap_or_else(|_| json!([]));
+        if let Some(arr) = steps.as_array_mut() {
+            for step in arr {
+                if step["status"] == "running" {
+                    step["status"] = "failed".into();
+                    if step["summary"] == "正在查阅…" {
+                        step["summary"] = "已中断".into();
+                    }
+                }
+            }
+        }
+        tx.execute(
+            "UPDATE companion_messages SET status='interrupted', steps_json=?1, updated_at=?2
+             WHERE id=?3 AND status='streaming'",
+            params![steps.to_string(), now, msg_id],
+        )?;
+    }
+    if let Some(meta_str) = cleaned_meta {
+        tx.execute(
+            "UPDATE companion_sessions SET metadata_json=?1, updated_at=?2 WHERE id=?3",
+            params![meta_str, now, session_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(orphan_rows.len())
+}
+
 impl CompanionStore {
     /// Creates `companion_*` tables and indexes idempotently. Never inserts rows.
     pub fn initialize(&self) -> Result<()> {
@@ -866,11 +947,14 @@ impl CompanionStore {
         let source_world_id = input["sourceWorldId"].as_str().filter(|s| !s.is_empty());
         let source_person_id = input["sourcePersonId"].as_str().filter(|s| !s.is_empty());
         let source_head_id = input["sourceHeadId"].as_str().filter(|s| !s.is_empty());
-        let metadata = input
+        let mut metadata = input
             .get("metadata")
             .filter(|v| v.is_object())
             .cloned()
             .unwrap_or_else(|| json!({}));
+        if let Some(lid) = input["boundLineId"].as_str().filter(|s| !s.is_empty()) {
+            metadata["boundLineId"] = lid.into();
+        }
 
         let mut db = self.0.lock()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1327,6 +1411,59 @@ impl CompanionStore {
         }))
     }
 
+    pub fn heal_orphan_streaming(
+        &self,
+        session_id: &str,
+        active_run_id: Option<&str>,
+    ) -> Result<usize> {
+        let mut db = self.0.lock()?;
+        ensure_schema_db(&db)?;
+        heal_orphan_streaming_db(&mut db, session_id, active_run_id)
+    }
+
+    pub fn get_session_detail_with_active(
+        &self,
+        id: &str,
+        active_run_for: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<Value> {
+        let mut db = self.0.lock()?;
+        let initial_session =
+            get_session_db(&db, id)?.ok_or_else(|| invalid("找不到这段伴聊会话"))?;
+        let real_id = initial_session["id"].as_str().unwrap_or(id).to_owned();
+        let active_run_id = active_run_for(&real_id);
+        let _ = heal_orphan_streaming_db(&mut db, &real_id, active_run_id.as_deref());
+        let mut session = get_session_db(&db, &real_id)?.unwrap_or(initial_session);
+        let persona = resolve_persona_db(
+            &db,
+            session["personaId"].as_str().unwrap_or(DEFAULT_PERSONA_ID),
+            session["metadata"].get("personaSnapshot"),
+        )?;
+        let all = load_session_messages_db(&db, &real_id)?;
+        let (resolved_leaf, messages) =
+            project_active_branch(&all, session["activeLeafId"].as_str());
+        if session["activeLeafId"].is_null() {
+            if let Some(leaf) = resolved_leaf {
+                session["activeLeafId"] = leaf.into();
+            }
+        }
+        let pi_tasks = match session["piSessionId"].as_str() {
+            Some(pi_id) => load_pi_tasks_summary(&db, pi_id)?,
+            None => vec![],
+        };
+        let active_val = match active_run_id {
+            Some(rid) => Value::String(rid),
+            None => Value::Null,
+        };
+        session["activeRunId"] = active_val.clone();
+        Ok(json!({
+            "session": session,
+            "persona": persona,
+            "messages": messages,
+            "piTasks": pi_tasks,
+            "activeRunId": active_val,
+        }))
+    }
+
     pub fn get_session_detail(&self, id: &str) -> Result<Value> {
         let db = self.0.lock()?;
         let mut session = get_session_db(&db, id)?.ok_or_else(|| invalid("找不到这段伴聊会话"))?;
@@ -1348,11 +1485,13 @@ impl CompanionStore {
             Some(pi_id) => load_pi_tasks_summary(&db, pi_id)?,
             None => vec![],
         };
+        session["activeRunId"] = Value::Null;
         Ok(json!({
             "session": session,
             "persona": persona,
             "messages": messages,
             "piTasks": pi_tasks,
+            "activeRunId": Value::Null,
         }))
     }
 

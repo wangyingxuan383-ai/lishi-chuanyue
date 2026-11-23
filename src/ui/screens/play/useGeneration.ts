@@ -110,7 +110,7 @@ export interface GenerationDeps {
 export function useGeneration(d: GenerationDeps) {
   const [gen, setGen] = useState<Gen | null>(null);
   /** 连播 under way (旁观): which step of how many; between two steps nothing is generating, but the player still waits. */
-  const [auto, setAuto] = useState<{ step: number; total: number; runId?: string } | null>(null);
+  const [auto, setAuto] = useState<{ step: number; total: number; runId?: string; activeNote?: string | null } | null>(null);
   /** One message under the story at a time (AUDIT 5.1): what happened, and what to do now. */
   const [notice, setNotice] = useState<Notice | null>(null);
   /** No new words for a while: say it is still being written (AUDIT 5.5). */
@@ -180,15 +180,24 @@ export function useGeneration(d: GenerationDeps) {
     setGen({ phase: "starting", minHeight: deps.current.streamFloor(), ...g });
   };
   /** A 连播 step started (new or followed). */
-  const stepStarted = (index: number, total: number, runId?: string) => {
-    setAuto((prev) => ({ step: index, total, runId: runId ?? prev?.runId }));
-    begin({ text: "", action: null, variant: false });
+  const stepStarted = (index: number, total: number, runId?: string, directorNote?: string) => {
+    const cleanNote = directorNote?.trim() || undefined;
+    setAuto((prev) => ({
+      step: index,
+      total,
+      runId: runId ?? prev?.runId,
+      activeNote: cleanNote ?? null,
+    }));
+    const stepAction = cleanNote
+      ? ({ mode: "continue" as ActionMode, text: "", directorNote: cleanNote } as Gen["action"])
+      : null;
+    begin({ text: "", action: stepAction, variant: false });
   };
 
   const onEvent = (restore: Restore | null) => (e: TurnEvent | AutoplayEvent) => {
     if (!screenActive.current) return;
     const { game, refresh, showSaved } = deps.current;
-    if (e.type === "step") { resumedAutoplay.current = true; stepStarted(e.index, e.total, e.runId); }
+    if (e.type === "step") { resumedAutoplay.current = true; stepStarted(e.index, e.total, e.runId, e.directorNote); }
     else if (e.type === "finished") { resumedAutoplay.current = false; streamedText.current = ""; reachedOrganizing.current = false; setAuto(null); setGen(null); setExecutionStatus(""); handle.current = null; void refresh(); }
     else if (e.type === "execution-status") setExecutionStatus({
       reconnecting: "正在重新读取生成进度…", connected: "", "stop-requested": "已收到停止请求，正在收尾…",
@@ -387,14 +396,19 @@ export function useGeneration(d: GenerationDeps) {
     let played = 0;
     retry.current = () => startAutoplay(Math.max(1, turns - played));
     setNotice(null);
+    streamedText.current = "";
+    reachedOrganizing.current = false;
+    setGen(null);
     deps.current.follow.current = deps.current.autoScroll;
-    setAuto({ step: 0, total: turns });
+    setAuto({ step: 0, total: turns, activeNote: null });
     const forward = onEvent(null);
     autoHandle.current = game.autoplay(worldId, { turns }, (e: AutoplayEvent) => {
       if (!screenActive.current) return;
-      if (e.type === "step") stepStarted(e.index, e.total, e.runId);
+      if (e.type === "step") stepStarted(e.index, e.total, e.runId, e.directorNote);
       else if (e.type === "finished") {
         autoHandle.current = null;
+        streamedText.current = "";
+        reachedOrganizing.current = false;
         setAuto(null);
         setGen(null);
         void refresh();

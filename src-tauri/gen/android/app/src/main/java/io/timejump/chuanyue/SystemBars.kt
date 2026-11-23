@@ -2,7 +2,6 @@ package io.timejump.chuanyue
 
 import android.app.Activity
 import android.content.Context
-import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.view.View
@@ -16,11 +15,14 @@ import androidx.core.view.WindowInsetsControllerCompat
  * android.R.id.content by the system-bar insets, so what shows behind the bars
  * is that padding, i.e. the content view's (and window's) background. Painting
  * those with the theme's --bg makes the bars continue the page, and the
- * icons are switched to dark-on-light or light-on-dark to match. The last
- * colour is remembered so the next launch starts with it before the page loads.
+ * icons are switched to dark-on-light or light-on-dark to match. The default
+ * starts with #EFE5CF (宣纸书卷) and dark=false so cold-start never paints black
+ * or transparent bars before JS boots.
  */
 internal object SystemBars {
     private const val PREFS = "system_bars"
+    private const val DEFAULT_COLOR = 0xFFEFE5CF.toInt()
+    private const val DEFAULT_DARK = false
 
     fun apply(activity: Activity, color: Int, dark: Boolean) {
         val window = activity.window
@@ -42,10 +44,13 @@ internal object SystemBars {
             .putInt("color", color).putBoolean("dark", dark).apply()
     }
 
-    /** Applies the colour the page chose last time, if any. */
+    /** Applies the saved theme colour, defaulting to #EFE5CF (paper) on first cold launch. */
     fun restore(activity: Activity) {
         val prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!prefs.contains("color")) return
-        apply(activity, prefs.getInt("color", Color.BLACK), prefs.getBoolean("dark", false))
+        apply(
+            activity,
+            prefs.getInt("color", DEFAULT_COLOR),
+            prefs.getBoolean("dark", DEFAULT_DARK)
+        )
     }
 }

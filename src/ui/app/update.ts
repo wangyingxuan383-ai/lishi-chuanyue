@@ -39,6 +39,32 @@ export function androidPackage(release: ReleaseInfo): ReleaseAsset | null {
   return apks.find((a) => a.name === `chuanyue-${release.version}.apk`) ?? (apks.length === 1 ? apks[0] : null);
 }
 
+/** The Windows installer of a release: prefers `.msi`, then `-setup.exe` / setup `.exe`, then `.exe`. */
+export function windowsPackage(release: ReleaseInfo): ReleaseAsset | null {
+  const msis = release.assets.filter((a) => a.name.toLowerCase().endsWith(".msi"));
+  if (msis.length) {
+    return msis.find((a) => a.name.includes(release.version))
+      ?? msis.find((a) => /x64|amd64/i.test(a.name))
+      ?? (msis.length === 1 ? msis[0] : msis[0]);
+  }
+  const exes = release.assets.filter((a) => a.name.toLowerCase().endsWith(".exe"));
+  if (!exes.length) return null;
+  const setups = exes.filter((a) => /-setup\.exe$/i.test(a.name) || /setup/i.test(a.name));
+  if (setups.length) {
+    return setups.find((a) => a.name.includes(release.version))
+      ?? setups.find((a) => /x64|amd64/i.test(a.name))
+      ?? setups[0];
+  }
+  return exes.find((a) => a.name.includes(release.version)) ?? (exes.length === 1 ? exes[0] : exes[0]);
+}
+
+/** Matching package asset for the current platform (`android` / `web-dev` -> APK, `windows` -> MSI/EXE). */
+export function platformPackage(platform: Platform, release: ReleaseInfo): ReleaseAsset | null {
+  if (platform.name === "android" || platform.name === "web-dev") return androidPackage(release);
+  if (platform.name === "windows") return windowsPackage(release);
+  return null;
+}
+
 /** `sha256sum` lines (`<hash>  <name>`, `<hash> *<name>`); a name listed twice with different hashes counts as unknown. */
 export function parseSums(text: string): Map<string, string> {
   const sums = new Map<string, string>();

@@ -1,121 +1,129 @@
-/* 华丽 animations (D160): everything here only runs at :root[data-motion="rich"].
-   简洁 keeps the light fades of the other files; 关 (or the system's reduce-motion)
-   switches all animation off (base.css). Only transform, opacity and filter move. */
+/* 华丽 animations: everything here only runs at :root[data-motion="rich"].
+   简洁 keeps light fades; 关 (or system reduce-motion) disables all motion & delays.
+   Compositor-only (transform, opacity, filter) for zero-drop 60fps. */
 
 /* ---------- page changes (View Transitions; App.tsx) ---------- */
-::view-transition-group(*) { animation-duration: 420ms; animation-timing-function: var(--ease-out); }
-:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 520ms var(--ease-in) both; }
-/* R29: the new page blooms out of an ink blot with ragged edges and splashes (D163). */
+::view-transition-group(*) { animation-duration: 360ms; animation-timing-function: var(--ease-out); }
+:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 420ms var(--ease-in) both; }
 :root[data-vt="push"]::view-transition-new(root) {
-  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E"); mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E");
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E");
   -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: 50% 62%; mask-position: 50% 62%;
-  animation: vt-ink-bloom 760ms cubic-bezier(0.25, 0.75, 0.2, 1) both;
+  animation: vt-ink-bloom 560ms cubic-bezier(0.25, 0.75, 0.2, 1) both;
 }
-:root[data-vt="pop"]::view-transition-old(root) { animation: vt-pop-away 440ms var(--ease-in) both; z-index: 2; }
-:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 520ms var(--spring-soft) both; }
-/* Opening a book: its cover grows into the story (shared element “story-card”). */
-::view-transition-group(story-card) { animation-duration: 520ms; animation-timing-function: var(--spring-soft); z-index: 2; }
+/* When opening a book from Home, the book flourish already played — settle crisply in 240ms */
+:root[data-vt="push"][data-book-open="1"]::view-transition-new(root) {
+  -webkit-mask-image: none; mask-image: none;
+  animation: fade 240ms var(--ease-out) both;
+}
+:root[data-vt="push"][data-book-open="1"]::view-transition-old(root) {
+  animation: fade-out 220ms var(--ease-in) both;
+}
+:root[data-vt="pop"]::view-transition-old(root) { animation: vt-pop-away 360ms var(--ease-in) both; z-index: 2; }
+:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 420ms var(--spring-soft) both; }
+::view-transition-group(story-card) { animation-duration: 380ms; animation-timing-function: var(--spring-soft); z-index: 2; }
 ::view-transition-old(story-card), ::view-transition-new(story-card) { height: 100%; object-fit: cover; }
-@keyframes vt-recede { to { opacity: 0.25; transform: scale(0.9) translateY(2%); filter: blur(6px) brightness(0.75); } }
+@keyframes vt-recede { to { opacity: 0.28; transform: scale(0.94) translateY(1.5%); } }
 @keyframes vt-ink-bloom {
-  0% { -webkit-mask-size: 0% 0%; mask-size: 0% 0%; filter: saturate(0.2) brightness(0.85) contrast(1.15); }
-  35% { -webkit-mask-size: 120% 120%; mask-size: 120% 120%; filter: saturate(0.6) brightness(0.95); }
-  100% { -webkit-mask-size: 520% 520%; mask-size: 520% 520%; filter: none; }
+  0% { -webkit-mask-size: 0% 0%; mask-size: 0% 0%; }
+  40% { -webkit-mask-size: 130% 130%; mask-size: 130% 130%; }
+  100% { -webkit-mask-size: 520% 520%; mask-size: 520% 520%; }
 }
-@keyframes vt-pop-away { to { opacity: 0; transform: scale(0.84) translateY(4%); filter: blur(8px); } }
-@keyframes vt-come-back { from { opacity: 0.3; transform: scale(1.05); filter: blur(4px); } }
-/* With View Transitions running, the CSS screen entry would play twice. */
+@keyframes vt-pop-away { to { opacity: 0; transform: scale(0.92) translateY(3%); } }
+@keyframes vt-come-back { from { opacity: 0.35; transform: scale(1.03); } }
 :root[data-vt] .screen, :root[data-vt] .agent-conversation, :root[data-vt] .play-layout { animation: none !important; }
 
-/* ---------- lists come in one after another, with a soft spring ---------- */
+/* ---------- lists come in one after another ---------- */
 :root[data-motion="rich"] .sheet-menu > *, :root[data-motion="rich"] .settings-entry, :root[data-motion="rich"] .shelf > *,
 :root[data-motion="rich"] .mode-option, :root[data-motion="rich"] .theme-cards > * {
-  animation: pop-in 460ms var(--spring-soft) both;
+  animation: pop-in 420ms var(--spring-soft) both;
 }
-:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(2) { animation-delay: 30ms; }
-:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(3) { animation-delay: 60ms; }
-:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(4) { animation-delay: 90ms; }
-:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(5) { animation-delay: 120ms; }
-:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(6) { animation-delay: 150ms; }
-:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(n+7) { animation-delay: 180ms; }
-@keyframes pop-in { from { opacity: 0; transform: translateY(14px) scale(0.97); } }
-:root[data-motion="rich"] .world-card.featured { animation: hero-in 620ms var(--spring-soft) both; }
-:root[data-motion="rich"] .new-story { animation: pop-in 520ms var(--spring-soft) 80ms both; }
-@keyframes hero-in { from { opacity: 0; transform: translateY(24px) scale(0.95); filter: blur(4px); } }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(2) { animation-delay: 25ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(3) { animation-delay: 50ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(4) { animation-delay: 75ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(5) { animation-delay: 100ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(6) { animation-delay: 125ms; }
+:root[data-motion="rich"] :is(.sheet-menu, .settings-list, .shelf, .theme-cards) > :nth-child(n+7) { animation-delay: 150ms; }
+@keyframes pop-in { from { opacity: 0; transform: translate3d(0, 12px, 0) scale(0.98); } }
+:root[data-motion="rich"] .world-card.featured { animation: hero-in 520ms var(--spring-soft) both; }
+:root[data-motion="rich"] .new-story { animation: pop-in 460ms var(--spring-soft) 60ms both; }
+@keyframes hero-in { from { opacity: 0; transform: translate3d(0, 18px, 0) scale(0.97); } }
 
 /* ---------- sheets rise with a spring and follow the finger ---------- */
-:root[data-motion="rich"] .sheet { animation: sheet-rise 520ms var(--spring-soft) both; }
-@keyframes sheet-rise { from { transform: translateY(70%); opacity: 0.2; } }
-:root[data-motion="rich"] .dialog { animation: dialog-pop 420ms var(--spring-soft) both; }
-@keyframes dialog-pop { from { opacity: 0; transform: translate(-50%, -46%) scale(0.86); } }
+:root[data-motion="rich"] .sheet { animation: sheet-rise 460ms var(--spring-soft) both; }
+@keyframes sheet-rise { from { transform: translate3d(0, 64%, 0); opacity: 0.25; } }
+:root[data-motion="rich"] .dialog { animation: dialog-pop 380ms var(--spring-soft) both; }
+@keyframes dialog-pop { from { opacity: 0; transform: translate(-50%, -46%) scale(0.9); } }
 .sheet.dragging { animation: none !important; transition: none !important; }
-.sheet.settle { transition: transform 420ms var(--spring-soft) !important; }
-.sheet.flung { transition: transform 200ms var(--ease-in), opacity 200ms var(--ease-in) !important; }
+.sheet.settle { transition: transform 380ms var(--spring-soft) !important; }
+.sheet.flung { transition: transform 190ms var(--ease-in), opacity 190ms var(--ease-in) !important; }
 
-/* ---------- the passage: ink spreads into words ---------- */
-:root[data-motion="rich"] .story-text.streaming .sent { animation: ink-bleed 700ms var(--ease-out) both; }
-@keyframes ink-bleed { from { opacity: 0; filter: blur(5px); transform: translateY(3px); } 55% { opacity: 0.85; filter: blur(0.6px); } }
-/* The action flies up from the input bar into the story. */
+/* ---------- the passage: ink spreads into words; pure transform gold sweep ---------- */
+:root[data-motion="rich"] .story-text.streaming .sent { animation: ink-bleed 560ms var(--ease-out) both; }
+@keyframes ink-bleed { from { opacity: 0; transform: translate3d(0, 3px, 0); } 55% { opacity: 0.88; } }
 :root[data-motion="rich"] .turn-action.flying, :root[data-motion="rich"] .writing-turn .turn-written {
-  animation: fly-in 640ms var(--spring-soft) both;
+  animation: fly-in 540ms var(--spring-soft) both;
 }
-@keyframes fly-in { from { opacity: 0; transform: translateY(60vh) scale(0.9); } 60% { opacity: 1; } }
-/* A finished passage settles with a pale-gold sweep. */
-:root[data-motion="rich"] .turn.fresh { position: relative; }
+@keyframes fly-in { from { opacity: 0; transform: translate3d(0, 40vh, 0) scale(0.94); } 60% { opacity: 1; } }
+:root[data-motion="rich"] .turn.fresh { position: relative; overflow: hidden; }
 :root[data-motion="rich"] .turn.fresh::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: var(--radius);
-  background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, #e6c27a 32%, transparent) 50%, transparent 70%);
-  background-size: 250% 100%; animation: gold-sweep 1.3s var(--ease-out) both;
+  content: ""; position: absolute; top: 0; bottom: 0; left: -60%; width: 55%; pointer-events: none;
+  background: linear-gradient(105deg, transparent 0%, color-mix(in srgb, #e6c27a 32%, transparent) 50%, transparent 100%);
+  animation: gold-sweep 1.15s var(--ease-out) both;
 }
-@keyframes gold-sweep { from { background-position: 120% 0; } to { background-position: -60% 0; opacity: 0; } }
-:root[data-motion="rich"] .next-choices { animation: choices-in 600ms var(--spring-soft) 200ms both; }
-:root[data-motion="rich"] .choice-row { animation: pop-in 480ms var(--spring-soft) both; }
-:root[data-motion="rich"] .choice-row:nth-child(1) { animation-delay: 300ms; }
-:root[data-motion="rich"] .choice-row:nth-child(2) { animation-delay: 380ms; }
-:root[data-motion="rich"] .choice-row:nth-child(3) { animation-delay: 460ms; }
-:root[data-motion="rich"] .choice-row:nth-child(4) { animation-delay: 540ms; }
-@keyframes choices-in { from { opacity: 0; transform: translateY(18px); } }
-/* Numbers that change flash green or red. */
-.count-up { display: inline-block; font-variant-numeric: tabular-nums; }
-:root[data-motion="rich"] .change.gain .count-up { animation: flash-gain 1.2s ease-out both; }
-:root[data-motion="rich"] .change.loss .count-up { animation: flash-loss 1.2s ease-out both; }
-@keyframes flash-gain { 0%, 40% { text-shadow: 0 0 10px color-mix(in srgb, var(--gain) 70%, transparent); transform: scale(1.25); } }
-@keyframes flash-loss { 0%, 40% { text-shadow: 0 0 10px color-mix(in srgb, var(--loss) 70%, transparent); transform: scale(1.25); } }
+@keyframes gold-sweep { from { transform: translate3d(0, 0, 0); opacity: 1; } to { transform: translate3d(380%, 0, 0); opacity: 0; } }
+:root[data-motion="rich"] .next-choices { animation: choices-in 520ms var(--spring-soft) 140ms both; }
+:root[data-motion="rich"] .choice-row { animation: pop-in 420ms var(--spring-soft) both; }
+:root[data-motion="rich"] .choice-row:nth-child(1) { animation-delay: 200ms; }
+:root[data-motion="rich"] .choice-row:nth-child(2) { animation-delay: 260ms; }
+:root[data-motion="rich"] .choice-row:nth-child(3) { animation-delay: 320ms; }
+:root[data-motion="rich"] .choice-row:nth-child(4) { animation-delay: 380ms; }
+@keyframes choices-in { from { opacity: 0; transform: translate3d(0, 14px, 0); } }
 
-/* ---------- a seal stamped down for a milestone (StampBurst) ---------- */
+.count-up { display: inline-block; font-variant-numeric: tabular-nums; }
+:root[data-motion="rich"] .change.gain .count-up { animation: flash-gain 1.1s ease-out both; }
+:root[data-motion="rich"] .change.loss .count-up { animation: flash-loss 1.1s ease-out both; }
+@keyframes flash-gain { 0%, 40% { transform: scale(1.22); } }
+@keyframes flash-loss { 0%, 40% { transform: scale(1.22); } }
+
+/* ---------- milestone StampBurst (strictly scoped to .stamp-layer so LifeSheet seals never vanish!) ---------- */
 .stamp-layer { position: absolute; inset: 0; z-index: 8; pointer-events: none; display: grid; place-items: center; overflow: hidden; }
-.stamp {
-  position: relative; display: grid; place-items: center; width: 132px; height: 132px; border-radius: 12px;
-  background: var(--accent); color: var(--on-accent); font-family: var(--serif); font-weight: 700; font-size: 34px; letter-spacing: 0.08em;
-  writing-mode: vertical-rl; box-shadow: inset 0 0 0 6px var(--accent), inset 0 0 0 8px color-mix(in srgb, var(--on-accent) 70%, transparent), 0 16px 40px var(--shadow);
+.stamp-layer .stamp {
+  position: relative; display: grid; justify-items: center; align-content: center; gap: 4px;
+  padding: 10px; border-radius: 12px;
   animation: stamp-down 1.9s cubic-bezier(0.2, 0.9, 0.3, 1) both;
 }
-:root[data-style="ink"] .stamp { border-radius: 50%; }
-.stamp small { font-size: 13px; font-weight: 500; letter-spacing: 0.2em; margin-top: 6px; opacity: 0.9; }
+:root[data-style="ink"] .stamp-layer .stamp { border-radius: 50%; }
+.stamp-layer .stamp small {
+  font-family: var(--serif); font-size: 13px; font-weight: 600; letter-spacing: 0.16em;
+  padding: 2px 8px; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--accent-text);
+  box-shadow: 0 2px 8px var(--shadow);
+}
 @keyframes stamp-down {
-  0% { opacity: 0; transform: scale(2.6) rotate(-28deg); filter: blur(6px); }
-  22% { opacity: 1; transform: scale(0.92) rotate(-8deg); filter: blur(0); }
+  0% { opacity: 0; transform: scale(2.4) rotate(-26deg); }
+  22% { opacity: 1; transform: scale(0.93) rotate(-8deg); }
   30% { transform: scale(1.04) rotate(-9deg); }
   38%, 78% { opacity: 1; transform: scale(1) rotate(-9deg); }
-  100% { opacity: 0; transform: scale(1) rotate(-9deg) translateY(-30px); }
+  100% { opacity: 0; transform: scale(1) rotate(-9deg) translate3d(0, -24px, 0); }
 }
-.stamp-splash { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); opacity: 0; animation: splash 1.1s cubic-bezier(0.1, 0.8, 0.3, 1) 0.36s both; }
-@keyframes splash { 0% { opacity: 0.9; transform: rotate(var(--a)) translateX(30px) scale(1); } 100% { opacity: 0; transform: rotate(var(--a)) translateX(var(--d)) scale(0.3); } }
+.stamp-splash { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); opacity: 0; animation: splash 1.05s cubic-bezier(0.1, 0.8, 0.3, 1) 0.32s both; }
+@keyframes splash { 0% { opacity: 0.88; transform: rotate(var(--a)) translateX(28px) scale(1); } 100% { opacity: 0; transform: rotate(var(--a)) translateX(var(--d)) scale(0.3); } }
 
-/* ---------- touch: an ink ripple on buttons; the send button sends out a ring ---------- */
-.ripple { position: absolute; border-radius: 50%; pointer-events: none; background: currentColor; opacity: 0.22; transform: scale(0); animation: ripple 620ms var(--ease-out) forwards; }
-@keyframes ripple { to { transform: scale(2.6); opacity: 0; } }
-:root[data-motion="rich"] .send-btn.fired { animation: send-pulse 700ms var(--ease-out); }
-@keyframes send-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 18px transparent; } }
-:root[data-motion="rich"] .tool-btn:active:not(:disabled) .icon { animation: tool-spin 500ms var(--spring-soft); }
-@keyframes tool-spin { from { transform: rotate(-40deg) scale(0.8); } }
+/* ---------- touch ripple & pulse ---------- */
+.ripple { position: absolute; border-radius: 50%; pointer-events: none; background: currentColor; opacity: 0.2; transform: scale(0); animation: ripple 560ms var(--ease-out) forwards; }
+@keyframes ripple { to { transform: scale(2.5); opacity: 0; } }
+:root[data-motion="rich"] .send-btn.fired { animation: send-pulse 640ms var(--ease-out); }
+@keyframes send-pulse { 0% { transform: scale(0.95); } 45% { transform: scale(1.04); } 100% { transform: scale(1); } }
+:root[data-motion="rich"] .tool-btn:active:not(:disabled) .icon { animation: tool-spin 440ms var(--spring-soft); }
+@keyframes tool-spin { from { transform: rotate(-34deg) scale(0.84); } }
 
-/* ---------- the play screen breathes: slow drifting light, by time of day ---------- */
+/* ---------- ambient breathing light ---------- */
 :root[data-motion="rich"] .play::after {
   content: ""; position: absolute; inset: -20%; z-index: -1; pointer-events: none;
   background:
-    radial-gradient(38% 30% at 20% 25%, color-mix(in srgb, #e9b864 16%, transparent), transparent 70%),
-    radial-gradient(34% 28% at 80% 70%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%);
+    radial-gradient(38% 30% at 20% 25%, color-mix(in srgb, #e9b864 15%, transparent), transparent 70%),
+    radial-gradient(34% 28% at 80% 70%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%);
   animation: drift 26s ease-in-out infinite alternate;
 }
 :root[data-motion="rich"][data-style="ink"] .play::after {
@@ -123,31 +131,48 @@
     radial-gradient(40% 32% at 18% 22%, color-mix(in srgb, var(--fg) 7%, transparent), transparent 70%),
     radial-gradient(36% 30% at 82% 75%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%);
 }
-@keyframes drift { 0% { transform: translate3d(-3%, -2%, 0) scale(1); } 100% { transform: translate3d(4%, 3%, 0) scale(1.08); } }
+@keyframes drift { 0% { transform: translate3d(-3%, -2%, 0) scale(1); } 100% { transform: translate3d(4%, 3%, 0) scale(1.07); } }
 
-/* ---------- waiting for the first words: the brush leaves a trail ---------- */
 :root[data-motion="rich"] .ink-brush { width: 44px; height: 44px; }
 :root[data-motion="rich"] .ink-brush::after {
   content: ""; position: absolute; inset: -6px; border-radius: 50%;
-  background: conic-gradient(from 0deg, transparent 0 60%, color-mix(in srgb, var(--accent) 35%, transparent) 85%, transparent);
+  background: conic-gradient(from 0deg, transparent 0 60%, color-mix(in srgb, var(--accent-text) 35%, transparent) 85%, transparent);
   animation: brush-turn 1.4s linear infinite; mask: radial-gradient(circle, transparent 58%, #000 60%);
 }
 
-/* ---------- empty home: the seal stamps itself on arrival ---------- */
-:root[data-motion="rich"] .hero .seal { animation: stamp-arrive 900ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
-@keyframes stamp-arrive { 0% { opacity: 0; transform: scale(2.2) rotate(-20deg); filter: blur(4px); } 60% { opacity: 1; transform: scale(0.94) rotate(-3deg); filter: blur(0); } }
+:root[data-motion="rich"] .hero .seal { animation: stamp-arrive 760ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes stamp-arrive { 0% { opacity: 0; transform: scale(2) rotate(-18deg); } 60% { opacity: 1; transform: scale(0.95) rotate(-3deg); } }
 :root[data-motion="rich"] .play { overflow: hidden; }
 
-/* ---------- gold dust (motion.ts burstDust): an opened book, a milestone ---------- */
 .dust-burst { position: fixed; z-index: 60; width: 0; height: 0; pointer-events: none; }
-.dust-burst i { position: absolute; left: -2px; top: -2px; width: 4px; height: 4px; border-radius: 50%;
-  background: radial-gradient(circle, #fff6d8, #e8b85c 60%, transparent 70%); box-shadow: 0 0 8px 2px rgba(232, 184, 92, 0.75);
-  animation: dust-fly 1100ms cubic-bezier(0.1, 0.8, 0.3, 1) both; }
+.dust-burst i {
+  position: absolute; left: -2px; top: -2px; width: 4px; height: 4px; border-radius: 50%;
+  background: radial-gradient(circle, #fff6d8, #e8b85c 60%, transparent 70%);
+  box-shadow: 0 0 8px 2px rgba(232, 184, 92, 0.72);
+  animation: dust-fly 960ms cubic-bezier(0.1, 0.8, 0.3, 1) both;
+}
 @keyframes dust-fly {
   0% { opacity: 0; transform: rotate(var(--a)) translateX(0) scale(var(--s)); }
-  12% { opacity: 1; }
-  100% { opacity: 0; transform: rotate(var(--a)) translateX(var(--d)) translateY(-26px) scale(calc(var(--s) * 0.4)); }
+  14% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(var(--a)) translateX(var(--d)) translateY(-22px) scale(calc(var(--s) * 0.4)); }
 }
-/* A small landscape card lifts toward you before its story opens. */
-.strip-card.opening { animation: strip-lift 420ms var(--ease-out) forwards; z-index: 3; }
-@keyframes strip-lift { to { transform: translateY(-10px) scale(1.06); box-shadow: 0 18px 40px var(--shadow); } }
+.strip-card.opening { animation: strip-lift 360ms var(--ease-out) forwards; z-index: 3; }
+@keyframes strip-lift { to { transform: translate3d(0, -8px, 0) scale(1.05); } }
+
+/* Hard reduced-motion / motion="off" override at the very end so staggered delays never hide content */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}
+:root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  transition-delay: 0ms !important;
+}

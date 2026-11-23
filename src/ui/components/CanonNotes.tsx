@@ -5,6 +5,7 @@
 import { createContext, useEffect, useRef, useState } from "react";
 import { NOTE_KINDS, NOTE_KIND_LABEL, STORY_NOTE_KINDS, NOTE_TEXT_LIMIT, deleteNote, draftFromParts, estimateNote, gapRanges, listNotes, listStoryNotes, localNoteContent, mentionedChapters, newLocalNote, newNote, newStoryNote, nextNoteReach, noteBehind, noteChapterRange, noteNearEnd, noteOffRoute, noteWithinScope, restartOnRoute, routeIds, noteProgressDetail, noteProgressLabel, noteStepsDone, noteUnit, readNoteText, renameNote, restorePrevious, saveNote, startNoteUpdate, storyLastTurn, suggestTitle, turnLabel, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
 import { useApp } from "../app/context";
+import { EmptyVignette } from "./ChineseArt";
 import { Sheet } from "./Sheet";
 import { RecentUsageLine } from "./TurnUsage";
 import { RangeInputs } from "./RangeInputs";
@@ -89,7 +90,14 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         <p className="muted m-0">{story
           ? "从这局已经写出的故事里整理：主线梗概、某个人物、地点或势力、一条时间线，或者一个问题。写作时会参考和眼下剧情有关的札记；剧情往前走了，可以一键更新。"
           : "可以让 AI 整理原著，也可以手写或导入 TXT。写作时会参考和当前剧情有关的札记。"}</p>
-        {notes?.length === 0 && <p className="muted">{story ? "还没有本局札记。故事有了章节摘要后，主线梗概会自动整理；也可以现在新建。" : "还没有札记。同人故事可以先整理当前章节前后的主线。"}</p>}
+        {notes?.length === 0 && (
+          <EmptyVignette
+            kind="blank-bamboo"
+            title={story ? "还没有本局札记" : "还没有原著札记"}
+            hint={story ? "故事有了章节摘要后，主线梗概会自动整理；也可以现在新建。" : "同人故事可以先整理当前章节前后的主线。"}
+            compact
+          />
+        )}
         <ul className="note-list">
           {notes?.map((n) => {
             const outOfScope = !story && n.status === "done" && through !== null && !noteWithinScope(n, through, !!worldId && n.worldId === worldId);

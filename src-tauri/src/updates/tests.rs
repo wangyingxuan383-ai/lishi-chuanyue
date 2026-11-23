@@ -587,6 +587,19 @@ async fn a_verified_package_is_reused_and_a_tampered_one_replaced() {
         download::verify(&dir.path().join("none.apk"), 1, &digest(&body)).await,
         Check::Missing
     );
+    assert_eq!(
+        download::inspect(&file, MAX_PACKAGE, &digest(&body)).await,
+        download::PackageState::Verified(body.len() as u64)
+    );
+    let wrong = digest(b"other");
+    assert_eq!(
+        download::inspect(&file, MAX_PACKAGE, &wrong).await,
+        download::PackageState::Differs
+    );
+    assert_eq!(
+        download::inspect(&dir.path().join("none.apk"), MAX_PACKAGE, &digest(&body)).await,
+        download::PackageState::Missing
+    );
 }
 
 #[tokio::test]

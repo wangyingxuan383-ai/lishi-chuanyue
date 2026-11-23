@@ -14,7 +14,7 @@ const GROUPS: { name: string; icon: IconName; tab?: Tab; test: RegExp }[] = [
   { name: "地点", icon: "pin", tab: "我", test: /^(到|来到|离开) / },
   { name: "时间", icon: "clock", tab: "我", test: /^(过了|过年|快进|第.+天)/ },
   { name: "数值", icon: "coin", tab: "我", test: /^(钱|健康|精力|名望|体力|声望)/ },
-  { name: "物品", icon: "seal", tab: "行囊", test: /^(得|失|用掉|丢了|丢|换|交出|收下) / },
+  { name: "物品", icon: "pack", tab: "行囊", test: /^(得|失|用掉|丢了|丢|换|交出|收下) / },
   { name: "人物", icon: "people", tab: "人物", test: /^(结识|告别)|：(友善|冷淡|敌视|亲近|信任|戒备|敬重|厌恶|中立)/ },
   { name: "目标", icon: "flag", tab: "目标", test: /(目标|支线|主线|完成|失败|幕演完|挑战)/ },
   { name: "状态", icon: "heart", tab: "我", test: /(好了|受伤|轻伤|重伤|虚脱|疲惫|垂危|中毒|生病)/ },

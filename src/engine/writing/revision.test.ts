@@ -354,4 +354,126 @@ describe("按我的要求改", () => {
     expect(afterRestore?.meta).toMatchObject({ upkeep: true, sealShown: true });
     expect(afterRestore?.meta.original).toBeUndefined();
   });
+
+  it("preserves both revisions' protagonist, card, and item patches across two consecutive Turn-0 opening revisions", async () => {
+    const platform = await createMemoryPlatform();
+    const game = await Game.open(platform, LLM);
+    const seed = sampleState(200);
+    seed.protagonist.name = "苏砚";
+    seed.protagonist.identity = "落魄书生";
+    seed.protagonist.items = [{ name: "竹简", quantity: 1, unit: "卷", place: null, note: "随身携带" }];
+    const committed = structuredClone(seed);
+    const { world, node: opening0, line: line0 } = await game.repo.createWorld({
+      title: "汴京夜雪",
+      eraId: "free",
+      opening: {
+        parentId: null,
+        kind: "opening",
+        narrative: "风雪夜，你站在州桥下，怀揣一卷竹简。",
+        state: committed,
+        record: { log: "雪夜至州桥" },
+        choices: ["走进茶肆"],
+        meta: { openingSeed: seed },
+      },
+    });
+
+    // First Turn-0 revision: changes protagonist identity, adds ability card, and adds an item + adjusts starting money.
+    platform.llm.stream = async (_req, onEvent) => {
+      onEvent({
+        type: "data",
+        data: JSON.stringify({
+          choices: [{
+            delta: {
+              content: JSON.stringify({
+                replacement: "风雪夜，身为皇城司密探的你站在州桥下，摸了摸怀里的铜牌与竹简。",
+                recordPatch: { money: 500, items: [{ name: "皇城司铜牌", delta: 1 }], log: "密探夜至州桥" },
+                correctionPatch: {
+                  profile: { identity: "皇城司密探" },
+                  cards: [{ name: abilityCardName("苏砚"), content: "擅长易容与听风辨位" }],
+                },
+                note: "身份改为皇城司密探并补铜牌",
+              }),
+            },
+            finish_reason: "stop",
+          }],
+        }),
+      });
+      onEvent({ type: "done" });
+      return "rev-1";
+    };
+    const anchor1 = {
+      worldId: world.id,
+      lineId: line0.id,
+      headId: opening0.id,
+      nodeId: opening0.id,
+      original: opening0.narrative,
+    };
+    const preview1 = await game.runPlayerRevision(
+      { anchor: anchor1, range: { start: 0, end: opening0.narrative.length }, hint: "把身份改成皇城司密探，补一枚铜牌和500文钱" },
+      () => {},
+    ).done;
+    const cursor1 = await adoptPlayerRevision(game, preview1);
+    const opening1 = cursor1.head;
+    expect(opening1.parentId).toBeNull();
+    const state1 = await game.repo.getState(opening1.id);
+    expect(state1.protagonist.identity).toBe("皇城司密探");
+    expect(state1.protagonist.stats.money).toBe(500);
+    expect(state1.cards.find((c) => c.name === abilityCardName("苏砚"))?.content).toContain("听风辨位");
+    expect(state1.protagonist.items.map((i) => `${i.name}:${i.quantity}`)).toEqual(["竹简:1", "皇城司铜牌:1"]);
+
+    // Second consecutive Turn-0 revision on `opening1`: adds a new lore card and a second item without re-specifying identity/money.
+    let secondPromptBody = "";
+    platform.llm.stream = async (req, onEvent) => {
+      secondPromptBody = JSON.stringify(req.body);
+      onEvent({
+        type: "data",
+        data: JSON.stringify({
+          choices: [{
+            delta: {
+              content: JSON.stringify({
+                replacement: "风雪夜，身为皇城司密探的你站在州桥下，怀揣铜牌、竹简与一封密函。",
+                recordPatch: { items: [{ name: "火漆密函", delta: 1 }], log: "携密函至州桥" },
+                correctionPatch: {
+                  cards: [{ name: "州桥暗桩", kind: "设定", content: "桥南茶博士是接头人" }],
+                },
+                note: "补上火漆密函与州桥暗桩设定",
+              }),
+            },
+            finish_reason: "stop",
+          }],
+        }),
+      });
+      onEvent({ type: "done" });
+      return "rev-2";
+    };
+    const anchor2 = {
+      worldId: world.id,
+      lineId: cursor1.line.id,
+      headId: opening1.id,
+      nodeId: opening1.id,
+      original: opening1.narrative,
+    };
+    const preview2 = await game.runPlayerRevision(
+      { anchor: anchor2, range: { start: 0, end: opening1.narrative.length }, hint: "再加一封火漆密函和州桥暗桩设定" },
+      () => {},
+    ).done;
+    expect(secondPromptBody).toContain("皇城司密探");
+    expect(secondPromptBody).toContain("听风辨位");
+
+    const cursor2 = await adoptPlayerRevision(game, preview2);
+    const opening2 = cursor2.head;
+    expect(opening2.parentId).toBeNull();
+    const state2 = await game.repo.getState(opening2.id);
+    // Both Revision #1 and Revision #2 patches must survive intact with exact item quantities:
+    expect(state2.protagonist.identity).toBe("皇城司密探");
+    expect(state2.protagonist.stats.money).toBe(500);
+    expect(state2.cards.find((c) => c.name === abilityCardName("苏砚"))?.content).toContain("听风辨位");
+    expect(state2.cards.find((c) => c.name === "州桥暗桩")?.content).toContain("茶博士");
+    expect(state2.protagonist.items.map((i) => `${i.name}:${i.quantity}`)).toEqual([
+      "竹简:1",
+      "皇城司铜牌:1",
+      "火漆密函:1",
+    ]);
+    expect(state2.facts?.filter((f) => f.origin === "player")).toHaveLength(2);
+  });
 });

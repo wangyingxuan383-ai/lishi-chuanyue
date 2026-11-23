@@ -190,15 +190,25 @@ function actionLine(node: StoryNode): string | null {
 export function storyText(input: { title: string; subtitle?: string; path: StoryNode[]; chapters: Chapter[] }): string {
   const out: string[] = [`《${input.title}》`];
   if (input.subtitle) out.push(input.subtitle);
-  const starts = new Map(input.chapters.map((c, i) => [c.firstNodeId, i]));
-  const lastOfAll = input.chapters.at(-1)?.lastNodeId;
+  const pathIndex = new Map(input.path.map((n, idx) => [n.id, idx]));
+  const story = input.path.filter((n) => n.kind !== "edit" && (n.status !== "interrupted" || Boolean(n.narrative.trim())));
+  const starts = new Map<string, number>();
+  let lastOfAll: string | undefined;
+  input.chapters.forEach((c, i) => {
+    const startAt = pathIndex.get(c.firstNodeId);
+    const endAt = pathIndex.get(c.lastNodeId);
+    if (startAt === undefined || endAt === undefined || startAt > endAt) return;
+    const firstStory = story.find((n) => (pathIndex.get(n.id) ?? -1) >= startAt && (pathIndex.get(n.id) ?? Infinity) <= endAt);
+    const lastStory = [...story].reverse().find((n) => (pathIndex.get(n.id) ?? -1) >= startAt && (pathIndex.get(n.id) ?? Infinity) <= endAt);
+    if (firstStory && !starts.has(firstStory.id)) starts.set(firstStory.id, i);
+    if (lastStory) lastOfAll = lastStory.id;
+  });
   let afterLast = false;
   let trailing = false;
-  const story = input.path.filter((n) => n.kind !== "edit");
   for (const node of story) {
     const k = starts.get(node.id);
-    if (node.kind === "opening" && input.chapters.length) out.push("", "", "楔子");
-    else if (k !== undefined) out.push("", "", huimu(k + 1, input.chapters[k].title));
+    if (k !== undefined) out.push("", "", huimu(k + 1, input.chapters[k].title));
+    else if (node.kind === "opening" && input.chapters.length) out.push("", "", "楔子");
     else if (afterLast && !trailing) { out.push("", "", `${huimu(input.chapters.length + 1)}（待续）`); trailing = true; }
     const parts: string[] = [];
     if (node.actionMode === "write" && node.actionText?.trim()) parts.push(paragraphs(node.actionText));

@@ -1,0 +1,172 @@
+/* Classical seals, fishtail cartouches, chapter dividers, and ink-wash vignettes. */
+.cinnabar-seal {
+  display: inline-block;
+  flex-shrink: 0;
+  overflow: visible;
+  user-select: none;
+  filter: drop-shadow(0 1px 2px var(--shadow));
+}
+.cinnabar-seal .cs-char {
+  font-family: var(--serif);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+/* 白文 (yin): cinnabar stone ground, carved light paper characters */
+.cinnabar-seal.seal-yin .cs-ground { fill: var(--accent); }
+.cinnabar-seal.seal-yin .cs-rim {
+  fill: none;
+  stroke: color-mix(in srgb, var(--on-accent) 62%, transparent);
+  stroke-width: 2.2;
+}
+.cinnabar-seal.seal-yin .cs-nick { fill: var(--surface); opacity: 0.55; }
+.cinnabar-seal.seal-yin .cs-char { fill: var(--on-accent); }
+
+/* 朱文 (yang): warm paper ground, stone-carved cinnabar rim and characters */
+.cinnabar-seal.seal-yang .cs-ground { fill: var(--raised); }
+.cinnabar-seal.seal-yang .cs-rim {
+  fill: none;
+  stroke: var(--accent-text, var(--accent));
+  stroke-width: 3.4;
+}
+.cinnabar-seal.seal-yang .cs-nick { fill: var(--raised); }
+.cinnabar-seal.seal-yang .cs-char { fill: var(--accent-text, var(--accent)); }
+
+.cinnabar-seal.is-muted { opacity: 0.62; filter: none; }
+.cinnabar-seal.is-muted .cs-ground { fill: transparent; stroke: var(--line); stroke-width: 2.2; stroke-dasharray: 6 4; }
+.cinnabar-seal.is-muted .cs-rim { stroke: transparent; }
+.cinnabar-seal.is-muted .cs-char { fill: var(--muted); font-weight: 500; }
+
+/* 卷首鱼尾题签 (TitleCartouche) */
+.title-cartouche {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-top: 3px double var(--line);
+  border-bottom: 3px double var(--line);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--surface) 90%, var(--raised));
+}
+:root[data-style="ink"] .title-cartouche {
+  border: none;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--elev-1), inset 0 0 0 1px var(--gilt-soft, var(--line));
+}
+.tc-fishtail {
+  color: var(--accent-text, var(--accent));
+  line-height: 0;
+}
+.tc-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tc-text {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.tc-kicker {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+.tc-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.35;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.tc-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.tc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed color-mix(in srgb, var(--line) 75%, transparent);
+}
+
+/* 章回分隔纹饰 (ChapterOrnament) */
+.chapter-ornament {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px auto 10px;
+  max-width: 340px;
+  color: var(--accent-text, var(--accent));
+  opacity: 0.85;
+  user-select: none;
+}
+.chapter-ornament .co-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line), transparent);
+}
+.chapter-ornament .co-motif {
+  flex-shrink: 0;
+}
+.chapter-ornament .co-label {
+  font-family: var(--serif);
+  font-size: 13px;
+  letter-spacing: 0.24em;
+  padding-left: 0.24em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 水墨淡彩空状态小景 (EmptyVignette) */
+.empty-vignette {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 20px 14px;
+  color: var(--fg);
+}
+.empty-vignette.compact {
+  padding: 12px 10px;
+}
+.empty-vignette .ev-art {
+  width: 144px;
+  height: 90px;
+  color: var(--fg);
+}
+.empty-vignette.compact .ev-art {
+  width: 118px;
+  height: 74px;
+}
+.empty-vignette .ev-title {
+  margin: 2px 0 0;
+  font-family: var(--serif);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+}
+.empty-vignette .ev-hint {
+  margin: 0;
+  max-width: 28em;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.empty-vignette .ev-action {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}

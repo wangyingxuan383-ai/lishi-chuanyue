@@ -7,7 +7,7 @@ mod download;
 mod tests;
 
 use crate::error::{blocking, PlatformError, Result};
-use download::{Asset, Check, Event, Failure, Tuning};
+use download::{Asset, Check, Event, Failure, PackageState, Tuning};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -28,6 +28,7 @@ use tauri::{plugin::PluginHandle, Manager};
 const MAX_PACKAGE: u64 = 512 * 1024 * 1024;
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_DEV_GET: usize = 1024 * 1024;
+const MAX_SAFE_JS_BYTES: u64 = 9_007_199_254_740_991;
 
 /// The update folder in the app's cache (Android: `getCacheDir()/updates`,
 /// which the FileProvider shares with the installer) and the one running download.
@@ -302,9 +303,22 @@ struct DownloadRequest {
     sha256: String,
 }
 
+#[cfg(target_os = "android")]
+async fn set_download_wake<R: Runtime>(app: &AppHandle<R>, active: bool) {
+    let _ = app
+        .state::<AndroidUpdates<R>>()
+        .0
+        .run_mobile_plugin_async::<serde_json::Value>(
+            "setDownloadWakeLock",
+            serde_json::json!({ "active": active }),
+        )
+        .await;
+}
+
 /// Resolves once `<version>.apk` holds exactly the published bytes.
 #[tauri::command]
-async fn download(
+async fn download<R: Runtime>(
+    app: AppHandle<R>,
     updates: State<'_, Arc<Updates>>,
     request: DownloadRequest,
     on_event: Channel<Event>,
@@ -328,6 +342,10 @@ async fn download(
         Ok(())
     })
     .await?;
+    #[cfg(target_os = "android")]
+    set_download_wake(&app, true).await;
+    #[cfg(not(target_os = "android"))]
+    let _ = &app;
     let file = updates.package(&version);
     let asset = Asset {
         url: &request.url,
@@ -337,7 +355,7 @@ async fn download(
     let sink = move |event: Event| {
         let _ = on_event.send(event);
     };
-    download::fetch(
+    let outcome = download::fetch(
         &asset,
         &file,
         &|| crate::stream::client().ok(),
@@ -346,7 +364,10 @@ async fn download(
         &sink,
     )
     .await
-    .map_err(failure)
+    .map_err(failure);
+    #[cfg(target_os = "android")]
+    set_download_wake(&app, false).await;
+    outcome
 }
 
 /// Pauses the running download; its bytes stay for the next try.
@@ -463,6 +484,151 @@ async fn can_install<R: Runtime>(app: AppHandle<R>) -> Result<bool> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackageStatus {
+    downloaded: bool,
+    verified: bool,
+    bytes: u64,
+    can_install: bool,
+}
+
+/// Checks whether `<version>.apk` is already downloaded and SHA-256 verified on disk.
+#[tauri::command]
+async fn package_status<R: Runtime>(
+    app: AppHandle<R>,
+    updates: State<'_, Arc<Updates>>,
+    version: String,
+    sha256: String,
+) -> Result<PackageStatus> {
+    let sha256 = download::parse_sha256(&sha256).ok_or_else(bad_request)?;
+    let can_install = can_install(app).await.unwrap_or(false);
+    let current = parse_version(env!("CARGO_PKG_VERSION")).expect("package version");
+    let Some(parsed) = parse_version(&version) else {
+        return Err(bad_request());
+    };
+    if !compare(&parsed, &current).is_gt() {
+        return Ok(PackageStatus {
+            downloaded: false,
+            verified: false,
+            bytes: 0,
+            can_install,
+        });
+    }
+    let file = updates.package(&version);
+    match download::inspect(&file, MAX_PACKAGE, &sha256).await {
+        PackageState::Verified(bytes) => Ok(PackageStatus {
+            downloaded: true,
+            verified: true,
+            bytes,
+            can_install,
+        }),
+        PackageState::Partial(bytes) => Ok(PackageStatus {
+            downloaded: false,
+            verified: false,
+            bytes,
+            can_install,
+        }),
+        PackageState::Differs => {
+            let _ = tokio::fs::remove_file(&file).await;
+            Ok(PackageStatus {
+                downloaded: false,
+                verified: false,
+                bytes: 0,
+                can_install,
+            })
+        }
+        PackageState::Missing => Ok(PackageStatus {
+            downloaded: false,
+            verified: false,
+            bytes: 0,
+            can_install,
+        }),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentStatus {
+    wifi_unmetered: bool,
+    free_bytes: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn disk_free_bytes(path: &Path) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lpDirectoryName: *const u16,
+            lpFreeBytesAvailableToCaller: *mut u64,
+            lpTotalNumberOfBytes: *mut u64,
+            lpTotalNumberOfFreeBytes: *mut u64,
+        ) -> i32;
+    }
+    let target = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let wide: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        free.min(MAX_SAFE_JS_BYTES)
+    } else {
+        0
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
+fn disk_free_bytes(_path: &Path) -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+/// Network and free-space preflight for silent Wi-Fi update preparation.
+#[tauri::command]
+async fn environment_status<R: Runtime>(
+    app: AppHandle<R>,
+    updates: State<'_, Arc<Updates>>,
+) -> Result<EnvironmentStatus> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = updates;
+        let reply: EnvironmentStatus = app
+            .state::<AndroidUpdates<R>>()
+            .0
+            .run_mobile_plugin_async("environmentStatus", serde_json::json!({}))
+            .await
+            .map_err(|_| PlatformError::new("update_env", "没能读取网络与存储状态"))?;
+        Ok(EnvironmentStatus {
+            wifi_unmetered: reply.wifi_unmetered,
+            free_bytes: reply.free_bytes.min(MAX_SAFE_JS_BYTES),
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let dir = updates.dir.clone();
+        let free_bytes = blocking(move || Ok(disk_free_bytes(&dir))).await?;
+        Ok(EnvironmentStatus {
+            wifi_unmetered: true,
+            free_bytes,
+        })
+    }
+}
+
+#[derive(Serialize)]
 struct DevSource {
     available: bool,
     url: Option<String>,
@@ -519,6 +685,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             fetch_text,
             install,
             can_install,
+            package_status,
+            environment_status,
             dev_source,
             set_dev_source
         ])

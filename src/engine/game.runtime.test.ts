@@ -345,4 +345,181 @@ describe("auxiliary request accounting", () => {
     await s.game.prepareForRestore();
     expect(aborted).toBe(true);
   });
+
+  it("prevents interrupted step text bleed across autoplay steps and surfaces consumed vs unconsumed directorNote", async () => {
+    const s = await seed();
+    // 1. Pre-snapshot ephemeral seq=0 text from Step 1 must NEVER bleed after Step 2 boundary in startRun:
+    let emitLive: ((e: { seq: number; event: unknown }) => void) | null = null;
+    let resolveSnap!: (snap: ExecutionSnapshot) => void;
+    const snapPromise = new Promise<ExecutionSnapshot>((resolve) => { resolveSnap = resolve; });
+    const rawDelivered: Record<string, unknown>[] = [];
+    const boundaryPlatform = {
+      execution: {
+        start: async () => "auto-bleed",
+        resume: async () => {},
+        stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }),
+        subscribe: (_id: string, cb: (e: { seq: number; event: unknown }) => void) => {
+          emitLive = cb;
+          return () => {};
+        },
+        snapshot: () => snapPromise,
+      },
+    } as unknown as Platform;
+    const rawHandle = startRun(boundaryPlatform, { id: "auto-bleed" } as RunPlan, (ev) => rawDelivered.push(ev));
+    await new Promise((r) => setTimeout(r, 0));
+    emitLive!({ seq: 0, event: { type: "text", full: "上一段中断残留的半截文字" } });
+    resolveSnap({
+      id: "auto-bleed",
+      worldId: s.world.id,
+      executionId: "e1",
+      stopRequested: false,
+      status: "cancelled",
+      budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 },
+      draft: null,
+      result: null,
+      error: null,
+      events: [{ seq: 2, event: { type: "step", index: 2, total: 3 } }],
+    });
+    await rawHandle.done;
+    expect(rawDelivered).toEqual([{ type: "step", index: 2, total: 3 }]);
+
+    // 2. Autoplay surfaces consumed `directorNote` on `step` event, skips stale interrupted text on resume,
+    //    and preserves unconsumed `autoplayNote:<runId>` when stopped before the next step:
+    let startedRunId = "";
+    let step1Resolved = false;
+    s.platform.execution = {
+      agent: async () => null,
+      settle: async () => null,
+      list: async () => [],
+      stop: async () => ({ executionId: "att-1", status: "cancelled", accepted: true, settled: true }),
+      resume: async () => { step1Resolved = true; },
+      start: async (plan) => {
+        startedRunId = String((plan as { id: string }).id);
+        return startedRunId;
+      },
+      snapshot: async (id, after = 0): Promise<ExecutionSnapshot> => {
+        if (id === "interrupted-auto") {
+          if (!step1Resolved) {
+            return {
+              id,
+              worldId: s.world.id,
+              status: "interrupted",
+              budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 },
+              draft: { steps: 0 },
+              result: null,
+              error: "连接中断",
+              events: [
+                { seq: 1, event: { type: "step", index: 1, total: 2 } },
+                { seq: 2, event: { type: "text", full: "旧的半截废稿不应在新尝试出现" } },
+              ],
+            };
+          }
+          const allEvents: ExecutionSnapshot["events"] = [
+            { seq: 1, event: { type: "step", index: 1, total: 2 } },
+            { seq: 2, event: { type: "text", full: "旧的半截废稿不应在新尝试出现" } },
+            { seq: 3, event: { type: "step", index: 1, total: 2, directorNote: "本段写暴风雨来袭" } },
+            { seq: 4, event: { type: "text", full: "狂风骤起，海浪拍打甲板。" } },
+          ];
+          const events = allEvents.filter((e) => e.seq > after);
+          return {
+            id,
+            worldId: s.world.id,
+            status: "committed",
+            budget: { modelRequests: 2, toolCalls: 0, corrections: 0, activeMs: 2 },
+            draft: { steps: 1 },
+            result: { steps: 1, reason: "stopped" },
+            error: null,
+            events,
+          };
+        }
+        // Live autoplay run: Step 1 consumes no note; Step 2 consumes `autoplayNote:<runId>` from settings;
+        // then stops before Step 3 so a second queued note stays preserved in settings!
+        if (after === 0) {
+          // Queue a note for Step 2 while Step 1 is running:
+          await s.game.queueAutoplayNote(id, "让大副发现远方灯塔");
+          return {
+            id,
+            worldId: s.world.id,
+            executionId: "att-live",
+            status: "running",
+            budget: { modelRequests: 1, toolCalls: 0, corrections: 0, activeMs: 1 },
+            draft: { steps: 0 },
+            result: null,
+            error: null,
+            events: [
+              { seq: 1, event: { type: "step", index: 1, total: 3 } },
+              { seq: 2, event: { type: "text", full: "第一段：船队夜航。" } },
+            ],
+          };
+        }
+        // Simulate native runner consuming Step 2's note:
+        await s.platform.sql.batch([{ sql: "DELETE FROM settings WHERE key = ?", params: [`autoplayNote:${id}`] }]);
+        return {
+          id,
+          worldId: s.world.id,
+          executionId: "att-live",
+          status: "cancelled",
+          budget: { modelRequests: 2, toolCalls: 0, corrections: 0, activeMs: 2 },
+          draft: { steps: 1 },
+          result: { steps: 1, reason: "stopped" },
+          error: null,
+          events: [
+            { seq: 3, event: { type: "step", index: 2, total: 3 } },
+            { seq: 4, event: { type: "text", full: "第二段：大副指向远方灯塔。" } },
+          ],
+        };
+      },
+    };
+
+    // Resume interrupted autoplay -> must NOT emit seq=2 stale text, and must include directorNote on seq=3 step!
+    await s.platform.sql.batch([
+      {
+        sql: "INSERT INTO execution_runs(id,world_id,line_id,base_head_id,status,plan_json,budget_json,draft_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        params: [
+          "interrupted-auto",
+          s.world.id,
+          s.line.id,
+          s.node.id,
+          "interrupted",
+          JSON.stringify({ id: "interrupted-auto", worldId: s.world.id, lineId: s.line.id, headId: s.node.id, baseId: s.node.id, kind: "autoplay", model: LLM, settings: SETTINGS, meta: { autoplayCount: 2 } }),
+          "{}",
+          "{}",
+          "中断",
+          new Date().toISOString(),
+          new Date().toISOString(),
+        ],
+      },
+    ]);
+    const resumedEvents: Record<string, unknown>[] = [];
+    await s.game.followExecution("interrupted-auto", (e) => resumedEvents.push(e as unknown as Record<string, unknown>), true).done;
+    expect(resumedEvents.some((e) => e.type === "text" && String(e.full).includes("旧的半截废稿"))).toBe(false);
+    expect(resumedEvents[0]).toEqual({
+      type: "step",
+      index: 1,
+      total: 2,
+      runId: "interrupted-auto",
+      directorNote: "本段写暴风雨来袭",
+    });
+
+    // Live autoplay note consumption on Step 2 + unconsumed Step 3 note preserved in settings:
+    const liveEvents: Record<string, unknown>[] = [];
+    let queuedStep3Promise: Promise<void> = Promise.resolve();
+    await s.game.autoplay(s.world.id, { turns: 3 }, (e) => {
+      liveEvents.push(e as unknown as Record<string, unknown>);
+      if (e.type === "step" && e.index === 2 && e.runId) {
+        queuedStep3Promise = s.game.queueAutoplayNote(e.runId, "留给未执行的第三段提示");
+      }
+    }).done;
+    await queuedStep3Promise;
+    const stepEvents = liveEvents.filter((e) => e.type === "step");
+    expect(stepEvents[0]).toEqual({ type: "step", index: 1, total: 3, runId: startedRunId });
+    expect(stepEvents[1]).toEqual({
+      type: "step",
+      index: 2,
+      total: 3,
+      runId: startedRunId,
+      directorNote: "让大副发现远方灯塔",
+    });
+    expect(await s.game.repo.getSetting(`autoplayNote:${startedRunId}`, null)).toBe("留给未执行的第三段提示");
+  });
 });

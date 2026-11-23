@@ -232,6 +232,34 @@ class AgentHostService : Service(), AgentNative.Sink {
                 }
                 return
             }
+            if (notice?.optString("event") == "story_committed") {
+                val payload = notice.optJSONObject("data") ?: notice
+                val completionId = payload.optString("completionId")
+                    .ifBlank { payload.optString("completion_id") }
+                    .ifBlank { payload.optString("attemptId") }
+                    .ifBlank { payload.optString("taskId") }
+                    .ifBlank { notice.optString("completionId") }
+                if (completionId.isNotBlank()) {
+                    val worldId = payload.optString("worldId")
+                        .ifBlank { payload.optString("world_id") }
+                        .ifBlank { notice.optString("worldId") }
+                    val title = payload.optString("title").ifBlank { notice.optString("title") }
+                    val excerpt = payload.optString("excerpt")
+                        .ifBlank { payload.optString("summary") }
+                        .ifBlank { notice.optString("excerpt") }
+                    try {
+                        sendBroadcast(
+                            Intent(this, GenerationActionReceiver::class.java)
+                                .setAction(GenerationActionReceiver.ACTION_STORY_COMMITTED)
+                                .setPackage(packageName)
+                                .putExtra(GenerationActionReceiver.EXTRA_COMPLETION_ID, completionId.take(256))
+                                .putExtra(GenerationActionReceiver.EXTRA_WORLD_ID, worldId.take(128))
+                                .putExtra(GenerationActionReceiver.EXTRA_TITLE, title.take(60))
+                                .putExtra(GenerationActionReceiver.EXTRA_EXCERPT, excerpt.take(120))
+                        )
+                    } catch (_: Exception) { }
+                }
+            }
         }
         if (destroying.get()) return
         if (requestId == 0L) {

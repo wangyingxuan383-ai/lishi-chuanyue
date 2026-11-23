@@ -209,7 +209,7 @@ export function thrownFailure(error: unknown, stopped: boolean, fallback: string
 }
 
 export type TurnEvent =
-  | { type: "step"; index: number; total: number; runId?: string }
+  | { type: "step"; index: number; total: number; runId?: string; directorNote?: string }
   | { type: "finished"; steps: number; reason: AutoplayStop }
   | { type: "thinking"; deep?: boolean }
   | { type: "tool"; tool: string }
@@ -256,7 +256,7 @@ export type AutoplayStop =
 
 export type AutoplayEvent =
   | TurnEvent
-  | { type: "step"; index: number; total: number; runId?: string }
+  | { type: "step"; index: number; total: number; runId?: string; directorNote?: string }
   | { type: "finished"; steps: number; reason: AutoplayStop };
 
 export interface AutoplayHandle {
@@ -344,6 +344,7 @@ export class Game {
   private chaptering = new Set<string>();
   private background = new Set<Promise<void>>();
   private listeners = new Set<(worldId: string) => void>();
+  private queuedAutoplayNotes = new Map<string, string>();
 
   /** 备用服务 (D179): answers what the main service could not for a passing reason; set from 设置 → AI 服务. */
   public fallbackLlm: LlmConfig | null = null;
@@ -989,8 +990,41 @@ export class Game {
   async queueAutoplayNote(runId: string, note: string): Promise<void> {
     const clean = note.trim();
     const key = `autoplayNote:${runId}`;
-    if (clean) await this.repo.setSetting(key, clean);
-    else await this.platform.sql.batch([{ sql: "DELETE FROM settings WHERE key = ?", params: [key] }]);
+    if (clean) {
+      this.queuedAutoplayNotes.set(runId, clean);
+      await this.repo.setSetting(key, clean);
+    } else {
+      this.queuedAutoplayNotes.delete(runId);
+      await this.platform.sql.batch([{ sql: "DELETE FROM settings WHERE key = ?", params: [key] }]);
+    }
+  }
+
+  private async resolveAutoplayStepNote(runId: string, rawEvent: Record<string, unknown>): Promise<string | undefined> {
+    if (typeof rawEvent.directorNote === "string" && rawEvent.directorNote.trim()) {
+      const direct = rawEvent.directorNote.trim();
+      if (this.queuedAutoplayNotes.get(runId) === direct) this.queuedAutoplayNotes.delete(runId);
+      return direct;
+    }
+    const [childRow] = await this.platform.sql
+      .query(
+        "SELECT json_extract(c.plan_json,'$.action.directorNote') AS note FROM execution_runs p JOIN execution_runs c ON c.id=json_extract(p.draft_json,'$.childId') WHERE p.id=?",
+        [runId],
+      )
+      .catch(() => []);
+    if (typeof childRow?.note === "string" && childRow.note.trim()) {
+      const childNote = childRow.note.trim();
+      if (this.queuedAutoplayNotes.get(runId) === childNote) this.queuedAutoplayNotes.delete(runId);
+      return childNote;
+    }
+    const tracked = this.queuedAutoplayNotes.get(runId);
+    if (tracked) {
+      const stillPending = await this.repo.getSetting<string | null>(`autoplayNote:${runId}`, null).catch(() => tracked);
+      if (!stillPending) {
+        this.queuedAutoplayNotes.delete(runId);
+        return tracked;
+      }
+    }
+    return undefined;
   }
 
   async currentExecution(worldId: string, expectedRunId?: string): Promise<SavedExecution | null> {
@@ -1158,20 +1192,35 @@ export class Game {
         const isOpening = run?.kind === "opening";
         const openingCarry = isOpening && typeof run?.carry_json === "string" ? JSON.parse(run.carry_json) as NewWorld["carry"] : undefined;
         let after = 0;
-        if (autoplay) {
-          const snapshot = await execution.snapshot(id);
-          for (const event of snapshot.events) if (event.event && typeof event.event === "object" && !Array.isArray(event.event) && event.event.type === "done") after = event.seq;
-        } else if (resume) {
-          // Skip stale events from the previous failed/stopped attempt when resuming into a new attempt.
+        if (resume) {
+          // Skip stale events from the previous failed/stopped attempt when resuming into a new attempt (including autoplay).
           const snapshot = await execution.snapshot(id);
           for (const event of snapshot.events) if (event.seq > after) after = event.seq;
+        } else if (autoplay) {
+          const snapshot = await execution.snapshot(id);
+          let lastDoneSeq = 0;
+          let latestStepSeq = 0;
+          for (const event of snapshot.events) {
+            if (!event.event || typeof event.event !== "object" || Array.isArray(event.event)) continue;
+            if (event.event.type === "done" && event.seq > lastDoneSeq) lastDoneSeq = event.seq;
+            else if (event.event.type === "step" && event.seq > latestStepSeq) latestStepSeq = event.seq;
+          }
+          after = Math.max(lastDoneSeq, latestStepSeq > 0 ? latestStepSeq - 1 : 0);
         }
         if (resume) await resumeWhenClosed(execution, id);
         active = startRun(this.platform, null, (event) => {
           deliveries = deliveries.then(async () => {
             if (detached) return;
-            if (autoplay && event.type === "step") onEvent({ type: "step", index: Number(event.index), total: Number(event.total), runId: id });
-            else if (autoplay && event.type === "done" && typeof event.nodeId === "string") {
+            if (autoplay && event.type === "step") {
+              const directorNote = await this.resolveAutoplayStepNote(id, event);
+              onEvent({
+                type: "step",
+                index: Number(event.index),
+                total: Number(event.total),
+                runId: id,
+                ...(directorNote ? { directorNote } : {}),
+              });
+            } else if (autoplay && event.type === "done" && typeof event.nodeId === "string") {
               const node = await this.repo.getNode(event.nodeId);
               if (node) onEvent({ type: "done", cursor: await tree.cursor(this.repo, node.worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
             } else this.nativeEvent(event, onEvent);
@@ -1212,7 +1261,7 @@ export class Game {
     return applyRecord(state, record, context, options);
   }
 
-  private nativeTurn(worldId: string, actionIn: PlayerAction | null, kind: "turn" | "variant" | "continue", hint: string | null, onEvent: (e: TurnEvent) => void, batch?: { turns: number; onStep(index: number, total: number, runId?: string): void; onFinished(steps: number, reason: AutoplayStop): void }): TurnHandle {
+  private nativeTurn(worldId: string, actionIn: PlayerAction | null, kind: "turn" | "variant" | "continue", hint: string | null, onEvent: (e: TurnEvent) => void, batch?: { turns: number; onStep(index: number, total: number, runId?: string, directorNote?: string): void; onFinished(steps: number, reason: AutoplayStop): void }): TurnHandle {
     this.requireExecution();
     let active: ReturnType<typeof startRun> | null = null, stopped = false, detached = false;
     let deliveries = Promise.resolve();
@@ -1283,8 +1332,10 @@ export class Game {
           if (!batch) { if (!detached) this.nativeEvent(event, onEvent); return; }
           deliveries = deliveries.then(async () => {
             if (detached) return;
-            if (event.type === "step") batch.onStep(Number(event.index), Number(event.total), plan.id);
-            else if (event.type === "done" && typeof event.nodeId === "string") {
+            if (event.type === "step") {
+              const directorNote = await this.resolveAutoplayStepNote(plan.id, event);
+              batch.onStep(Number(event.index), Number(event.total), plan.id, directorNote);
+            } else if (event.type === "done" && typeof event.nodeId === "string") {
               const node = await this.repo.getNode(event.nodeId);
               if (node) onEvent({ type: "done", cursor: await tree.cursor(this.repo, worldId), node, chips: (node.meta.chips as Chip[]) ?? [] });
             } else this.nativeEvent(event, onEvent);
@@ -1681,7 +1732,9 @@ export class Game {
     let result: { steps: number; reason: AutoplayStop } = { steps: 0, reason: "failed" }, detached = false;
     const handle = this.nativeTurn(worldId, { mode: "continue", text: "" }, "turn", null, (event) => { if (!detached) onEvent(event); }, {
       turns: Math.max(0, Math.floor(opts.turns)),
-      onStep(index, total, runId) { if (!detached) onEvent({ type: "step", index, total, runId }); },
+      onStep(index, total, runId, directorNote) {
+        if (!detached) onEvent({ type: "step", index, total, runId, ...(directorNote ? { directorNote } : {}) });
+      },
       onFinished(steps, reason) { result = { steps, reason }; if (!detached) onEvent({ type: "finished", ...result }); },
     });
     return { done: handle.done.then(() => result), stop: () => handle.stop(), catchUp: async () => { detached = false; await handle.catchUp(); }, detach: () => { detached = true; handle.detach?.(); } };

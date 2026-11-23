@@ -37,5 +37,8 @@
 #-renamesourcefileattribute SourceFile
 
 -keep class io.timejump.chuanyue.DocumentPickerPlugin { *; }
+-keep class io.timejump.chuanyue.FilesPlugin { *; }
+-keep class io.timejump.chuanyue.NotificationsPlugin { *; }
 # Rust opens the system installer through this plugin (run_mobile_plugin by name).
 -keep class io.timejump.chuanyue.UpdatePlugin { *; }
+-keep @app.tauri.annotation.InvokeArg class * { *; }

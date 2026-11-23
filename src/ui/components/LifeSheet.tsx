@@ -1,12 +1,12 @@
-// 这一世小传 (PLAN_V4 direction G; UX_CN 15, 29, 30): a 列传-style summary of
-// the protagonist's life, the 行状 (play statistics) and the 印谱 (seals
-// earned), built from saved state without a model call. Opens on death from
-// the ending card and any time from the ⋯ menu.
+// 这一世小传: a 列传-style summary of the protagonist's life, the 行状 (play
+// statistics) and the 印谱 (seals earned), built from saved state without a
+// model call. Opens on death from the ending card and any time from the ⋯ menu.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { eraContext } from "../../engine/era";
 import { dateText, earnedSeals, lifeSummary, newSeals, playStats, realTimeText, sealsForState, spanText, type PlayStats } from "../../engine/life";
 import type { World, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
+import { ChapterOrnament, CinnabarSeal } from "./ChineseArt";
 import { CardSheet } from "./ShareCard";
 import { Sheet } from "./Sheet";
 
@@ -38,7 +38,9 @@ export function LifeSheet({ world, state, headId, dead, onClose }: { world: Worl
     <Sheet title="这一世小传" onClose={onClose}>
       <div className="life">
         <div className="life-head">
-          <div className="life-seal" aria-label={`结局印：${life.seal}`}><span>{life.seal[0]}</span><span>{life.seal[1]}</span></div>
+          <div className="life-seal-wrap" aria-label={`结局印：${life.seal}`}>
+            <CinnabarSeal text={life.seal} variant="yin" size={52} tilt={-4} />
+          </div>
           <div className="grow">
             <h3>{life.name}</h3>
             <p className="muted">{world.title} · {dead ? "这一世已了" : "这一世还在继续"}</p>
@@ -62,14 +64,17 @@ export function LifeSheet({ world, state, headId, dead, onClose }: { world: Worl
         ) : <p className="muted">正在统计…</p>}
         <p className="muted m-0 small">“大约玩了”按每回合之间的间隔估算，停下超过十分钟的只算十分钟。</p>
 
-        <h4 className="section-title">印谱 <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}>{seals.filter((s) => earned.has(s.id)).length} / {seals.length}</span></h4>
+        <h4 className="section-title">印谱 <span className="muted small">{seals.filter((s) => earned.has(s.id)).length} / {seals.length}</span></h4>
         <div className="seal-book">
-          {seals.map((s) => (
-            <div key={s.id} className={`seal-stamp${earned.has(s.id) ? " got" : ""}`} aria-label={`${s.name}：${earned.has(s.id) ? "已得" : `未得，${s.how}`}`}>
-              <div className="stamp" aria-hidden="true">{[...s.name].map((c, i) => <span key={i}>{c}</span>)}</div>
-              <small>{earned.has(s.id) ? s.name : s.how}</small>
-            </div>
-          ))}
+          {seals.map((s, idx) => {
+            const got = earned.has(s.id);
+            return (
+              <div key={s.id} className={`seal-stamp${got ? " got" : ""}`} aria-label={`${s.name}：${got ? "已得" : `未得，${s.how}`}`}>
+                <CinnabarSeal text={s.name} variant={idx % 3 === 1 ? "yang" : "yin"} size={48} tilt={got ? (idx % 2 === 0 ? -3 : 2) : 0} muted={!got} />
+                <small>{got ? s.name : s.how}</small>
+              </div>
+            );
+          })}
         </div>
       </div>
     </Sheet>
@@ -81,9 +86,9 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * The end of a life (AUDIT_V4 5.6): a card in the book's style, with where
- * and when it ended, the 结局印, the 小传, and the ways on — back a few
- * turns, another route, or the same setup again. Nothing is lost.
+ * The end of a life: a card in the book's style, with where and when it ended,
+ * the 结局印, the 小传, and the ways on — back a few turns, another route, or
+ * the same setup again. Nothing is lost.
  */
 export function EndingCard({ state, world, now, turns, onLife, onBack, onLines, onAgain }: {
   state: WorldState; world: World; now: string; turns: number; onLife: () => void; onBack: (steps: number) => void; onLines: () => void; onAgain: () => void;
@@ -93,8 +98,9 @@ export function EndingCard({ state, world, now, turns, onLife, onBack, onLines, 
   const done = state.goals.filter((g) => g.status === "完成").length;
   return (
     <div className="ending-card" role="status">
-      <div className="ending-seal" aria-hidden="true"><span>殉</span><span>身</span></div>
+      <CinnabarSeal text="殉身" variant="yin" size={54} tilt={-3} />
       <h2>{me.name}{me.age ? `，年${me.age}` : ""}</h2>
+      <ChapterOrnament variant="cloud" />
       <p className="ending-line">卒于{now}。{turns ? `历 ${turns} 回合，` : ""}结识 {known} 人{done ? `，了却 ${done} 桩心愿` : ""}{state.deviations.length ? `，改了 ${state.deviations.length} 件史事` : ""}。</p>
       <p className="muted">这一世到此为止。走过的路都还在，可以回到之前的某一刻重来。</p>
       <button className="ending-life" onClick={onLife}>看这一世小传</button>
@@ -115,7 +121,6 @@ export function EndingCard({ state, world, now, turns, onLife, onBack, onLines, 
  */
 export function useSealToast(world: World | null, state: WorldState | null, turns: number) {
   const { game, toast } = useApp();
-  // Seals already earned when the world is opened (older saves) are recorded without a toast.
   const opened = useRef(false);
   const queue = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
@@ -123,7 +128,6 @@ export function useSealToast(world: World | null, state: WorldState | null, turn
     let live = true;
     const quiet = !opened.current;
     opened.current = true;
-    // One check at a time, so two quick refreshes do not both announce the same seal.
     queue.current = queue.current.then(async () => {
       const key = "seals:" + world.id;
       const shown = await game.repo.getSetting<string[]>(key, []);

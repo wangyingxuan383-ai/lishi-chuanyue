@@ -1,11 +1,11 @@
-// Exit motion (R28): overlays play a short closing animation before they are
-// removed. With reduced motion (system setting or 阅读设置 → 动效 off) they
-// are removed at once.
+// Exit motion and compositor transitions: overlays play a short closing animation
+// before removal. With reduced motion (system setting or 阅读设置 → 动效 off)
+// everything settles at once.
 
 /** How long a closing overlay stays on screen; matches --dur-fast in base.css plus a frame. */
 export const EXIT_MS = 170;
 
-/** rich / simple / off (D160); the system's "reduce motion" always means off. */
+/** rich / simple / off; the system's "reduce motion" always means off. */
 export function motionLevel(): "rich" | "simple" | "off" {
   if (typeof document === "undefined" || typeof matchMedia !== "function") return "off";
   const level = document.documentElement.dataset.motion;
@@ -32,8 +32,8 @@ export function buzz(platform: { system: { haptic(): Promise<boolean> } }): void
   void platform.system.haptic().catch(() => false);
 }
 
-/** Ink ripples on buttons at 华丽 (D160): one listener for the whole app. */
-const RIPPLE = "button.primary, .choice, .tool-btn, .send-btn, .sheet-menu button, .world-open, .mode-option, .settings-entry, .new-story, .theme-card, .style-card";
+/** Ink ripples on buttons at 华丽: one listener for the whole app. Never clips 3D/scene hosts. */
+const RIPPLE = "button.primary, .choice, .tool-btn, .send-btn, .sheet-menu button, .world-open:not(.scene-hit), .mode-option, .settings-entry, .new-story, .theme-card, .style-card";
 export function installRipples(): () => void {
   const onDown = (e: PointerEvent) => {
     if (motionLevel() !== "rich" || e.button !== 0) return;
@@ -46,10 +46,19 @@ export function installRipples(): () => void {
     dot.style.width = dot.style.height = `${size}px`;
     dot.style.left = `${e.clientX - rect.left - size / 2}px`;
     dot.style.top = `${e.clientY - rect.top - size / 2}px`;
-    if (getComputedStyle(target).position === "static") target.style.position = "relative";
+    const computed = getComputedStyle(target);
+    const restorePos = computed.position === "static";
+    const prevOverflow = target.style.overflow;
+    if (restorePos) target.style.position = "relative";
     target.style.overflow = "hidden";
     target.appendChild(dot);
-    dot.addEventListener("animationend", () => dot.remove(), { once: true });
+    dot.addEventListener("animationend", () => {
+      dot.remove();
+      if (!target.querySelector(".ripple")) {
+        target.style.overflow = prevOverflow;
+        if (restorePos) target.style.position = "";
+      }
+    }, { once: true });
     if (target.classList.contains("send-btn")) {
       target.classList.remove("fired"); void target.offsetWidth; target.classList.add("fired");
     }
@@ -65,16 +74,27 @@ type ViewTransitionDocument = Document & { startViewTransition?: (update: () => 
  */
 export function withViewTransition(direction: "push" | "pop", update: () => void, prepare?: () => void): void {
   const doc = document as ViewTransitionDocument;
-  if (motionLevel() !== "rich" || typeof doc.startViewTransition !== "function") { update(); prepare?.(); return; }
+  if (motionLevel() !== "rich" || typeof doc.startViewTransition !== "function") {
+    if (typeof document !== "undefined") delete document.documentElement.dataset.bookOpen;
+    update();
+    prepare?.();
+    return;
+  }
   const root = document.documentElement;
   root.dataset.vt = direction;
   try {
     const vt = doc.startViewTransition(() => { update(); prepare?.(); });
     void vt.finished.finally(() => {
       delete root.dataset.vt;
+      delete root.dataset.bookOpen;
       document.querySelectorAll<HTMLElement>("[data-vt-named]").forEach((el) => { el.style.viewTransitionName = ""; delete el.dataset.vtNamed; });
     });
-  } catch { delete root.dataset.vt; update(); prepare?.(); }
+  } catch {
+    delete root.dataset.vt;
+    delete root.dataset.bookOpen;
+    update();
+    prepare?.();
+  }
 }
 /** Gives an element a View Transition name until the transition ends. */
 export function nameForTransition(el: Element | null | undefined, name: string): void {
@@ -83,7 +103,7 @@ export function nameForTransition(el: Element | null | undefined, name: string):
   (el as HTMLElement).dataset.vtNamed = "1";
 }
 
-/** Gold dust bursting from a point (R29-T007): an opened book, a milestone. 华丽 only. */
+/** Gold dust bursting from a point: an opened book, a milestone. 华丽 only. */
 export function burstDust(x: number, y: number, count = 18): void {
   if (motionLevel() !== "rich" || typeof document === "undefined") return;
   const layer = document.createElement("div");
@@ -99,27 +119,31 @@ export function burstDust(x: number, y: number, count = 18): void {
     layer.appendChild(dot);
   }
   document.body.appendChild(layer);
-  window.setTimeout(() => layer.remove(), 1400);
+  window.setTimeout(() => layer.remove(), 1200);
 }
 
 /**
- * Opening a book from the home screen (R29-T007): the chosen design plays its
- * own flourish on `host`, then `go` navigates (where the page transition takes
- * over). Without 华丽 it navigates at once.
+ * Opening a book from the home screen: the chosen design plays its crisp flourish
+ * on `host`, then `go` transitions smoothly into the story (~580ms total).
+ * Without 华丽 it navigates at once.
  */
-export function openWithFlourish(host: HTMLElement | null, from: HTMLElement | null, go: () => void, ms = 460): void {
+export function openWithFlourish(host: HTMLElement | null, from: HTMLElement | null, go: () => void, ms = 360): void {
   if (!host || motionLevel() !== "rich") { go(); return; }
   const rect = (from ?? host).getBoundingClientRect();
-  // How far the book travels to the middle of the screen, for the design's keyframes.
   host.style.setProperty("--dx", `${Math.round(window.innerWidth / 2 - (rect.left + rect.width / 2))}px`);
   host.style.setProperty("--dy", `${Math.round(window.innerHeight * 0.42 - (rect.top + rect.height / 2))}px`);
   host.classList.add("opening");
   const group = host.closest(".home-shelf");
   group?.classList.add("opening");
-  burstDust(rect.left + rect.width / 2, rect.top + rect.height / 2, 22);
+  document.documentElement.dataset.bookOpen = "1";
+  burstDust(rect.left + rect.width / 2, rect.top + rect.height / 2, 18);
+  const clamped = Math.min(ms, 420);
   window.setTimeout(() => {
     go();
-    // The home screen stays mounted underneath: put it back for the way home.
-    window.setTimeout(() => { host.classList.remove("opening"); group?.classList.remove("opening"); }, 900);
-  }, ms);
+    window.setTimeout(() => {
+      host.classList.remove("opening");
+      group?.classList.remove("opening");
+      delete document.documentElement.dataset.bookOpen;
+    }, 640);
+  }, clamped);
 }

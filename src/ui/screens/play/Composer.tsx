@@ -33,7 +33,7 @@ export function Composer(p: ComposerProps) {
     const prev = prevAuto.current;
     if (!auto) {
       if (prev && queuedNote) {
-        if (watch && !input.trim()) p.setInput(queuedNote);
+        if (watch) p.setInput(input.trim() ? `${input.trim()}\n${queuedNote}` : queuedNote);
         else { p.setNote(queuedNote); p.setNoteOpen(true); }
       }
       setQueuedNote("");
@@ -41,16 +41,25 @@ export function Composer(p: ComposerProps) {
       prevAuto.current = null;
       return;
     }
-    if (!prev || prev.runId !== auto.runId) {
-      setActiveNote(auto.activeNote ?? "");
-      setQueuedNote("");
+    const consumed = auto.activeNote?.trim() ?? "";
+    const switchedRun = Boolean(prev?.runId && auto.runId && prev.runId !== auto.runId);
+    if (!prev || switchedRun) {
+      setActiveNote(consumed);
+      if (switchedRun || consumed) {
+        setQueuedNote((cur) => (switchedRun || cur === consumed ? "" : cur));
+      }
     } else if (auto.step > prev.step) {
-      setActiveNote(auto.activeNote ?? queuedNote);
-      setQueuedNote("");
+      setActiveNote(consumed);
+      if (consumed) {
+        setQueuedNote((cur) => (cur === consumed || !cur ? "" : cur));
+      }
     } else if (auto.activeNote !== undefined) {
-      setActiveNote(auto.activeNote ?? "");
+      setActiveNote(consumed);
+      if (consumed) {
+        setQueuedNote((cur) => (cur === consumed ? "" : cur));
+      }
     }
-    prevAuto.current = { step: auto.step, runId: auto.runId };
+    prevAuto.current = { step: auto.step, runId: auto.runId ?? prev?.runId };
   }, [auto?.step, auto?.runId, auto?.activeNote]);
   const typed = !!input.trim();
   const kind = agentBusy ? "wait" : busy ? "stop" : typed ? "send" : "continue";

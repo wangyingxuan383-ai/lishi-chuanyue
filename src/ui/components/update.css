@@ -21,6 +21,13 @@
 .update-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .update-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.25s ease-out; }
 .update-bar.busy > i { width: 30%; animation: update-slide 1.2s ease-in-out infinite; }
+.update-auto-toggle {
+  display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 3px; background: var(--raised); cursor: pointer;
+}
+.update-auto-toggle > span { display: grid; gap: 2px; }
+.update-auto-toggle b { font-size: 14px; font-weight: 600; }
+.update-auto-toggle small { color: var(--muted); font-size: 12px; line-height: 1.5; }
 @keyframes update-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (prefers-reduced-motion: reduce) { .update-bar.busy > i { animation: none; width: 100%; opacity: 0.4; } }
 :root[data-motion="off"] .update-bar.busy > i { animation: none; width: 100%; opacity: 0.4; }

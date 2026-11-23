@@ -378,6 +378,7 @@ export function isOpeningSeed(value: unknown): value is WorldState {
  */
 export function recoverOpeningSeed(target: StoryNode, targetState?: WorldState | null, worldEraId?: string): WorldState | null {
   if (!isOpeningSeed(target.meta.openingSeed)) return null;
+  if (target.meta.revision) return structuredClone(target.meta.openingSeed);
   const seed = structuredClone(target.meta.openingSeed);
   const record = (target.record && typeof target.record === "object" ? target.record : {}) as TurnRecord;
   const pack = seed.era.mode === "free" ? null : eraPack(worldEraId ?? seed.era.packId ?? "");
@@ -694,6 +695,7 @@ async function commitRevision(game: Game, r: {
     baseline = (await game.settleRecord(baseline, patch, { mode: "do", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock }, { advanceTime: false })).state;
     era = eraContext(world.eraId, baseline);
   }
+  const postCorrectionSeed = target.parentId ? undefined : structuredClone(baseline);
   const normalized = parseRecord(JSON.stringify(r.record)).record;
   if (!normalized) throw new WritingError("改稿的事实整理尚未完成。");
   let record = structuredClone(normalized);
@@ -726,14 +728,23 @@ async function commitRevision(game: Game, r: {
     if (!Object.keys(normalized.continuity).length) delete normalized.continuity;
   }
   result.state.source = structuredClone(r.source ?? null);
-  result.state.facts = [...result.state.facts ?? [], ...r.facts(nodeId)];
+  const addedFacts = r.facts(nodeId);
+  result.state.facts = [...result.state.facts ?? [], ...addedFacts];
+  const nextOpeningSeed: WorldState | undefined = !postCorrectionSeed
+    ? undefined
+    : r.asVersion && addedFacts.length
+      ? {
+          ...postCorrectionSeed,
+          facts: [...(postCorrectionSeed.facts ?? []), ...structuredClone(addedFacts)],
+        }
+      : postCorrectionSeed;
   const node = {
     id: nodeId, parentId: target.parentId, kind: target.kind, narrative: r.narrative.trim(), state: result.state,
     actionMode: target.actionMode, actionText: target.actionText, directorNote: target.directorNote, record: normalized, choices: normalized.choices ?? [],
     meta: {
       ...r.meta,
       ...(target.parentId ? {} : {
-        openingSeed: structuredClone(seed),
+        openingSeed: nextOpeningSeed,
         ...(Array.isArray(target.meta.codexTimeline) ? { codexTimeline: structuredClone(target.meta.codexTimeline) } : {}),
         ...(target.meta.setup ? { setup: structuredClone(target.meta.setup) } : {}),
       }),

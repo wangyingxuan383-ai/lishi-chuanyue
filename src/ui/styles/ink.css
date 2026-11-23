@@ -1,40 +1,47 @@
-/* 墨韵·新中式 (D160): the component differences of the second style.
-   Everything here is scoped to :root[data-style="ink"]; 宣纸书卷 is untouched.
-   Colours, radii and shadows come from tokens.css. */
+/* 墨韵·新中式: component differences of the second style.
+   Scoped to :root[data-style="ink"]; base button rule uses :where() so list/row/banner
+   buttons never pick up accidental elevation shadows. */
 
-/* ---------- page and type ---------- */
 :root[data-style="ink"] body { background-attachment: fixed; }
 :root[data-style="ink"] .muted { color: var(--muted); }
 :root[data-style="ink"] h1, :root[data-style="ink"] h2, :root[data-style="ink"] h3 { font-family: var(--font-title); }
 
-/* ---------- buttons and fields ---------- */
-:root[data-style="ink"] button {
-  border-color: transparent; background: var(--surface); box-shadow: var(--elev-1);
+/* ---------- buttons and fields (zero-specificity :where wrapper) ---------- */
+:where(:root[data-style="ink"]) button {
+  border-color: transparent;
+  background: var(--surface);
+  box-shadow: var(--elev-1);
   font-weight: 500;
 }
-:root[data-style="ink"] button.ghost, :root[data-style="ink"] .icon-btn, :root[data-style="ink"] button.link,
-:root[data-style="ink"] .sheet-menu button, :root[data-style="ink"] .topbar button.title, :root[data-style="ink"] .sheet-close,
-:root[data-style="ink"] .world-open, :root[data-style="ink"] button.turn-changes, :root[data-style="ink"] .choice,
-:root[data-style="ink"] .settings-entry, :root[data-style="ink"] .tabs button, :root[data-style="ink"] .service-hero .icon-btn, :root[data-style="ink"] .usage-line { box-shadow: none; background: transparent; }
+:root[data-style="ink"] :is(
+  button.ghost, .icon-btn, button.link, .sheet-menu button, .topbar button.title,
+  .sheet-close, .world-open, button.turn-changes, .choice, .settings-entry,
+  .tabs button, .service-hero .icon-btn, .usage-line, button.codex-item,
+  .scope-toc-item, .mode-banner > button, .beat-body, .writing-saved-use,
+  .switch-row, .fold-head, .my-template-menu, .whats-new-open
+) {
+  box-shadow: none;
+  background: transparent;
+}
 :root[data-style="ink"] button.primary {
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent));
   border-color: transparent; color: var(--on-accent); font-family: var(--sans); letter-spacing: 0.08em; font-weight: 600;
-  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent), 0 8px 20px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent), 0 8px 20px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 0 0 1px rgba(255, 226, 170, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 :root[data-style="ink"][data-theme="night"] button.primary {
   background: linear-gradient(180deg, #c63526, var(--accent));
 }
 :root[data-style="ink"] button.primary:disabled { background: var(--raised); color: var(--muted); box-shadow: none; }
-:root[data-style="ink"] button.danger-solid { font-family: var(--sans); border: 1px solid var(--loss); box-shadow: none; }
+:root[data-style="ink"] button.danger-solid { font-family: var(--sans); border: 1px solid var(--loss); box-shadow: none; background: transparent; }
 :root[data-style="ink"] input, :root[data-style="ink"] textarea, :root[data-style="ink"] select {
   border: 1px solid transparent; background: var(--raised);
 }
 :root[data-style="ink"] input:focus-visible, :root[data-style="ink"] textarea:focus-visible, :root[data-style="ink"] select:focus-visible {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--surface);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent-text) 55%, transparent); background: var(--surface);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent-text) 12%, transparent);
 }
 :root[data-style="ink"] .segmented button[aria-pressed="true"], :root[data-style="ink"] .mode-option[aria-pressed="true"] {
-  background: var(--fg); color: var(--bg); box-shadow: var(--elev-2);
+  background: var(--fg); color: var(--bg); box-shadow: var(--elev-2); border-color: transparent;
 }
 :root[data-style="ink"] .mode-option[aria-pressed="true"] small { color: color-mix(in srgb, var(--bg) 75%, transparent); }
 :root[data-style="ink"] .mode-option[aria-pressed="true"] b { color: var(--bg); }
@@ -42,18 +49,21 @@
 /* ---------- top bar ---------- */
 :root[data-style="ink"] .topbar {
   border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  backdrop-filter: blur(18px) saturate(1.4);
-  min-height: 56px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  min-height: calc(56px + env(safe-area-inset-top));
 }
 :root[data-style="ink"] .topbar h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.04em; }
 
 /* ---------- overlays ---------- */
-:root[data-style="ink"] .backdrop { backdrop-filter: blur(6px); }
+:root[data-style="ink"] .backdrop { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 :root[data-style="ink"] .sheet {
   border-top: none; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
-  box-shadow: var(--elev-3); background-image: none;
-  padding-left: var(--s-gutter); padding-right: var(--s-gutter);
+  box-shadow: var(--elev-3);
+  background-image: linear-gradient(90deg, transparent, var(--gilt-soft) 30%, var(--gilt-soft) 70%, transparent);
+  background-size: 100% 1px; background-repeat: no-repeat; background-position: 0 0;
+  padding-left: max(var(--s-gutter), env(safe-area-inset-left));
+  padding-right: max(var(--s-gutter), env(safe-area-inset-right));
 }
 :root[data-style="ink"] .sheet-handle { width: 44px; height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--fg) 18%, transparent); }
 :root[data-style="ink"] .sheet h2 { font-size: 19px; font-weight: 700; letter-spacing: 0.02em; }
@@ -67,22 +77,25 @@
 :root[data-style="ink"] .tabs button { border-radius: var(--radius-pill); font-family: var(--sans); padding: 6px 14px; min-height: 36px; }
 :root[data-style="ink"] .tabs button[aria-selected="true"], :root[data-style="ink"] .tabs button[aria-pressed="true"] { background: var(--fg); color: var(--bg); box-shadow: none; }
 
-/* ---------- cards everywhere ---------- */
+/* ---------- cards ---------- */
 :root[data-style="ink"] .fold, :root[data-style="ink"] .status-card, :root[data-style="ink"] .service-card,
 :root[data-style="ink"] .spend-card, :root[data-style="ink"] .notice, :root[data-style="ink"] .tip,
 :root[data-style="ink"] .recap-card, :root[data-style="ink"] .ending-card, :root[data-style="ink"] .report-card {
   border: none; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-2);
 }
-:root[data-style="ink"] .notice { border-left: 4px solid var(--accent); }
+:root[data-style="ink"] .notice { border-left: 4px solid var(--accent-text); }
 :root[data-style="ink"] .theme-card { border-radius: var(--radius-card); box-shadow: var(--elev-1); border: 2px solid transparent; }
 :root[data-style="ink"] .theme-card[aria-pressed="true"] { border-color: var(--fg); background: var(--surface); color: var(--fg); }
+:root[data-style="ink"] .theme-paper .swatch { background: #f7f5f0; }
+:root[data-style="ink"] .theme-day .swatch { background: #fbfaf7; }
+:root[data-style="ink"] .theme-night .swatch { background: #121212; }
+:root[data-style="ink"] .theme-auto .swatch { background: linear-gradient(135deg, #f7f5f0 50%, #121212 50%); }
 
 /* ---------- play screen ---------- */
 :root[data-style="ink"] .story { padding-left: var(--s-gutter); padding-right: var(--s-gutter); }
-:root[data-style="ink"] .turn + .turn::before { opacity: 0.6; }
-/* 接下来 is a card of rows with a quiet fill button. */
-:root[data-style="ink"] .next-choices { margin: 22px 0 8px; padding: 14px 8px 6px; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-2); }
-:root[data-style="ink"] .next-head { justify-content: flex-start; padding: 2px 10px 4px 22px; letter-spacing: 0.12em; font-family: var(--sans); font-weight: 600; color: var(--muted); }
+:root[data-style="ink"] .turn + .turn::before { opacity: 0.65; }
+:root[data-style="ink"] .next-choices { margin: 22px 0 8px; padding: 14px 10px 8px; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-2); }
+:root[data-style="ink"] .next-head { justify-content: flex-start; padding: 2px 10px 4px 18px; letter-spacing: 0.12em; font-family: var(--sans); font-weight: 600; color: var(--muted); }
 :root[data-style="ink"] .next-head::before { display: none; }
 :root[data-style="ink"] .choice-row { border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); align-items: center; }
 :root[data-style="ink"] .choice-row:last-child { border-bottom: none; }
@@ -92,22 +105,24 @@
 :root[data-style="ink"] .choice-fill { border-radius: 50%; margin-right: 2px; }
 :root[data-style="ink"] .ref-review { border: none; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1); }
 :root[data-style="ink"] .ref-review-body { border-top-style: solid; border-top-color: color-mix(in srgb, var(--line) 70%, transparent); }
-/* Changes: soft pills. */
 :root[data-style="ink"] .turn-changes { gap: 6px; font-family: var(--sans); }
 :root[data-style="ink"] .turn-changes .change { padding: 3px 10px; border-radius: var(--radius-pill); background: color-mix(in srgb, currentColor 9%, transparent); }
 :root[data-style="ink"] .turn-changes .change + .change::before { content: none; }
 :root[data-style="ink"] .change-row { border-left: none; border-radius: 12px; font-family: var(--sans); }
 :root[data-style="ink"] .tool-btn { background: var(--surface); box-shadow: var(--elev-1); margin-left: 6px; }
-/* The input bar floats over the story: a blurred strip with a pill-shaped field. */
+/* Preserve horizontal centering on wide/foldable viewports by setting block & inline padding separately */
 :root[data-style="ink"] .dock {
-  border-top: none; background: var(--dock); backdrop-filter: blur(20px) saturate(1.5);
-  box-shadow: 0 -8px 24px color-mix(in srgb, var(--shadow) 60%, transparent); padding: 10px 12px 12px;
+  border-top: none; background: var(--dock); backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  box-shadow: 0 -8px 24px color-mix(in srgb, var(--shadow) 60%, transparent);
+  padding-block: 10px calc(12px + env(safe-area-inset-bottom));
+  padding-inline: max(12px, env(safe-area-inset-left), calc((100% - 660px) / 2));
 }
 :root[data-style="ink"] .inputbar { align-items: center; gap: 6px; padding: 4px; border-radius: 28px; background: var(--dock-field); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 80%, transparent); }
 :root[data-style="ink"] .inputbar textarea { background: transparent; border: none; box-shadow: none; padding: 11px 6px; }
 :root[data-style="ink"] .inputbar textarea:focus-visible { box-shadow: none; background: transparent; }
 :root[data-style="ink"] .mode-btn { min-width: 44px; height: 40px; min-height: 40px; border-radius: 20px; font-family: var(--serif); font-weight: 700; background: var(--surface); }
 :root[data-style="ink"] .send-btn { height: 44px; min-height: 44px; border-radius: 22px; min-width: 84px; }
+@media (max-width: 359px) { :root[data-style="ink"] .send-btn { min-width: 64px; padding: 0 10px; } }
 :root[data-style="ink"] .send-btn.stop { background: var(--surface); }
 :root[data-style="ink"] .note-chip { border-style: solid; border-color: transparent; border-radius: var(--radius-pill); background: var(--accent-soft); }
 :root[data-style="ink"] .to-bottom { box-shadow: var(--elev-2); border: none; }
@@ -128,7 +143,7 @@
 :root[data-style="ink"] .world-card.featured .continue-btn { border-radius: var(--radius-pill); background: linear-gradient(180deg, #d9b46a, #b8914a); color: #1a1610; font-family: var(--sans); font-weight: 700; letter-spacing: 0.1em; box-shadow: 0 6px 18px rgba(217, 180, 106, 0.3); }
 :root[data-style="ink"] .world-card.featured .writing-badge { color: #f0cf8a; }
 :root[data-style="ink"] .world-card.featured .writing-badge i { background: #f0cf8a; }
-:root[data-style="ink"] .new-story { border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--elev-2); }
+:root[data-style="ink"] .new-story { border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--elev-2); padding: 14px 18px; }
 :root[data-style="ink"] .new-story-mark { border: none; background: var(--fg); color: var(--bg); }
 :root[data-style="ink"] .new-story-text b { font-family: var(--font-title); }
 :root[data-style="ink"] .section-title { font-family: var(--sans); font-size: 13px; color: var(--muted); letter-spacing: 0.2em; font-weight: 600; }
@@ -137,17 +152,15 @@
 /* ---------- settings ---------- */
 :root[data-style="ink"] .settings-group h2 { font-family: var(--sans); font-size: 13px; letter-spacing: 0.18em; color: var(--muted); font-weight: 600; }
 :root[data-style="ink"] .settings-list { border: none; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-2); overflow: hidden; }
-:root[data-style="ink"] .settings-entry { border-bottom-color: color-mix(in srgb, var(--line) 70%, transparent); }
+:root[data-style="ink"] .settings-entry { border-bottom-color: color-mix(in srgb, var(--line) 70%, transparent); padding: 13px 16px; }
 :root[data-style="ink"] .settings-entry .entry-icon { border-radius: 12px; background: var(--raised); color: var(--fg); }
 :root[data-style="ink"] .service-hero {
   border: none; color: #f7f1e6; box-shadow: var(--elev-3);
   background: radial-gradient(120% 100% at 100% 0%, rgba(181, 40, 28, 0.35), transparent 55%), linear-gradient(160deg, #2a2621, #141311);
 }
-:root[data-style="ink"] .service-hero-text small, :root[data-style="ink"] .service-hero-text > span, :root[data-style="ink"] .service-hero-state { color: rgba(247, 241, 230, 0.7); }
+:root[data-style="ink"] .service-hero-text small, :root[data-style="ink"] .service-hero-text > span, :root[data-style="ink"] .service-hero-state { color: rgba(247, 241, 230, 0.72); }
 :root[data-style="ink"] .service-hero.ok .service-hero-state { color: #9fe0b4; }
 :root[data-style="ink"] .service-hero-icon { background: linear-gradient(180deg, #c63526, #9e2218); box-shadow: 0 0 0 2px rgba(217, 180, 106, 0.6); }
-:root[data-style="ink"][data-theme="night"] :is(.writing-badge, .report-head b, .report-card .report-tag, .story-text p.date-line, .tip button, .to-bottom, .tree-marks, .ref-badge.branch, details > summary::before) { color: #ee7a64; }
-:root[data-style="ink"][data-theme="night"] .tag:not(.tag-ai):not(.tag-loss):not(.own) { color: #ee7a64; border-color: color-mix(in srgb, #ee7a64 70%, transparent); }
 :root[data-style="ink"] .style-card { border-color: transparent; box-shadow: var(--elev-2); }
 :root[data-style="ink"] .note-kind, :root[data-style="ink"] .note-row { border-color: transparent; box-shadow: var(--elev-1); border-radius: var(--radius-card); }
 :root[data-style="ink"] .note-kind[aria-checked="true"] { border-color: var(--fg); box-shadow: var(--elev-2), 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent); }
@@ -166,22 +179,22 @@
 :root[data-style="ink"] .assist-btn { border-radius: var(--radius-pill); }
 :root[data-style="ink"] .opening-wait .ring-brush { stroke: var(--fg); }
 :root[data-style="ink"] .opening-seal { color: var(--fg); }
-:root[data-style="ink"] .sheet-menu button.with-icon .icon { color: var(--fg); opacity: 0.7; }
+:root[data-style="ink"] .sheet-menu button.with-icon .icon { color: var(--fg); opacity: 0.72; }
 :root[data-style="ink"] .whats-new { border: none; border-radius: var(--radius-card); box-shadow: var(--elev-2); }
 :root[data-style="ink"] .whats-new-open { background: transparent; box-shadow: none; }
 :root[data-style="ink"] .whats-new-mark { border-radius: 50%; }
 
-/* ---------- R29 墨韵加厚 (D163): ink wash and paper fibre behind everything, distant
-   hills at the foot of the page, gilt hairlines and 回纹 corners on the larger cards,
-   brush-stroke underlines under headings, gilt on the big titles. ---------- */
+/* ---------- ink wash, distant hills & gilt meander corners ---------- */
 :root[data-style="ink"] {
-  --gilt: #b8914a; --gilt-soft: rgba(184, 145, 74, 0.28);
-  --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.5' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E"); --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.5' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
-  --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%231f1d1a' fill-opacity='0.06' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%231f1d1a' fill-opacity='0.05' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
+  --gilt: #b8914a; --gilt-soft: rgba(184, 145, 74, 0.26);
+  --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.45' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E");
+  --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.45' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
+  --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%231f1d1a' fill-opacity='0.055' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%231f1d1a' fill-opacity='0.045' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
 }
 :root[data-style="ink"][data-theme="night"] {
   --gilt: #d9b46a; --gilt-soft: rgba(217, 180, 106, 0.22);
-  --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.42' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E"); --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.42' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
+  --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.38' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E");
+  --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.38' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
   --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%23d9b46a' fill-opacity='0.045' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%23000000' fill-opacity='0.35' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
 }
 :root[data-style="ink"] body {
@@ -204,7 +217,7 @@
 }
 :root[data-style="ink"] :is(.card, .status-card, .settings-list, .whats-new, .new-story, .shelf-slip, .next-choices) {
   background-image: var(--meander), var(--meander-br);
-  background-repeat: no-repeat; background-size: 15px 15px; background-position: 9px 9px, calc(100% - 9px) calc(100% - 9px);
+  background-repeat: no-repeat; background-size: 13px 13px; background-position: 8px 8px, calc(100% - 8px) calc(100% - 8px);
   box-shadow: var(--elev-2), inset 0 0 0 1px var(--gilt-soft);
 }
 :root[data-style="ink"] :is(.settings-sub, .section-title)::after {
@@ -220,10 +233,8 @@
   background: linear-gradient(180deg, var(--title) 35%, color-mix(in srgb, var(--title) 55%, #9a7434)); -webkit-background-clip: text; background-clip: text; color: transparent;
   text-shadow: none; filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.6));
 }
-:root[data-style="ink"] button.primary { box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent), 0 8px 20px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 0 0 1px rgba(255, 226, 170, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
 :root[data-style="ink"] .home-scene { box-shadow: 0 16px 44px var(--shadow), inset 0 0 0 1px var(--gilt-soft); }
 :root[data-style="ink"] .scene-panel { border-color: var(--gilt-soft); }
-:root[data-style="ink"] .sheet { background-image: linear-gradient(90deg, transparent, var(--gilt-soft) 30%, var(--gilt-soft) 70%, transparent); background-size: 100% 1px; background-repeat: no-repeat; background-position: 0 0; }
 :root[data-style="ink"] .depth-btn span { border-color: var(--gilt); }
 :root[data-style="ink"] :is(.codex-era, .codex-ability, .bio-card, .hero-panel, .stat, .diff-fold) {
   border: none; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--elev-1);
@@ -239,9 +250,9 @@
 :root[data-style="ink"] .dock[data-tools]:not([data-tools="0"]) .inputbar { align-items: flex-end; border-radius: 22px; }
 @media (hover: hover) {
   :root[data-style="ink"] .choice:hover:not(:disabled) { background: var(--raised); }
-  :root[data-style="ink"] .choice-fill:hover:not(:disabled) { background: var(--raised); color: var(--accent); opacity: 1; }
+  :root[data-style="ink"] .choice-fill:hover:not(:disabled) { background: var(--raised); color: var(--accent-text); opacity: 1; }
   :root[data-style="ink"] .sheet-menu button:hover:not(:disabled) { background: var(--raised); }
   :root[data-style="ink"] .settings-entry:hover:not(:disabled) { background: var(--raised); }
-  :root[data-style="ink"] .tool-btn:hover:not(:disabled) { background: var(--raised); color: var(--accent); }
+  :root[data-style="ink"] .tool-btn:hover:not(:disabled) { background: var(--raised); color: var(--accent-text); }
   :root[data-style="ink"] button.primary:hover:not(:disabled) { filter: brightness(1.06); }
 }

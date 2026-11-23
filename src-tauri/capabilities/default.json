@@ -15,7 +15,10 @@
     "notifications:allow-notification-status",
     "notifications:allow-open-notification-settings",
     "notifications:allow-open-app-settings",
+    "notifications:allow-open-system-settings",
     "notifications:allow-story-committed",
+    "notifications:allow-notify-done",
+    "notifications:allow-notify-failed",
     "notifications:allow-set-keep-awake",
     "notifications:allow-open-url",
     "notifications:allow-set-system-bars",
@@ -33,6 +36,8 @@
     "updates:allow-fetch-text",
     "updates:allow-install",
     "updates:allow-can-install",
+    "updates:allow-package-status",
+    "updates:allow-environment-status",
     "updates:allow-dev-source",
     "updates:allow-set-dev-source"
   ]

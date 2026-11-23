@@ -14,6 +14,7 @@ import { Codex } from "./Codex";
 import { Goals } from "./Goals";
 import { Journal } from "./Journal";
 import { People } from "./People";
+import { EmptyVignette } from "./ChineseArt";
 import { Icon } from "./Icon";
 import { Sheet } from "./Sheet";
 
@@ -236,9 +237,10 @@ function StatusTidySheet({ worldId, headId, onClose, onSave }: { worldId: string
   );
 }
 
-export function Panel({ worldId, headId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, busy, docked = false, initialTab, initialTabNonce }: {
-  worldId: string; headId: string; chapterEvery: number;
+export function Panel({ worldId, headId, lineId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, onJumpNode, busy, docked = false, initialTab, initialTabNonce }: {
+  worldId: string; headId: string; lineId?: string; chapterEvery: number;
   onContinuitySaved?: () => void | Promise<void>;
+  onJumpNode?: (nodeId: string) => void;
   settings?: WorldSettings;
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
@@ -385,6 +387,8 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
   };
 
   return (
+    <>
+    {!docked && <div className={`backdrop${leaving ? " closing" : ""}`} aria-hidden="true" onClick={() => { if (!saving) close(); }} />}
     <div className={`panel${docked ? " docked" : ""}${leaving ? " leaving" : ""}`} role={docked ? "complementary" : "dialog"} aria-label="角色">
       <div className="topbar">
         {!docked && <button className="icon-btn" aria-label="关闭" disabled={saving} onClick={close}><Icon name="back" /></button>}
@@ -472,12 +476,12 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
               <div className="grow"><b>{i.name}</b>{i.note && <small>{i.note}</small>}{i.place && <small>放在{i.place}</small>}</div>
               <span className="item-count">{quantityText(i)}</span>
             </button>
-          )) : <p className="muted">行囊空空。</p>}
+          )) : <EmptyVignette kind="empty-satchel" title="行囊空空" hint="旅途中得来的器物、书信与凭据都会收在这里。" compact />}
           <button disabled={busy} onClick={() => setItem({ item: null })}><Icon name="plus" size={18} />添加物品</button>
         </div>}
         {tab === "我" && <KnowledgeRecords worldId={worldId} headId={headId} person={{ id: "protagonist", name: me.name, aliases: me.aliases }} busy={busy} onSaved={onContinuitySaved} />}
-        {tab === "人物" && <People worldId={worldId} headId={headId} onContinuitySaved={onContinuitySaved} onClosePanel={!docked ? onClose : undefined} state={state} era={era} busy={busy} onSave={onSave} />}
-        {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
+        {tab === "人物" && <People worldId={worldId} headId={headId} lineId={lineId} onJumpNode={onJumpNode} onContinuitySaved={onContinuitySaved} onClosePanel={!docked ? onClose : undefined} state={state} era={era} busy={busy} onSave={onSave} />}
+        {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} lineId={lineId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
         {tab === "设定" && <Codex worldId={worldId} state={state} era={era} headId={headId} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
         {tab === "目标" && <Goals state={state} era={era} headId={headId} busy={busy} onSave={onSave} />}
       </div>
@@ -489,5 +493,6 @@ export function Panel({ worldId, headId, chapterEvery, state, settings, era, onC
       {tidy && <StatusTidySheet worldId={worldId} headId={headId} onClose={() => setTidy(false)} onSave={onSave} />}
       {item && <ItemSheet item={item.item} state={state} headId={headId} onClose={() => setItem(null)} onSave={onSave} />}
     </div>
+    </>
   );
 }

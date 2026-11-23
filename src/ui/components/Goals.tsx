@@ -9,6 +9,7 @@ import type { EraContext } from "../../engine/era";
 import type { TurnRecord } from "../../engine/state/apply";
 import type { Goal, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
+import { EmptyVignette } from "./ChineseArt";
 import { Icon } from "./Icon";
 
 const ORDER: Goal["kind"][] = ["主线", "支线", "心愿"];
@@ -100,7 +101,7 @@ export function Goals({ state, era, headId, busy, onSave }: { state: WorldState;
           <div className="grow"><b>{g.name}</b>{g.progress && <small>{g.progress}</small>}</div>
           <span className="tag">{g.kind}</span>
         </button>
-      )) : <p className="muted">眼下没有明确的目标。</p>}
+      )) : <EmptyVignette kind="distant-road" title="眼下没有明确的目标" hint="顺着故事往前走，或点右上角记下一桩心愿。" compact />}
       {ended.length > 0 && <details>
         <summary className="muted">已结束 {ended.length}</summary>
         {ended.map((g) => (

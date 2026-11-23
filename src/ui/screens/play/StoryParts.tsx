@@ -6,6 +6,7 @@ import { useApp } from "../../app/context";
 import { FailureSheet } from "../../components/FailureSheet";
 import type { Variants } from "../../../engine/tree";
 import { Icon, type IconName } from "../../components/Icon";
+import { CinnabarSeal } from "../../components/ChineseArt";
 import { StoryText } from "../../components/StoryText";
 import { RunUsageLine } from "../../components/TurnUsage";
 import { DiffView } from "../../components/WritingAssist";
@@ -187,7 +188,10 @@ export function StampBurst({ label, sub }: { label: string; sub: string }) {
   return (
     <div className="stamp-layer" aria-hidden="true">
       {splashes.map((p, i) => <i key={i} className="stamp-splash" style={{ ["--a" as string]: p.a, ["--d" as string]: p.d, width: p.s, height: p.s }} />)}
-      <div className="stamp">{label}{sub && <small>{sub.slice(0, 8)}</small>}</div>
+      <div className="stamp">
+        <CinnabarSeal text={label} variant="yin" size={112} />
+        {sub && <small>{sub.slice(0, 8)}</small>}
+      </div>
     </div>
   );
 }

@@ -6,6 +6,16 @@ import type { Game } from "../../engine/game";
 import type { Profile } from "../../engine/llm/providers";
 import type { CompanionScreenProps } from "../screens/CompanionScreen";
 
+export interface ReaderRouteProps {
+  bookId?: string;
+  worldId?: string;
+  lineId?: string;
+  initialSection?: number;
+  initialNodeId?: string;
+  through?: number | null;
+  fanfic?: boolean;
+}
+
 export type Route =
   | { name: "home" }
   | { name: "setup"; first?: boolean; profileId?: string }
@@ -13,6 +23,7 @@ export type Route =
   | { name: "play"; worldId: string; resumeRunId?: string }
   | { name: "agent"; worldId: string; lineId: string; sessionId?: string; initialText?: string; skills?: string[]; target?: { nodeId: string; paragraph?: number; evidence?: import("../../engine/types").FactCitation[] } }
   | ({ name: "companion" } & CompanionScreenProps)
+  | ({ name: "reader" } & ReaderRouteProps)
   | { name: "settings" }
   | { name: "guide" };
 
@@ -29,28 +40,47 @@ export interface Reading {
   indent: boolean;
   /** Widest the story column gets on a big screen, in characters. */
   measure: number;
-  /** Look of the whole app (D160): 宣纸书卷 (default) or 墨韵·新中式. */
+  /** Look of the whole app: 宣纸书卷 (default) or 墨韵·新中式. */
   style: "scroll" | "ink";
-  /** Animations (D160): rich (default), simple, or off. The system's "reduce motion" always means off. */
+  /** Animations: rich (default), simple, or off. The system's "reduce motion" always means off. */
   motion: "rich" | "simple" | "off";
   /** A short vibration on long press. */
   haptics: boolean;
   /** Keep the screen on while reading and writing. */
   keepAwake: boolean;
-  /** Follow newly generated story text to the bottom. */
+  /** Follow newly generated story text to the bottom / last page. */
   autoScroll: boolean;
-  /** A small line under the latest passage with what it cost (R29-T004). */
+  /** A small line under the latest passage with what it cost. */
   usageLine: boolean;
-  /** The home screen's design (R29-T007, D163): a landscape for the latest story, or a bookshelf. */
+  /** The home screen's design: a landscape for the latest story, or a bookshelf. */
   home: "scene" | "shelf";
+  /** Vertical scroll or horizontal CSS multi-column book pages. */
+  pageMode: "scroll" | "paged";
 }
-export const DEFAULT_READING: Reading = { size: 18, theme: "paper", style: "scroll", serif: true, leading: 2, paragraph: 0.7, indent: true, measure: 36, motion: "rich", haptics: true, keepAwake: false, autoScroll: false, usageLine: true, home: "scene" };
+export const DEFAULT_READING: Reading = {
+  size: 18,
+  theme: "paper",
+  style: "scroll",
+  serif: true,
+  leading: 2,
+  paragraph: 0.7,
+  indent: true,
+  measure: 36,
+  motion: "rich",
+  haptics: true,
+  keepAwake: false,
+  autoScroll: false,
+  usageLine: true,
+  home: "scene",
+  pageMode: "scroll",
+};
 /** Saved reading settings from older versions: "system" animations became "rich". */
-export function normalizeReading(saved: Partial<Reading> & { motion?: string; style?: string }): Reading {
+export function normalizeReading(saved: Partial<Reading> & { motion?: string; style?: string; pageMode?: string }): Reading {
   const r = { ...DEFAULT_READING, ...saved } as Reading;
   if (!["rich", "simple", "off"].includes(r.motion)) r.motion = "rich";
   if (r.style !== "ink") r.style = "scroll";
   if (r.home !== "shelf") r.home = "scene";
+  if (r.pageMode !== "paged") r.pageMode = "scroll";
   return r;
 }
 /** The theme a setting resolves to now. */
@@ -75,14 +105,14 @@ export interface AppValue {
   pop(): void;
   /** A short message; with an action (e.g. 撤回) it stays a little longer. */
   toast(text: string, action?: ToastAction): void;
-  /** The app's own confirmation (R11-T003): resolves true when the player confirms. */
+  /** The app's own confirmation: resolves true when the player confirms. */
   ask(o: { title: string; message?: string; confirm: string; danger?: boolean }): Promise<boolean>;
   /** The app's own name prompt: resolves the trimmed name, or null when cancelled. */
   askName(o: { title: string; initial?: string; placeholder?: string; confirm?: string }): Promise<string | null>;
 }
 
 export interface ToastAction { label: string; run: () => void }
-export interface ToastState { text: string; action?: ToastAction; /** Fading out (R28); removed a moment later. */ leaving?: boolean }
+export interface ToastState { text: string; action?: ToastAction; leaving?: boolean }
 
 const AppContext = createContext<AppValue | null>(null);
 
@@ -114,7 +144,6 @@ export function useToast(): [ToastState | null, (text: string, action?: ToastAct
     setToast({ text, action });
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
-      // Fade out first, then remove; a new toast in between replaces it.
       if (!motionOn()) { setToast(null); return; }
       setToast((t) => t && { ...t, leaving: true });
       timer.current = setTimeout(() => setToast(null), EXIT_MS);

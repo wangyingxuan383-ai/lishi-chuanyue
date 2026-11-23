@@ -90,6 +90,30 @@ export interface UpdateRequest {
 
 export type InstallStatus = "started" | "permission" | "unsupported";
 
+export interface UpdatePackageStatus {
+  downloaded: boolean;
+  verified: boolean;
+  bytes: number;
+  canInstall: boolean;
+}
+
+export interface UpdateEnvironmentStatus {
+  wifiUnmetered: boolean;
+  freeBytes: number;
+}
+
+export type OemFamily = "xiaomi" | "vivo" | "oppo" | "honor" | "huawei" | "samsung" | "generic";
+export type SystemSettingsTarget = "notifications" | "app" | "channel_done" | "channel_failed" | "battery" | "autostart";
+
+export interface NotificationStatus {
+  granted: boolean;
+  enabled: boolean;
+  oem?: OemFamily;
+  channelImportance?: number;
+  canFloat?: boolean;
+  reminderAudible?: boolean;
+}
+
 /** Why a generation stopped, as the native engine records it (R30, D166). */
 export interface Failure {
   kind: string;
@@ -181,6 +205,10 @@ export interface Platform {
     install(request: { version: string; size: number; sha256: string }): Promise<InstallStatus>;
     /** Whether the system lets this app install packages yet. */
     canInstall(): Promise<boolean>;
+    /** Inspects whether `<version>.apk` is already downloaded and SHA-256 verified on disk without re-downloading. */
+    packageStatus?(request: { version: string; sha256: string }): Promise<UpdatePackageStatus>;
+    /** Inspects unmetered Wi-Fi state and available disk bytes for silent update preparation. */
+    environmentStatus?(): Promise<UpdateEnvironmentStatus>;
     /** Debug builds: a local test server (`http://127.0.0.1:<port>`) instead of GitHub for the update check. */
     devSource(): Promise<{ available: boolean; url: string | null }>;
     setDevSource(url: string | null): Promise<void>;
@@ -222,6 +250,8 @@ export interface Platform {
   files: {
     /** Native snapshot-to-file path; the full archive never passes through the WebView. */
     exportWorld?(worldId: string, suggestedName: string): Promise<boolean>;
+    /** Binary file export (EPUB, PNG, Markdown, plain text) via native save dialog / SAF / Blob download. */
+    exportBytes?(name: string, bytes: Uint8Array, mime?: string): Promise<boolean>;
     exportText(suggestedName: string, text: string): Promise<boolean>;
     importText(): Promise<string | null>;
     importSkillPackage?(): Promise<{ name: string; bytes: number[] } | null>;
@@ -232,23 +262,25 @@ export interface Platform {
   system: {
     /** Only after the chosen story node is durably committed. Never for streams, candidates, tests or cancellation. */
     storyCommitted(completionId: string): Promise<void>;
+    notifyDone?(payload: { completionId: string; worldId?: string; title?: string; excerpt?: string }): Promise<void>;
+    notifyFailed?(payload: { worldId?: string; title?: string; status?: string; line?: string; runId?: string }): Promise<void>;
     /** Owned by the active play page; release when leaving it. */
     setKeepAwake(enabled: boolean): Promise<void>;
     requestNotifications(): Promise<boolean>;
-    /** Can notifications show (permission and the app's switch)? Always true off Android. */
-    notificationStatus(): Promise<{ granted: boolean; enabled: boolean }>;
-    /** Opens the system screen for this app's notifications, or its details page (battery, autostart). */
-    openSystemSettings(which: "notifications" | "app"): Promise<void>;
+    /** Can notifications show (permission, app switch, OEM ROM family, channel importance, banner & sound status)? */
+    notificationStatus(): Promise<NotificationStatus>;
+    /** Opens the system screen for notifications, reminder channels, battery, autostart, or app details. */
+    openSystemSettings(which: SystemSettingsTarget): Promise<void>;
     /** Opens an https page in the system browser. */
     openUrl(url: string): Promise<void>;
-    /** R29-T006: battery optimisation and phone make, for keeping a passage writing in the background (Android). */
-    backgroundStatus?(): Promise<{ ignoringBattery: boolean; xiaomi: boolean }>;
+    /** Battery optimisation and phone make, for keeping a passage writing in the background (Android). */
+    backgroundStatus?(): Promise<{ ignoringBattery: boolean; xiaomi: boolean; oem?: OemFamily }>;
     requestBatteryExemption?(): Promise<void>;
-    /** Xiaomi's 自启动管理, else the app's details page. */
+    /** OEM autostart manager, else the app's details page. */
     openAutostart?(): Promise<void>;
     /** What the notifications show: live progress, the passage's first line, that line on the lock screen. */
     setNotifyPrefs?(prefs: NotifyPrefs): Promise<void>;
-    /** Whether "写好了" will ring: the app's switch and what the system will actually do (Android). */
+    /** Whether "写好了" will ring: the app's switch and what the system will actually do. */
     reminderStatus?(): Promise<{ sound: boolean; audible: boolean }>;
     /** Posts one sample reminder now, so the player hears it. */
     testReminder?(): Promise<void>;

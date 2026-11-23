@@ -56,7 +56,7 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
       if (event.type === "text" && typeof event.full === "string") {
         if (event.full.length < lastLiveTextLen) return;
         lastLiveTextLen = event.full.length;
-      } else if (event.type === "thinking" || event.type === "step") {
+      } else if (event.type === "thinking" || event.type === "step" || event.type === "done" || event.type === "failed") {
         lastLiveTextLen = 0;
       }
       onEvent(event);
@@ -68,6 +68,7 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
       lastLiveTextLen = event.full.length;
       onEvent(event);
     } else if (event.type === "thinking") {
+      lastLiveTextLen = 0;
       onEvent(event);
     }
   };
@@ -80,7 +81,7 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
       if (!snapshotReady) pendingLive.push({ seq: numericSeq, event });
       else deliver(numericSeq, event);
       const kind = event && typeof event === "object" && !Array.isArray(event) ? (event as Record<string, unknown>).type : null;
-      if (kind === "done" || kind === "failed" || kind === "finished") {
+      if (kind === "step" || kind === "done" || kind === "failed" || kind === "finished") {
         clearTimeout(timer);
         void next();
       }
@@ -124,9 +125,30 @@ export function startRun(platform: Platform, plan: RunPlan | null, onEvent: (eve
     const running = ["running", "committing"].includes(snapshot.status);
     if (running && snapshot.stopRequested && (!stopped || currentAttempt === stopAttempt)) acknowledgeStop();
     if (attached) {
-      for (const item of snapshot.events) deliver(item.seq, item.event);
+      let crossedBoundary = false;
+      for (const item of snapshot.events) {
+        const kind = item.event && typeof item.event === "object" && !Array.isArray(item.event)
+          ? (item.event as Record<string, unknown>).type
+          : null;
+        if (kind === "step" || kind === "done" || kind === "failed" || kind === "finished") {
+          crossedBoundary = true;
+        }
+        deliver(item.seq, item.event);
+      }
       snapshotReady = true;
-      for (const item of pendingLive.splice(0)) deliver(item.seq, item.event);
+      for (const item of pendingLive.splice(0)) {
+        if (
+          crossedBoundary &&
+          item.seq === 0 &&
+          item.event &&
+          typeof item.event === "object" &&
+          !Array.isArray(item.event) &&
+          (item.event as Record<string, unknown>).type === "text"
+        ) {
+          continue;
+        }
+        deliver(item.seq, item.event);
+      }
     }
     if (!running) { terminal = true; cleanupLive(); settle(snapshot); return; }
     void sendStop(id);

@@ -3,8 +3,12 @@ package io.timejump.chuanyue
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.os.StatFs
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import app.tauri.annotation.Command
@@ -20,13 +24,101 @@ class PackageArgs {
     var path: String? = null
 }
 
+@InvokeArg
+class WakeArgs {
+    var active: Boolean = false
+}
+
 /**
- * Hands a downloaded update to the system package installer (R14 应用内更新).
- * Only Rust calls these commands: no capability names them, so the page
- * cannot, and Rust has checked the package's SHA-256 again just before.
+ * Hands a downloaded update to the system package installer and inspects
+ * Wi-Fi / storage environment for safe update preparation.
+ * Only Rust calls these commands: no capability names them directly.
  */
 @TauriPlugin
 class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
+    private val wakeSync = Any()
+    private var downloadWakeLock: PowerManager.WakeLock? = null
+
+    private fun startSafely(vararg intents: Intent): Boolean {
+        for (candidate in intents) {
+            try {
+                activity.startActivity(Intent(candidate).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return true
+            } catch (_: Throwable) {
+                // Try next fallback intent on custom OEM ROMs.
+            }
+        }
+        return false
+    }
+
+    /** Keeps CPU/socket reads alive for up to 20 minutes while downloading a large APK in the background. */
+    @Command
+    fun setDownloadWakeLock(invoke: Invoke) {
+        val active = try { invoke.parseArgs(WakeArgs::class.java).active } catch (_: Exception) { false }
+        synchronized(wakeSync) {
+            try {
+                if (active) {
+                    val pm = activity.getSystemService(PowerManager::class.java)
+                    val lock = downloadWakeLock ?: pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chuanyue:update-download")?.also {
+                        it.setReferenceCounted(false)
+                        downloadWakeLock = it
+                    }
+                    lock?.acquire(20 * 60 * 1000L)
+                } else {
+                    downloadWakeLock?.let { if (it.isHeld) it.release() }
+                    downloadWakeLock = null
+                }
+            } catch (_: Throwable) {
+                downloadWakeLock = null
+            }
+        }
+        invoke.resolve()
+    }
+
+    /** Inspects active + underlying non-VPN networks for unmetered Wi-Fi and checks internal free bytes. */
+    @Command
+    fun environmentStatus(invoke: Invoke) {
+        val freeBytes = try {
+            StatFs(activity.filesDir.absolutePath).availableBytes.coerceAtLeast(0L)
+        } catch (_: Throwable) {
+            0L
+        }
+        invoke.resolve(
+            JSObject()
+                .put("wifiUnmetered", isWifiUnmetered())
+                .put("freeBytes", freeBytes)
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isWifiUnmetered(): Boolean {
+        return try {
+            val cm = activity.getSystemService(ConnectivityManager::class.java) ?: return false
+            val active = cm.activeNetwork ?: return false
+            val activeCaps = cm.getNetworkCapabilities(active) ?: return false
+            if (!activeCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return false
+
+            fun isUnmeteredWifi(caps: NetworkCapabilities): Boolean =
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+
+            if (!activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                return isUnmeteredWifi(activeCaps)
+            }
+
+            // When Clash / VPN is active, inspect underlying / non-VPN networks.
+            val nonVpn = cm.allNetworks.mapNotNull { net ->
+                cm.getNetworkCapabilities(net)?.takeIf {
+                    !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                        it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                }
+            }
+            nonVpn.any { isUnmeteredWifi(it) }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     /** Android 8+ asks once per app (“安装未知应用”); older versions ask inside the installer. */
     @Command
     fun canInstallPackages(invoke: Invoke) {
@@ -91,7 +183,7 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("未找到系统软件包安装程序，无法安装更新")
         } catch (error: SecurityException) {
             invoke.reject("系统拒绝打开安装程序，请检查安装未知应用权限")
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             invoke.reject("没能打开系统安装界面，请稍后重试")
         }
     }
@@ -105,28 +197,14 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
     private fun openInstallSettings(): Boolean {
         val pkgUri = Uri.parse("package:${activity.packageName}")
         val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                activity.startActivity(
-                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-                return true
-            } catch (_: Exception) {
-                // Fall back to app details settings on custom ROMs that omit or block the unknown-sources screen.
-            }
-        }
-        return try {
-            activity.startActivity(details)
-            true
-        } catch (_: Exception) {
-            try {
-                activity.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                true
-            } catch (_: Exception) {
-                false
-            }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startSafely(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri),
+                details,
+                Intent(Settings.ACTION_SETTINGS)
+            )
+        } else {
+            startSafely(details, Intent(Settings.ACTION_SETTINGS))
         }
     }
 }

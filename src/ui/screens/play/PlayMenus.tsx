@@ -45,11 +45,12 @@ interface PassageMoreMenuProps {
   toast: AppValue["toast"];
   setBookmark: (value: { node: StoryNode; name: string }) => void;
   setCardNode: (node: StoryNode) => void;
+  onExcerpt?: (node: StoryNode) => void;
   setRawNode: (node: StoryNode) => void;
   setUsageNode: (id: string) => void;
 }
 
-export function PassageMoreMenu({ menuMore, busy = false, devMode, game, setMenuMore, setEditing, refresh, toast, setBookmark, setCardNode, setRawNode, setUsageNode }: PassageMoreMenuProps) {
+export function PassageMoreMenu({ menuMore, busy = false, devMode, game, setMenuMore, setEditing, refresh, toast, setBookmark, setCardNode, onExcerpt, setRawNode, setUsageNode }: PassageMoreMenuProps) {
   return (
     <MenuSheet
       title="这一段还可以"
@@ -59,6 +60,7 @@ export function PassageMoreMenu({ menuMore, busy = false, devMode, game, setMenu
         { icon: "undo", label: "恢复 AI 写的原文", hidden: !menuMore.rewritten || typeof menuMore.meta.original !== "string" || menuMore.meta.original === menuMore.narrative || busy, onSelect: () => void game.repo.restoreNarrative(menuMore.id).then(() => game.afterTextEdit(menuMore.worldId, menuMore.id)).then(() => { void refresh(); toast("已恢复原文"); }) },
         { icon: "feather", label: "改我的行动", hidden: !menuMore.actionText || menuMore.actionMode === "continue" || menuMore.actionMode === "skip" || busy, onSelect: () => setEditing({ node: menuMore, field: "action", text: menuMore.actionText ?? "" }) },
         { icon: "bookmark", label: "加书签", hidden: menuMore.kind === "edit", onSelect: () => setBookmark({ node: menuMore, name: menuMore.narrative.replace(/\s+/g, "").slice(0, 12) || "书签" }) },
+        { icon: "highlight", label: "收入佳句摘录", hidden: menuMore.kind === "edit" || !menuMore.narrative.trim() || !onExcerpt, onSelect: () => onExcerpt?.(menuMore) },
         { icon: "share", label: "做成书摘卡", hidden: menuMore.kind === "edit" || !menuMore.narrative.trim(), onSelect: () => setCardNode(menuMore) },
         { icon: "coin", label: "这一段的用量", hidden: menuMore.kind === "edit", onSelect: () => setUsageNode(menuMore.id) },
         { icon: "key", label: "查看原始输出（开发者）", hidden: !devMode, onSelect: () => setRawNode(menuMore) },
@@ -71,7 +73,7 @@ interface MoreMenuProps {
   mouse: boolean; busy?: boolean; state: WorldState; dead: boolean; watch?: boolean;
   head: StoryNode; cursor: tree.Cursor; noteOpen: boolean; devMode: boolean;
   game: AppValue["game"]; worldId: string;
-  setSheet: (sheet: "toc" | "ask" | "reference" | "notes" | "usage" | "life" | "autoplay" | "skip" | "lines" | "story" | "settings" | "keys" | null) => void;
+  setSheet: (sheet: "toc" | "excerpts" | "export" | "ask" | "reference" | "notes" | "usage" | "life" | "autoplay" | "skip" | "lines" | "story" | "settings" | "keys" | null) => void;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   setNoteOpen: (open: boolean) => void;
@@ -87,10 +89,14 @@ export function MoreMenu({ mouse, busy = false, state, dead, watch, head, cursor
       onClose={() => setSheet(null)}
       items={[
         { icon: "list", group: "阅读", label: "目录与搜索", onSelect: () => setSheet("toc") },
+        { icon: "book-open", group: "阅读", label: "小说模式阅读", onSelect: () => { captureReading?.(); push({ name: "reader", worldId, lineId: cursor.line.id, initialNodeId: head.id }); } },
+        { icon: "highlight", group: "阅读", label: "佳句摘录簿", onSelect: () => setSheet("excerpts") },
+        { icon: "download", group: "阅读", label: "导出成小说（EPUB / TXT / MD）", onSelect: () => setSheet("export") },
         { icon: "search", group: "阅读", label: mouse ? "查一查（Ctrl+F）" : "查一查", onSelect: () => setSheet("ask") },
         { icon: "sparkle", group: "阅读", label: "伴聊（畅聊 · 查资料 · 改档）", onSelect: () => { captureReading?.(); push({ name: "companion", worldId, lineId: cursor.line.id }); } },
         { icon: "memo", group: "阅读", label: "札记", onSelect: () => setSheet("notes") },
-        { icon: "book", group: "阅读", label: "参考资料", hidden: !state.source, onSelect: () => setSheet("reference") },
+        { icon: "book", group: "阅读", label: "沉浸阅读原著", hidden: !state.source, onSelect: () => { captureReading?.(); push({ name: "reader", bookId: state.source!.bookId, worldId, initialSection: state.source!.position, through: state.source!.through, fanfic: state.source!.fanfic }); } },
+        { icon: "scroll", group: "阅读", label: "参考资料引用", hidden: !state.source, onSelect: () => setSheet("reference") },
         { icon: "person", group: "阅读", label: "这一世小传", onSelect: () => setSheet("life") },
         { icon: "play", group: "推进", label: "连播", hidden: busy || dead || watch, onSelect: () => setSheet("autoplay") },
         { icon: "clock", group: "推进", label: "过些日子", hidden: busy, onSelect: () => setSheet("skip") },

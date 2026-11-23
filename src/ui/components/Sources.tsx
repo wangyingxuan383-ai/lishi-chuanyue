@@ -6,6 +6,7 @@ import { localFind } from "../app/localFind";
 import { Sheet } from "./Sheet";
 import { StoryText } from "./StoryText";
 import { Icon } from "./Icon";
+import { EmptyVignette } from "./ChineseArt";
 import { readBudget } from "./budgetMath";
 import { parseBook, type TextEncoding } from "../../engine/sources/parse";
 import { analysisJobs, chunksOf, deleteBook, getBook, listBooks, referenceContext, saveBook } from "../../engine/sources/library";
@@ -280,20 +281,21 @@ export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSe
       <BookPreview key={preview.id} book={preview} />
       {imported && <><span className="muted">使用方式</span><div className="segmented">{([["library", "只存入书库"], ["reference", "用作参考"], ["fanfic", "同人开局"]] as const).map(([v, label]) => <button key={v} aria-pressed={usage === v} onClick={() => setUsage(v)}>{label}</button>)}</div><button className="primary" disabled={!!progress || !!error || !preview.title.trim()} onClick={() => void save()}>保存书籍</button></>}
       {!imported && onSelect && <button className="primary" onClick={() => { onSelect(preview); onClose(); }}>使用这本书</button>}
+      {!imported && <button onClick={() => { onClose(); push({ name: "reader", bookId: preview.id }); }}><Icon name="book-open" size={18} />沉浸阅读全书</button>}
       {!imported && <button onClick={() => setNotes(true)}>原著札记</button>}
       {notes && <CanonNotesSheet bookId={preview.id} worldId={null} onClose={() => setNotes(false)} />}
       <button className="ghost" disabled={!!progress} onClick={() => { setPreview(null); setFile(null); setImported(false); }}>返回书库</button>
-    </> : shownBooks.map((book) => <div className="row" key={book.id}><button className="grow" onClick={() => void getBook(game.repo, book.id).then((b) => { setPreview(b); setImported(false); })}>{book.title} · {book.format.toUpperCase()}</button><button className="ghost danger" onClick={async () => {
+    </> : shownBooks.map((book) => <div className="row" key={book.id}><button className="grow" onClick={() => void getBook(game.repo, book.id).then((b) => { setPreview(b); setImported(false); })}>{book.title} · {book.format.toUpperCase()}</button><button className="ghost small" aria-label={`阅读《${book.title}》`} onClick={() => { onClose(); push({ name: "reader", bookId: book.id }); }}>阅读</button><button className="ghost danger" onClick={async () => {
       if (!await ask({ title: `删除“${book.title}”？`, message: "未被当前或历史路线引用的书籍才能删除。", confirm: "删除", danger: true })) return;
       try { await deleteBook(game.repo, book.id); load(); } catch (e) { toast(e instanceof Error ? e.message : "没能删除"); }
     }}>删除</button></div>)}
-    {!preview && !!books.length && !shownBooks.length && <p className="muted">没有找到相符的书籍，可以换个词或清除查找。</p>}
-    {!preview && !books.length && !progress && <p className="muted">书库还是空的。导入一次，可以给多个故事使用。</p>}
+    {!preview && !!books.length && !shownBooks.length && <EmptyVignette kind="mist-search" title="没有找到相符的书籍" hint="可以换个词或清除查找。" compact />}
+    {!preview && !books.length && !progress && <EmptyVignette kind="book-stack" title="书库还是空的" hint="导入一次，既可沉浸阅读，也能给多个故事作参考或同人原著。" compact />}
   </div></Sheet>;
 }
 
 export function SourceSetup({ value, onChange, disabled = false, fanfic = false, worldId = null }: { value: SourceBinding | null | undefined; onChange: (b: SourceBinding | null) => void; disabled?: boolean; fanfic?: boolean; worldId?: string | null }) {
-  const { game, toast } = useApp();
+  const { game, toast, push } = useApp();
   const [library, setLibrary] = useState(false), [book, setBook] = useState<SourceBook | null>(null), [analysis, setAnalysis] = useState(false), [browse, setBrowse] = useState(false), [notes, setNotes] = useState(false);
   const [picking, setPicking] = useState<"position" | "through" | null>(null);
   useEffect(() => { let live = true; setBook(null); if (value) void getBook(game.repo, value.bookId).then((b) => { if (live) setBook(b); }); return () => { live = false; }; }, [game, value?.bookId]);
@@ -332,7 +334,7 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false,
       <label className="field">原著怎么用<textarea rows={4} maxLength={12000} disabled={disabled} aria-label="原著怎么用" value={value.instructions} onChange={(e) => set({ instructions: e.target.value })} /></label>
       <span className="muted">理解方式</span><div className="segmented"><button disabled={disabled} aria-pressed={value.method === "search"} onClick={() => set({ method: "search" })}>直接检索引用</button><button disabled={disabled} aria-pressed={value.method === "analysis"} onClick={() => set({ method: "analysis" })}>先让 AI 通读整理</button></div>
       <p className="muted m-0">直接检索无需预先调用 AI。未整理也可以先直接使用，以后再整理。修改用法不会自动重新整理，也不会自动产生费用。</p>
-      <div className="row wrap"><button onClick={() => setBrowse(true)}>目录与正文</button><button onClick={() => setNotes(true)}>原著札记</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
+      <div className="row wrap"><button onClick={() => push({ name: "reader", bookId: value.bookId, worldId: worldId ?? undefined, initialSection: value.position, through: value.through, fanfic: value.fanfic })}><Icon name="book-open" size={18} />沉浸阅读</button><button onClick={() => setBrowse(true)}>目录与正文</button><button onClick={() => setNotes(true)}>原著札记</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
       <p className="muted m-0">原著札记：让 AI 先整理一段主线、一个人物或一个设定，写作时带上，比每段都翻原文更快更省。</p>
       {notes && <CanonNotesSheet bookId={value.bookId} worldId={worldId} position={value.position} through={value.through} onClose={() => setNotes(false)} />}
     </>}

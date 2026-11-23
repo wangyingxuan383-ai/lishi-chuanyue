@@ -8,6 +8,10 @@ import { nowOf, type GameClock } from "../../engine/calendar/clock";
 import { huimu, searchBook, turnNumbers, type SearchHit } from "../../engine/book";
 import type { Chapter, Line, Pin, StoryNode, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
+import { EmptyVignette } from "./ChineseArt";
+import { ExcerptsSheet } from "./ExcerptsSheet";
+import { Icon } from "./Icon";
+import { NovelExportSheet } from "./NovelExportSheet";
 import { Sheet } from "./Sheet";
 
 interface Data {
@@ -23,17 +27,19 @@ function Highlight({ hit }: { hit: SearchHit }) {
   return <small className="toc-snippet">{hit.snippet.before}<mark>{hit.snippet.hit}</mark>{hit.snippet.after}</small>;
 }
 
-export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, onClose }: {
-  worldId: string; headId: string; state: WorldState; clock: GameClock;
+export function TocSheet({ worldId, headId, lineId, state, clock, onJump, onBookmark, onClose }: {
+  worldId: string; headId: string; lineId?: string; state: WorldState; clock: GameClock;
   /** Scroll the story to a passage on the current path. */
   onJump: (nodeId: string) => void;
   /** Carry on from a bookmark that is not on the current path. */
   onBookmark: (line: Line) => void;
   onClose: () => void;
 }) {
-  const { game } = useApp();
+  const { game, push } = useApp();
   const [data, setData] = useState<Data | null>(null);
   const [query, setQuery] = useState("");
+  const [excerptsOpen, setExcerptsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -71,10 +77,25 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
   return (
     <Sheet title="目录" onClose={onClose}>
       <div className="stack toc">
+        <div className="row wrap gap-1">
+          <button type="button" className="ghost small grow" onClick={() => { onClose(); push({ name: "reader", worldId, lineId }); }}>
+            <Icon name="book-open" size={16} />小说模式精读
+          </button>
+          <button type="button" className="ghost small grow" onClick={() => setExcerptsOpen(true)}>
+            <Icon name="highlight" size={16} />佳句摘录簿
+          </button>
+          <button type="button" className="ghost small grow" onClick={() => setExportOpen(true)}>
+            <Icon name="download" size={16} />导出成书
+          </button>
+        </div>
         <input type="search" aria-label="搜索" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜正文、人物、设定、回目" />
         {query.trim() ? (
           <section className="stack gap-0" aria-label="搜索结果">
-            <p className="muted m-0 mb-1">{hits.length ? `找到 ${hits.length} 处${hits.filter((h) => h.kind === "正文").length >= 60 ? "（正文只列最近 60 段）" : ""}` : "没有找到。换个词试试，如人名、地名。"}</p>
+            {hits.length ? (
+              <p className="muted m-0 mb-1">{`找到 ${hits.length} 处${hits.filter((h) => h.kind === "正文").length >= 60 ? "（正文只列最近 60 段）" : ""}`}</p>
+            ) : (
+              <EmptyVignette kind="mist-search" title="没有找到相关内容" hint="换个词试试，如人名、地名。" compact />
+            )}
             {hits.map((hit, i) => {
               const content = (
                 <div className="grow">
@@ -144,6 +165,20 @@ export function TocSheet({ worldId, headId, state, clock, onJump, onBookmark, on
           </>
         )}
       </div>
+      {excerptsOpen && (
+        <ExcerptsSheet
+          worldId={worldId}
+          onJumpHighlight={(h) => {
+            if (h.nodeId) go(h.nodeId);
+            else {
+              onClose();
+              push({ name: "reader", worldId, lineId, initialSection: h.sectionIndex });
+            }
+          }}
+          onClose={() => setExcerptsOpen(false)}
+        />
+      )}
+      {exportOpen && <NovelExportSheet worldId={worldId} lineId={lineId} onClose={() => setExportOpen(false)} />}
     </Sheet>
   );
 }

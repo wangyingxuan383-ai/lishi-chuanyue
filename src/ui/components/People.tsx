@@ -4,12 +4,14 @@
 import { useApp } from "../app/context";
 import { useContext, useEffect, useRef, useState } from "react";
 import { personaFromStoryPerson } from "../../engine/companion";
+import { buildCharacterAtlas, type CharacterEntry } from "../../engine/characterAtlas";
 import { NoteEntry } from "./CanonNotes";
 import { agoText } from "../../engine/calendar/clock";
 import type { EraContext } from "../../engine/era";
 import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
 import type { Attitude, Person, WorldState } from "../../engine/types";
+import { EmptyVignette } from "./ChineseArt";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
 import { KnowledgeRecords } from "./Continuity";
@@ -23,8 +25,8 @@ export function attitudeClass(a: Attitude): string {
   return a === "仇视" || a === "敌意" ? "att-hostile" : a === "冷淡" ? "att-cold" : a === "友善" ? "att-friendly" : a === "亲近" || a === "生死之交" ? "att-close" : "att-plain";
 }
 
-function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, headId, busy = false, onContinuitySaved }: {
-  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
+function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, headId, lineId, busy = false, onContinuitySaved }: {
+  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { game, push, ask, toast } = useApp();
   const noteEntry = useContext(NoteEntry);
@@ -72,10 +74,10 @@ function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, he
                 onClick={async () => {
                   setSaving(true);
                   try {
-                    const invited = await personaFromStoryPerson(game, worldId, person.id);
+                    const invited = await personaFromStoryPerson(game, worldId, person.id, lineId);
                     onClose();
                     onClosePanel?.();
-                    push({ name: "companion", worldId, personaId: invited.id, gear: "chat" });
+                    push({ name: "companion", worldId, lineId, personaId: invited.id, gear: "chat" });
                   } catch (e) {
                     toast(e instanceof Error ? e.message : "没能发起私聊");
                   } finally {
@@ -112,10 +114,10 @@ function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, he
             onClick={async () => {
               setSaving(true);
               try {
-                const invited = await personaFromStoryPerson(game, worldId, person.id);
+                const invited = await personaFromStoryPerson(game, worldId, person.id, lineId);
                 onClose();
                 onClosePanel?.();
-                push({ name: "companion", worldId, personaId: invited.id, gear: "chat" });
+                push({ name: "companion", worldId, lineId, personaId: invited.id, gear: "chat" });
               } catch (e) {
                 toast(e instanceof Error ? e.message : "没能发起私聊");
               } finally {
@@ -136,10 +138,13 @@ function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, he
   );
 }
 
-export function People({ state, era, busy, onSave, worldId, headId, onContinuitySaved, onClosePanel }: {
-  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; onContinuitySaved?: () => void | Promise<void>; onClosePanel?: () => void;
+export function People({ state, era, busy, onSave, worldId, headId, lineId, onJumpNode, onContinuitySaved, onClosePanel }: {
+  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; onJumpNode?: (nodeId: string) => void; onContinuitySaved?: () => void | Promise<void>; onClosePanel?: () => void;
 }) {
+  const { game } = useApp();
   const [editing, setEditing] = useState<{ person: Person | null } | null>(null);
+  const [view, setView] = useState<"list" | "atlas">("list");
+  const [atlas, setAtlas] = useState<CharacterEntry[] | null>(null);
   const prevAnchor = useRef<unknown>(headId ? `${worldId ?? ""}:${headId}` : state);
   useEffect(() => {
     const next = headId ? `${worldId ?? ""}:${headId}` : state;
@@ -147,6 +152,35 @@ export function People({ state, era, busy, onSave, worldId, headId, onContinuity
     prevAnchor.current = next;
     setEditing(null);
   }, [worldId, headId, state]);
+
+  useEffect(() => {
+    if (view !== "atlas" || !worldId || !headId) return;
+    let live = true;
+    void Promise.all([
+      game.repo.path(headId),
+      game.repo.chaptersOnPath(worldId, headId),
+      game.repo.clocksOnPath(headId),
+    ])
+      .then(([path, chapters, clocks]) => {
+        if (!live) return;
+        setAtlas(
+          buildCharacterAtlas({
+            state,
+            path,
+            chapters,
+            clock: era.clock,
+            clocks,
+          }),
+        );
+      })
+      .catch(() => {
+        if (live) setAtlas([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [era.clock, game.repo, headId, state, view, worldId]);
+
   const people = [...state.people].sort((a, b) => Number(b.alive) - Number(a.alive) || (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1));
   const now = state.time.elapsedMinutes;
 
@@ -156,21 +190,92 @@ export function People({ state, era, busy, onSave, worldId, headId, onContinuity
         <b>人物{people.length ? ` ${people.length}` : ""}</b>
         <button className="ghost" aria-label="添加人物" disabled={busy} onClick={() => setEditing({ person: null })}><Icon name="plus" size={18} />添加</button>
       </div>
-      {people.length ? people.map((p) => (
-        <button key={p.id} className="item-row codex-item" disabled={busy} onClick={() => setEditing({ person: p })}>
-          <PersonAvatar name={p.name} dead={!p.alive} />
-          <div className="grow">
-            <b>{p.name}</b>{!p.alive && <span className="muted">（已故）</span>}
-            <small>{[p.role, p.aliases.length ? `又称${p.aliases.join("、")}` : ""].filter(Boolean).join(" · ") || "身份不明"}</small>
-            {p.notes && <small>{preview(p.notes)}</small>}
-          </div>
-          <div className="person-side">
-            <span className={`tag ${attitudeClass(p.attitude)}`}>{p.attitude}</span>
-            {p.lastSeenMinute != null && <small>{agoText(era.clock, p.lastSeenMinute, now)}</small>}
-          </div>
-        </button>
-      )) : <p className="muted">还没有结识什么人。</p>}
-      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={headId} busy={busy} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
+      {people.length > 0 && worldId && headId && (
+        <div className="segmented" role="group" aria-label="人物视图">
+          <button type="button" aria-pressed={view === "list"} onClick={() => setView("list")}>人物名录</button>
+          <button type="button" aria-pressed={view === "atlas"} onClick={() => setView("atlas")}>出场脉络</button>
+        </div>
+      )}
+      {!people.length ? (
+        <EmptyVignette kind="tea-cups" title="还没有结识什么人" hint="走出门去与世人交谈，结识的人物都会记进名录。" compact />
+      ) : view === "atlas" ? (
+        <div className="stack gap-2">
+          {!atlas ? (
+            <p className="muted m-0">正在梳理人物出场与交集…</p>
+          ) : (
+            atlas.map((entry) => (
+              <div
+                key={entry.id}
+                className="stack gap-1"
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: "var(--radius)",
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                <div className="row between wrap gap-1">
+                  <div className="row gap-2">
+                    <PersonAvatar name={entry.name} dead={!entry.alive} />
+                    <div>
+                      <b>{entry.name}</b>
+                      {!entry.alive && <span className="muted">（已故）</span>}
+                      <small className="muted" style={{ display: "block" }}>
+                        {entry.role || "局中人"} · 共出场 {entry.appearances} 段
+                      </small>
+                    </div>
+                  </div>
+                  <span className={`tag ${attitudeClass(entry.attitude)}`}>{entry.attitude}</span>
+                </div>
+                <small className="muted">
+                  {entry.firstTurn != null
+                    ? `初见：${entry.firstChapterTitle ? `${entry.firstChapterTitle} · ` : ""}第 ${entry.firstTurn} 段${entry.firstDate ? `（${entry.firstDate}）` : ""}`
+                    : "初见：开篇已识"}
+                  {entry.lastTurn != null && entry.lastTurn !== entry.firstTurn
+                    ? ` · 近见：第 ${entry.lastTurn} 段`
+                    : ""}
+                </small>
+                {entry.coOccurs.length > 0 && (
+                  <small className="muted">
+                    常同场：{entry.coOccurs.map((c) => `${c.name}(${c.count})`).join("、")}
+                  </small>
+                )}
+                <div className="row wrap gap-1">
+                  <button type="button" className="ghost small" disabled={busy} onClick={() => setEditing({ person: entry.person })}>
+                    查看小传
+                  </button>
+                  {onJumpNode && entry.firstNodeId && (
+                    <button type="button" className="ghost small" onClick={() => onJumpNode(entry.firstNodeId!)}>
+                      跳到初见
+                    </button>
+                  )}
+                  {onJumpNode && entry.lastNodeId && entry.lastNodeId !== entry.firstNodeId && (
+                    <button type="button" className="ghost small" onClick={() => onJumpNode(entry.lastNodeId!)}>
+                      跳到近见
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      ) : (
+        people.map((p) => (
+          <button key={p.id} className="item-row codex-item" disabled={busy} onClick={() => setEditing({ person: p })}>
+            <PersonAvatar name={p.name} dead={!p.alive} />
+            <div className="grow">
+              <b>{p.name}</b>{!p.alive && <span className="muted">（已故）</span>}
+              <small>{[p.role, p.aliases.length ? `又称${p.aliases.join("、")}` : ""].filter(Boolean).join(" · ") || "身份不明"}</small>
+              {p.notes && <small>{preview(p.notes)}</small>}
+            </div>
+            <div className="person-side">
+              <span className={`tag ${attitudeClass(p.attitude)}`}>{p.attitude}</span>
+              {p.lastSeenMinute != null && <small>{agoText(era.clock, p.lastSeenMinute, now)}</small>}
+            </div>
+          </button>
+        ))
+      )}
+      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={headId} lineId={lineId} busy={busy} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
     </div>
   );
 }

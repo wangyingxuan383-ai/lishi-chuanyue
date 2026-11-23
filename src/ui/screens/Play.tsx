@@ -22,10 +22,14 @@ import { fromSetup } from "./openingDraft";
 import { useMedia, useMouse, useWide } from "../components/useMedia";
 import { EndingCard, LifeSheet, useSealToast } from "../components/LifeSheet";
 import { PassageCardSheet } from "../components/ShareCard";
+import { ExcerptsSheet } from "../components/ExcerptsSheet";
+import { NovelExportSheet } from "../components/NovelExportSheet";
+import { Paginator, type PaginatorHandle } from "../components/Paginator";
+import { addReaderHighlight } from "../../engine/reader/store";
 import { useShortcuts } from "../components/useShortcuts";
 import { ShortcutsSheet } from "../components/ShortcutsSheet";
 import { Icon } from "../components/Icon";
-import { buzz, motionLevel } from "../app/motion";
+import { buzz, motionLevel, motionOn } from "../app/motion";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
 import { adoptRewrite, adoptCanonCorrection, adoptPlayerRevision, assertWritingAnchor, headFollowsUpkeep, isLatestPassage, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview, type PlayerRevisionPreview } from "../../engine/writing/assist";
 import { FactSyncSheet, type FactSyncAsk } from "../components/FactSync";
@@ -91,8 +95,10 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const [context, setContext] = useState<ContextPreview | null>(null);
   const [remember, setRemember] = useState<{ node: StoryNode; text: string } | null>(null);
   const [bookmark, setBookmark] = useState<{ node: StoryNode; name: string } | null>(null);
-  const [sheet, setSheet] = useState<"more" | "reading" | "depth" | "notes" | "usage" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
+  const [sheet, setSheet] = useState<"more" | "reading" | "depth" | "notes" | "usage" | "hints" | "settings" | "story" | "lines" | "time" | "rules" | "duration" | "reference" | "skip" | "ask" | "toc" | "excerpts" | "export" | "life" | "keys" | "script" | "challenge" | "autoplay" | null>(null);
   const [cardNode, setCardNode] = useState<StoryNode | null>(null);
+  const paginatorRef = useRef<PaginatorHandle>(null);
+  const isPaged = reading.pageMode === "paged";
   const [panel, setPanel] = useState(false);
   const [panelTab, setPanelTab] = useState<{ tab: Tab; nonce: number }>({ tab: "我", nonce: 0 });
   const openPanel = useCallback((tab?: Tab) => {
@@ -220,6 +226,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   // in the story until new words fill it, so a taller viewport cannot clamp a
   // reader at the bottom upward. No scroll position is restored at completion.
   const streamFloor = () => {
+    if (reading.pageMode === "paged") return undefined;
     const el = scroller.current;
     const dock = el?.closest(".play")?.querySelector<HTMLElement>(".dock");
     const input = dock?.querySelector<HTMLElement>(".inputbar");
@@ -366,8 +373,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     }, 400);
   };
   const toBottom = (smooth = false) => {
+    if (reading.pageMode === "paged") {
+      paginatorRef.current?.goToLastPage();
+      setAtBottom(true);
+      return;
+    }
     const el = scroller.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth && motionOn() ? "smooth" : "auto" });
   };
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -508,7 +520,8 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   };
 
   const editAction = async (node: StoryNode, text: string) => {
-    if (!cursor || !node.parentId) return;
+    if (!cursor || !node.parentId || busy) return;
+    setEditing(null);
     await tree.goBackTo(game.repo, cursor, node.parentId);
     await refresh();
     const mode = node.actionMode === "say" || node.actionMode === "write" || node.actionMode === "direct" ? node.actionMode : "do";
@@ -539,13 +552,29 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   /** 只改文字: into the passage itself (R14 engine review); the first original stays for 恢复原文. */
   const saveTextOnly = async (anchor: WritingAnchor, text: string) => {
     checkScope(anchor);
+    const beforeNode = await game.repo.getNode(anchor.nodeId);
+    const wasAlreadyRewritten = beforeNode?.rewritten ?? false;
     await adoptRewrite(game, anchor, text);
     setEditing(null);
     await refresh();
+    const afterCur = await tree.cursor(game.repo, anchor.worldId);
     // Things remembered word for word from the old text no longer say what the passage says.
     const pins = (await game.repo.pinsOnPath(anchor.worldId, anchor.nodeId)).filter((p) => p.originNodeId === anchor.nodeId && !text.includes(p.text.trim()));
-    // Undo restores `anchor.original` (the text right before this edit), rather than wiping all earlier manual edits back to `meta.original`.
-    toast(pins.length ? `已改写；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : "已改写，后面的剧情会按改过的文字继续", { label: "撤回", run: () => void game.repo.updateNarrative(anchor.nodeId, anchor.original).then(() => game.afterTextEdit(anchor.worldId, anchor.nodeId)).then(() => refresh()) });
+    // Undo restores original cleanly (clearing `rewritten` when this was the first edit, or restoring the previous manual edit).
+    toast(
+      pins.length ? `已改写；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : "已改写，后面的剧情会按改过的文字继续",
+      {
+        label: "撤回",
+        run: still(afterCur.head.id, () => {
+          void (async () => {
+            if (!wasAlreadyRewritten) await game.repo.restoreNarrative(anchor.nodeId);
+            else await game.repo.updateNarrative(anchor.nodeId, anchor.original);
+            await game.afterTextEdit(anchor.worldId, anchor.nodeId);
+            await refresh();
+          })();
+        }),
+      },
+    );
   };
   /** 事实也一起改: the passage's facts follow its edited text, as another version or a revision route. */
   const adoptFactSync = async (preview: PlayerRevisionPreview) => {
@@ -613,7 +642,8 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
 
   /** Scrolls the story to a passage on the current path, loading earlier pages when it is not shown yet (目录, search). */
   const scrollToNode = async (nodeId: string) => {
-    const find = () => scroller.current?.querySelector<HTMLElement>(`.turn[data-node-id="${nodeId}"]`) ?? null;
+    const escaped = CSS.escape(nodeId);
+    const find = () => (scroller.current ?? document).querySelector<HTMLElement>(`.turn[data-node-id="${escaped}"]`) ?? null;
     const flash = (target: HTMLElement) => {
       target.classList.remove("toc-flash");
       void target.offsetWidth;
@@ -621,6 +651,26 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       setTimeout(() => target.classList.remove("toc-flash"), 1800);
     };
     follow.current = false;
+    if (reading.pageMode === "paged") {
+      if (paginatorRef.current?.jumpToSelector(`[data-node-id="${escaped}"]`)) {
+        const target = find();
+        if (target) flash(target);
+        return;
+      }
+      if (!cursor) return;
+      const path = await game.repo.path(cursor.head.id);
+      const index = path.findIndex((n) => n.id === nodeId);
+      if (index < 0) return;
+      const next = Math.max(limit.current, Math.ceil((path.length - index) / PAGE) * PAGE);
+      limit.current = next;
+      await refresh(next);
+      setTimeout(() => {
+        paginatorRef.current?.jumpToSelector(`[data-node-id="${escaped}"]`);
+        const target = find();
+        if (target) flash(target);
+      }, 60);
+      return;
+    }
     const shownNow = find();
     if (shownNow && scroller.current) {
       scroller.current.scrollTop += shownNow.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top - 8;
@@ -701,7 +751,10 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const again = async (retry: boolean) => {
     const setup = await game.setupOf(worldId);
     if (!setup) return;
-    if (retry && state.challenge) setup.challenge = challengeInputOf(state.challenge);
+    if (retry) {
+      delete setup.carry;
+      if (state.challenge) setup.challenge = challengeInputOf(state.challenge);
+    }
     await game.repo.setSetting("newgameDraft", fromSetup(setup));
     if (retry) await game.repo.setSetting("newgameAutostart", true);
     replace({ name: "newgame" });
@@ -716,7 +769,8 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       : undefined;
 
   const panelProps = {
-    worldId, headId: head.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy, initialTab: panelTab.tab, initialTabNonce: panelTab.nonce,
+    worldId, headId: head.id, lineId: cursor.line.id, chapterEvery: world.settings.chapterEvery, state, era, settings: world.settings, busy, initialTab: panelTab.tab, initialTabNonce: panelTab.nonce,
+    onJumpNode: (id: string) => { if (!wide) setPanel(false); closeRecap(); void scrollToNode(id); },
     onContinuitySaved: refresh, onClose: () => setPanel(false), onOpenStory: () => { setPanel(false); setSheet("story"); },
     onOrganize: async (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => {
       try {
@@ -752,59 +806,132 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       <ModeBanner state={state} onScript={() => setSheet("script")} onChallenge={() => setSheet("challenge")} />
 
       <div className="story-wrap">
-        <div className="story" ref={scroller} onScroll={onScroll}>
-          <div className="story-inner" style={(gen?.minHeight ?? agentFloor) === undefined ? undefined : { minHeight: gen?.minHeight ?? agentFloor }}>
-            {hasMore && <button className="load-more ghost" onClick={loadMore}>加载更早的剧情</button>}
-            {shown.map((node) => {
-              const isHead = node.id === turn?.id && !busy;
-              return (
-                <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
-                  {isHead && node.status === "interrupted" && (
-                    <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(a) => a.run()} onOpenUsage={() => setSheet("usage")} />
-                  )}
-                  {isHead && node.status === "no_record" && <p className="muted">这段没能整理出记录，状态可能没有更新。</p>}
-                  {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
-                    <HeadTools node={node} variants={variants} mouse={mouse} onSwitch={(d) => void switchVariant(d)}
-                      onRegen={() => regenerate(null)} onHints={() => setSheet("hints")} onUndo={() => void undo()} onMenu={() => setMenuNode(node)} />
-                  )}
-                  {isHead && reading.usageLine && node.kind !== "edit" && <TurnUsageLine nodeId={node.id} />}
-                  {isHead && notesTip && !pressTip && (
-                    <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
-                  )}
-                  {isHead && notesAhead && !notesTip && !pressTip && (
-                    <div className="tip">原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
-                  )}
-                  {isHead && pressTip && (
-                    <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
-                  )}
-                </> : null}</TurnView>
-              );
-            })}
-            {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
-              onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
-            {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
-            {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
-            {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
-              <NoticeCard notice={notice} onAction={(a) => { if (!a.keepNotice) setNotice(null); a.run(); }} onOpenUsage={() => setSheet("usage")} />
-            )}
-            {dead && <EndingCard state={state} world={world} now={now.text} turns={routeTurns}
-              onLife={() => setSheet("life")}
-              onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
-              onLines={() => setSheet("lines")}
-              onAgain={() => void again(false)} />}
-            {!busy && ends.challenge && ending && (
-              <ChallengeEndCard view={ending} onAgain={() => void again(true)} onBack={backOne} onContinue={() => setEndSeen(turn?.id ?? null)} />
-            )}
-            {!busy && ends.script && state.script && (
-              <ScriptEndCard script={state.script}
-                onEpilogue={() => { setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === "direct"))); setInput(EPILOGUE); setEndSeen(turn?.id ?? null); requestAnimationFrame(() => inputBox.current?.focus()); }}
-                onContinue={() => setEndSeen(turn?.id ?? null)} onLife={() => setSheet("life")} />
-            )}
-            {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
+        {isPaged ? (
+          <Paginator
+            ref={paginatorRef}
+            contentKey={`${head.id}:${shown.length}:${gen?.text?.length ?? 0}:${gen?.phase ?? ""}:${notice?.text ?? ""}:${reading.size}:${reading.leading}:${reading.paragraph}:${reading.serif}:${reading.indent}:${reading.measure}`}
+            initialPage="last"
+            streaming={!!gen}
+            autoFollow={reading.autoScroll}
+            footerLeft={`${place} · ${now.text}`}
+            onBoundaryStart={hasMore ? () => { const next = limit.current + PAGE; limit.current = next; void refresh(next); } : undefined}
+            onPageChange={(p, total, anchorId) => {
+              const onLast = p >= total - 1;
+              follow.current = reading.autoScroll && onLast;
+              setAtBottom(onLast);
+              if (anchorId) {
+                if (readingTimer.current) clearTimeout(readingTimer.current);
+                readingTimer.current = setTimeout(() => {
+                  void game.repo.setSetting("reading:" + worldId, anchorId);
+                }, 400);
+              }
+            }}
+          >
+            <div className="story-inner">
+              {hasMore && <button className="load-more ghost" onClick={() => { const next = limit.current + PAGE; limit.current = next; void refresh(next); }}>加载更早的剧情</button>}
+              {shown.map((node) => {
+                const isHead = node.id === turn?.id && !busy;
+                return (
+                  <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
+                    {isHead && node.status === "interrupted" && (
+                      <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(a) => a.run()} onOpenUsage={() => setSheet("usage")} />
+                    )}
+                    {isHead && node.status === "no_record" && <p className="muted">这段没能整理出记录，状态可能没有更新。</p>}
+                    {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
+                      <HeadTools node={node} variants={variants} mouse={mouse} onSwitch={(d) => void switchVariant(d)}
+                        onRegen={() => regenerate(null)} onHints={() => setSheet("hints")} onUndo={() => void undo()} onMenu={() => setMenuNode(node)} />
+                    )}
+                    {isHead && reading.usageLine && node.kind !== "edit" && <TurnUsageLine nodeId={node.id} />}
+                    {isHead && notesTip && !pressTip && (
+                      <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
+                    )}
+                    {isHead && notesAhead && !notesTip && !pressTip && (
+                      <div className="tip">原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
+                    )}
+                    {isHead && pressTip && (
+                      <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
+                    )}
+                  </> : null}</TurnView>
+                );
+              })}
+              {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
+                onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
+              {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
+              {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
+              {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
+                <NoticeCard notice={notice} onAction={(a) => { if (!a.keepNotice) setNotice(null); a.run(); }} onOpenUsage={() => setSheet("usage")} />
+              )}
+              {dead && <EndingCard state={state} world={world} now={now.text} turns={routeTurns}
+                onLife={() => setSheet("life")}
+                onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
+                onLines={() => setSheet("lines")}
+                onAgain={() => void again(false)} />}
+              {!busy && ends.challenge && ending && (
+                <ChallengeEndCard view={ending} onAgain={() => void again(true)} onBack={backOne} onContinue={() => setEndSeen(turn?.id ?? null)} />
+              )}
+              {!busy && ends.script && state.script && (
+                <ScriptEndCard script={state.script}
+                  onEpilogue={() => { setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === "direct"))); setInput(EPILOGUE); setEndSeen(turn?.id ?? null); requestAnimationFrame(() => inputBox.current?.focus()); }}
+                  onContinue={() => setEndSeen(turn?.id ?? null)} onLife={() => setSheet("life")} />
+              )}
+              {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
+            </div>
+          </Paginator>
+        ) : (
+          <div className="story" ref={scroller} onScroll={onScroll}>
+            <div className="story-inner" style={(gen?.minHeight ?? agentFloor) === undefined ? undefined : { minHeight: gen?.minHeight ?? agentFloor }}>
+              {hasMore && <button className="load-more ghost" onClick={loadMore}>加载更早的剧情</button>}
+              {shown.map((node) => {
+                const isHead = node.id === turn?.id && !busy;
+                return (
+                  <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
+                    {isHead && node.status === "interrupted" && (
+                      <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(a) => a.run()} onOpenUsage={() => setSheet("usage")} />
+                    )}
+                    {isHead && node.status === "no_record" && <p className="muted">这段没能整理出记录，状态可能没有更新。</p>}
+                    {isHead && node.kind !== "opening" && node.status !== "interrupted" && (
+                      <HeadTools node={node} variants={variants} mouse={mouse} onSwitch={(d) => void switchVariant(d)}
+                        onRegen={() => regenerate(null)} onHints={() => setSheet("hints")} onUndo={() => void undo()} onMenu={() => setMenuNode(node)} />
+                    )}
+                    {isHead && reading.usageLine && node.kind !== "edit" && <TurnUsageLine nodeId={node.id} />}
+                    {isHead && notesTip && !pressTip && (
+                      <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
+                    )}
+                    {isHead && notesAhead && !notesTip && !pressTip && (
+                      <div className="tip">原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
+                    )}
+                    {isHead && pressTip && (
+                      <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
+                    )}
+                  </> : null}</TurnView>
+                );
+              })}
+              {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
+                onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
+              {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
+              {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
+              {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
+                <NoticeCard notice={notice} onAction={(a) => { if (!a.keepNotice) setNotice(null); a.run(); }} onOpenUsage={() => setSheet("usage")} />
+              )}
+              {dead && <EndingCard state={state} world={world} now={now.text} turns={routeTurns}
+                onLife={() => setSheet("life")}
+                onBack={(steps) => { const target = [...nodes].filter((n) => n.kind !== "edit").reverse()[steps]; if (target) void goBack(target); }}
+                onLines={() => setSheet("lines")}
+                onAgain={() => void again(false)} />}
+              {!busy && ends.challenge && ending && (
+                <ChallengeEndCard view={ending} onAgain={() => void again(true)} onBack={backOne} onContinue={() => setEndSeen(turn?.id ?? null)} />
+              )}
+              {!busy && ends.script && state.script && (
+                <ScriptEndCard script={state.script}
+                  onEpilogue={() => { setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === "direct"))); setInput(EPILOGUE); setEndSeen(turn?.id ?? null); requestAnimationFrame(() => inputBox.current?.focus()); }}
+                  onContinue={() => setEndSeen(turn?.id ?? null)} onLife={() => setSheet("life")} />
+              )}
+              {recap && !gen && <RecapCard recap={recap} place={place} time={now.text} onClose={closeRecap} />}
+            </div>
           </div>
-        </div>
+        )}
         {stamp && <StampBurst key={stamp.key} label={stamp.label} sub={stamp.sub} />}
-        {!atBottom && <button className={`to-bottom${gen?.text ? " fresh" : ""}`} aria-label={gen?.text ? "下面有新写的内容，回到底部" : "回到底部 ↓"} onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
+        {!atBottom && <button className={`to-bottom${gen?.text ? " fresh" : ""}`} style={isPaged ? { bottom: 52 } : undefined} aria-label={gen?.text ? "下面有新写的内容，回到底部" : isPaged ? "回到末页" : "回到底部 ↓"} onClick={() => { follow.current = reading.autoScroll; toBottom(true); }}><Icon name="arrow-down" size={22} /></button>}
       </div>
 
       <Composer dead={dead} state={state} watch={watch} auto={auto} input={input} typing={typing} mouse={mouse} busy={busy}
@@ -820,7 +947,24 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         onAskAbout={(n) => { const excerpt = n.narrative.replace(/\s+/g, " ").trim(); setAskInitial(`关于“${excerpt.slice(0, 48)}${excerpt.length > 48 ? "…" : ""}”：`); setSheet("ask"); }}
         setRemember={setRemember} goBack={goBack} toast={toast} setMenuMore={setMenuMore} />}
       {menuMore && <PassageMoreMenu menuMore={menuMore} busy={busy} devMode={devMode} game={game} setMenuMore={setMenuMore}
-        setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode} setRawNode={setRawNode} setUsageNode={setUsageNode} />}
+        setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode}
+        onExcerpt={(n) => {
+          void addReaderHighlight(game.repo, {
+            targetType: "world_novel",
+            targetId: worldId,
+            worldId,
+            sectionIndex: 0,
+            sectionTitle: place,
+            paragraphIndex: 0,
+            charStart: 0,
+            charEnd: n.narrative.trim().length,
+            selectedText: n.narrative.trim(),
+            note: "",
+            color: "cinnabar",
+            nodeId: n.id,
+          }).then(() => toast("已收入佳句摘录", { label: "查看", run: () => setSheet("excerpts") }));
+        }}
+        setRawNode={setRawNode} setUsageNode={setUsageNode} />}
       {writing && <WritingAssist draft={writing} onClose={() => setWriting(null)} onAdopt={adoptWriting} />}
       {factAsk && <FactSyncSheet ask={factAsk} onClose={() => setFactAsk(null)} onTextOnly={() => saveTextOnly(factAsk.anchor, factAsk.text)} onAdopt={adoptFactSync} />}
       {desk && <WritingDesk text={input} mode={mode.mode} onClose={() => setDesk(false)} onDone={(text, nextMode) => {
@@ -828,26 +972,24 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         setInput(text); setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === nextMode))); setDesk(false); inputBox.current?.focus();
       }} />}
       {remember && <RememberSheet remember={remember} setRemember={setRemember} game={game} worldId={worldId} toast={toast} />}
-      {editing && (
+      {editing && !factAsk && (
         <Sheet title={editing.field === "action" ? "改我的行动" : "改写这段文字"} onClose={() => setEditing(null)}>
           <div className="stack">
             {editing.field === "action" && <p className="muted m-0">会从这一回合之前重新写，原来的内容保留在另一条路线里。</p>}
-            {editing.field === "narrative" && <p className="muted m-0">润色措辞选“仅保存文字”；改了生死、得失、地点等事实选“保存并同步事实”，原文随时可以恢复。只想说一句要改什么、让 AI 动笔，用<button className="link" onClick={() => { const node = editing.node; setEditing(null); openWriting("rewrite", node); }}>AI 改写</button>。</p>}
+            {editing.field === "narrative" && <p className="muted m-0">润色措辞选“仅保存文字”；改了生死、得失、地点等事实选“保存并同步事实”，原文随时可以恢复。只想说一句要改什么、让 AI 动笔，用<button className="link" disabled={busy} onClick={() => { const node = editing.node; setEditing(null); openWriting("rewrite", node); }}>AI 改写</button>。</p>}
             <textarea rows={editing.field === "action" ? 3 : 12} value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
             {editing.field === "action" ? (
-              <button className="primary" disabled={!editing.text.trim()} onClick={() => {
+              <button className="primary" disabled={busy || !editing.text.trim()} onClick={() => {
                 const { node, text } = editing;
-                setEditing(null);
                 void editAction(node, text.trim());
               }}>重新开始这一回合</button>
             ) : (
               <div className="writing-actions">
-                <button disabled={!editing.text.trim() || editing.text === editing.node.narrative} onClick={() => {
+                <button disabled={busy || !editing.text.trim() || editing.text === editing.node.narrative} onClick={() => {
                   const { node, text } = editing;
-                  setEditing(null);
                   void saveRewriteTextOnly(node, text);
                 }}>仅保存文字</button>
-                <button className="primary" disabled={!editing.text.trim() || editing.text === editing.node.narrative} onClick={() => {
+                <button className="primary" disabled={busy || !editing.text.trim() || editing.text === editing.node.narrative} onClick={() => {
                   const { node, text } = editing;
                   void saveRewriteSync(node, text);
                 }}>保存并同步事实</button>
@@ -914,9 +1056,14 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {sheet === "usage" && <WorldUsageSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {usageNode && <PassageUsageSheet nodeId={usageNode} onClose={() => setUsageNode(null)} />}
       {sheet === "notes" && <CanonNotesSheet bookId={state.source?.bookId ?? null} worldId={worldId} position={state.source?.position ?? 0} through={state.source?.through ?? null} start={notesStart ?? undefined} open={notesOpen ?? undefined} onClose={() => { setSheet(null); setNotesStart(null); setNotesOpen(null); }} />}
-      {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
+      {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} lineId={cursor.line.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
         onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
         onBookmark={(line) => { if (busy) { toast("正在续写故事，等这一段写完再切换路线"); return; } void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); }); }} />}
+      {sheet === "excerpts" && <ExcerptsSheet worldId={worldId} onJumpHighlight={(h) => {
+        if (h.nodeId) { closeRecap(); void scrollToNode(h.nodeId); }
+        else { captureReading(); push({ name: "reader", worldId, lineId: cursor.line.id, initialSection: h.sectionIndex }); }
+      }} onClose={() => setSheet(null)} />}
+      {sheet === "export" && <NovelExportSheet worldId={worldId} lineId={cursor.line.id} worldTitle={world.title} onClose={() => setSheet(null)} />}
       {sheet === "lines" && <LinesSheet worldId={worldId} current={cursor.line.id} busy={busy} onClose={() => setSheet(null)} onChanged={(message) => { void refresh(); toast(message); }} />}
       {bookmark && <BookmarkSheet initial={bookmark.name} onClose={() => setBookmark(null)} onSave={(name) => {
         const node = bookmark.node;

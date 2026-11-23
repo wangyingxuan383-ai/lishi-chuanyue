@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PlatformError, type Platform } from "../../platform";
-import { androidPackage, expectedHash, latestRelease, newer, openLink, parseSums, plainNotes, REPO_URL, type ReleaseAsset, type ReleaseInfo } from "./update";
+import type { Repo } from "../../engine/db/repo";
+import { PlatformError, type Platform, type UpdateEnvironmentStatus, type UpdatePackageStatus, type UpdateRequest } from "../../platform";
+import { androidPackage, expectedHash, latestRelease, newer, openLink, parseSums, plainNotes, platformPackage, REPO_URL, windowsPackage, type ReleaseAsset, type ReleaseInfo } from "./update";
+import { createUpdateStore, hasPromptableReadyUpdate } from "./updateStore";
 
 // Every platform call is a stub. Even an accidental browser fetch must fail locally.
 beforeEach(() => { vi.stubGlobal("fetch", vi.fn(() => { throw new Error("network forbidden in update tests"); })); });
@@ -278,5 +280,342 @@ describe("plain release notes", () => {
     expect(plainNotes(`${"甲".repeat(30)}\n${"乙".repeat(40)}`, 8, 50)).toBe(`${"甲".repeat(30)}\n${"乙".repeat(19)}…`);
     expect(plainNotes(`${"甲".repeat(45)}\n${"乙".repeat(40)}`, 8, 50)).toBe(`${"甲".repeat(45)}…`);
     expect(plainNotes("")).toBe("");
+  });
+});
+
+function memorySettings(initial: Record<string, unknown> = {}) {
+  const map = new Map<string, unknown>(Object.entries(initial));
+  const getSetting = vi.fn(async <T>(key: string, fallback: T): Promise<T> =>
+    (map.has(key) ? (map.get(key) as T) : fallback));
+  const setSetting = vi.fn(async (key: string, value: unknown): Promise<void> => {
+    map.set(key, value);
+  });
+  return { repo: { getSetting, setSetting } as unknown as Repo, map, getSetting, setSetting };
+}
+
+describe("Windows installer selection (U5)", () => {
+  it("prefers .msi, then -setup.exe / .exe on Windows, and returns null when only Android .apk exists", () => {
+    const msi = pkg("chuanyue_0.11.0_x64.msi", HASH_A);
+    const setupExe = pkg("chuanyue_0.11.0_x64-setup.exe", HASH_B);
+    const apk = pkg("chuanyue-0.11.0.apk", HASH_A);
+
+    expect(windowsPackage(info([apk, setupExe, msi]))?.name).toBe("chuanyue_0.11.0_x64.msi");
+    expect(windowsPackage(info([apk, setupExe]))?.name).toBe("chuanyue_0.11.0_x64-setup.exe");
+    expect(windowsPackage(info([apk]))).toBeNull();
+
+    const winPlatform = { name: "windows" } as Platform;
+    const androidPlat = { name: "android" } as Platform;
+    expect(platformPackage(winPlatform, info([apk, setupExe]))?.name).toBe("chuanyue_0.11.0_x64-setup.exe");
+    expect(platformPackage(winPlatform, info([apk]))).toBeNull();
+    expect(platformPackage(androidPlat, info([apk, setupExe]))?.name).toBe("chuanyue-0.11.0.apk");
+  });
+});
+
+describe("updateStore: offline retry (U1), packageStatus hydration (U3), and safe default-OFF autoPrepare", () => {
+  const apkReleasePayload = (version = "0.12.0", sha = HASH_A) => JSON.stringify([
+    release(`v${version}`, {
+      body: "修复了若干问题",
+      assets: [{
+        name: `chuanyue-${version}.apk`,
+        size: 40 * 1024 * 1024,
+        state: "uploaded",
+        digest: `sha256:${sha}`,
+        browser_download_url: `${REPO_URL}/releases/download/v${version}/chuanyue-${version}.apk`,
+      }],
+    }),
+  ]);
+
+  it("U1: does not stamp 24h check cooldown when offline/DNS fails, allowing immediate retry", async () => {
+    const { repo, map } = memorySettings();
+    let online = false;
+    const getPublic = vi.fn(async () => {
+      if (!online) throw new PlatformError("llm_network", "DNS resolution failed");
+      return { status: 200, body: apkReleasePayload("0.12.0") };
+    });
+    const platform = { name: "android", llm: { getPublic } } as unknown as Platform;
+    const store = createUpdateStore(repo, platform, "0.10.0");
+
+    await store.check(false);
+    expect(store.snapshot().failed).toBe(true);
+    expect(store.snapshot().checkedAt).toBe(0);
+    expect(map.has("updateCheckedAt")).toBe(false);
+    expect(map.has("updateLastCheckAt")).toBe(false);
+
+    // Network comes back 5 seconds later: automatic check retries immediately instead of waiting 24h!
+    online = true;
+    await store.check(false);
+    expect(getPublic).toHaveBeenCalledTimes(2);
+    expect(store.snapshot().failed).toBe(false);
+    expect(store.snapshot().release?.version).toBe("0.12.0");
+    expect(store.snapshot().checkedAt).toBeGreaterThan(0);
+    expect(map.get("updateLastCheckAt")).toBe(store.snapshot().checkedAt);
+
+    // Now that a check succeeded, another non-manual check within 24h is skipped.
+    await store.check(false);
+    expect(getPublic).toHaveBeenCalledTimes(2);
+  });
+
+  it("U3: hydrates readyRelease and canInstall from packageStatus on startup without re-downloading", async () => {
+    const cached: ReleaseInfo = {
+      version: "0.12.0",
+      name: "v0.12.0",
+      notes: "更新说明",
+      url: `${REPO_URL}/releases/tag/v0.12.0`,
+      publishedAt: "2026-11-20T00:00:00Z",
+      prerelease: false,
+      assets: [{
+        name: "chuanyue-0.12.0.apk",
+        size: 30 * 1024 * 1024,
+        url: `${REPO_URL}/releases/download/v0.12.0/chuanyue-0.12.0.apk`,
+        sha256: HASH_A,
+      }],
+    };
+    const { repo } = memorySettings({ updateLatestRelease: cached });
+    let allowInstall = false;
+    const packageStatus = vi.fn(async (): Promise<UpdatePackageStatus> => ({
+      downloaded: true,
+      verified: true,
+      bytes: 30 * 1024 * 1024,
+      canInstall: allowInstall,
+    }));
+    const download = vi.fn();
+    const install = vi.fn();
+    const platform = {
+      name: "android",
+      llm: { getPublic: vi.fn() },
+      update: { packageStatus, download, install, canInstall: async () => allowInstall },
+    } as unknown as Platform;
+
+    const store = createUpdateStore(repo, platform, "0.10.0");
+    await store.load();
+    expect(packageStatus).toHaveBeenCalledWith({ version: "0.12.0", sha256: HASH_A });
+    expect(store.readyRelease?.version).toBe("0.12.0");
+    expect(store.snapshot().canInstall).toBe(false);
+    expect(download).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+
+    // U4: after granting unknown-sources permission and resuming, refreshStatus updates canInstall.
+    allowInstall = true;
+    await store.refreshStatus();
+    expect(store.snapshot().canInstall).toBe(true);
+
+    // Dismissing ready prompt records dismissedReadyVersion while keeping readyRelease available in Settings.
+    expect(hasPromptableReadyUpdate(store.snapshot(), "0.10.0")).toBe(true);
+    await store.dismissReady();
+    expect(store.dismissedReadyVersion).toBe("0.12.0");
+    expect(hasPromptableReadyUpdate(store.snapshot(), "0.10.0")).toBe(false);
+  });
+
+  it("enforces default-OFF autoUpdate gate and Wi-Fi / free-space preflight gates", async () => {
+    const size = 120 * 1024 * 1024; // 120 MiB -> requires max(300 MiB, 250 MiB) = 300 MiB
+    const rel: ReleaseInfo = {
+      version: "0.12.0",
+      name: "v0.12.0",
+      notes: "",
+      url: `${REPO_URL}/releases/tag/v0.12.0`,
+      publishedAt: "2026-11-20T00:00:00Z",
+      prerelease: false,
+      assets: [{
+        name: "chuanyue-0.12.0.apk",
+        size,
+        url: `${REPO_URL}/releases/download/v0.12.0/chuanyue-0.12.0.apk`,
+        sha256: HASH_A,
+      }],
+    };
+    const { repo, map } = memorySettings({ updateLatestRelease: rel });
+    let env: UpdateEnvironmentStatus = { wifiUnmetered: true, freeBytes: 800 * 1024 * 1024 };
+    let pkgVerified = false;
+    const download = vi.fn(async () => { pkgVerified = true; });
+    const install = vi.fn();
+    const environmentStatus = vi.fn(async () => env);
+    const packageStatus = vi.fn(async (): Promise<UpdatePackageStatus> => ({
+      downloaded: pkgVerified,
+      verified: pkgVerified,
+      bytes: pkgVerified ? size : 0,
+      canInstall: true,
+    }));
+    const platform = {
+      name: "android",
+      llm: { getPublic: vi.fn() },
+      update: {
+        download,
+        cancel: vi.fn(async () => {}),
+        fetchText: vi.fn(),
+        install,
+        canInstall: vi.fn(async () => true),
+        packageStatus,
+        environmentStatus,
+        devSource: vi.fn(),
+        setDevSource: vi.fn(),
+      },
+    } as unknown as Platform;
+
+    const store = createUpdateStore(repo, platform, "0.10.0");
+
+    // 1. Default OFF (autoUpdate unset): must NOT check environment or download.
+    expect(await store.autoPrepare()).toBe(false);
+    expect(environmentStatus).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+
+    // Turn autoUpdate ON.
+    map.set("autoUpdate", true);
+
+    // 2. Busy gate: refuses while story generation is active.
+    expect(await store.autoPrepare({ isBusy: () => true })).toBe(false);
+    expect(download).not.toHaveBeenCalled();
+
+    // 3. Metered network gate: refuses when not on unmetered Wi-Fi.
+    env = { wifiUnmetered: false, freeBytes: 800 * 1024 * 1024 };
+    expect(await store.autoPrepare()).toBe(false);
+    expect(download).not.toHaveBeenCalled();
+
+    // 4. Free-space gate: refuses when freeBytes < Math.max(asset.size * 2.5, 250 MiB) (300 MiB here).
+    env = { wifiUnmetered: true, freeBytes: 280 * 1024 * 1024 };
+    expect(await store.autoPrepare()).toBe(false);
+    expect(download).not.toHaveBeenCalled();
+
+    // 5. All gates satisfied: downloads silently, verifies packageStatus, sets readyRelease, NEVER calls install!
+    env = { wifiUnmetered: true, freeBytes: 500 * 1024 * 1024 };
+    expect(await store.autoPrepare()).toBe(true);
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(store.readyRelease?.version).toBe("0.12.0");
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it("aborts silent download on 15s poll when switching to metered network or becoming busy, keeping partial state", async () => {
+    vi.useFakeTimers();
+    try {
+      const rel: ReleaseInfo = {
+        version: "0.12.0",
+        name: "v0.12.0",
+        notes: "",
+        url: `${REPO_URL}/releases/tag/v0.12.0`,
+        publishedAt: "2026-11-20T00:00:00Z",
+        prerelease: false,
+        assets: [{
+          name: "chuanyue-0.12.0.apk",
+          size: 50 * 1024 * 1024,
+          url: `${REPO_URL}/releases/download/v0.12.0/chuanyue-0.12.0.apk`,
+          sha256: HASH_A,
+        }],
+      };
+      const { repo } = memorySettings({ updateLatestRelease: rel, autoUpdate: true });
+      let wifiUnmetered = true;
+      let busy = false;
+      let rejectDownload!: (reason: unknown) => void;
+      const cancel = vi.fn(async () => {
+        rejectDownload(new PlatformError("update_cancelled", "下载已暂停"));
+      });
+      const download = vi.fn((_req: UpdateRequest) => new Promise<void>((_resolve, reject) => {
+        rejectDownload = reject;
+      }));
+      const platform = {
+        name: "android",
+        llm: { getPublic: vi.fn() },
+        update: {
+          download,
+          cancel,
+          fetchText: vi.fn(),
+          install: vi.fn(),
+          canInstall: vi.fn(async () => true),
+          packageStatus: vi.fn(async (): Promise<UpdatePackageStatus> => ({
+            downloaded: false,
+            verified: false,
+            bytes: 12 * 1024 * 1024,
+            canInstall: true,
+          })),
+          environmentStatus: vi.fn(async (): Promise<UpdateEnvironmentStatus> => ({
+            wifiUnmetered,
+            freeBytes: 600 * 1024 * 1024,
+          })),
+          devSource: vi.fn(),
+          setDevSource: vi.fn(),
+        },
+      } as unknown as Platform;
+
+      const store = createUpdateStore(repo, platform, "0.10.0");
+
+      // Case A: Wi-Fi drops to metered cellular mid-download.
+      const runA = store.autoPrepare({ isBusy: () => busy });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(download).toHaveBeenCalledTimes(1);
+      wifiUnmetered = false;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await runA).toBe(false);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(store.readyRelease).toBeNull();
+
+      // Case B: Player starts generating a story (`isBusy` becomes true) mid-download.
+      wifiUnmetered = true;
+      const runB = store.autoPrepare({ isBusy: () => busy });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(download).toHaveBeenCalledTimes(2);
+      busy = true;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await runB).toBe(false);
+      expect(cancel).toHaveBeenCalledTimes(2);
+      expect(store.readyRelease).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects SHA-256 mismatch or unverified post-download packageStatus without marking readyRelease", async () => {
+    const rel: ReleaseInfo = {
+      version: "0.12.0",
+      name: "v0.12.0",
+      notes: "",
+      url: `${REPO_URL}/releases/tag/v0.12.0`,
+      publishedAt: "2026-11-20T00:00:00Z",
+      prerelease: false,
+      assets: [{
+        name: "chuanyue-0.12.0.apk",
+        size: 30 * 1024 * 1024,
+        url: `${REPO_URL}/releases/download/v0.12.0/chuanyue-0.12.0.apk`,
+        sha256: HASH_A,
+      }],
+    };
+    const { repo } = memorySettings({ updateLatestRelease: rel, autoUpdate: true });
+    let failMode: "download_hash" | "post_status" = "download_hash";
+    const install = vi.fn();
+    const download = vi.fn(async () => {
+      if (failMode === "download_hash") {
+        throw new PlatformError("update_hash", "安装包校验没通过，已删除");
+      }
+    });
+    const packageStatus = vi.fn(async (): Promise<UpdatePackageStatus> => ({
+      downloaded: false,
+      verified: false,
+      bytes: 0,
+      canInstall: true,
+    }));
+    const platform = {
+      name: "android",
+      llm: { getPublic: vi.fn() },
+      update: {
+        download,
+        cancel: vi.fn(async () => {}),
+        fetchText: vi.fn(),
+        install,
+        canInstall: vi.fn(async () => true),
+        packageStatus,
+        environmentStatus: vi.fn(async (): Promise<UpdateEnvironmentStatus> => ({
+          wifiUnmetered: true,
+          freeBytes: 600 * 1024 * 1024,
+        })),
+        devSource: vi.fn(),
+        setDevSource: vi.fn(),
+      },
+    } as unknown as Platform;
+
+    const store = createUpdateStore(repo, platform, "0.10.0");
+    expect(await store.autoPrepare()).toBe(false);
+    expect(store.readyRelease).toBeNull();
+
+    // Even if download() resolved, a failing post-download packageStatus check still refuses readyRelease!
+    failMode = "post_status";
+    expect(await store.autoPrepare()).toBe(false);
+    expect(store.readyRelease).toBeNull();
+    expect(install).not.toHaveBeenCalled();
   });
 });

@@ -62,6 +62,307 @@ export async function getBook(repo: Repo, id: string): Promise<SourceBook | null
   const [row] = await repo.platform.sql.query("SELECT json FROM source_books WHERE id=?", [id]);
   return row ? JSON.parse(String(row.json)) : null;
 }
+
+export interface BookMeta {
+  id: string;
+  title: string;
+  format: string;
+  sectionCount: number;
+  totalChars: number;
+  createdAt: string;
+}
+
+export interface BookTocItem {
+  section: number;
+  title: string;
+  page: number | null;
+  chars: number;
+}
+
+export interface BookSectionContent {
+  section: number;
+  title: string;
+  page: number | null;
+  text: string;
+  paragraphs: string[];
+}
+
+export interface BookSearchHit {
+  section: number;
+  title: string;
+  chunkOrd: number;
+  paragraphIndex: number;
+  snippet: { before: string; hit: string; after: string };
+}
+
+function splitCleanParagraphs(text: string): { text: string; start: number; end: number }[] {
+  const out: { text: string; start: number; end: number }[] = [];
+  const lineRe = /[^\r\n]+/g;
+  let match: RegExpExecArray | null;
+  while ((match = lineRe.exec(text)) !== null) {
+    const raw = match[0];
+    const trimmed = raw.replace(/^[\s\u3000]+|[\s\u3000]+$/g, "");
+    if (trimmed) {
+      out.push({ text: trimmed, start: match.index, end: match.index + raw.length });
+    }
+  }
+  return out;
+}
+
+function makeHitSnippet(text: string, queryLower: string, radius = 28): { before: string; hit: string; after: string } | null {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat || !queryLower) return null;
+  const at = flat.toLowerCase().indexOf(queryLower);
+  if (at < 0) return null;
+  const start = Math.max(0, at - radius);
+  const end = Math.min(flat.length, at + queryLower.length + radius);
+  return {
+    before: (start > 0 ? "…" : "") + flat.slice(start, at),
+    hit: flat.slice(at, at + queryLower.length),
+    after: flat.slice(at + queryLower.length, end) + (end < flat.length ? "…" : ""),
+  };
+}
+
+/** Reads lightweight book metadata without loading `source_books.json` or chunk text into JS memory. */
+export async function getBookMeta(repo: Repo, bookId: string): Promise<BookMeta | null> {
+  const [row] = await repo.platform.sql.query(
+    `SELECT b.id, b.title, b.format, b.created_at AS createdAt,
+       (SELECT COUNT(*) FROM source_sections s WHERE s.book_id = b.id) AS sectionCount,
+       (SELECT COALESCE(SUM(LENGTH(c.text)), 0) FROM source_chunks c WHERE c.book_id = b.id) AS totalChars
+     FROM source_books b
+     WHERE b.id = ?`,
+    [bookId],
+  );
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    title: String(row.title),
+    format: String(row.format),
+    sectionCount: Number(row.sectionCount ?? 0),
+    totalChars: Number(row.totalChars ?? 0),
+    createdAt: String(row.createdAt),
+  };
+}
+
+/** Lists table-of-contents sections with SQLite-aggregated character counts (zero chunk text loaded). */
+export async function listBookToc(repo: Repo, bookId: string): Promise<BookTocItem[]> {
+  const rows = await repo.platform.sql.query(
+    `SELECT s.section, s.title, s.page, COALESCE(SUM(LENGTH(c.text)), 0) AS chars
+     FROM source_sections s
+     LEFT JOIN source_chunks c ON c.book_id = s.book_id AND c.section = s.section
+     WHERE s.book_id = ?
+     GROUP BY s.section, s.title, s.page
+     ORDER BY s.section ASC`,
+    [bookId],
+  );
+  return rows.map((r) => ({
+    section: Number(r.section),
+    title: String(r.title),
+    page: r.page == null ? null : Number(r.page),
+    chars: Number(r.chars ?? 0),
+  }));
+}
+
+/** Reads a single section on demand from `source_sections` + `source_chunks` without touching other chapters. */
+export async function readBookSection(repo: Repo, bookId: string, section: number): Promise<BookSectionContent | null> {
+  const [secRow] = await repo.platform.sql.query(
+    "SELECT section, title, page FROM source_sections WHERE book_id = ? AND section = ?",
+    [bookId, section],
+  );
+  if (!secRow) return null;
+  const chunkRows = await repo.platform.sql.query(
+    "SELECT text FROM source_chunks WHERE book_id = ? AND section = ? ORDER BY ordinal ASC",
+    [bookId, section],
+  );
+  // chunksOf slices section.text into contiguous non-overlapping 2400-char segments.
+  const text = chunkRows.map((r) => String(r.text)).join("");
+  const paragraphs = splitCleanParagraphs(text).map((p) => p.text);
+  return {
+    section: Number(secRow.section),
+    title: String(secRow.title),
+    page: secRow.page == null ? null : Number(secRow.page),
+    text,
+    paragraphs,
+  };
+}
+
+/**
+ * Full-text search across an imported book using `source_terms` postings when
+ * 2-char Han bigrams / multi-char words exist, falling back to `LIKE` for
+ * single-character or punctuation queries, strictly honoring `opts.through`.
+ */
+export async function searchBookFullText(
+  repo: Repo,
+  bookId: string,
+  query: string,
+  opts?: { through?: number | null; limit?: number },
+): Promise<BookSearchHit[]> {
+  const rawQuery = query.trim();
+  if (!rawQuery) return [];
+  const limit = opts?.limit === undefined ? 50 : Math.floor(opts.limit);
+  if (limit <= 0) return [];
+  const cappedLimit = Math.min(500, limit);
+  const hasThrough = opts?.through !== undefined && opts.through !== null;
+  const through = hasThrough ? Math.floor(opts!.through!) : null;
+  if (through !== null && through < 0) return [];
+
+  const queryFlat = rawQuery.replace(/\s+/g, " ").toLowerCase();
+  const hanBigrams = new Set<string>();
+  const wordTerms = new Set<string>();
+  for (const word of rawQuery.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+    if (/\p{Script=Han}/u.test(word)) {
+      for (let i = 0; i < word.length - 1; i++) hanBigrams.add(word.slice(i, i + 2));
+    } else if (word.length > 1) {
+      wordTerms.add(word.slice(0, 64));
+    }
+  }
+
+  const hits: BookSearchHit[] = [];
+  const precedingParagraphCache = new Map<string, number>();
+
+  const baseParagraphOffset = async (section: number, chunkOrd: number, chunkText: string): Promise<number> => {
+    const cacheKey = `${section}:${chunkOrd}`;
+    const cached = precedingParagraphCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const [countRow] = await repo.platform.sql.query(
+      "SELECT COUNT(*) AS cnt FROM source_chunks WHERE book_id = ? AND section = ? AND ordinal < ?",
+      [bookId, section, chunkOrd],
+    );
+    const priorCount = Number(countRow?.cnt ?? 0);
+    if (priorCount === 0) {
+      precedingParagraphCache.set(cacheKey, 0);
+      return 0;
+    }
+    if (priorCount <= 16) {
+      const priorRows = await repo.platform.sql.query(
+        "SELECT text FROM source_chunks WHERE book_id = ? AND section = ? AND ordinal < ? ORDER BY ordinal ASC",
+        [bookId, section, chunkOrd],
+      );
+      const prefix = priorRows.map((r) => String(r.text)).join("");
+      const paras = splitCleanParagraphs(prefix);
+      const separated = /[\r\n][\s\u3000]*$/.test(prefix) || /^[\s\u3000]*[\r\n]/.test(chunkText);
+      const offset = separated ? paras.length : Math.max(0, paras.length - 1);
+      precedingParagraphCache.set(cacheKey, offset);
+      return offset;
+    }
+    const [nlRow] = await repo.platform.sql.query(
+      `SELECT COALESCE(SUM(LENGTH(norm) - LENGTH(REPLACE(norm, char(10), ''))), 0) AS nl
+       FROM (
+         SELECT REPLACE(REPLACE(text, char(13), ''), char(10) || char(10), char(10)) AS norm
+         FROM source_chunks
+         WHERE book_id = ? AND section = ? AND ordinal < ?
+       )`,
+      [bookId, section, chunkOrd],
+    );
+    const offset = Number(nlRow?.nl ?? 0);
+    precedingParagraphCache.set(cacheKey, offset);
+    return offset;
+  };
+
+  const collectFromChunkRows = async (rows: Record<string, unknown>[]) => {
+    for (const row of rows) {
+      if (hits.length >= cappedLimit) break;
+      const section = Number(row.section);
+      const chunkOrd = Number(row.ordinal);
+      const title = String(row.title);
+      const chunkText = String(row.text);
+      const paras = splitCleanParagraphs(chunkText);
+      const basePara = await baseParagraphOffset(section, chunkOrd, chunkText);
+      let matchedInParas = false;
+      for (let i = 0; i < paras.length && hits.length < cappedLimit; i++) {
+        const snip = makeHitSnippet(paras[i].text, queryFlat);
+        if (snip) {
+          matchedInParas = true;
+          hits.push({
+            section,
+            title,
+            chunkOrd,
+            paragraphIndex: basePara + i,
+            snippet: snip,
+          });
+        }
+      }
+      if (!matchedInParas && hits.length < cappedLimit) {
+        const fallbackSnip = makeHitSnippet(chunkText, queryFlat);
+        if (fallbackSnip) {
+          const at = chunkText.toLowerCase().indexOf(queryFlat);
+          const localIdx = at >= 0 ? Math.max(0, paras.findIndex((p) => p.end >= at)) : 0;
+          hits.push({
+            section,
+            title,
+            chunkOrd,
+            paragraphIndex: basePara + localIdx,
+            snippet: fallbackSnip,
+          });
+        }
+      }
+    }
+  };
+
+  let usedIndex = false;
+  const filterTokens = hanBigrams.size > 0
+    ? sampleTerms([...hanBigrams], 48)
+    : wordTerms.size > 0
+      ? sampleTerms([...wordTerms], 48)
+      : [];
+
+  if (filterTokens.length > 0) {
+    const termRows = await repo.platform.sql.query(
+      `SELECT term, postings FROM source_terms WHERE book_id = ? AND term IN (${filterTokens.map(() => "?").join(",")})`,
+      [bookId, ...filterTokens],
+    );
+    if (termRows.length === filterTokens.length) {
+      usedIndex = true;
+      const lists = termRows
+        .map((r) => JSON.parse(String(r.postings)) as number[])
+        .sort((a, b) => a.length - b.length);
+      let candidateSet = new Set<number>(lists[0] ?? []);
+      for (let i = 1; i < lists.length && candidateSet.size > 0; i++) {
+        const next = new Set<number>();
+        for (const ord of lists[i]) {
+          if (candidateSet.has(ord)) next.add(ord);
+        }
+        candidateSet = next;
+      }
+      const candidates = [...candidateSet].sort((a, b) => a - b);
+      for (let i = 0; i < candidates.length && hits.length < cappedLimit; i += 100) {
+        const batch = candidates.slice(i, i + 100);
+        const rows = await repo.platform.sql.query(
+          `SELECT c.ordinal, c.section, c.text, s.title
+           FROM source_chunks c
+           JOIN source_sections s ON s.book_id = c.book_id AND s.section = c.section
+           WHERE c.book_id = ?
+             ${through !== null ? "AND c.section <= ?" : ""}
+             AND c.ordinal IN (${batch.map(() => "?").join(",")})
+           ORDER BY c.ordinal ASC`,
+          through !== null ? [bookId, through, ...batch] : [bookId, ...batch],
+        );
+        await collectFromChunkRows(rows);
+      }
+    } else if (hanBigrams.size > 0) {
+      // Every contiguous 2-char Han bigram in a chunk is guaranteed to be indexed in `source_terms`.
+      return [];
+    }
+  }
+
+  if (!usedIndex) {
+    const likeTerm = `%${rawQuery.split(/\s+/)[0].replace(/[\\%_]/g, "\\$&")}%`;
+    const rows = await repo.platform.sql.query(
+      `SELECT c.ordinal, c.section, c.text, s.title
+       FROM source_chunks c
+       JOIN source_sections s ON s.book_id = c.book_id AND s.section = c.section
+       WHERE c.book_id = ?
+         ${through !== null ? "AND c.section <= ?" : ""}
+         AND c.text LIKE ? ESCAPE '\\'
+       ORDER BY c.ordinal ASC
+       LIMIT ?`,
+      through !== null ? [bookId, through, likeTerm, Math.max(cappedLimit * 2, 60)] : [bookId, likeTerm, Math.max(cappedLimit * 2, 60)],
+    );
+    await collectFromChunkRows(rows);
+  }
+
+  return hits;
+}
 // Match archive inputs, including old snapshots, revision citations and the
 // source data retained with readable assistant tasks. Tasks still executing
 // can also own references until their prepared changes are adopted.

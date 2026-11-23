@@ -1,0 +1,125 @@
+/* Viewport-height CSS Multi-Column book paginator (Paginator.tsx). */
+.paginator {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  touch-action: pan-y;
+  user-select: none;
+}
+.paginator-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: min(676px, calc(var(--story-measure) * var(--story-size) * 1.08 + 36px));
+  margin: 0 auto;
+  padding: 8px 18px 2px;
+  display: flex;
+  flex-direction: column;
+}
+:root[data-style="ink"] .paginator-frame {
+  padding-left: var(--s-gutter, 20px);
+  padding-right: var(--s-gutter, 20px);
+}
+@media (max-width: 359px) {
+  .paginator-frame { padding: 6px 12px 2px; }
+}
+
+.paginator-stage {
+  position: relative;
+  flex: 1;
+  min-height: 160px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.paged-columns {
+  font-size: var(--story-size);
+  column-fill: auto;
+  will-change: transform;
+}
+:where(.paged-columns > *) { font-size: 1rem; }
+
+.paginator.is-animated .paged-columns {
+  transition: transform 240ms cubic-bezier(0.22, 0.85, 0.28, 1);
+}
+.paginator.is-dragging .paged-columns {
+  transition: none !important;
+}
+
+/* Prevent oversized cards inside multi-column flow from overflowing column height */
+.paged-columns .ending-card,
+.paged-columns .recap-card,
+.paged-columns .notice,
+.paged-columns .next-choices,
+.paged-columns .title-cartouche {
+  break-inside: avoid-column;
+}
+
+.paginator-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  padding: 2px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+}
+.paginator-footer .pf-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--serif);
+  opacity: 0.85;
+}
+.paginator-footer .pf-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.paginator-footer .pf-step {
+  min-width: 30px;
+  min-height: 28px;
+  padding: 0 4px;
+  color: var(--muted);
+}
+.paginator-footer .pf-count {
+  min-width: 4em;
+  text-align: center;
+}
+
+/* Quiet floating pill when streaming words spill onto later pages while user reads an earlier page */
+.paged-follow-pill {
+  position: absolute;
+  right: 16px;
+  bottom: 38px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent-text) 45%, var(--line));
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--accent-text);
+  font-family: var(--serif);
+  font-size: 13px;
+  box-shadow: var(--elev-2);
+}
+.paged-follow-pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-text);
+  animation: breathe 1.4s ease-in-out infinite;
+}

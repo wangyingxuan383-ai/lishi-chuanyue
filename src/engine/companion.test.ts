@@ -17,9 +17,16 @@ import {
   draftSetupFromCompanionText,
   escalateCompanionToAgent,
   exportPersonaJson,
+  followCompanionRun,
+  getOrCreateSession,
   parsePersonaJson,
   personaFromStoryPerson,
+  resolveCompanionAgentPolicy,
+  resolveEscalatedAgentModel,
+  resolveSessionDraftSource,
   saveCompanionMessageAsNote,
+  steerCompanionAgent,
+  stopCompanionRun,
 } from "./companion";
 
 const LLM = {
@@ -483,5 +490,395 @@ describe("Companion engine (R33-T001..T003)", () => {
     const updatedDetail = await client.getSessionDetail(bookSession.session.id);
     expect(updatedDetail.session.piSessionId).toBe("pi-sess-new");
     expect(updatedDetail.session.activeGear).toBe("agent");
+  });
+
+  it("self-heals orphan streaming messages on getSessionDetail while supporting live followCompanionRun and sessionId stop", async () => {
+    let releaseStream!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const { game } = await createWorldFixture();
+    const client = new CompanionClient(game);
+
+    const created = await client.createSession({
+      title: "断流自愈",
+      metadata: { activeRunId: "stale-orphan-run" },
+    });
+    const sid = created.session.id;
+
+    // 1. Insert an orphan `streaming` row with no active run in memory:
+    await client.appendMessage(sid, {
+      id: "orphan-stream-1",
+      role: "assistant",
+      gear: "chat",
+      status: "streaming",
+      content: "崩溃前只写了一半",
+      steps: [{ id: "st-1", tool: "search_original", label: "检索原著原文", status: "running", summary: "正在查阅…" }],
+    });
+
+    const healed = await client.getSessionDetail(sid);
+    expect(healed.activeRunId).toBeNull();
+    expect(healed.session.activeRunId).toBeNull();
+    expect(healed.session.metadata.activeRunId).toBeUndefined();
+    expect(healed.messages[0].status).toBe("interrupted");
+    expect(healed.messages[0].content).toBe("崩溃前只写了一半");
+    expect(healed.messages[0].steps[0].status).toBe("failed");
+
+    // 2. Start a real in-flight streaming run, verify getSessionDetail keeps it `streaming` + exposes `activeRunId`,
+    //    attach via `followCompanionRun`, and stop via `stopCompanionRun({ sessionId })` even without the original handle!
+    game.platform.llm.cancel = async () => {
+      releaseStream();
+    };
+    game.platform.llm.stream = async (_req, onEvent) => {
+      void (async () => {
+        onEvent({
+          type: "data",
+          data: JSON.stringify({ choices: [{ delta: { content: "正在持续流式输出…" }, finish_reason: null }] }),
+        });
+        await gate;
+        onEvent({ type: "done" });
+      })();
+      return "live-stream-1";
+    };
+
+    const started = await client.send({ sessionId: sid, text: "重新进入会话测试" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const reentered = await client.getSessionDetail(sid);
+    expect(reentered.activeRunId).toBe(started.runId);
+    expect(reentered.session.activeRunId).toBe(started.runId);
+    expect(reentered.messages.at(-1)?.status).toBe("streaming");
+
+    const observedFrames: string[] = [];
+    const attached = followCompanionRun(game, sid, started.runId, (u) => {
+      if (u.text) observedFrames.push(u.text);
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(observedFrames).toContain("正在持续流式输出…");
+
+    const stopped = await stopCompanionRun(game, { sessionId: sid });
+    releaseStream();
+    expect(stopped.accepted).toBe(true);
+    const finalSnap = await attached.done;
+    expect(finalSnap.status).toBe("cancelled");
+
+    const afterStop = await client.getSessionDetail(sid);
+    expect(afterStop.activeRunId).toBeNull();
+    expect(afterStop.messages.at(-1)?.status).toBe("cancelled");
+  });
+
+  it("handles relative baseUrl safely, inherits agentAdoptionMode, keeps failed agent escalation atomic, and steers active runs", async () => {
+    const { game, world, line } = await createWorldFixture();
+    const client = new CompanionClient(game);
+    const sess = await client.createSession({
+      title: "改档健壮性",
+      boundWorldId: world.id,
+      boundLineId: line.id,
+    });
+
+    // Relative dev-proxy base URL (`/v1`) must NEVER throw `TypeError: Invalid URL` across non-chat-completions protocols:
+    game.llm = {
+      ...LLM,
+      url: "/v1",
+      model: "proxy-main",
+    };
+    const basePrefs = {
+      policy: "preview" as const,
+      thinkingMode: "off" as const,
+      skills: [],
+      customSkills: [],
+      network: { mode: "off" as const },
+      limits: { modelRequests: 0, toolCalls: 0, activeMs: 0 },
+      limitsVersion: 2 as const,
+      inputTokens: 475_000,
+      inputBudgetVersion: 2 as const,
+    };
+    const respModel = await resolveEscalatedAgentModel(game, { ...basePrefs, protocol: "openai-responses" });
+    expect(respModel.url).toBe("/v1/responses");
+    const anthModel = await resolveEscalatedAgentModel(game, { ...basePrefs, protocol: "anthropic" });
+    expect(anthModel.url).toBe("/v1/messages");
+    const gemModel = await resolveEscalatedAgentModel(game, { ...basePrefs, protocol: "gemini" });
+    expect(gemModel.url).toBe("/v1/models/proxy-main:streamGenerateContent?alt=sse");
+
+    // Default adoption policy when unset is `"preview"` ("review"), and `"agentAdoptionMode": "auto"` maps to `"auto"`:
+    expect(await resolveCompanionAgentPolicy(game)).toBe("preview");
+    await game.repo.setSetting("agentAdoptionMode", "auto");
+    expect(await resolveCompanionAgentPolicy(game)).toBe("auto");
+    await game.repo.setSetting("agentAdoptionMode", "review");
+    expect(await resolveCompanionAgentPolicy(game)).toBe("preview");
+    await game.repo.setSetting("agentAdoptionMode", "auto");
+    await game.repo.setSetting("agent:preferences", { ...basePrefs, protocol: "openai-responses" });
+
+    let failStart = true;
+    const agentCalls: Record<string, unknown>[] = [];
+    game.platform.execution = {
+      async agent(req): Promise<import("../platform").Json> {
+        const r = req as Record<string, unknown>;
+        agentCalls.push(r);
+        if (r.op === "create") {
+          return {
+            id: "pi-atomic-1",
+            worldId: world.id,
+            lineId: line.id,
+            title: "伴聊协作",
+            createdAt: "2026-11-24T00:00:00Z",
+            updatedAt: "2026-11-24T00:00:00Z",
+          };
+        }
+        if (r.op === "session") {
+          return {
+            session: {
+              id: String(r.id),
+              worldId: world.id,
+              lineId: line.id,
+              title: "伴聊协作",
+              createdAt: "2026-11-24T00:00:00Z",
+              updatedAt: "2026-11-24T00:00:00Z",
+            },
+            messages: [],
+            tasks: [],
+          };
+        }
+        if (r.op === "start") {
+          if (failStart) throw new Error("当前故事正忙，暂时无法启动改档");
+          return { taskId: "pi-task-live", runId: "pi-task-live" };
+        }
+        if (r.op === "enqueue_input" || r.op === "enqueue") {
+          return { id: "inp-1", delivery: "steer", status: "accepted" };
+        }
+        throw new Error(`unexpected op ${String(r.op)}`);
+      },
+      settle: async () => ({}),
+      start: async () => "run",
+      snapshot: async () => ({ id: "run", worldId: world.id, status: "committed", budget: { modelRequests: 0, toolCalls: 0, corrections: 0, activeMs: 0 }, draft: {}, result: null, error: null, events: [] }),
+      list: async () => [],
+      stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }),
+      resume: async () => {},
+    };
+
+    // 1. Failed `agent.start` must NEVER leave any dead agent card or orphan user message in `companion_messages`!
+    await expect(
+      escalateCompanionToAgent(game, {
+        sessionId: sess.session.id,
+        text: "给王掌柜加一把算盘",
+      }),
+    ).rejects.toThrow("当前故事正忙");
+    const afterFailedStart = await client.getSessionDetail(sess.session.id);
+    expect(afterFailedStart.messages).toHaveLength(0);
+
+    // 2. Successful start with relative `/v1` endpoint + inherited `agentAdoptionMode = "auto"`:
+    failStart = false;
+    agentCalls.length = 0;
+    const ok = await escalateCompanionToAgent(game, {
+      sessionId: sess.session.id,
+      text: "给王掌柜加一把算盘",
+    });
+    expect(ok.piSessionId).toBe("pi-atomic-1");
+    expect(ok.agentMessage.piTaskId).toBe("pi-task-live");
+    const startReq = agentCalls.find((c) => c.op === "start")!;
+    expect(startReq.policy).toBe("auto");
+    expect((startReq.model as Record<string, unknown>).model).toBe("proxy-main");
+
+    // 3. Follow-up message while Pi task is active steers the existing session instead of calling `start` again:
+    agentCalls.length = 0;
+    const steered = await steerCompanionAgent(game, {
+      sessionId: sess.session.id,
+      piSessionId: ok.piSessionId,
+      taskId: ok.taskId,
+      text: "顺便注明算盘是紫檀木的",
+    });
+    expect(steered.delivery).toBe("steer");
+    expect(agentCalls.some((c) => c.op === "start")).toBe(false);
+    const enqueueCall = agentCalls.find((c) => c.op === "enqueue_input" || c.op === "enqueue")!;
+    expect(enqueueCall.taskId ?? enqueueCall.id).toBe("pi-task-live");
+    expect(enqueueCall.text).toBe("顺便注明算盘是紫檀木的");
+    const afterSteer = await client.getSessionDetail(sess.session.id);
+    expect(afterSteer.messages.at(-2)?.content).toBe("顺便注明算盘是紫檀木的");
+    expect(afterSteer.messages.at(-1)?.role).toBe("system_note");
+  });
+
+  it("preserves spoiler ceiling `through`, `position`, `fanfic`, `plot`, and `instructions` when drafting a new game", async () => {
+    const { game, world, line } = await createWorldFixture();
+    const client = new CompanionClient(game);
+
+    await saveBook(game.repo, {
+      id: "book-ceiling",
+      title: "长安暗潮",
+      format: "txt",
+      createdAt: "2026-11-24T00:00:00Z",
+      sections: Array.from({ length: 6 }, (_, idx) => ({
+        title: `第${idx + 1}章`,
+        text: `第${idx + 1}章正文内容。`,
+      })),
+    });
+    await game.bindSource(world.id, {
+      bookId: "book-ceiling",
+      through: 4,
+      position: 2,
+      fanfic: true,
+      plot: "rewrite",
+      method: "search",
+      instructions: "仅参考前五章设定，不照搬后续剧情",
+    });
+
+    const boundSession = await client.createSession({
+      title: "新局构思",
+      boundWorldId: world.id,
+      boundLineId: line.id,
+      boundBookId: "book-ceiling",
+      bookScope: { mode: "through" },
+    });
+
+    const inheritedSource = await resolveSessionDraftSource(game, boundSession.session);
+    expect(inheritedSource).toMatchObject({
+      bookId: "book-ceiling",
+      through: 4,
+      position: 2,
+      fanfic: true,
+      plot: "rewrite",
+      instructions: "仅参考前五章设定，不照搬后续剧情",
+    });
+
+    const draft = draftSetupFromCompanionText(
+      "标题：《风雪西市》\n故事设定：天宝年间西市暗流涌动。\n主角姓名：裴行",
+      "灵犀",
+      { worldSource: inheritedSource, bookId: "book-ceiling", bookScope: boundSession.session.bookScope },
+    );
+    expect(draft.source).toMatchObject({
+      bookId: "book-ceiling",
+      through: 4,
+      position: 2,
+      fanfic: true,
+      plot: "rewrite",
+      instructions: "仅参考前五章设定，不照搬后续剧情",
+    });
+  });
+
+  it("isolates NPC private chat personas, knowledge, memories, and sessions across worldlines without cross-branch leaks", async () => {
+    const { game, world, openingNode, line: lineA } = await createWorldFixture();
+    const client = new CompanionClient(game);
+    const baseState = await game.repo.getState(openingNode.id);
+    const wang = baseState.people.find((p) => p.name === "王掌柜")!;
+
+    // Fork a second worldline `lineB` from `openingNode`:
+    const branchBState = structuredClone(baseState);
+    const wangInB = branchBState.people.find((p) => p.id === wang.id)!;
+    wangInB.attitude = "冷淡";
+    wangInB.notes = "怀疑有人夜探账房";
+    const lineB = { id: "line-branch-b" };
+    await game.platform.sql.batch([
+      {
+        sql: "INSERT INTO lines(id,world_id,name,node_id,kind,created_at) VALUES(?,?,?,?,'line',?)",
+        params: [lineB.id, world.id, "暗查支线", openingNode.id, "2026-11-24T00:00:00Z"],
+      },
+    ]);
+    const nodeB = await game.repo.appendNode(world.id, lineB.id, {
+      parentId: openingNode.id,
+      kind: "turn",
+      actionMode: "do",
+      actionText: "夜探账房",
+      narrative: "王掌柜听见账房窗户异响，起了疑心。",
+      state: branchBState,
+    });
+
+    // Advance `lineA` with completely different secret knowledge for Wang:
+    const nodeA = await game.repo.appendNode(world.id, lineA.id, {
+      parentId: openingNode.id,
+      kind: "turn",
+      actionMode: "say",
+      actionText: "坦白来意",
+      narrative: "王掌柜亲眼看见李安拿出太医署荐书。",
+      state: structuredClone(baseState),
+    });
+    await appendContinuity(game, world.id, nodeA.id, {
+      knowledge: [
+        {
+          id: "k-line-a-only",
+          person: wang.id,
+          claim: "李安持有太医署荐书",
+          awareness: "witnessed",
+          source: { nodeId: nodeA.id, from: "narrative", quote: "王掌柜亲眼看见李安拿出太医署荐书" },
+        },
+      ],
+    });
+    await game.platform.sql.batch([
+      { sql: "UPDATE worlds SET current_line_id=? WHERE id=?", params: [lineB.id, world.id] },
+    ]);
+    await appendContinuity(game, world.id, nodeB.id, {
+      knowledge: [
+        {
+          id: "k-line-b-only",
+          person: wang.id,
+          claim: "昨晚有人撬动了账房窗栓",
+          awareness: "witnessed",
+          source: { nodeId: nodeB.id, from: "narrative", quote: "王掌柜听见账房窗户异响" },
+        },
+      ],
+    });
+    await game.platform.sql.batch([
+      { sql: "UPDATE worlds SET current_line_id=? WHERE id=?", params: [lineA.id, world.id] },
+    ]);
+
+    // Insert an unbound legacy `npc:${worldId}:${person.id}` persona + memory: must NOT leak into `lineB`!
+    await client.savePersona({
+      id: `npc:${world.id}:${wang.id}`,
+      name: "王掌柜",
+      roleKind: "npc",
+      systemPrompt: "旧版未分线人格",
+      pureRoleplay: true,
+    });
+    await client.saveMemory({
+      scope: "persona",
+      personaId: `npc:${world.id}:${wang.id}`,
+      category: "relation",
+      content: "旧主线专属记忆：不该泄露到暗查支线",
+    });
+
+    // 1. Extract NPC persona on `lineA` (3-arg default currentLineId) vs `lineB` (explicit 4th arg):
+    const personaA = await personaFromStoryPerson(game, world.id, wang.id);
+    const personaB = await personaFromStoryPerson(game, world.id, wang.id, lineB.id);
+
+    expect(personaA.id).toBe(`npc:${world.id}:${lineA.id}:${wang.id}`);
+    expect(personaA.boundLineId).toBe(lineA.id);
+    expect(personaB.id).toBe(`npc:${world.id}:${lineB.id}:${wang.id}`);
+    expect(personaB.boundLineId).toBe(lineB.id);
+
+    expect(personaA.systemPrompt).toContain("李安持有太医署荐书");
+    expect(personaA.systemPrompt).not.toContain("昨晚有人撬动了账房窗栓");
+
+    expect(personaB.systemPrompt).toContain("昨晚有人撬动了账房窗栓");
+    expect(personaB.systemPrompt).toContain("冷淡");
+    expect(personaB.systemPrompt).not.toContain("李安持有太医署荐书");
+
+    // 2. Persona memories on `lineA` never leak into `lineB` (and unbound legacy memory did NOT leak into `lineB`):
+    await client.saveMemory({
+      scope: "persona",
+      personaId: personaA.id,
+      category: "bond",
+      content: "主线约定：帮王掌柜代写家书",
+    });
+    const memsA = await client.activeMemoriesForPersona(personaA.id, "persona");
+    const memsB = await client.activeMemoriesForPersona(personaB.id, "persona");
+    expect(memsA.map((m) => m.content)).toContain("主线约定：帮王掌柜代写家书");
+    expect(memsB).toEqual([]);
+
+    // 3. `getOrCreateSession` strictly isolates NPC sessions per worldline:
+    const sessA1 = await getOrCreateSession(game, {
+      personaId: personaA.id,
+      worldId: world.id,
+      lineId: lineA.id,
+    });
+    const sessB1 = await getOrCreateSession(game, {
+      personaId: personaB.id,
+      worldId: world.id,
+      lineId: lineB.id,
+    });
+    const sessA2 = await getOrCreateSession(game, {
+      personaId: personaA.id,
+      worldId: world.id,
+      lineId: lineA.id,
+    });
+    expect(sessA1.id).toBe(sessA2.id);
+    expect(sessA1.boundLineId).toBe(lineA.id);
+    expect(sessB1.id).not.toBe(sessA1.id);
+    expect(sessB1.boundLineId).toBe(lineB.id);
   });
 });

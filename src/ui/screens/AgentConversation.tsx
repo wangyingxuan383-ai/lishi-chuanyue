@@ -38,6 +38,14 @@ const inFlight = (status: string) => ["running", "committing", "compacting", "st
 const canCompact = (status: string) => ["running", "paused", "failed", "cancelled", "interrupted", "blocked"].includes(status);
 const TOOL_LABELS: Record<string, string> = { list_resources: "查看本局资料", read_resource: "读取本局资料", search_resources: "搜索本局资料", stage_edit: "准备修改", stage_edits: "批量准备修改", stage_story_turn: "准备正式剧情", finish_task: "完成任务", list_skills: "查看可用技能", read_skill: "读取技能", read_world: "读取本局设定", check_draft: "核对草稿", list_sections: "查看原著目录", search_original: "检索原著", read_original: "阅读原著", read_canon_notes: "核对原著札记", read_canon_facts: "查证原著事实", web_search: "联网搜索", read_webpage: "阅读网页", list_remote_tools: "查看外部工具", call_remote_tool: "调用外部工具" };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+function endpointPathname(raw: string): string {
+  if (!raw) return "/";
+  try {
+    return new URL(raw, "http://localhost").pathname;
+  } catch {
+    return raw.startsWith("/") ? raw : "/";
+  }
+}
 function modelFor(profile: Profile, override: string, preferences?: AgentPreferences | null): LlmConfig & { profileId: string; protocol: AgentProtocol; thinkingMode: AgentThinkingMode; contextWindowTokens?: number; maxOutputTokens?: number } {
   const model = (override.trim() || profile.mainModel).trim(), protocol = preferences?.protocol ?? "chat-completions";
   let url = chatCompletionsUrl(profile.baseUrl);
@@ -45,10 +53,10 @@ function modelFor(profile: Profile, override: string, preferences?: AgentPrefere
     let base = profile.baseUrl.trim().replace(/\/+$/, "").replace(/\/(?:chat\/completions|responses|messages)$/, "");
     if (protocol === "gemini") {
       base = base.replace(/\/openai$/, "");
-      if (new URL(base).pathname === "/") base += "/v1beta";
+      if (endpointPathname(base) === "/") base += "/v1beta";
       url = `${base}/models/${encodeURIComponent(model.replace(/^models\//, ""))}:streamGenerateContent?alt=sse`;
     } else {
-      if (new URL(base).pathname === "/") base += "/v1";
+      if (endpointPathname(base) === "/") base += "/v1";
       url = `${base}/${protocol === "openai-responses" ? "responses" : "messages"}`;
     }
   }
@@ -430,6 +438,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   const makeRequest = () => sessionId && prefs && selected ? { ...prefs, skills: [...new Set([...prefs.skills, ...(draftRecipe?.skills ?? [])])], readOnly: !!prefs.readOnly || !!draftRecipe?.readOnly, sessionId, text: input.trim(), model: modelFor(selected, model, prefs), ...(target ? { target } : {}) } : null;
   const clearSentInput = async () => {
     setTarget(undefined); changeInput(""); setDraftRecipeId(null);
+    if (textarea.current) textarea.current.style.height = "auto";
     if (sessionId) await Promise.all([game.repo.setSetting(`agent:input:${sessionId}`, ""), game.repo.setSetting(`agent:input-recipe:${sessionId}`, null)]);
   };
   const send = (delivery: "steer" | "queued" = "steer") => void act(async () => {
@@ -548,7 +557,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     }
 
     await client.continue(task.id,input.trim()||undefined,prefs?.limits,prefs?.inputTokens??DEFAULT_AGENT_INPUT_TOKENS,prefs&&selected?modelFor(selected,model,prefs):task.model,prefs?.modelUrl??"",check.needsRebase,selected?.id,prefs?.thinkingMode);
-    changeInput("");
+    await clearSentInput();
   });
   const discardTaskDrafts = (task: AgentTask) => void act(async () => {
     if (!await ask({ title: "清空未采用草稿？", message: "只清空这项任务尚未采用的修改草稿，已经生效的故事内容和累计用量不变。", confirm: "清空草稿", danger: true })) return;

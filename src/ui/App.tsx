@@ -17,9 +17,11 @@ import NewGame from "./screens/NewGame";
 import Play from "./screens/Play";
 import AgentConversation from "./screens/AgentConversation";
 import CompanionScreen from "./screens/CompanionScreen";
+import ReaderScreen from "./screens/ReaderScreen";
 import Settings from "./screens/Settings";
 import Guide from "./screens/Guide";
 import { applyFallback, llmFor } from "./app/llmConfig";
+import { updateStore } from "./app/updateStore";
 
 /** Each style and theme's --bg (tokens.css), for the phone's status and navigation bars. */
 const BAR_COLORS = {
@@ -213,6 +215,68 @@ export default function App() {
       window.removeEventListener("lishi:launch-target", take);
     };
   }, [boot]);
+
+  // Idle background update preparation (only acts when user explicitly enabled `autoUpdate`)
+  // and cross-screen in-app toast when a background passage finishes writing while on another page.
+  useEffect(() => {
+    if (!boot) return;
+    const { game, platform } = boot;
+    const uStore = updateStore(game.repo, platform);
+    const idleTimer = window.setTimeout(() => {
+      void uStore.check().then(() => uStore.autoPrepare()).catch(() => {});
+    }, 3500);
+
+    let live = true;
+    const trackedHeads = new Map<string, string | null>();
+    const notifiedNodes = new Set<string>();
+    const syncRunning = async (changedWorldId?: string) => {
+      try {
+        const rows = await platform.sql
+          .query("SELECT DISTINCT world_id FROM execution_runs WHERE status IN ('running','committing')")
+          .catch(() => []);
+        if (!live) return;
+        const activeIds = new Set(rows.map((r) => String((r as { world_id: string }).world_id)));
+        for (const wid of activeIds) {
+          if (!trackedHeads.has(wid)) {
+            const w = await game.repo.getWorld(wid).catch(() => null);
+            const line = w?.currentLineId ? await game.repo.getLine(w.currentLineId).catch(() => null) : null;
+            trackedHeads.set(wid, line?.nodeId ?? null);
+          }
+        }
+        const candidates = changedWorldId ? [changedWorldId] : [...trackedHeads.keys()];
+        for (const wid of candidates) {
+          if (!trackedHeads.has(wid) || activeIds.has(wid)) continue;
+          const prevNodeId = trackedHeads.get(wid) ?? null;
+          trackedHeads.delete(wid);
+          const top = topRoute.current;
+          if (top.name === "newgame" || (top.name === "play" && top.worldId === wid)) continue;
+          const w = await game.repo.getWorld(wid).catch(() => null);
+          const line = w?.currentLineId ? await game.repo.getLine(w.currentLineId).catch(() => null) : null;
+          if (!w || !line || line.nodeId === prevNodeId || notifiedNodes.has(line.nodeId)) continue;
+          const headNode = await game.repo.getNode(line.nodeId).catch(() => null);
+          if (!headNode || headNode.kind === "edit" || headNode.status === "interrupted") continue;
+          notifiedNodes.add(headNode.id);
+          if (live) {
+            toast(`《${w.title}》下一段写好了`, {
+              label: "去看",
+              run: () => push({ name: "play", worldId: wid }),
+            });
+          }
+        }
+      } catch {
+        // Ignore transient SQL reads during restore/shutdown
+      }
+    };
+    void syncRunning();
+    const poll = window.setInterval(() => void syncRunning(), 2500);
+    const off = game.subscribe((wid) => void syncRunning(wid));
+    return () => {
+      live = false;
+      window.clearTimeout(idleTimer);
+      window.clearInterval(poll);
+      off();
+    };
+  }, [boot, push, toast]);
   // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
   // a new request answers the one it replaces as cancelled.
   const dialogId = useRef(0);
@@ -293,15 +357,21 @@ export default function App() {
   }
   const route = value.route;
   // Keep the player's ordinary draft, loaded passages and viewport alive
-  // while the separate assistant or companion page is open.
+  // while the separate assistant, companion, or reader page is open.
+  const underlyingPlay = [...stack].reverse().find((item) => item.name === "play");
   const assistantRoute = [...stack].reverse().find(
-    (item) => item.name === "agent" || (item.name === "companion" && !!item.worldId),
+    (item) =>
+      item.name === "agent" ||
+      (item.name === "companion" && !!item.worldId) ||
+      (item.name === "reader" && (!!item.worldId || !!underlyingPlay)),
   );
   const storyId =
     route.name === "play"
       ? route.worldId
-      : assistantRoute && "worldId" in assistantRoute
-        ? (assistantRoute.worldId ?? null)
+      : assistantRoute
+        ? ("worldId" in assistantRoute && assistantRoute.worldId
+            ? assistantRoute.worldId
+            : underlyingPlay?.worldId ?? null)
         : null;
   return (
     <AppProvider value={value}>
@@ -311,6 +381,7 @@ export default function App() {
       {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} resumeRunId={route.name === "play" ? route.resumeRunId : undefined} /></div>}
       {route.name === "agent" && <AgentConversation key={`${route.worldId}:${route.lineId}`} route={route} />}
       {route.name === "companion" && <CompanionScreen {...route} />}
+      {route.name === "reader" && <ReaderScreen key={`${route.bookId ?? ""}:${route.worldId ?? ""}:${route.lineId ?? ""}`} {...route} />}
       {route.name === "settings" && <Settings />}
       {route.name === "guide" && <Guide />}
       {toastState && (

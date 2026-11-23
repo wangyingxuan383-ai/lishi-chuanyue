@@ -136,6 +136,7 @@ export interface CompanionSession {
   bookScope: CompanionBookScope | null;
   piSessionId: string | null;
   activeLeafId: string | null;
+  activeRunId?: string | null;
   summaryText: string;
   summaryUpToMsgId: string | null;
   pinned: boolean;
@@ -245,8 +246,22 @@ export interface CompanionHandoffInput {
 export interface EscalateToAgentInput {
   sessionId: string;
   text: string;
-  policy?: AgentPolicy;
+  policy?: AgentPolicy | "review";
   target?: { nodeId: string; paragraph?: number };
+}
+
+export interface GetOrCreateSessionInput {
+  personaId?: string;
+  activeGear?: CompanionGear;
+  boundWorldId?: string | null;
+  boundLineId?: string | null;
+  boundBookId?: string | null;
+  bookScope?: CompanionBookScope | null;
+  worldId?: string | null;
+  lineId?: string | null;
+  bookId?: string | null;
+  title?: string;
+  withGreeting?: boolean;
 }
 
 export interface EscalateToAgentResult {
@@ -384,9 +399,14 @@ function safeJson<T>(raw: unknown, fallback: T): T {
   }
 }
 
-function rowToPersona(r: Record<string, unknown>): CompanionPersona {
+function rowToPersona(r: Record<string, unknown>): CompanionPersona & { boundLineId?: string | null } {
   const id = String(r.id);
   const builtin = isBuiltinPersonaId(id);
+  const metadata = safeJson<Record<string, unknown>>(r.metadata_json, {});
+  const boundLineId =
+    typeof metadata.boundLineId === "string" && metadata.boundLineId.trim()
+      ? metadata.boundLineId.trim()
+      : undefined;
   return {
     id,
     name: String(r.name ?? ""),
@@ -402,10 +422,11 @@ function rowToPersona(r: Record<string, unknown>): CompanionPersona {
     sourceWorldId: r.source_world_id == null ? null : String(r.source_world_id),
     sourcePersonId: r.source_person_id == null ? null : String(r.source_person_id),
     sourceHeadId: r.source_head_id == null ? null : String(r.source_head_id),
+    ...(boundLineId ? { boundLineId } : {}),
     sortOrder: Number(r.sort_order ?? 100),
     builtin,
     customized: builtin,
-    metadata: safeJson<Record<string, unknown>>(r.metadata_json, {}),
+    metadata,
     createdAt: String(r.created_at ?? ""),
     updatedAt: String(r.updated_at ?? ""),
   };
@@ -663,9 +684,9 @@ export class CompanionClient {
   }
 
   async savePersona(
-    input: Partial<CompanionPersona> & Pick<CompanionPersona, "name" | "systemPrompt">,
-  ): Promise<CompanionPersona> {
-    if (this.rpc) return (await this.callNative<{ persona: CompanionPersona }>({ op: "persona_save", persona: input })).persona;
+    input: Partial<CompanionPersona> & Pick<CompanionPersona, "name" | "systemPrompt"> & { boundLineId?: string | null },
+  ): Promise<CompanionPersona & { boundLineId?: string | null }> {
+    if (this.rpc) return (await this.callNative<{ persona: CompanionPersona & { boundLineId?: string | null } }>({ op: "persona_save", persona: input })).persona;
     await ensureCompanionTables(this.repo);
     const name = input.name.trim();
     if (!name || name.length > 64) throw new Error("请填写 1～64 字的人格名称。");
@@ -683,6 +704,10 @@ export class CompanionClient {
     const starters = (input.starters ?? []).map((s) => s.trim()).filter(Boolean).slice(0, 8);
     const pureRoleplay = input.pureRoleplay ?? (roleKind === "roleplay" || roleKind === "npc");
     const now = nowIso();
+    const metadata: Record<string, unknown> = { ...(input.metadata ?? {}) };
+    if (typeof input.boundLineId === "string" && input.boundLineId.trim()) {
+      metadata.boundLineId = input.boundLineId.trim();
+    }
     const [existing] = await this.repo.platform.sql.query("SELECT created_at FROM companion_personas WHERE id=?", [id]);
     const createdAt = existing ? String(existing.created_at) : now;
     await this.repo.platform.sql.batch([
@@ -717,7 +742,7 @@ export class CompanionClient {
           input.sourcePersonId ?? null,
           input.sourceHeadId ?? null,
           input.sortOrder ?? 100,
-          JSON.stringify(input.metadata ?? {}),
+          JSON.stringify(metadata),
           createdAt,
           now,
         ],
@@ -1022,7 +1047,15 @@ export class CompanionClient {
   }
 
   async getSessionDetail(id: string): Promise<CompanionSessionDetail> {
-    if (this.rpc) return this.callNative({ op: "session_detail", id });
+    if (this.rpc) {
+      const detail = await this.callNative<CompanionSessionDetail>({ op: "session_detail", id });
+      const runId = detail.activeRunId ?? detail.session?.activeRunId ?? null;
+      return {
+        ...detail,
+        activeRunId: runId,
+        session: { ...detail.session, activeRunId: runId },
+      };
+    }
     await ensureCompanionTables(this.repo);
     let session: CompanionSession | null = null;
     const [direct] = await this.repo.platform.sql.query("SELECT * FROM companion_sessions WHERE id=?", [id]);
@@ -1050,6 +1083,7 @@ export class CompanionClient {
             bookScope: null,
             piSessionId: piId,
             activeLeafId: null,
+            activeRunId: null,
             summaryText: "",
             summaryUpToMsgId: null,
             pinned: false,
@@ -1063,14 +1097,57 @@ export class CompanionClient {
       }
     }
     if (!session) throw new Error("找不到这段伴聊会话。");
+
+    const activeRun = [...runsFor(this.game.platform).values()].find(
+      (r) => r.snapshot.sessionId === session!.id && !r.snapshot.done,
+    );
+    const activeRunId = activeRun?.snapshot.runId ?? null;
+
     const persona = await this.resolvePersona(session.personaId, session.metadata.personaSnapshot);
     const msgRows = await this.repo.platform.sql.query(
       "SELECT * FROM companion_messages WHERE session_id=? ORDER BY seq ASC, id ASC",
       [session.id],
     );
     const all = msgRows.map(rowToMessage);
+
+    // Self-heal orphan `streaming` messages and stale `activeRunId` metadata when no run is active:
+    const healStatements: SqlStatement[] = [];
+    const now = nowIso();
+    for (let i = 0; i < all.length; i++) {
+      const m = all[i];
+      if (m.status === "streaming" && m.id !== activeRunId) {
+        const healedSteps: CompanionStep[] = m.steps.map((s) =>
+          s.status === "running"
+            ? { ...s, status: "failed", summary: s.summary === "正在查阅…" ? "已中断" : s.summary }
+            : s,
+        );
+        all[i] = { ...m, status: "interrupted", steps: healedSteps, updatedAt: now };
+        healStatements.push({
+          sql: "UPDATE companion_messages SET status='interrupted', steps_json=?, updated_at=? WHERE id=? AND status='streaming'",
+          params: [JSON.stringify(healedSteps), now, m.id],
+        });
+      }
+    }
+    if (!activeRunId && ("activeRunId" in session.metadata || "active_run_id" in session.metadata)) {
+      const nextMeta = { ...session.metadata };
+      delete nextMeta.activeRunId;
+      delete nextMeta.active_run_id;
+      session = { ...session, metadata: nextMeta, updatedAt: now };
+      healStatements.push({
+        sql: "UPDATE companion_sessions SET metadata_json=?, updated_at=? WHERE id=?",
+        params: [JSON.stringify(nextMeta), now, session.id],
+      });
+    }
+    if (healStatements.length > 0) {
+      await this.repo.platform.sql.batch(healStatements).catch(() => {});
+    }
+
     const { leafId, messages } = projectBranch(all, session.activeLeafId);
-    if (!session.activeLeafId && leafId) session = { ...session, activeLeafId: leafId };
+    session = {
+      ...session,
+      ...(!session.activeLeafId && leafId ? { activeLeafId: leafId } : {}),
+      activeRunId,
+    };
 
     let piTasks: CompanionPiTaskSummary[] = [];
     if (session.piSessionId && (await tableExists(this.repo, "pi_tasks"))) {
@@ -1092,16 +1169,77 @@ export class CompanionClient {
         };
       });
     }
-    const activeRun = [...runsFor(this.game.platform).values()].find(
-      (r) => r.snapshot.sessionId === session!.id && !r.snapshot.done,
-    );
     return {
       session,
       persona,
       messages,
       piTasks,
-      activeRunId: activeRun?.snapshot.runId ?? null,
+      activeRunId,
     };
+  }
+
+  async getOrCreateSession(input: GetOrCreateSessionInput = {}): Promise<CompanionSessionDetail> {
+    const cleanPid = input.personaId?.trim() ? normalizePersonaId(input.personaId.trim()) : undefined;
+    const persona = cleanPid
+      ? ((await this.resolvePersona(cleanPid)) as CompanionPersona & { boundLineId?: string | null })
+      : null;
+    const isNpc = Boolean(persona?.roleKind === "npc" || cleanPid?.startsWith("npc:"));
+    const worldId = input.boundWorldId ?? input.worldId ?? persona?.sourceWorldId ?? null;
+    const personaLineId =
+      persona?.boundLineId ??
+      (typeof persona?.metadata?.boundLineId === "string" && persona.metadata.boundLineId.trim()
+        ? persona.metadata.boundLineId.trim()
+        : null);
+    let lineId = input.boundLineId ?? input.lineId ?? personaLineId ?? null;
+    if (worldId && !lineId) {
+      const w = await this.repo.getWorld(worldId).catch(() => null);
+      lineId = w?.currentLineId || (isNpc ? "main" : null);
+    }
+    const bookId = input.boundBookId ?? input.bookId ?? null;
+    const strictLineScope =
+      isNpc || input.boundLineId !== undefined || input.lineId !== undefined || Boolean(personaLineId);
+
+    const { sessions } = await this.listSessions({ worldId: worldId ?? undefined, limit: 100 });
+    const matching = sessions.find((s) => {
+      if (s.legacyPi && input.activeGear !== "agent") return false;
+      if (cleanPid && normalizePersonaId(s.personaId) !== cleanPid) return false;
+      if (worldId) {
+        if (s.boundWorldId !== worldId) return false;
+        if (strictLineScope) {
+          const targetLine = lineId || "main";
+          const sLine = s.boundLineId || "main";
+          if (sLine !== targetLine) return false;
+        }
+        return true;
+      }
+      if (bookId) return !s.boundWorldId && s.boundBookId === bookId;
+      return !s.boundWorldId && !s.boundBookId && s.activeGear !== "agent" && !s.legacyPi;
+    });
+
+    if (matching) {
+      const patch: Parameters<CompanionClient["updateSession"]>[1] = {};
+      if (input.activeGear && matching.activeGear !== input.activeGear) {
+        patch.activeGear = input.activeGear;
+      }
+      if (strictLineScope && lineId && matching.boundLineId !== lineId) {
+        patch.boundLineId = lineId;
+      }
+      if (Object.keys(patch).length > 0) {
+        await this.updateSession(matching.id, patch);
+      }
+      return this.getSessionDetail(matching.id);
+    }
+
+    return this.createSession({
+      title: input.title,
+      personaId: cleanPid ?? DEFAULT_PERSONA_ID,
+      activeGear: input.activeGear ?? (bookId && !worldId ? "research" : "chat"),
+      boundWorldId: worldId,
+      boundLineId: lineId,
+      boundBookId: bookId,
+      bookScope: input.bookScope ?? null,
+      withGreeting: input.withGreeting,
+    });
   }
 
   async createSession(input: {
@@ -1753,6 +1891,7 @@ export class CompanionClient {
           handle.cancel();
         };
         const res = await handle.result;
+        if (cancelled) throw new ChatError("cancelled");
         snap.content = res.text;
         snap.status = "done";
         snap.phase = "done";
@@ -1910,6 +2049,13 @@ export async function createSession(
   return (await new CompanionClient(game).createSession(input)).session;
 }
 
+export async function getOrCreateSession(
+  game: Game,
+  input: GetOrCreateSessionInput = {},
+): Promise<CompanionSession> {
+  return (await new CompanionClient(game).getOrCreateSession(input)).session;
+}
+
 export async function getSessionDetail(
   game: Game,
   id: string,
@@ -1956,6 +2102,68 @@ export async function compactCompanionSession(
   return new CompanionClient(game).compact(sessionId, keepRecent);
 }
 
+export async function stopCompanionRun(
+  game: Game,
+  target: { runId?: string; sessionId?: string },
+): Promise<{ status: string; accepted: boolean }> {
+  const directStop = (
+    game.platform as Platform & {
+      companion?: { stop?: (t: { runId?: string; sessionId?: string }) => Promise<{ status?: string; accepted?: boolean }> };
+    }
+  ).companion?.stop;
+  if (directStop && !nativeCompanionRpc(game.platform)) {
+    const res = await directStop(target);
+    await new CompanionClient(game).stop(target).catch(() => {});
+    return { status: res?.status ?? "cancelled", accepted: res?.accepted ?? true };
+  }
+  return new CompanionClient(game).stop(target);
+}
+
+export function followCompanionRun(
+  game: Game,
+  sessionId: string,
+  runId: string,
+  onUpdate?: (update: CompanionStreamUpdate) => void,
+): CompanionHandle {
+  const client = new CompanionClient(game);
+  let stopped = false;
+
+  const done = (async (): Promise<CompanionRunSnapshot> => {
+    if (stopped) {
+      await stopCompanionRun(game, { runId, sessionId }).catch(() => {});
+    }
+    let seq = 0;
+    while (true) {
+      const snap = await client.snapshot(runId, seq, 350);
+      seq = Math.max(seq, snap.seq);
+      onUpdate?.({
+        status: snap.status,
+        phase: snap.phase,
+        text: snap.content,
+        thinking: snap.thinking,
+        steps: snap.steps,
+        citations: snap.citations,
+        usage: snap.usage,
+        errorText: snap.errorText,
+      });
+      if (snap.done) {
+        if (snap.status === "failed") {
+          throw new Error(snap.errorText || "生成未能完成，请稍后重试");
+        }
+        return snap;
+      }
+    }
+  })();
+
+  return {
+    done,
+    stop: () => {
+      stopped = true;
+      void stopCompanionRun(game, { runId, sessionId }).catch(() => {});
+    },
+  };
+}
+
 export function sendCompanionMessage(
   game: Game,
   input: CompanionSendInput,
@@ -1969,7 +2177,7 @@ export function sendCompanionMessage(
     const started = await client.send(input);
     activeRunId = started.runId;
     if (stopped) {
-      await client.stop({ runId: started.runId }).catch(() => {});
+      await stopCompanionRun(game, { runId: started.runId, sessionId: input.sessionId }).catch(() => {});
     }
     let seq = 0;
     while (true) {
@@ -1999,9 +2207,9 @@ export function sendCompanionMessage(
     stop: () => {
       stopped = true;
       if (activeRunId) {
-        void client.stop({ runId: activeRunId }).catch(() => {});
+        void stopCompanionRun(game, { runId: activeRunId, sessionId: input.sessionId }).catch(() => {});
       } else {
-        void client.stop({ sessionId: input.sessionId }).catch(() => {});
+        void stopCompanionRun(game, { sessionId: input.sessionId }).catch(() => {});
       }
     },
   };
@@ -2019,10 +2227,12 @@ const AWARENESS_LABEL: Record<ProjectedKnowledge["awareness"], string> = {
 };
 
 /**
- * Generates an immersive, knowledge-fenced pure-roleplay persona from a story NPC.
+ * Generates an immersive, knowledge-fenced, worldline-isolated pure-roleplay persona from a story NPC.
  *
  * SECURITY / IMMERSION INVARIANT:
- * - Includes ONLY `continuity.knowledge` items where `k.active !== false && k.person === person.id`.
+ * - Scoped strictly to `resolvedLineId` (`npc:${worldId}:${resolvedLineId}:${person.id}`) so spoilers
+ *   and memories from Branch A never leak into Branch B.
+ * - Includes ONLY `continuity.knowledge` items where `k.active !== false && k.person === person.id` on `resolvedLineId`.
  * - NEVER leaks `protagonist.origin`, `protagonist.cheat`, `protagonist.panel`,
  *   other NPCs' private knowledge, `pins`, `continuity.threads`, or `state.timeline`.
  */
@@ -2030,17 +2240,23 @@ export async function personaFromStoryPerson(
   game: Game,
   worldId: string,
   personId: string,
-): Promise<CompanionPersona> {
+  lineId?: string,
+): Promise<CompanionPersona & { boundLineId?: string | null }> {
   const world = await game.repo.getWorld(worldId);
   if (!world) throw new Error("没有找到这局故事。");
-  const cursor = await tree.cursor(game.repo, worldId);
-  const state = await game.repo.getState(cursor.head.id);
+  const resolvedLineId = lineId?.trim() || world.currentLineId || "main";
+  const requestedLine = await game.repo.getLine(resolvedLineId).catch(() => null);
+  const headId =
+    requestedLine && requestedLine.worldId === worldId
+      ? requestedLine.nodeId
+      : (await tree.cursor(game.repo, worldId)).head.id;
+  const state = await game.repo.getState(headId);
   const person = state.people.find(
     (p) => p.id === personId || p.name === personId || p.aliases.includes(personId),
   );
   if (!person) throw new Error("在这局故事里没有找到这位人物。");
 
-  const continuity = await readContinuity(game.repo, worldId, cursor.head.id);
+  const continuity = await readContinuity(game.repo, worldId, headId);
   const myKnowledge = continuity.knowledge.filter(
     (k) => k.active !== false && k.person === person.id,
   );
@@ -2069,8 +2285,67 @@ export async function personaFromStoryPerson(
     .join("\n") + knowledgeBlock;
 
   const client = new CompanionClient(game);
-  return client.savePersona({
-    id: `npc:${worldId}:${person.id}`,
+  const scopedId = `npc:${worldId}:${resolvedLineId}:${person.id}`;
+  const legacyId = `npc:${worldId}:${person.id}`;
+
+  // Gracefully migrate legacy `npc:${worldId}:${person.id}` ONLY if its `boundLineId`
+  // matches `resolvedLineId` or is unset on `"main"`:
+  const existingScoped = await client.getPersona(scopedId).catch(() => null);
+  if (!existingScoped) {
+    const legacyPersona = (await client.getPersona(legacyId).catch(() => null)) as
+      | (CompanionPersona & { boundLineId?: string | null })
+      | null;
+    if (legacyPersona) {
+      const legacyLineId =
+        legacyPersona.boundLineId ??
+        (typeof legacyPersona.metadata?.boundLineId === "string" && legacyPersona.metadata.boundLineId.trim()
+          ? legacyPersona.metadata.boundLineId.trim()
+          : null);
+      const canMigrate =
+        legacyLineId === resolvedLineId || (!legacyLineId && resolvedLineId === "main");
+      if (canMigrate) {
+        const legacyMemories = await client.listMemories({
+          personaId: legacyId,
+          scope: "persona",
+          includeDisabled: true,
+        });
+        for (const mem of legacyMemories) {
+          if (mem.scope === "persona" && mem.personaId === legacyId) {
+            await client.saveMemory({
+              scope: "persona",
+              personaId: scopedId,
+              category: mem.category,
+              content: mem.content,
+              sourceSessionId: mem.sourceSessionId,
+              sourceMessageId: mem.sourceMessageId,
+              enabled: mem.enabled,
+              pinned: mem.pinned,
+            });
+          }
+        }
+        const { sessions: existingSessions } = await client.listSessions({
+          worldId,
+          includeArchived: true,
+          limit: 100,
+        });
+        for (const sess of existingSessions) {
+          if (
+            sess.personaId === legacyId &&
+            (!sess.boundLineId || sess.boundLineId === resolvedLineId)
+          ) {
+            await client.updateSession(sess.id, {
+              personaId: scopedId,
+              boundLineId: resolvedLineId,
+            });
+          }
+        }
+        await client.deletePersona(legacyId).catch(() => {});
+      }
+    }
+  }
+
+  const saved = await client.savePersona({
+    id: scopedId,
     name: person.name,
     avatar: person.name.trim().slice(0, 1) || "人",
     tagline: `《${world.title}》· ${person.role || "故事人物"}（对${heroName}${person.attitude}）`.slice(0, 120),
@@ -2087,10 +2362,12 @@ export async function personaFromStoryPerson(
     pureRoleplay: true,
     sourceWorldId: worldId,
     sourcePersonId: person.id,
-    sourceHeadId: cursor.head.id,
+    sourceHeadId: headId,
+    boundLineId: resolvedLineId,
     sortOrder: 60,
-    metadata: { worldTitle: world.title, heroName },
+    metadata: { worldTitle: world.title, heroName, boundLineId: resolvedLineId },
   });
+  return { ...saved, boundLineId: resolvedLineId };
 }
 
 // ---------- Three One-Tap Creative Bridges (R33-T003) ----------
@@ -2106,6 +2383,79 @@ function normalizeArrival(raw: unknown): Arrival {
   return "魂穿";
 }
 
+function buildInheritedSourceBinding(context?: {
+  worldSource?: SourceBinding | null;
+  bookId?: string | null;
+  bookScope?: CompanionBookScope | null;
+}): SourceBinding | null {
+  if (!context) return null;
+  const { worldSource, bookId, bookScope } = context;
+  if (worldSource?.bookId && (!bookId || worldSource.bookId === bookId)) {
+    const through =
+      bookScope?.mode === "chapters"
+        ? worldSource.through === null
+          ? bookScope.to
+          : Math.min(worldSource.through, bookScope.to)
+        : worldSource.through;
+    const position =
+      through !== null ? Math.min(worldSource.position, through) : worldSource.position;
+    return {
+      ...structuredClone(worldSource),
+      through,
+      position,
+      fanfic: worldSource.fanfic,
+      plot: worldSource.plot,
+      instructions: worldSource.instructions,
+    };
+  }
+  const effectiveBookId = bookId?.trim() || null;
+  if (!effectiveBookId) return null;
+  return {
+    bookId: effectiveBookId,
+    through: bookScope?.mode === "chapters" ? bookScope.to : null,
+    position: 0,
+    fanfic: false,
+    plot: "canon",
+    method: "search",
+    instructions: "",
+  };
+}
+
+/**
+ * Resolves the spoiler-fenced `SourceBinding` for `"拿去开新局"` from a Companion session
+ * or bound world, preserving `through`, `position`, `fanfic`, `plot`, and `instructions`.
+ */
+export async function resolveSessionDraftSource(
+  game: Game,
+  session?: Pick<CompanionSession, "boundWorldId" | "boundLineId" | "boundBookId" | "bookScope"> | null,
+  fallbackWorldId?: string | null,
+): Promise<SourceBinding | null> {
+  const worldId = session?.boundWorldId ?? fallbackWorldId ?? null;
+  let worldSource: SourceBinding | null = null;
+  if (worldId) {
+    const world = await game.repo.getWorld(worldId).catch(() => null);
+    if (world) {
+      const preferredLine = session?.boundLineId
+        ? await game.repo.getLine(session.boundLineId).catch(() => null)
+        : null;
+      const headId =
+        preferredLine && preferredLine.worldId === world.id
+          ? preferredLine.nodeId
+          : (await tree.cursor(game.repo, world.id).catch(() => null))?.head.id ?? null;
+      const state = headId ? await game.repo.getState(headId).catch(() => null) : null;
+      if (state?.source?.bookId) {
+        worldSource = state.source;
+      }
+    }
+  }
+  const bookId = session?.boundBookId ?? worldSource?.bookId ?? null;
+  return buildInheritedSourceBinding({
+    worldSource,
+    bookId,
+    bookScope: session?.bookScope ?? null,
+  });
+}
+
 /**
  * Bridge 1 ("用这段设定去开新局"): Extracts a `SetupDraft` from a companion reply
  * (supports embedded JSON, labeled Chinese headings, or free-form brainstorm prose).
@@ -2113,7 +2463,13 @@ function normalizeArrival(raw: unknown): Arrival {
 export function draftSetupFromCompanionText(
   text: string,
   personaName?: string,
+  context?: {
+    worldSource?: SourceBinding | null;
+    bookId?: string | null;
+    bookScope?: CompanionBookScope | null;
+  },
 ): SetupDraft & { rules?: string; source?: SourceBinding | null } {
+  const inheritedSource = buildInheritedSourceBinding(context);
   const cleaned = text
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .trim();
@@ -2142,6 +2498,7 @@ export function draftSetupFromCompanionText(
           hint: typeof obj.hint === "string" ? obj.hint.trim() : "",
           essentials: typeof obj.essentials === "string" ? obj.essentials.trim() : "",
           ...(typeof obj.rules === "string" ? { rules: obj.rules.trim() } : {}),
+          ...(inheritedSource ? { source: inheritedSource } : {}),
         };
       }
     }
@@ -2215,6 +2572,7 @@ export function draftSetupFromCompanionText(
     origin: arrival === "不穿越" ? "" : (fields.origin ?? ""),
     hint: (fields.hint ?? (personaName ? `按与${personaName}商定的构思开场` : "")).slice(0, 300),
     essentials: (fields.essentials ?? "").slice(0, 1000),
+    ...(inheritedSource ? { source: inheritedSource } : {}),
   };
 }
 
@@ -2351,7 +2709,40 @@ export async function saveCompanionMessageAsNote(
  */
 const PRIOR_CHAT_REFERENCE_RE = /(?:上面|刚才|前面|之前|按这|照这|这套|这些|如上|同上|聊的|说的|讨论)/;
 
-async function resolveEscalatedAgentModel(
+function safeEndpointPathname(raw: string): string {
+  if (!raw) return "/";
+  try {
+    return new URL(raw, "http://localhost").pathname;
+  } catch {
+    return raw.startsWith("/") ? raw : "/";
+  }
+}
+
+export async function resolveCompanionAgentPolicy(
+  game: Game,
+  explicit?: AgentPolicy | "review" | null,
+): Promise<AgentPolicy> {
+  if (explicit === "review" || explicit === "preview") return "preview";
+  if (explicit === "auto" || explicit === "auto-reversible") return explicit;
+
+  const rawAdoption = await game.repo
+    .getSetting<unknown>("agentAdoptionMode", null)
+    .catch(() => null);
+  if (rawAdoption === "review" || rawAdoption === "preview") return "preview";
+  if (rawAdoption === "auto") return "auto";
+  if (rawAdoption === "auto-reversible") return "auto-reversible";
+
+  const storedPrefs = await game.repo
+    .getSetting<Record<string, unknown> | null>("agent:preferences", null)
+    .catch(() => null);
+  const storedPolicy = storedPrefs?.policy;
+  if (storedPolicy === "review" || storedPolicy === "preview") return "preview";
+  if (storedPolicy === "auto" || storedPolicy === "auto-reversible") return storedPolicy;
+
+  return "preview";
+}
+
+export async function resolveEscalatedAgentModel(
   game: Game,
   prefs: AgentPreferences,
 ): Promise<LlmConfig & { profileId?: string; protocol?: AgentProtocol; thinkingMode?: AgentThinkingMode; contextWindowTokens?: number; maxOutputTokens?: number }> {
@@ -2362,12 +2753,25 @@ async function resolveEscalatedAgentModel(
     : available.find((p) => p.keySlot === base.slot) ?? available[0];
   if (!chosen) {
     const model = (prefs.modelName?.trim() || base.model).trim();
+    const protocol: AgentProtocol = prefs.protocol ?? base.protocol ?? "chat-completions";
+    let fallbackUrl = base.url;
+    if (protocol !== "chat-completions" && base.url) {
+      let endpoint = base.url.trim().replace(/\/+$/, "").replace(/\/(?:chat\/completions|responses|messages)$/, "");
+      if (protocol === "gemini") {
+        endpoint = endpoint.replace(/\/openai$/, "");
+        if (safeEndpointPathname(endpoint) === "/") endpoint += "/v1beta";
+        fallbackUrl = `${endpoint}/models/${encodeURIComponent(model.replace(/^models\//, ""))}:streamGenerateContent?alt=sse`;
+      } else {
+        if (safeEndpointPathname(endpoint) === "/") endpoint += "/v1";
+        fallbackUrl = `${endpoint}/${protocol === "openai-responses" ? "responses" : "messages"}`;
+      }
+    }
     return {
       ...base,
+      url: prefs.modelUrl?.trim() || fallbackUrl,
       model,
-      ...(prefs.modelUrl?.trim() ? { url: prefs.modelUrl.trim() } : {}),
       contextTokens: prefs.inputTokens ?? base.contextTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
-      protocol: prefs.protocol ?? base.protocol ?? "chat-completions",
+      protocol,
       thinkingMode: prefs.thinkingMode ?? "off",
       ...(prefs.contextWindowTokens ? { contextWindowTokens: prefs.contextWindowTokens } : {}),
       ...(prefs.maxOutputTokens ? { maxOutputTokens: prefs.maxOutputTokens, maxTokens: prefs.maxOutputTokens } : {}),
@@ -2380,10 +2784,10 @@ async function resolveEscalatedAgentModel(
     let endpoint = chosen.baseUrl.trim().replace(/\/+$/, "").replace(/\/(?:chat\/completions|responses|messages)$/, "");
     if (protocol === "gemini") {
       endpoint = endpoint.replace(/\/openai$/, "");
-      if (new URL(endpoint).pathname === "/") endpoint += "/v1beta";
+      if (safeEndpointPathname(endpoint) === "/") endpoint += "/v1beta";
       url = `${endpoint}/models/${encodeURIComponent(model.replace(/^models\//, ""))}:streamGenerateContent?alt=sse`;
     } else {
-      if (new URL(endpoint).pathname === "/") endpoint += "/v1";
+      if (safeEndpointPathname(endpoint) === "/") endpoint += "/v1";
       url = `${endpoint}/${protocol === "openai-responses" ? "responses" : "messages"}`;
     }
   }
@@ -2415,8 +2819,11 @@ export async function escalateCompanionToAgent(
   const worldId = detail.session.boundWorldId;
   if (!worldId) throw new Error("请先挂载要操作的故事，再切换到智能体改档。");
 
-  const start = await game.repo.generationStart(worldId);
-  const prefs = await getAgentPreferences(game);
+  const [start, prefs, policy] = await Promise.all([
+    game.repo.generationStart(worldId),
+    getAgentPreferences(game),
+    resolveCompanionAgentPolicy(game, input.policy),
+  ]);
   const resolvedModel = await resolveEscalatedAgentModel(game, prefs);
   const agent = new AgentClient(game);
 
@@ -2453,19 +2860,13 @@ export async function escalateCompanionToAgent(
     ? `【玩家此前在伴聊中提出的要求】\n${priorPlayerLines.map((l) => `- ${l}`).join("\n")}\n\n【本次执行要求】\n${requestText}`
     : requestText;
 
-  const userMsg = (
-    await companion.appendMessage(detail.session.id, {
-      role: "user",
-      gear: "agent",
-      status: "done",
-      content: requestText,
-    })
-  ).message;
-
-  const policy: AgentPolicy = input.policy ?? prefs.policy;
+  // Atomic start: start the Pi agent run and bind `piSessionId` BEFORE writing
+  // the user/card messages into `companion_messages`, so a failed start never
+  // leaves a dead unclickable agent card in chat!
   const started = await agent.start({
     ...prefs,
     ...(resolvedModel.profileId ? { profileId: resolvedModel.profileId } : {}),
+    ...(prefs.modelUrl?.trim() || resolvedModel.url ? { modelUrl: prefs.modelUrl?.trim() || resolvedModel.url } : {}),
     policy,
     sessionId: piSessionId,
     text: combinedPlayerText,
@@ -2478,6 +2879,15 @@ export async function escalateCompanionToAgent(
     boundLineId: start.lineId,
     activeGear: "agent",
   });
+
+  const userMsg = (
+    await companion.appendMessage(detail.session.id, {
+      role: "user",
+      gear: "agent",
+      status: "done",
+      content: requestText,
+    })
+  ).message;
 
   const agentMsg = (
     await companion.appendMessage(detail.session.id, {
@@ -2498,4 +2908,99 @@ export async function escalateCompanionToAgent(
     userMessage: userMsg,
     agentMessage: agentMsg,
   };
+}
+
+export async function steerCompanionAgent(
+  game: Game,
+  input: {
+    sessionId: string;
+    piSessionId: string;
+    taskId: string;
+    text: string;
+    phase?: string;
+    delivery?: "steer" | "queued";
+    policy?: AgentPolicy | "review";
+  },
+): Promise<{
+  delivery: "steer" | "queued";
+  userMessage: CompanionMessage;
+  noteMessage: CompanionMessage;
+}> {
+  const requestText = input.text.trim();
+  if (!requestText) throw new Error("请输入要补充给改档任务的说明。");
+  if (!game.llm) throw new Error("请先在设置中配置 AI 服务与模型。");
+
+  const [prefs, policy] = await Promise.all([
+    getAgentPreferences(game),
+    resolveCompanionAgentPolicy(game, input.policy),
+  ]);
+  const resolvedModel = await resolveEscalatedAgentModel(game, prefs);
+  const requestedDelivery: "steer" | "queued" =
+    input.phase === "closing" || input.phase === "committing"
+      ? "queued"
+      : (input.delivery ?? "steer");
+
+  const directSteer = (
+    game.platform as Platform & {
+      agent?: {
+        steer?: (args: {
+          sessionId: string;
+          taskId: string;
+          text: string;
+          delivery: "steer" | "queued";
+        }) => Promise<{ delivery?: "steer" | "queued" } | void>;
+      };
+    }
+  ).agent?.steer;
+
+  let actualDelivery: "steer" | "queued" = requestedDelivery;
+  if (directSteer && !game.platform.execution?.agent) {
+    const res = await directSteer({
+      sessionId: input.piSessionId,
+      taskId: input.taskId,
+      text: requestText,
+      delivery: requestedDelivery,
+    });
+    if (res && (res.delivery === "steer" || res.delivery === "queued")) {
+      actualDelivery = res.delivery;
+    }
+  } else {
+    const agent = new AgentClient(game);
+    const accepted = await agent.enqueue(input.taskId, requestText, requestedDelivery, {
+      ...prefs,
+      ...(resolvedModel.profileId ? { profileId: resolvedModel.profileId } : {}),
+      ...(prefs.modelUrl?.trim() || resolvedModel.url ? { modelUrl: prefs.modelUrl?.trim() || resolvedModel.url } : {}),
+      policy,
+      sessionId: input.piSessionId,
+      text: requestText,
+      model: resolvedModel,
+    });
+    if (accepted.delivery === "steer" || accepted.delivery === "queued") {
+      actualDelivery = accepted.delivery;
+    }
+  }
+
+  const companion = new CompanionClient(game);
+  const userMessage = (
+    await companion.appendMessage(input.sessionId, {
+      role: "user",
+      gear: "agent",
+      status: "done",
+      content: requestText,
+    })
+  ).message;
+  const noteMessage = (
+    await companion.appendMessage(input.sessionId, {
+      parentId: userMessage.id,
+      role: "system_note",
+      gear: "agent",
+      status: "done",
+      content:
+        actualDelivery === "queued"
+          ? "补充要求已排队，将在当前改档步骤收尾后接着执行"
+          : "补充要求已同步给正在执行的改档任务，将在下一步处理",
+    })
+  ).message;
+
+  return { delivery: actualDelivery, userMessage, noteMessage };
 }

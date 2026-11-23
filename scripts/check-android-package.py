@@ -256,7 +256,8 @@ def main():
             "Lio/timejump/chuanyue/NotificationsPlugin;": ["story_committed", "set_keep_awake", "notification_status"],
             "Lio/timejump/chuanyue/SecretStorePlugin;": ["save", "delete", "status"],
             "Lio/timejump/chuanyue/DocumentPickerPlugin;": ["openDocument", "createDocument", "ensureIdle"],
-            "Lio/timejump/chuanyue/UpdatePlugin;": ["installPackage", "canInstallPackages"],
+            "Lio/timejump/chuanyue/FilesPlugin;": ["exportBytes", "exportBytesResult"],
+            "Lio/timejump/chuanyue/UpdatePlugin;": ["installPackage", "canInstallPackages", "environmentStatus", "setDownloadWakeLock"],
         }
         if args.pi_runtime:
             required.update({

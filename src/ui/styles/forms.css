@@ -1,55 +1,54 @@
 /* Labelled fields, pickers, links. */
 /* ---------- forms: labelled fields, pickers, links ---------- */
 .field-label { font-size: 14px; color: var(--muted); }
-.field { display: grid; gap: 6px; }
+.field { display: grid; gap: 6px; min-width: 0; }
 .field-hint { font-size: 13px; color: var(--muted); }
 .field-hint.warn { color: var(--warn); }
 .picker { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; text-align: left; padding: 10px 14px; background: var(--raised); }
 .picker span:first-child { display: grid; gap: 2px; min-width: 0; }
 .picker b { font-family: var(--serif); font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker small { color: var(--muted); font-size: 13px; }
-.picker > span:last-child { color: var(--accent); font-size: 18px; }
+.picker > span:last-child { color: var(--accent-text); font-size: 18px; }
 .links { margin: 0; font-size: 14px; color: var(--muted); }
-button.link { position: relative; min-height: 32px; padding: 0 2px; border: none; background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+button.link { position: relative; min-height: 32px; padding: 0 2px; border: none; background: transparent; color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
 .input-tools { display: flex; gap: 4px; align-items: stretch; }
 .input-tools input { flex: 1; min-width: 0; }
-/* Our own 看 button shows the key; Edge's built-in eye would be a second one. */
 input::-ms-reveal, input::-ms-clear { display: none; }
-.input-tools .icon-btn { font-size: 14px; font-family: var(--serif); color: var(--accent); border: 1px solid var(--line); background: var(--surface); }
+.input-tools .icon-btn { font-size: 14px; font-family: var(--serif); color: var(--accent-text); border: 1px solid var(--line); background: var(--surface); }
 .notice.ok { border-left-color: var(--gain); }
-.model-list { max-height: 50vh; overflow-y: auto; }
+.model-list { max-height: 50dvh; overflow-y: auto; }
 .model-list b, .picker b.model { font-family: var(--sans); font-weight: 500; font-size: 15px; word-break: break-all; }
 .model-list small { color: var(--gain); }
 
-/* 原著札记 (components/CanonNotes.tsx). */
+/* 原著札记 */
 .note-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.note-row { width: 100%; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "tag title" "tag status" "tag hint"; align-items: center; column-gap: 10px; row-gap: 2px; padding: 10px 12px; text-align: left; justify-content: stretch; }
+.note-row { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "tag title" "tag status" "tag hint"; align-items: center; column-gap: 10px; row-gap: 2px; padding: 10px 12px; text-align: left; justify-content: stretch; }
 .note-row .tag { grid-area: tag; align-self: center; }
 .note-row b { grid-area: title; font-family: var(--serif); font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .note-status { grid-area: status; font-size: 12px; color: var(--muted); }
-.note-status.running { color: var(--accent); }
+.note-status.running { color: var(--accent-text); }
 .note-status.failed { color: var(--loss); }
-.note-hint { grid-area: hint; font-size: 12px; color: var(--accent); }
+.note-hint { grid-area: hint; font-size: 12px; color: var(--accent-text); }
 .note-kinds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.note-kind { display: grid; gap: 2px; justify-items: start; padding: 10px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); }
+@media (max-width: 340px) { .note-kinds { grid-template-columns: minmax(0, 1fr); } }
+.note-kind { display: grid; gap: 2px; justify-items: start; padding: 10px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); white-space: normal; }
 .note-kind:last-child { grid-column: 1 / -1; }
 .note-kind b { font-family: var(--serif); font-size: 15px; }
 .note-kind small { font-size: 12px; color: var(--muted); line-height: 1.45; }
-.note-kind[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
-.note-kind[aria-checked="true"] b { color: var(--accent); }
+.note-kind[aria-checked="true"] { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.note-kind[aria-checked="true"] b { color: var(--accent-text); }
 .note-estimate { font-size: 13px; }
 .note-text { font-family: var(--serif); font-size: 15px; line-height: 1.75; }
 button.small { min-height: 32px; padding: 2px 10px; font-size: 13px; align-self: flex-start; }
 
-/* 让 AI 改 (Codex editor, RulesSheet). */
+/* 让 AI 改 */
 .ai-revise { border: 1px dashed var(--line); border-radius: var(--radius-lg, 8px); padding: 6px 10px; }
-.ai-revise > summary { cursor: pointer; color: var(--accent); font-family: var(--serif); padding: 4px 0; }
+.ai-revise > summary { cursor: pointer; color: var(--accent-text); font-family: var(--serif); padding: 4px 0; }
 .ai-revise[open] > summary { margin-bottom: 6px; }
 
-/* 清空重填 above the setup fields (R30): small, out of the way, right-aligned. */
 .form-tools { justify-content: flex-end; margin: -4px 0 -8px; }
 
-/* 资料范围 (D184): the row in each feature, novel-app chapter directory, and chosen notes. */
+/* 资料范围与章节目录 */
 button.settings-entry.scope-row { width: 100%; min-height: 52px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg, 8px); }
 .scope-notes { border: 0; padding: 0; margin: 0; min-width: 0; max-height: 32dvh; overflow-y: auto; }
 .scope-notes legend { padding: 0 0 4px; font-size: 13px; }
@@ -69,17 +68,17 @@ button.settings-entry.scope-row { width: 100%; min-height: 52px; padding: 8px 12
   background: transparent; text-align: left; color: var(--fg);
 }
 .scope-toc-item:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
-.scope-toc-item.selected { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-.scope-toc-item.edge { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.scope-toc-item.selected { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent-text) 45%, transparent); }
+.scope-toc-item.edge { border-color: var(--accent-text); box-shadow: inset 3px 0 0 var(--accent-text); }
 .scope-toc-main { display: grid; gap: 2px; min-width: 0; flex: 1; }
 .scope-toc-main b { font-family: var(--serif); font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scope-toc-main small { font-size: 12px; color: var(--muted); }
 .scope-toc-tags { display: inline-flex; align-items: center; gap: 4px; flex: none; }
 .scope-badge { font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-.scope-badge.current { border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
-.scope-badge.picked { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.scope-badge.current { border-color: color-mix(in srgb, var(--accent-text) 45%, transparent); color: var(--accent-text); }
+.scope-badge.picked { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .scope-toc-empty { margin: 8px 6px; font-size: 13px; text-align: center; }
-.scope-toc-more { width: 100%; min-height: 38px; font-size: 13px; color: var(--accent); }
+.scope-toc-more { width: 100%; min-height: 38px; font-size: 13px; color: var(--accent-text); }
 .range-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .range-field { display: grid; gap: 3px; min-width: 0; }
 .range-field label { display: flex; align-items: center; gap: 5px; font-size: 13px; white-space: nowrap; }

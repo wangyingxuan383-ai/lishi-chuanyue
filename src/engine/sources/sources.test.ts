@@ -5,7 +5,20 @@ import { Game } from "../game";
 import { sampleState } from "../testing/fixtures";
 import { fakeLlm } from "../testing/fakeLlm";
 import { parseBook, decodeText } from "./parse";
-import { analysisJobs, deleteBook, fitReference, getBook, referenceBlock, referenceContext, referenceEvidenceBlock, saveBook } from "./library";
+import {
+  analysisJobs,
+  deleteBook,
+  fitReference,
+  getBook,
+  getBookMeta,
+  listBookToc,
+  readBookSection,
+  referenceBlock,
+  referenceContext,
+  referenceEvidenceBlock,
+  saveBook,
+  searchBookFullText,
+} from "./library";
 import { chapterRangeSummary, extractChapterNumbers } from "./scope";
 import { newBinding, type SourceBook } from "./types";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
@@ -209,6 +222,74 @@ describe("external books", () => {
     ]);
     expect(txtBook.sections[0]?.text).toContain("楔子打进木缝里");
     expect(txtBook.sections[1]?.text).toContain("上卷书说到");
+  });
+
+  it("supports zero-RAM per-section reading, TOC aggregation, and full-text search with through spoiler gating", async () => {
+    const game = await Game.open(await createMemoryPlatform());
+    const longPara0 = "甲".repeat(1500) + "，藏书阁秘卷在此。";
+    const longPara1 = "乙".repeat(1400) + "，跨分片段落里的青铜罗盘与特殊问号？";
+    const longPara2 = "丙".repeat(600) + "，尾段风雪夜归人。";
+    const longSecText = [longPara0, longPara1, longPara2].join("\n\n");
+
+    const book: SourceBook = {
+      id: crypto.randomUUID(),
+      title: "零内存长卷测试",
+      format: "epub",
+      createdAt: "2026-11-24T00:00:00.000Z",
+      sections: [
+        { title: "第一章 阁楼", text: longSecText, page: 1 },
+        { title: "第二章 渡口", text: "　　渡口孤舟横斜。\n\n船家递来一封密信。", page: 12 },
+        { title: "第三章 终局剧透", text: "青铜罗盘真正的幕后黑手现身王城！", page: 28 },
+      ],
+    };
+    await saveBook(game.repo, book);
+
+    expect(await getBookMeta(game.repo, "missing-id")).toBeNull();
+    const meta = await getBookMeta(game.repo, book.id);
+    expect(meta).toEqual({
+      id: book.id,
+      title: "零内存长卷测试",
+      format: "epub",
+      sectionCount: 3,
+      totalChars: book.sections.reduce((n, s) => n + s.text.length, 0),
+      createdAt: "2026-11-24T00:00:00.000Z",
+    });
+
+    const toc = await listBookToc(game.repo, book.id);
+    expect(toc).toEqual([
+      { section: 0, title: "第一章 阁楼", page: 1, chars: longSecText.length },
+      { section: 1, title: "第二章 渡口", page: 12, chars: book.sections[1].text.length },
+      { section: 2, title: "第三章 终局剧透", page: 28, chars: book.sections[2].text.length },
+    ]);
+
+    expect(await readBookSection(game.repo, book.id, 99)).toBeNull();
+    const sec0 = (await readBookSection(game.repo, book.id, 0))!;
+    expect(sec0.text).toBe(longSecText);
+    expect(sec0.paragraphs).toEqual([longPara0, longPara1, longPara2]);
+
+    const sec1 = (await readBookSection(game.repo, book.id, 1))!;
+    expect(sec1.paragraphs).toEqual(["渡口孤舟横斜。", "船家递来一封密信。"]);
+
+    // 2-char+ CJK search via `source_terms` postings + exact paragraph alignment across multi-chunk section
+    const compassAll = await searchBookFullText(game.repo, book.id, "青铜罗盘");
+    expect(compassAll.map((h) => ({ section: h.section, paragraphIndex: h.paragraphIndex, hit: h.snippet.hit }))).toEqual([
+      { section: 0, paragraphIndex: 1, hit: "青铜罗盘" },
+      { section: 2, paragraphIndex: 0, hit: "青铜罗盘" },
+    ]);
+    expect(sec0.paragraphs[compassAll[0].paragraphIndex]).toContain("青铜罗盘");
+
+    // Spoiler gating: `through: 1` strictly hides section 2!
+    const compassGated = await searchBookFullText(game.repo, book.id, "青铜罗盘", { through: 1 });
+    expect(compassGated).toHaveLength(1);
+    expect(compassGated[0].section).toBe(0);
+    expect(await searchBookFullText(game.repo, book.id, "幕后黑手", { through: 1 })).toEqual([]);
+
+    // 1-char / punctuation fallback (`LIKE`) also respects `through` and aligns `paragraphIndex`
+    const oneCharGated = await searchBookFullText(game.repo, book.id, "船", { through: 1 });
+    expect(oneCharGated).toHaveLength(1);
+    expect(oneCharGated[0]).toMatchObject({ section: 1, paragraphIndex: 1 });
+    expect(await searchBookFullText(game.repo, book.id, "！", { through: 1 })).toEqual([]);
+    expect((await searchBookFullText(game.repo, book.id, "！", { through: null }))[0]?.section).toBe(2);
   });
 
 });

@@ -12,6 +12,7 @@ import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
@@ -20,6 +21,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.app.NotificationCompat
 
 /** Rust-only JNI entry; no mobile plugin command or notification permission prompt. */
 class GenerationService : Service() {
@@ -61,20 +63,14 @@ class GenerationService : Service() {
                 // Fulfil the foreground-start deadline, then immediately stop.
                 if (!requested) stopGeneration() else holdWakeLock()
             } catch (error: Exception) {
-                // Includes ForegroundServiceStartNotAllowedException,
-                // SecurityException and invalid/missing foreground-service type.
                 warn("promotion", error)
                 try {
-                    // While the player is looking at the app the passage can go on
-                    // without the drawer notification (R30); only in the background
-                    // would Android stop it unprotected.
                     if (inBackground()) stopNativeRuns()
                 } finally {
                     stopGeneration()
                 }
             }
         }
-        // A restarted process has no Rust streams to keep alive.
         return START_NOT_STICKY
     }
 
@@ -93,8 +89,6 @@ class GenerationService : Service() {
     override fun onDestroy() {
         synchronized(lock) {
             releaseWakeLock()
-            // An unexpected service destruction must not leave the Rust run
-            // waiting without its foreground/wake-lock protection.
             if (current === this && requested) stopNativeRuns()
             if (current === this) current = null
         }
@@ -108,8 +102,6 @@ class GenerationService : Service() {
         } catch (error: Exception) {
             warn("notification removal", error)
         } finally {
-            // A new lease must start the service again rather than refreshing
-            // this instance after stopSelf has already been requested.
             if (current === this) {
                 current = null
                 requested = false
@@ -118,7 +110,7 @@ class GenerationService : Service() {
         }
     }
 
-    /** R29-T006: the story's name, the phase, words so far, a running timer and 停止. */
+    /** The story's name, the phase, words so far, a running timer and 停止. */
     private fun notification(): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         val detailed = prefs(this).getBoolean(PREF_PROGRESS, true)
@@ -158,6 +150,7 @@ class GenerationService : Service() {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
+            @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
         builder
@@ -173,7 +166,6 @@ class GenerationService : Service() {
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
-            .setSound(null)
             .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
         if (detailed && phase != "writing") builder.setProgress(0, 0, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -187,19 +179,21 @@ class GenerationService : Service() {
         private const val CHANNEL_ID = "generation"
         private const val NOTIFICATION_ID = 1001
         private const val DONE_NOTIFICATION_ID = 1002
-        /**
-         * "写好了" and "没写完" (R30 step 2): before 0.17.0 their channels had default
-         * importance and on some phones only showed a banner without a sound. Android
-         * fixes a channel's importance and sound once created, so the reminders move
-         * to new channels: one pair that rings and vibrates, one pair that stays
-         * quiet for players who turn the sound off. The old pair is deleted.
-         */
-        private const val DONE_SOUND_CHANNEL = "story_ready_sound"
-        private const val ISSUE_SOUND_CHANNEL = "story_issue_sound"
-        private const val DONE_QUIET_CHANNEL = "story_ready_quiet"
-        private const val ISSUE_QUIET_CHANNEL = "story_issue_quiet"
-        private val LEGACY_CHANNELS = listOf("story_ready", "story_issue")
+        private const val SUMMARY_NOTIFICATION_ID = 1006
         private const val TEST_NOTIFICATION_ID = 1007
+
+        const val DONE_SOUND_CHANNEL = "story_done"
+        const val ISSUE_SOUND_CHANNEL = "story_failed"
+        private const val DONE_QUIET_CHANNEL = "story_done_quiet"
+        private const val ISSUE_QUIET_CHANNEL = "story_failed_quiet"
+        private val LEGACY_CHANNELS = listOf(
+            "story_ready",
+            "story_issue",
+            "story_ready_sound",
+            "story_issue_sound",
+            "story_ready_quiet",
+            "story_issue_quiet"
+        )
         private const val GROUP_STORIES = "io.timejump.chuanyue.stories"
         private const val REQUEST_STOP = 7
         const val EXTRA_WORLD = "io.timejump.chuanyue.WORLD"
@@ -211,9 +205,8 @@ class GenerationService : Service() {
         const val PREF_LOCKSCREEN = "lockscreen"
         const val PREF_SOUND = "sound"
 
-        /** The channel a reminder uses now, created on first use. */
-        fun reminderChannel(context: Context, issue: Boolean): String {
-            val sound = prefs(context).getBoolean(PREF_SOUND, true)
+        /** Ensures a specific channel (`story_done` / `story_failed` or quiet variant) exists and returns its id. */
+        fun ensureChannel(context: Context, issue: Boolean, sound: Boolean): String {
             val id = when {
                 issue && sound -> ISSUE_SOUND_CHANNEL
                 issue -> ISSUE_QUIET_CHANNEL
@@ -227,9 +220,13 @@ class GenerationService : Service() {
             }
             if (manager.getNotificationChannel(id) == null) {
                 val name = if (issue) "没写完提醒" else "写好了提醒"
-                val channel = NotificationChannel(id, if (sound) name else "$name（静音）",
-                    if (sound) NotificationManager.IMPORTANCE_HIGH else NotificationManager.IMPORTANCE_LOW)
-                channel.description = if (issue) "切到后台时，一段没写完会提醒你回来接着写" else "切到后台时，下一段写好会提醒你"
+                val channel = NotificationChannel(
+                    id,
+                    if (sound) name else "$name（静音）",
+                    if (sound) NotificationManager.IMPORTANCE_HIGH else NotificationManager.IMPORTANCE_LOW
+                )
+                channel.description = if (issue) "切到后台时，一段没写完会弹出横幅提醒你回来接着写" else "切到后台时，下一段写好会弹出横幅并响铃提醒你"
+                channel.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 if (sound) {
                     channel.setSound(
                         RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
@@ -240,6 +237,7 @@ class GenerationService : Service() {
                     )
                     channel.enableVibration(true)
                     channel.vibrationPattern = longArrayOf(0, 180, 120, 180)
+                    channel.enableLights(true)
                 } else {
                     channel.setSound(null, null)
                     channel.enableVibration(false)
@@ -249,62 +247,106 @@ class GenerationService : Service() {
             return id
         }
 
-        /** A reminder builder on `channel`; before Android 8 the sound is set per notification. */
-        @Suppress("DEPRECATION")
-        private fun reminderBuilder(context: Context, channel: String): Notification.Builder {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) return Notification.Builder(context, channel)
-            val builder = Notification.Builder(context)
-            if (channel == DONE_SOUND_CHANNEL || channel == ISSUE_SOUND_CHANNEL) {
-                builder.setDefaults(Notification.DEFAULT_SOUND or Notification.DEFAULT_VIBRATE).setPriority(Notification.PRIORITY_HIGH)
+        /** The channel a reminder uses now, created on first use. */
+        fun reminderChannel(context: Context, issue: Boolean): String {
+            val sound = prefs(context).getBoolean(PREF_SOUND, true)
+            return ensureChannel(context, issue, sound)
+        }
+
+        /** Builds a heads-up + audible reminder notification with NotificationCompat. */
+        private fun reminderCompatBuilder(context: Context, channel: String): NotificationCompat.Builder {
+            val sound = channel == DONE_SOUND_CHANNEL || channel == ISSUE_SOUND_CHANNEL
+            val builder = NotificationCompat.Builder(context, channel)
+                .setSmallIcon(R.drawable.ic_stat_seal)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setAutoCancel(true)
+            if (sound) {
+                builder.setDefaults(NotificationCompat.DEFAULT_ALL)
             }
             return builder
         }
 
-        /** Whether both reminder channels ("写好了" and "没写完") will actually make a sound. */
+        /** Verifies IMPORTANCE_HIGH, non-empty sound URI, notifications enabled, and ringer mode not silent. */
         fun reminderAudible(context: Context): Pair<Boolean, Boolean> {
             val wanted = prefs(context).getBoolean(PREF_SOUND, true)
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return wanted to wanted
-            val manager = context.getSystemService(NotificationManager::class.java) ?: return wanted to wanted
+            val audio = context.getSystemService(AudioManager::class.java)
+            val ringerNotSilent = audio == null || audio.ringerMode != AudioManager.RINGER_MODE_SILENT
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return wanted to (wanted && ringerNotSilent)
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return wanted to (wanted && ringerNotSilent)
             if (!manager.areNotificationsEnabled()) return wanted to false
-            val audible = listOf(false, true).all { issue ->
-                val channel = manager.getNotificationChannel(reminderChannel(context, issue))
-                channel != null && channel.importance >= NotificationManager.IMPORTANCE_DEFAULT && channel.sound != null
+            if (!wanted) return false to false
+            val channelsOk = listOf(false, true).all { issue ->
+                val id = ensureChannel(context, issue = issue, sound = true)
+                val channel = manager.getNotificationChannel(id)
+                channel != null &&
+                    channel.importance >= NotificationManager.IMPORTANCE_HIGH &&
+                    channel.sound != null &&
+                    channel.sound.toString().isNotEmpty()
             }
-            return wanted to audible
+            return wanted to (channelsOk && ringerNotSilent)
         }
 
-        /** Which reminder channel to open in settings: the muted one when only one is muted, otherwise "写好了". */
+        /** Minimum importance across the active reminder channels (`story_done` and `story_failed`). */
+        fun channelStatus(context: Context): Pair<Int, Boolean> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                return NotificationManager.IMPORTANCE_HIGH to true
+            }
+            val manager = context.getSystemService(NotificationManager::class.java)
+                ?: return NotificationManager.IMPORTANCE_HIGH to true
+            val enabled = manager.areNotificationsEnabled()
+            val importances = listOf(false, true).map { issue ->
+                val id = ensureChannel(context, issue = issue, sound = true)
+                manager.getNotificationChannel(id)?.importance ?: NotificationManager.IMPORTANCE_HIGH
+            }
+            val minImportance = importances.minOrNull() ?: NotificationManager.IMPORTANCE_HIGH
+            val canFloat = enabled && minImportance >= NotificationManager.IMPORTANCE_HIGH
+            return minImportance to canFloat
+        }
+
+        /** Which reminder channel to open in settings: the degraded one when one is muted/demoted, otherwise `story_done`. */
         fun mutedReminderChannel(context: Context): String {
-            val doneId = reminderChannel(context, issue = false)
+            val doneId = ensureChannel(context, issue = false, sound = true)
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return doneId
             val manager = context.getSystemService(NotificationManager::class.java) ?: return doneId
-            val isAudible = { id: String ->
+            val isHealthy = { id: String ->
                 val channel = manager.getNotificationChannel(id)
-                channel != null && channel.importance >= NotificationManager.IMPORTANCE_DEFAULT && channel.sound != null
+                channel != null &&
+                    channel.importance >= NotificationManager.IMPORTANCE_HIGH &&
+                    channel.sound != null &&
+                    channel.sound.toString().isNotEmpty()
             }
-            if (!isAudible(doneId)) return doneId
-            val issueId = reminderChannel(context, issue = true)
-            return if (!isAudible(issueId)) issueId else doneId
+            if (!isHealthy(doneId)) return doneId
+            val issueId = ensureChannel(context, issue = true, sound = true)
+            return if (!isHealthy(issueId)) issueId else doneId
         }
 
-        /** 试一下提醒: one "写好了"-style reminder now, even with the app open. */
+        /** 试一下提醒: one "写好了"-style reminder now with heads-up banner, BigTextStyle and content PendingIntent. */
         fun testReminder(context: Context) {
             val app = context.applicationContext
             try {
                 val manager = app.getSystemService(NotificationManager::class.java) ?: return
                 val channel = reminderChannel(app, issue = false)
-                val builder = reminderBuilder(app, channel)
-                    .setSmallIcon(R.drawable.ic_stat_seal)
+                val openApp = PendingIntent.getActivity(
+                    app,
+                    TEST_NOTIFICATION_ID,
+                    Intent(app, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val body = "以后切到后台时写好一段，会像这样弹出横幅并响提示音提醒你。"
+                val builder = reminderCompatBuilder(app, channel)
                     .setContentTitle("试一下：写好了提醒")
-                    .setContentText("以后切到后台时写好一段，会这样提醒你。")
-                    .setAutoCancel(true)
-                    .setCategory(Notification.CATEGORY_STATUS)
+                    .setContentText(body)
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                    .setContentIntent(openApp)
                 manager.notify(TEST_NOTIFICATION_ID, builder.build())
             } catch (error: Exception) {
                 warn("test reminder", error)
             }
         }
-        /** What the progress notification shows (R29-T006), set from the Rust engine. */
+
         private var phase = "thinking"
         private var storyTitle = ""
         private var runId = ""
@@ -318,7 +360,6 @@ class GenerationService : Service() {
         private val shown = LinkedHashSet<Int>()
 
         fun prefs(context: Context): SharedPreferences = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        /** The Rust whole-run lease covers model gaps and settlement. */
         private const val STOP_DELAY_MS = 0L
         @JvmStatic private external fun nativeTimeout()
         @JvmStatic private external fun nativeStop(runId: String, executionId: String)
@@ -330,15 +371,42 @@ class GenerationService : Service() {
         private var pendingStop: Runnable? = null
         private val committed = LinkedHashSet<String>()
 
-        /** Stops native runs because Android stopped background work (recorded as the system's stop, R30). */
         private fun stopNativeRuns() {
             try {
                 nativeTimeout()
             } catch (error: LinkageError) {
-                // Still release the Android service if native initialization
-                // failed. Never let a missing JNI entry turn timeout into ANR.
                 Log.w(TAG, "Generation native cancellation unavailable: ${error.javaClass.simpleName}")
             }
+        }
+
+        /** Posts a group summary when 2+ completion/issue notifications are active so children keep their banner. */
+        private fun postSummaryIfNeeded(context: Context, manager: NotificationManager, channel: String) {
+            val activeCount = synchronized(lock) { shown.size }
+            if (activeCount < 2) return
+            val openApp = PendingIntent.getActivity(
+                context,
+                SUMMARY_NOTIFICATION_ID,
+                Intent(context, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val summaryLine = "$activeCount 个故事有新进展，点开查看。"
+            val summary = NotificationCompat.Builder(context, channel)
+                .setSmallIcon(R.drawable.ic_stat_seal)
+                .setContentTitle("穿越小说模拟")
+                .setContentText(summaryLine)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(summaryLine))
+                .setContentIntent(openApp)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setGroup(GROUP_STORIES)
+                .setGroupSummary(true)
+                .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+                .build()
+            manager.notify(SUMMARY_NOTIFICATION_ID, summary)
         }
 
         /** Called only after the selected passage was saved, never by the stream timer. */
@@ -402,17 +470,18 @@ class GenerationService : Service() {
                 val channel = reminderChannel(app, issue = true)
                 val id = storyNotificationId(worldId, 1)
                 val resume = storyIntent(app, worldId, "resume", id, run)
-                val builder = reminderBuilder(app, channel)
-                builder.setSmallIcon(R.drawable.ic_stat_seal)
+                val body = line.ifBlank { "切回来可以接着写完。" }
+                val builder = reminderCompatBuilder(app, channel)
                     .setContentTitle(if (title.isNotBlank()) "《$title》没写完" else "这一段没写完")
-                    .setContentText(line)
+                    .setContentText(body)
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                     .setContentIntent(resume)
-                    .addAction(Notification.Action.Builder(Icon.createWithResource(app, R.drawable.ic_stat_seal), "接着写完", resume).build())
-                    .setAutoCancel(true)
+                    .addAction(R.drawable.ic_stat_seal, "接着写完", resume)
                     .setGroup(GROUP_STORIES)
-                    .setCategory(Notification.CATEGORY_ERROR)
+                    .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
                 synchronized(lock) { shown.add(id) }
                 manager.notify(id, builder.build())
+                postSummaryIfNeeded(app, manager, channel)
             } catch (error: Exception) {
                 warn("issue notification", error)
             }
@@ -430,11 +499,9 @@ class GenerationService : Service() {
             catch (error: LinkageError) { Log.w(TAG, "Generation targeted cancellation unavailable: ${error.javaClass.simpleName}") }
         }
 
-        /** One notification per story and kind, so two stories never replace each other. */
         private fun storyNotificationId(worldId: String, kind: Int): Int =
             if (worldId.isBlank()) DONE_NOTIFICATION_ID + kind else 2000 + ((worldId.hashCode() and 0x3fffffff) % 100000) * 2 + kind
 
-        /** Opens the app on that story; `action` "resume" asks it to finish the passage. */
         private fun storyIntent(context: Context, worldId: String, action: String, request: Int, run: String = ""): PendingIntent =
             PendingIntent.getActivity(
                 context, request,
@@ -446,14 +513,13 @@ class GenerationService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-        /** True when the app is not on screen; then a finished passage is worth a notification. */
         private fun inBackground(): Boolean {
             val state = ActivityManager.RunningAppProcessInfo()
             ActivityManager.getMyMemoryState(state)
             return state.importance > ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
         }
 
-        /** "写好了" when a passage finished while the player was away (ANDROID_COMPAT F2): the story, its first line, straight back to it. */
+        /** "写好了" when a passage finished while the player was away: heads-up banner, BigTextStyle and direct deep link. */
         private fun notifyReady(context: Context, worldId: String, title: String, excerpt: String) {
             try {
                 val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -464,37 +530,29 @@ class GenerationService : Service() {
                 val settings = prefs(context)
                 val line = if (settings.getBoolean(PREF_EXCERPT, true) && excerpt.isNotBlank()) excerpt else "下一段写好了，回来看看"
                 val heading = if (title.isNotBlank()) "《$title》写好了" else "穿越小说模拟"
-                val builder = reminderBuilder(context, channel)
-                // The lock screen shows the story's name only, unless the player allowed the line too.
-                val lockVersion = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, channel) else Notification.Builder(context))
-                    .setSmallIcon(R.drawable.ic_stat_seal)
-                    .setContentTitle(heading)
-                    .setContentText("下一段写好了")
-                    .build()
-                builder.setSmallIcon(R.drawable.ic_stat_seal)
+                val builder = reminderCompatBuilder(context, channel)
                     .setContentTitle(heading)
                     .setContentText(line)
-                    .setStyle(Notification.BigTextStyle().bigText(line))
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(line))
                     .setContentIntent(open)
-                    .addAction(Notification.Action.Builder(Icon.createWithResource(context, R.drawable.ic_stat_seal), "继续读", open).build())
-                    .setAutoCancel(true)
+                    .addAction(R.drawable.ic_stat_seal, "继续读", open)
                     .setGroup(GROUP_STORIES)
-                    .setCategory(Notification.CATEGORY_STATUS)
-                    .setVisibility(if (settings.getBoolean(PREF_LOCKSCREEN, false)) Notification.VISIBILITY_PUBLIC else Notification.VISIBILITY_PRIVATE)
-                    .setPublicVersion(lockVersion)
+                    .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
                 synchronized(lock) { shown.add(id) }
                 manager.notify(id, builder.build())
+                postSummaryIfNeeded(context, manager, channel)
             } catch (error: Exception) {
                 warn("ready notification", error)
             }
         }
 
-        /** Clears "写好了" and "没写完" once the player is back. */
+        /** Clears "写好了", "没写完", and group summary once the player is back. */
         @JvmStatic
         fun clearReady(context: Context) {
             try {
                 val manager = context.getSystemService(NotificationManager::class.java) ?: return
                 manager.cancel(DONE_NOTIFICATION_ID)
+                manager.cancel(SUMMARY_NOTIFICATION_ID)
                 val ids = synchronized(lock) { shown.toList().also { shown.clear() } }
                 for (id in ids) manager.cancel(id)
             } catch (error: Exception) {
@@ -503,7 +561,6 @@ class GenerationService : Service() {
         }
 
         private fun warn(operation: String, error: Exception) {
-            // Log the failure class only; never include platform exception text.
             Log.w(TAG, "Generation foreground service $operation failed: ${error.javaClass.simpleName}")
         }
 
@@ -514,13 +571,11 @@ class GenerationService : Service() {
                 wakeUntil = if (requested) maxOf(wakeUntil, deadline) else deadline
                 pendingStop?.let { main.removeCallbacks(it) }
                 pendingStop = null
-                // Already up (a second request of the same turn): nothing to start.
                 if (requested && current != null) {
                     current?.holdWakeLock()
                     return
                 }
                 requested = true
-                // Keep any progress that arrived before start() so the first notification frame is not blank.
                 val target = progress.values.lastOrNull()
                 phase = target?.phase ?: "thinking"
                 chars = target?.chars ?: 0
@@ -531,8 +586,6 @@ class GenerationService : Service() {
                 try {
                     val app = context.applicationContext
                     val intent = Intent(app, GenerationService::class.java)
-                    // POST_NOTIFICATIONS is deliberately not checked: denial
-                    // hides the drawer notification but does not prohibit FGS.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         app.startForegroundService(intent)
                     } else {
@@ -555,8 +608,6 @@ class GenerationService : Service() {
                         pendingStop = null
                         requested = false
                         try {
-                            // If onCreate has not run, onStartCommand observes false
-                            // and stops after promotion. Never start a service to stop it.
                             current?.stopGeneration()
                         } catch (error: Exception) {
                             warn("stop", error)

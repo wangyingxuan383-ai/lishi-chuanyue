@@ -3,7 +3,11 @@
 import { useEffect, useSyncExternalStore } from "react";
 import type { Repo } from "../../engine/db/repo";
 import type { Platform } from "../../platform";
-import { latestRelease, newer, type ReleaseInfo } from "./update";
+import { expectedHash, latestRelease, newer, platformPackage, type ReleaseInfo } from "./update";
+
+const CHECK_COOLDOWN_MS = 86_400_000;
+const AUTO_PREPARE_POLL_MS = 15_000;
+const MIN_FREE_FLOOR_BYTES = 250 * 1024 * 1024;
 
 export interface UpdateNotice {
   release: ReleaseInfo | null;
@@ -11,6 +15,14 @@ export interface UpdateNotice {
   checkedAt: number;
   checking: boolean;
   failed: boolean;
+  readyRelease: ReleaseInfo | null;
+  dismissedReadyVersion: string | null;
+  canInstall: boolean;
+  preparing: boolean;
+}
+
+function appBuildVersion(): string {
+  return typeof __APP_VERSION__ === "string" && __APP_VERSION__ ? __APP_VERSION__ : "0.0.0";
 }
 
 /** Ignore an incomplete cache from an interrupted/older write. */
@@ -29,8 +41,24 @@ export function hasUnreadUpdate(state: UpdateNotice, currentVersion: string): bo
     && (!state.readVersion || newer(state.release.version, state.readVersion));
 }
 
-export function createUpdateStore(repo: Repo, platform: Platform) {
-  let state: UpdateNotice = { release: null, readVersion: null, checkedAt: 0, checking: false, failed: false };
+export function hasPromptableReadyUpdate(state: UpdateNotice, currentVersion: string): boolean {
+  return !!state.readyRelease
+    && newer(state.readyRelease.version, currentVersion)
+    && state.dismissedReadyVersion !== state.readyRelease.version;
+}
+
+export function createUpdateStore(repo: Repo, platform: Platform, currentVersion = appBuildVersion()) {
+  let state: UpdateNotice = {
+    release: null,
+    readVersion: null,
+    checkedAt: 0,
+    checking: false,
+    failed: false,
+    readyRelease: null,
+    dismissedReadyVersion: null,
+    canInstall: false,
+    preparing: false,
+  };
   const listeners = new Set<() => void>();
   const set = (patch: Partial<UpdateNotice>) => {
     state = { ...state, ...patch };
@@ -38,44 +66,211 @@ export function createUpdateStore(repo: Repo, platform: Platform) {
   };
   let loading: Promise<void> | null = null;
   let checking: Promise<void> | null = null;
+  let preparing: Promise<boolean> | null = null;
   let reading = Promise.resolve();
+
+  const hydratePackage = async (target: ReleaseInfo | null, allowSumsFetch: boolean): Promise<void> => {
+    if (!platform.update) return;
+    if (!target || !newer(target.version, currentVersion)) {
+      const canInstall = await platform.update.canInstall().catch(() => false);
+      set({ readyRelease: null, canInstall });
+      return;
+    }
+    const asset = platformPackage(platform, target);
+    if (!asset || !platform.update.packageStatus) {
+      const canInstall = await platform.update.canInstall().catch(() => false);
+      set({ canInstall });
+      return;
+    }
+    const sha256 = asset.sha256 ?? (allowSumsFetch ? await expectedHash(platform, target, asset).catch(() => null) : null);
+    if (!sha256 || !/^[0-9a-f]{64}$/i.test(sha256)) {
+      const canInstall = await platform.update.canInstall().catch(() => false);
+      set({ readyRelease: null, canInstall });
+      return;
+    }
+    const pkg = await platform.update.packageStatus({ version: target.version, sha256 }).catch(() => null);
+    if (pkg && pkg.downloaded && pkg.verified) {
+      set({ readyRelease: target, canInstall: pkg.canInstall });
+    } else {
+      set({ readyRelease: null, canInstall: pkg?.canInstall ?? false });
+    }
+  };
+
   const load = () => loading ??= (async () => {
-    const [release, read, checkedAt, skipped] = await Promise.all([
+    const [release, read, checkedAt, lastCheckAt, skipped, dismissedReady] = await Promise.all([
       repo.getSetting<unknown>("updateLatestRelease", null),
       repo.getSetting<unknown>("updateReadVersion", null),
       repo.getSetting<unknown>("updateCheckedAt", 0),
+      repo.getSetting<unknown>("updateLastCheckAt", 0),
       repo.getSetting<unknown>("updateSkipped", null),
+      repo.getSetting<unknown>("updateDismissedReadyVersion", null),
     ]);
-    set({ release: cachedRelease(release), readVersion: typeof read === "string" ? read : typeof skipped === "string" ? skipped : null,
-      checkedAt: typeof checkedAt === "number" && Number.isFinite(checkedAt) ? checkedAt : 0 });
+    const tsA = typeof checkedAt === "number" && Number.isFinite(checkedAt) ? checkedAt : 0;
+    const tsB = typeof lastCheckAt === "number" && Number.isFinite(lastCheckAt) ? lastCheckAt : 0;
+    const parsed = cachedRelease(release);
+    set({
+      release: parsed,
+      readVersion: typeof read === "string" ? read : typeof skipped === "string" ? skipped : null,
+      checkedAt: Math.max(tsA, tsB),
+      dismissedReadyVersion: typeof dismissedReady === "string" ? dismissedReady : null,
+    });
+    await hydratePackage(parsed, false);
   })();
+
+  const checkBusy = async (isBusy?: () => boolean): Promise<boolean> => {
+    try {
+      if (isBusy?.()) return true;
+    } catch {
+      return true;
+    }
+    if (platform.execution?.list) {
+      const active = await platform.execution.list().catch(() => []);
+      if (active.some((item) => item.status === "running")) return true;
+    }
+    return false;
+  };
 
   return {
     load,
     snapshot: () => state,
+    get readyRelease() { return state.readyRelease; },
+    get dismissedReadyVersion() { return state.dismissedReadyVersion; },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    async refreshStatus() {
+      await load();
+      await hydratePackage(state.release, false);
+    },
+    async dismissReady(version?: string) {
+      await load();
+      const target = version ?? state.readyRelease?.version ?? state.release?.version ?? null;
+      if (!target) return;
+      await repo.setSetting("updateDismissedReadyVersion", target);
+      set({ dismissedReadyVersion: target });
+    },
     async check(manual = false) {
       await load();
-      if (!manual && (!await repo.getSetting("autoUpdateCheck", true) || Date.now() - state.checkedAt < 86_400_000)) return;
+      if (
+        !manual &&
+        (!(await repo.getSetting("autoUpdateCheck", true)) ||
+          (state.checkedAt > 0 && Date.now() - state.checkedAt < CHECK_COOLDOWN_MS))
+      ) {
+        return;
+      }
       if (checking) return checking;
       checking = (async () => {
-        const checkedAt = Date.now();
         set({ checking: true, failed: false });
         try {
-          await repo.setSetting("updateCheckedAt", checkedAt);
-          set({ checkedAt });
           // Android installs in the app, so a release without its package does not count yet (D158).
           const release = await latestRelease(platform, { needPackage: platform.name === "android" });
-          await repo.setSetting("updateLatestRelease", release);
-          set({ release });
+          // Only stamp the 24h cooldown AFTER the network check succeeds!
+          const checkedAt = Date.now();
+          await Promise.all([
+            repo.setSetting("updateLatestRelease", release),
+            repo.setSetting("updateCheckedAt", checkedAt),
+            repo.setSetting("updateLastCheckAt", checkedAt),
+          ]);
+          set({ release, checkedAt, failed: false });
+          await hydratePackage(release, false);
         } catch {
-          // A temporary network failure must not erase an unread cached release.
+          // A temporary network or DNS failure must neither erase an unread cached release nor stamp checkedAt.
           set({ failed: true });
         } finally {
           set({ checking: false });
         }
       })().finally(() => { checking = null; });
       return checking;
+    },
+    async autoPrepare(opts?: { isBusy?: () => boolean }): Promise<boolean> {
+      await load();
+      if (preparing) return preparing;
+      preparing = (async () => {
+        // Gate 1: Default-OFF setting — MUST be strictly true.
+        const autoUpdate = await repo.getSetting<unknown>("autoUpdate", false);
+        if (autoUpdate !== true) return false;
+        if (!platform.update) return false;
+        if (await checkBusy(opts?.isBusy)) return false;
+
+        // Gate 2: Newer non-ignored release with a matching platform asset + valid SHA-256.
+        const release = state.release;
+        if (!release || !newer(release.version, currentVersion)) return false;
+        const skipped = await repo.getSetting<unknown>("updateSkipped", null);
+        if (typeof skipped === "string" && skipped === release.version) return false;
+        const asset = platformPackage(platform, release);
+        if (!asset || asset.size <= 0) return false;
+        const sha256 = await expectedHash(platform, release, asset).catch(() => null);
+        if (!sha256 || !/^[0-9a-f]{64}$/i.test(sha256)) return false;
+
+        // Already downloaded & verified on disk? Hydrate immediately without re-downloading.
+        if (platform.update.packageStatus) {
+          const existing = await platform.update.packageStatus({ version: release.version, sha256 }).catch(() => null);
+          if (existing?.downloaded && existing.verified) {
+            set({ readyRelease: release, canInstall: existing.canInstall });
+            return true;
+          }
+        }
+
+        // Gate 3: Environment check — unmetered Wi-Fi + sufficient free disk space.
+        if (!platform.update.environmentStatus) return false;
+        const env = await platform.update.environmentStatus().catch(() => null);
+        const minFreeBytes = Math.max(asset.size * 2.5, MIN_FREE_FLOOR_BYTES);
+        if (!env || env.wifiUnmetered !== true || typeof env.freeBytes !== "number" || env.freeBytes < minFreeBytes) {
+          return false;
+        }
+        if (await checkBusy(opts?.isBusy)) return false;
+
+        // Silent background download with 15s guard polling; keeps .part on abort for HTTP Range resume.
+        let aborted = false;
+        let finished = false;
+        set({ preparing: true });
+        const pollTimer = setInterval(() => {
+          if (aborted || finished) return;
+          void (async () => {
+            if (aborted || finished) return;
+            const busyNow = await checkBusy(opts?.isBusy);
+            if (busyNow) {
+              aborted = true;
+              await platform.update?.cancel().catch(() => {});
+              return;
+            }
+            const nextEnv = await platform.update?.environmentStatus?.().catch(() => null);
+            if (!nextEnv || nextEnv.wifiUnmetered !== true) {
+              aborted = true;
+              await platform.update?.cancel().catch(() => {});
+            }
+          })();
+        }, AUTO_PREPARE_POLL_MS);
+
+        try {
+          await platform.update.download(
+            { version: release.version, url: asset.url, size: asset.size, sha256 },
+            () => {},
+          );
+          finished = true;
+          if (aborted) return false;
+          // Re-verify packageStatus before marking readyRelease; NEVER auto-launch OS installer.
+          if (platform.update.packageStatus) {
+            const verified = await platform.update.packageStatus({ version: release.version, sha256 }).catch(() => null);
+            if (!verified || !verified.downloaded || !verified.verified) {
+              if (state.readyRelease?.version === release.version) set({ readyRelease: null });
+              return false;
+            }
+            set({ readyRelease: release, canInstall: verified.canInstall });
+          } else {
+            const canInstall = await platform.update.canInstall().catch(() => false);
+            set({ readyRelease: release, canInstall });
+          }
+          return true;
+        } catch {
+          finished = true;
+          if (state.readyRelease?.version === release.version) set({ readyRelease: null });
+          return false;
+        } finally {
+          finished = true;
+          clearInterval(pollTimer);
+          set({ preparing: false });
+        }
+      })().finally(() => { preparing = null; });
+      return preparing;
     },
     markRead(version: string) {
       reading = reading.catch(() => {}).then(async () => {
@@ -89,7 +284,7 @@ export function createUpdateStore(repo: Repo, platform: Platform) {
   };
 }
 
-type UpdateStore = ReturnType<typeof createUpdateStore>;
+export type UpdateStore = ReturnType<typeof createUpdateStore>;
 const stores = new WeakMap<Repo, UpdateStore>();
 
 export function updateStore(repo: Repo, platform: Platform): UpdateStore {
@@ -101,6 +296,25 @@ export function updateStore(repo: Repo, platform: Platform): UpdateStore {
 export function useUpdateNotice(game: { repo: Repo; platform: Platform }) {
   const store = updateStore(game.repo, game.platform);
   const state = useSyncExternalStore(store.subscribe, store.snapshot);
-  useEffect(() => { void store.load().catch(() => {}); }, [store]);
-  return { store, state, unread: hasUnreadUpdate(state, __APP_VERSION__) };
+  useEffect(() => {
+    void store.load().then(() => store.autoPrepare()).catch(() => {});
+    const onResume = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") {
+        void store.refreshStatus().catch(() => {});
+      }
+    };
+    window.addEventListener("lishi:app-resume", onResume);
+    document.addEventListener("visibilitychange", onResume);
+    return () => {
+      window.removeEventListener("lishi:app-resume", onResume);
+      document.removeEventListener("visibilitychange", onResume);
+    };
+  }, [store]);
+  const current = appBuildVersion();
+  return {
+    store,
+    state,
+    unread: hasUnreadUpdate(state, current),
+    readyToPrompt: hasPromptableReadyUpdate(state, current),
+  };
 }

@@ -1026,19 +1026,10 @@ impl CompanionRuntime {
                 Ok(json!({ "ok": true }))
             }
             _ => {
-                let store = self.store.clone();
-                let active_session_runs: HashMap<String, String> = {
-                    let active = lock_unpoison(&self.active);
-                    active
-                        .values()
-                        .map(|r| (r.session_id.clone(), r.run_id.clone()))
-                        .collect()
-                };
-                tokio::task::spawn_blocking(move || {
-                    dispatch_store_op(&store, &request, &active_session_runs)
-                })
-                .await
-                .map_err(|_| invalid("伴聊本地数据操作中断"))?
+                let rt = Arc::clone(self);
+                tokio::task::spawn_blocking(move || dispatch_store_op(&rt, &request))
+                    .await
+                    .map_err(|_| invalid("伴聊本地数据操作中断"))?
             }
         }
     }
@@ -2063,11 +2054,8 @@ impl CompanionRuntime {
     }
 }
 
-fn dispatch_store_op(
-    store: &CompanionStore,
-    request: &Value,
-    active_session_runs: &HashMap<String, String>,
-) -> Result<Value> {
+fn dispatch_store_op(rt: &CompanionRuntime, request: &Value) -> Result<Value> {
+    let store = &rt.store;
     match request["op"].as_str().unwrap_or("") {
         "persona_list" => Ok(json!({ "personas": store.list_personas()? })),
         "persona_get" => {
@@ -2137,13 +2125,13 @@ fn dispatch_store_op(
                 .as_str()
                 .or_else(|| request["sessionId"].as_str())
                 .ok_or_else(|| invalid("缺少会话标识"))?;
-            let mut detail = store.get_session_detail(id)?;
-            if let Some(sid) = detail["session"]["id"].as_str() {
-                if let Some(rid) = active_session_runs.get(sid) {
-                    detail["activeRunId"] = rid.clone().into();
-                }
-            }
-            Ok(detail)
+            store.get_session_detail_with_active(id, |sid| {
+                let active = lock_unpoison(&rt.active);
+                active
+                    .values()
+                    .find(|r| r.session_id == sid && !lock_unpoison(&r.live).settled_in_db)
+                    .map(|r| r.run_id.clone())
+            })
         }
         "session_create" => store.create_session(request),
         "session_update" => Ok(json!({ "session": store.update_session(request)? })),
@@ -2594,5 +2582,79 @@ mod tests {
         assert!(!compacted["summaryUpToMsgId"].is_null());
         let bodies = lock_unpoison(&fake.captured_bodies);
         assert_eq!(bodies[0]["model"], "test-aux");
+    }
+
+    #[tokio::test]
+    async fn session_detail_and_get_heal_orphan_streaming_messages_when_no_run_is_active() {
+        let store = setup_db();
+        let fake = FakeModel::new(vec![ScriptedTurn::SlowHang]);
+        let rt = Arc::new(CompanionRuntime::new(store.clone(), fake));
+
+        let created = rt
+            .dispatch(json!({
+                "op": "session_create",
+                "title": "自愈测试",
+                "metadata": {"activeRunId": "stale-run-99"},
+            }))
+            .await
+            .unwrap();
+        let sid = created["session"]["id"].as_str().unwrap().to_owned();
+
+        // Insert an orphan `streaming` message with no active run in `rt.active`:
+        let appended = rt
+            .dispatch(json!({
+                "op": "message_append",
+                "sessionId": sid,
+                "message": {
+                    "id": "orphan-msg-1",
+                    "role": "assistant",
+                    "gear": "chat",
+                    "status": "streaming",
+                    "content": "中断前写到一半的内容",
+                    "steps": [{"id": "s1", "tool": "search_original", "label": "检索原著原文", "status": "running", "summary": "正在查阅…"}],
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(appended["message"]["status"], "streaming");
+
+        let healed = rt
+            .dispatch(json!({"op": "session_get", "id": sid}))
+            .await
+            .unwrap();
+        assert!(healed["activeRunId"].is_null());
+        assert!(healed["session"]["activeRunId"].is_null());
+        assert!(healed["session"]["metadata"].get("activeRunId").is_none());
+        assert_eq!(healed["messages"][0]["status"], "interrupted");
+        assert_eq!(healed["messages"][0]["content"], "中断前写到一半的内容");
+        assert_eq!(healed["messages"][0]["steps"][0]["status"], "failed");
+
+        // Verify live active runs are NOT marked interrupted while running, and expose activeRunId:
+        let sent = rt
+            .dispatch(json!({
+                "op": "send",
+                "sessionId": sid,
+                "text": "继续聊",
+                "model": model_cfg(),
+            }))
+            .await
+            .unwrap();
+        let live_run_id = sent["runId"].as_str().unwrap().to_owned();
+        let while_live = rt
+            .dispatch(json!({"op": "session_detail", "id": sid}))
+            .await
+            .unwrap();
+        assert_eq!(while_live["activeRunId"], live_run_id);
+        assert_eq!(while_live["session"]["activeRunId"], live_run_id);
+        assert_eq!(
+            while_live["messages"].as_array().unwrap().last().unwrap()["status"],
+            "streaming"
+        );
+
+        let stopped = rt
+            .dispatch(json!({"op": "stop", "sessionId": sid}))
+            .await
+            .unwrap();
+        assert_eq!(stopped["status"], "cancelled");
     }
 }

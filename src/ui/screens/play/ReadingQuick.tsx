@@ -1,5 +1,5 @@
-// 字号与主题 (R28): the reading settings used most, one tap from the story.
-// The same values as 设置 → 阅读与外观; the change shows at once behind the sheet.
+// 字号与主题: the reading settings used most, one tap from the story or built-in reader.
+// Shares the same Reading state as 设置 → 阅读与外观; changes apply live behind the sheet.
 import { useApp, type Reading } from "../../app/context";
 import { Sheet } from "../../components/Sheet";
 import { Choice, SIZES, STYLES, THEMES } from "../Settings";
@@ -10,13 +10,21 @@ export function ReadingQuickSheet({ onClose }: { onClose: () => void }) {
   const sizes = SIZES.map(([v]) => v);
   const at = sizes.indexOf(reading.size);
   const step = (by: number) => {
-    // A size set elsewhere (not one of the four) moves to its nearest neighbour.
     const index = at >= 0 ? at + by : by > 0 ? sizes.findIndex((v) => v > reading.size) : sizes.reduce((found, v, i) => (v < reading.size ? i : found), -1);
     if (index >= 0 && index < sizes.length) set({ size: sizes[index] });
   };
   const label = SIZES.find(([v]) => v === reading.size)?.[1] ?? `${reading.size}`;
   return (
     <Sheet title="字号与主题" onClose={onClose}>
+      <Choice
+        label="阅读方式"
+        value={reading.pageMode}
+        options={[
+          ["scroll", "上下滚动"],
+          ["paged", "左右翻页"],
+        ]}
+        onChange={(pageMode) => set({ pageMode })}
+      />
       <div className="setting">
         <div className="setting-head"><b>字号</b></div>
         <div className="size-stepper">
@@ -34,6 +42,7 @@ export function ReadingQuickSheet({ onClose }: { onClose: () => void }) {
         </div>
       </div>
       <Choice label="外观风格" value={reading.style} options={STYLES.map(([v, l]) => [v, l] as [typeof v, string])} onChange={(v) => set({ style: v })} />
+      <Choice label="字体" value={reading.serif} options={[[true, "宋体"], [false, "黑体"]]} onChange={(serif) => set({ serif })} />
       <Choice label="行距" value={reading.leading} options={[[1.7, "紧"], [2, "适中"], [2.3, "松"]]} onChange={(v) => set({ leading: v })} />
     </Sheet>
   );

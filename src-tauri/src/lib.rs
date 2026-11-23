@@ -32,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(secret::init())
         .plugin(document_picker::init())
+        .plugin(files::init())
         .plugin(notifications::init())
         .plugin(updates::init())
         .plugin(pi_agent::init())
@@ -141,6 +142,7 @@ pub fn run() {
             execution::execution_resume,
             files::file_export_text,
             files::file_export_world,
+            commands::file_export_bytes,
             files::file_import_text,
             files::file_import_skill,
             files::file_grant_agent,

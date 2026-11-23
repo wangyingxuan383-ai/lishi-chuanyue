@@ -196,3 +196,13 @@ pub async fn http_get_public(url: String, timeout_ms: u64) -> Result<crate::stre
     }
     crate::stream::get_public(&url, timeout_ms).await
 }
+
+#[tauri::command]
+pub async fn file_export_bytes(
+    app: tauri::AppHandle,
+    default_name: String,
+    bytes_base64: String,
+    mime: Option<String>,
+) -> Result<bool> {
+    crate::files::export_bytes(app, default_name, bytes_base64, mime).await
+}

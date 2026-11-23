@@ -7,9 +7,30 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use tauri::AppHandle;
+use tauri::plugin::{Builder, TauriPlugin};
+use tauri::Runtime;
+#[cfg(target_os = "android")]
+use tauri::{plugin::PluginHandle, Manager};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FilePath;
+
+#[cfg(target_os = "android")]
+struct AndroidFiles<R: Runtime>(PluginHandle<R>);
+
+pub fn init<R: Runtime>() -> TauriPlugin<R> {
+    Builder::new("files_bridge")
+        .setup(|app, api| {
+            #[cfg(target_os = "android")]
+            app.manage(AndroidFiles(
+                api.register_android_plugin("io.timejump.chuanyue", "FilesPlugin")?,
+            ));
+            #[cfg(not(target_os = "android"))]
+            let _ = (app, api);
+            Ok(())
+        })
+        .build()
+}
 
 const MAX_IMPORT: u64 = 64 * 1024 * 1024;
 const ARCHIVE_LIMIT: &str = "完整存档超过当前64MiB导入上限，未写出不可导入的文件。";
@@ -291,6 +312,179 @@ pub async fn file_export_text(
     .await
 }
 
+fn sanitize_export_name(raw: &str) -> String {
+    let leaf: String = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(255)
+        .collect();
+    if leaf.is_empty() || leaf == "." || leaf == ".." {
+        "export.bin".to_owned()
+    } else {
+        leaf
+    }
+}
+
+pub(crate) fn resolve_export_mime(name: &str, explicit: Option<&str>) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.ends_with(".epub") {
+        "application/epub+zip".into()
+    } else if lower.ends_with(".png") {
+        "image/png".into()
+    } else if lower.ends_with(".md") {
+        "text/markdown".into()
+    } else if lower.ends_with(".txt") {
+        "text/plain".into()
+    } else if let Some(mime) = explicit
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && m.contains('/') && !m.chars().any(char::is_control))
+    {
+        mime.to_owned()
+    } else if lower.ends_with(".json") {
+        "application/json".into()
+    } else {
+        "application/octet-stream".into()
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn write_bytes_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|_| io_error())?;
+    temp.write_all(bytes).map_err(|_| io_error())?;
+    temp.flush().map_err(|_| io_error())?;
+    temp.as_file().sync_all().map_err(|_| io_error())?;
+    temp.persist(path).map_err(|_| io_error())?;
+    Ok(())
+}
+
+pub async fn export_bytes(
+    app: AppHandle,
+    default_name: String,
+    bytes_base64: String,
+    mime: Option<String>,
+) -> Result<bool> {
+    if bytes_base64.len() > 90 * 1024 * 1024 {
+        return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
+    }
+    let safe_name = sanitize_export_name(&default_name);
+    let resolved_mime = resolve_export_mime(&safe_name, mime.as_deref());
+
+    #[cfg(target_os = "android")]
+    {
+        struct Temporary(std::path::PathBuf);
+        impl Drop for Temporary {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        #[derive(serde::Deserialize)]
+        struct ExportReply {
+            status: String,
+        }
+        let dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|_| io_error())?
+            .join("export-bytes");
+        let temp_path = dir.join(format!("{}.bin", uuid::Uuid::new_v4()));
+        let write_target = temp_path.clone();
+        let temp_guard = blocking(move || {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(bytes_base64.trim())
+                .map_err(|_| PlatformError::new("file_invalid_base64", "导出内容编码无效"))?;
+            if bytes.len() as u64 > MAX_IMPORT {
+                return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
+            }
+            std::fs::create_dir_all(&dir).map_err(|_| io_error())?;
+            let guard = Temporary(write_target);
+            let mut file = std::fs::File::create(&guard.0).map_err(|_| io_error())?;
+            file.write_all(&bytes).map_err(|_| io_error())?;
+            file.flush().map_err(|_| io_error())?;
+            Ok(guard)
+        })
+        .await?;
+        let reply: ExportReply = app
+            .state::<AndroidFiles<tauri::Wry>>()
+            .0
+            .run_mobile_plugin_async(
+                "exportBytes",
+                serde_json::json!({
+                    "defaultName": safe_name,
+                    "mime": resolved_mime,
+                    "sourcePath": temp_guard.0.to_string_lossy(),
+                }),
+            )
+            .await
+            .map_err(|_| io_error())?;
+        drop(temp_guard);
+        match reply.status.as_str() {
+            "saved" => Ok(true),
+            "cancelled" => Ok(false),
+            _ => Err(io_error()),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let bytes = blocking(move || {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(bytes_base64.trim())
+                .map_err(|_| PlatformError::new("file_invalid_base64", "导出内容编码无效"))?;
+            if decoded.len() as u64 > MAX_IMPORT {
+                return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
+            }
+            Ok(decoded)
+        })
+        .await?;
+        let _ = resolved_mime;
+        let handle = app.clone();
+        let name_for_dialog = safe_name.clone();
+        let selected = blocking(move || {
+            let ext = std::path::Path::new(&name_for_dialog)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            let mut dialog = handle.dialog().file().set_file_name(&name_for_dialog);
+            dialog = match ext.as_deref() {
+                Some("epub") => dialog
+                    .add_filter("EPUB 电子书", &["epub"])
+                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
+                Some("png") => dialog
+                    .add_filter("PNG 图片", &["png"])
+                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
+                Some("md") => dialog
+                    .add_filter("Markdown 文档", &["md"])
+                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
+                Some("txt") => dialog
+                    .add_filter("文本文件", &["txt"])
+                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
+                _ => dialog.add_filter("导出文件", &["epub", "png", "md", "txt"]),
+            };
+            Ok(dialog.blocking_save_file())
+        })
+        .await?;
+        let Some(selected) = selected else {
+            return Ok(false);
+        };
+        blocking(move || {
+            let path = selected.into_path().map_err(|_| io_error())?;
+            write_bytes_atomic(&path, &bytes)?;
+            Ok(true)
+        })
+        .await
+    }
+}
+
 /// Serialize a consistent native snapshot directly into an app-private file.
 /// Only a small status or a structured error crosses the WebView boundary.
 #[tauri::command]
@@ -368,5 +562,27 @@ mod tests {
         assert_eq!(picked_file_name(&content, Some("   ".into()), "技能包"), "技能包");
         let desktop = FilePath::Path(std::path::PathBuf::from("archive/资治通鉴.pdf"));
         assert_eq!(picked_file_name(&desktop, None, "参考书籍"), "资治通鉴.pdf");
+    }
+
+    #[test]
+    fn export_mime_and_atomic_write_handle_supported_formats() {
+        assert_eq!(resolve_export_mime("story.EPUB", None), "application/epub+zip");
+        assert_eq!(resolve_export_mime("card.png", None), "image/png");
+        assert_eq!(resolve_export_mime("notes.md", None), "text/markdown");
+        assert_eq!(resolve_export_mime("chapter.txt", None), "text/plain");
+        assert_eq!(resolve_export_mime("cover.webp", Some("image/webp")), "image/webp");
+        assert_eq!(resolve_export_mime("raw.bin", None), "application/octet-stream");
+        assert_eq!(sanitize_export_name("../bad/path/小说.epub"), "小说.epub");
+        assert_eq!(sanitize_export_name(".."), "export.bin");
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("book.epub");
+            write_bytes_atomic(&target, b"PK\x03\x04epub").unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"PK\x03\x04epub");
+            write_bytes_atomic(&target, b"replaced").unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
+        }
     }
 }

@@ -28,6 +28,8 @@ impl Store {
         self.lock()?.execute_batch(include_str!("schema.sql"))?;
         self.lock()?
             .execute_batch(include_str!("agent_schema.sql"))?;
+        self.lock()?
+            .execute_batch(include_str!("reader_schema.sql"))?;
         crate::companion_store::CompanionStore(self.clone()).initialize()?;
         lease::ensure_schema(&*self.lock()?)?;
         crate::agent_workspace::install_hooks(&*self.lock()?);
@@ -647,5 +649,63 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_schema_initializes_idempotently_with_zero_rows_no_blobs_and_soft_fks() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        let store = Store(Arc::new(Mutex::new(conn)));
+        store.initialize().expect("first initialize");
+        store.initialize().expect("second initialize");
+
+        let db = store.lock().expect("lock");
+        for table in ["reader_progress", "reader_bookmarks", "reader_highlights"] {
+            let count: i64 = db
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .expect("count rows");
+            assert_eq!(count, 0, "{table} must start with 0 rows for empty_database()");
+
+            let blob_cols: i64 = db
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE UPPER(type) LIKE '%BLOB%'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("check blob cols");
+            assert_eq!(blob_cols, 0, "{table} must not contain BLOB columns");
+
+            let fk_count: i64 = db
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_foreign_key_list('{table}')"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("check foreign keys");
+            assert_eq!(fk_count, 0, "{table} must use soft foreign keys only");
+        }
+
+        db.execute(
+            "INSERT INTO reader_progress (target_type, target_id, section_index, page_index, scroll_ratio, anchor_text, node_id, updated_at)
+             VALUES ('book', 'b1', 2, 4, 0.5, '青铜钥匙', NULL, '2026-11-24T00:00:00Z')",
+            [],
+        )
+        .expect("insert reader_progress");
+        db.execute(
+            "INSERT INTO reader_bookmarks (id, target_type, target_id, section_index, section_title, snippet, paragraph_index, node_id, created_at)
+             VALUES ('bm1', 'world_novel', 'w1', 1, '第一回 · 初入长安', '街上很冷。', 3, 'n1', '2026-11-24T00:00:00Z')",
+            [],
+        )
+        .expect("insert reader_bookmarks");
+        db.execute(
+            "INSERT INTO reader_highlights (id, target_type, target_id, world_id, section_index, section_title, paragraph_index, char_start, char_end, selected_text, note, color, node_id, created_at, updated_at)
+             VALUES ('hl1', 'book', 'b1', 'w1', 0, '第一章 灯', 0, 0, 10, '阿青守信', '关键伏笔', 'cinnabar', NULL, '2026-11-24T00:00:00Z', '2026-11-24T00:00:00Z')",
+            [],
+        )
+        .expect("insert reader_highlights");
     }
 }

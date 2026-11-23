@@ -1,8 +1,6 @@
 /* The play screen: story stream, turns, dock. */
 /* ---------- play ---------- */
-.play { height: 100%; display: flex; flex-direction: column; position: relative; isolation: isolate; }
-/* Atmosphere (UX_CN 28): the paper warms a little at dusk and cools at night,
-   from the in-game hour. A faint wash behind the text that only fades; off with motion off. */
+.play { height: 100%; display: flex; flex-direction: column; position: relative; isolation: isolate; min-width: 0; }
 .play::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; opacity: 0; transition: opacity 1.6s ease; }
 .play[data-daypart="dusk"]::before { opacity: 1; background: linear-gradient(180deg, rgba(214, 138, 58, 0.10), rgba(214, 138, 58, 0.03) 75%); }
 .play[data-daypart="night"]::before { opacity: 1; background: linear-gradient(180deg, rgba(70, 92, 140, 0.06), rgba(70, 92, 140, 0.02) 75%); }
@@ -10,31 +8,37 @@
 :root[data-theme="night"] .play[data-daypart="night"]::before { background: linear-gradient(180deg, rgba(110, 140, 200, 0.06), transparent 75%); }
 :root[data-motion="off"] .play::before { display: none; }
 @media (prefers-reduced-motion: reduce) { .play::before { display: none; } }
-.play-layout { height: 100%; }
-.preserved-play { height: 100%; }
-/* Keep the reading viewport measurable while its independent assistant is shown. */
+.play-layout { height: 100%; height: 100dvh; }
+.preserved-play { height: 100%; height: 100dvh; }
 .preserved-play[data-inactive="true"] { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
-/* Wide windows (R10-T001): story on the left, the character panel always open on the right. */
+
+/* Wide windows (>= 1000px): story on the left, character panel docked on the right */
 .play-layout.wide { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 .play-layout.wide > .play { min-width: 0; min-height: 0; }
 .play-side { border-left: 1px solid var(--line); min-height: 0; display: flex; }
-.panel.docked { position: static; inset: auto; z-index: auto; flex: 1; animation: none; min-width: 0; }
-.play-layout.wide .dock { padding-inline: max(10px, calc((100% - 640px) / 2)); }
-@media (min-width: 1000px) {
-  /* Sheets still rise from the bottom, at a readable width. */
-  .sheet { max-width: 600px; margin: 0 auto; }
+.panel.docked { position: static; inset: auto; z-index: auto; flex: 1; animation: none; min-width: 0; width: auto; max-width: none; box-shadow: none; }
+
+/* Center dock input bar on foldable inner screens & tablets/desktops */
+.play > .dock {
+  padding-inline: max(10px, env(safe-area-inset-left), calc((100% - 660px) / 2));
 }
-.story { flex: 1; overflow-y: auto; overflow-anchor: none; padding: 8px 18px 24px; -webkit-overflow-scrolling: touch; }
-/* The reading column: --story-measure (in em) counted at the story's own size, at most 640px.
-   The size is set here only for that em; everything inside keeps its own (zero specificity). */
+
+@media (min-width: 640px) {
+  /* Sheets stay at a comfortable book-page width on foldables, tablets and desktops */
+  .sheet { max-width: 580px; margin: 0 auto; }
+}
+
+.story { flex: 1; overflow-y: auto; overflow-anchor: none; padding: 8px 18px 24px; -webkit-overflow-scrolling: touch; scroll-padding-bottom: 64px; }
 .story-inner { font-size: var(--story-size); max-width: min(640px, calc(var(--story-measure) * 1.05)); margin: 0 auto; }
 :where(.story-inner > *) { font-size: 1rem; }
 .turn { padding: 10px 0 6px; border-radius: 3px; transition: background-color 0.15s; content-visibility: auto; contain-intrinsic-size: auto 240px; }
 .turn.pressed { background: var(--accent-soft); }
-/* Between turns: the divider mark between two short hairlines (AUDIT_V4 4.7), visible but quiet. */
+/* Inside CSS multi-column paginator, content-visibility MUST stay visible so scrollWidth is deterministic */
+.paged-columns .turn { content-visibility: visible !important; contain-intrinsic-size: none !important; break-inside: auto; }
+
 .turn + .turn::before {
   content: var(--divider); display: block; width: 132px; margin: 2px auto 12px; text-align: center;
-  color: var(--accent); opacity: 0.8; font-size: 12px; line-height: 1;
+  color: var(--accent-text); opacity: 0.82; font-size: 12px; line-height: 1;
   background: linear-gradient(var(--line), var(--line)) left center / 50px 1px no-repeat, linear-gradient(var(--line), var(--line)) right center / 50px 1px no-repeat;
 }
 .turn-action { font-size: 14px; color: var(--muted); margin: 4px 0 10px; padding: 1px 0 1px 10px; border-left: 2px solid var(--accent); user-select: none; font-family: var(--serif); }
@@ -48,7 +52,7 @@
 .tree-seg { display: flex; flex-direction: column; gap: 6px; }
 .tree-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; width: 100%; padding: 8px 10px; border-left: 3px solid var(--line); border-radius: 3px; font-size: 14px; }
 .tree-row.on-path { border-left-color: var(--accent); }
-.tree-marks { font-size: 12px; color: var(--accent); }
+.tree-marks { font-size: 12px; color: var(--accent-text); }
 .tree-turns { display: flex; flex-direction: column; gap: 2px; padding: 0 0 4px 10px; }
 .tree-turns .ghost { min-height: 40px; padding: 2px 8px; font-size: 13px; }
 .line-row { align-items: stretch; gap: 4px; }
@@ -57,22 +61,20 @@
 .ask-item .story-text, .ask-item p { font-size: 15px; }
 .report-card { margin: 12px 0 6px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: var(--radius-card); background: var(--surface); font-size: 14px; font-family: var(--serif); animation: fade-up 0.24s ease-out both; }
 .report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; padding-bottom: 5px; border-bottom: 1px dashed var(--line); }
-.report-head b { margin: 0; font-size: 15px; letter-spacing: 0.1em; color: var(--accent); }
+.report-head b { margin: 0; font-size: 15px; letter-spacing: 0.1em; color: var(--accent-text); }
 .report-head span { font-size: 11px; font-family: var(--sans); letter-spacing: 0.14em; color: var(--muted); }
 .report-card p { margin: 4px 0; line-height: 1.75; }
-.report-card .report-tag { display: inline-block; margin-right: 8px; padding: 0 5px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-family: var(--sans); font-size: 12px; line-height: 1.6; vertical-align: 1px; }
+.report-card .report-tag { display: inline-block; margin-right: 8px; padding: 0 5px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent-text); font-family: var(--sans); font-size: 12px; line-height: 1.6; vertical-align: 1px; }
 .story-text {
   font-size: var(--story-size); line-height: var(--story-leading);
   white-space: pre-wrap; word-break: break-word; margin: 0;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .story-text p { margin: 0 0 var(--story-paragraph); }
-/* Chinese book setting: paragraphs indented two characters, in the story only. */
-.story .story-text p { text-indent: 2em; }
-:root[data-indent="off"] .story .story-text p { text-indent: 0; }
-.story .story-text p.date-line, .story-text p.date-line { text-indent: 0; text-align: center; letter-spacing: 0.25em; color: var(--accent); margin: 1em 0; font-size: 0.85em; font-family: var(--serif); }
-.cursor-blink::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent); }
-/* Writing feel (UX_CN 3): while a passage streams, each new sentence fades in like ink. */
+.story .story-text p, .paged-columns .story-text p { text-indent: 2em; }
+:root[data-indent="off"] .story .story-text p, :root[data-indent="off"] .paged-columns .story-text p { text-indent: 0; }
+.story .story-text p.date-line, .story-text p.date-line { text-indent: 0; text-align: center; letter-spacing: 0.25em; color: var(--accent-text); margin: 1em 0; font-size: 0.85em; font-family: var(--serif); }
+.cursor-blink::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent-text); }
 .story-text.streaming .sent { animation: ink-in 0.5s ease-out both; }
 @keyframes ink-in { from { opacity: 0; } }
 .status-line .cursor-blink { font-family: var(--serif); letter-spacing: 0.08em; }
@@ -88,29 +90,25 @@
 .rewritten-mark { display: inline-block; margin: 2px 0; font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: 3px; padding: 0 6px; }
 .edit-line { font-size: 13px; color: var(--muted); padding: 4px 0; }
 .load-more { display: block; margin: 8px auto; font-size: 14px; }
-/* 回到底部: a small round button with a down arrow (AUDIT_V4 4.8). */
 .to-bottom {
-  position: absolute; right: 16px; bottom: 12px; width: var(--tap); height: var(--tap); min-height: var(--tap); padding: 0;
-  border-radius: 999px; display: grid; place-items: center; color: var(--accent);
+  position: absolute; right: 16px; bottom: 12px; z-index: 4; width: var(--tap); height: var(--tap); min-height: var(--tap); padding: 0;
+  border-radius: 999px; display: grid; place-items: center; color: var(--accent-text);
   box-shadow: 0 2px 10px var(--shadow); animation: fade var(--dur) ease-out both;
 }
-/* New words are arriving below while the reader stays put (R28): a breathing dot on the arrow. */
-.to-bottom.fresh::after { content: ""; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: breathe 1.4s ease-in-out infinite; }
+.to-bottom.fresh::after { content: ""; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-text); animation: breathe 1.4s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: 0.35; transform: scale(0.8); } }
 
-/* 白天 gives the dock a slightly deeper cream than the page so it still reads as paper (AUDIT_V4 10.2; --dock in the theme). */
 .dock textarea, .dock input { background: var(--dock-field); }
 .dying-note { margin: 0 0 8px; padding: 7px 12px; border-radius: 3px; border-left: 3px solid var(--loss); background: var(--accent-soft); color: var(--loss); font-size: 14px; animation: fade-up 0.24s ease-out both; }
 .director-note { font-size: 14px; min-height: var(--tap); }
-.tip { margin: 8px 0 2px; padding: 8px 4px 8px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 14px; line-height: 1.6; display: flex; align-items: center; gap: 6px; animation: fade-up 0.24s ease-out both; }
-.tip button { position: relative; flex-shrink: 0; min-height: 36px; color: var(--accent); }
+.tip { margin: 8px 0 2px; padding: 8px 6px 8px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 14px; line-height: 1.6; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; animation: fade-up 0.24s ease-out both; }
+.tip button { position: relative; flex-shrink: 0; min-height: 36px; color: var(--accent-text); }
 .mode-option { display: grid; gap: 2px; }
 .mode-option b { font-family: var(--serif); font-size: 16px; font-weight: 600; }
 .mode-option small { color: var(--muted); font-size: 13px; }
-.mode-option[aria-pressed="true"] b { color: var(--accent); }
+.mode-option[aria-pressed="true"] b { color: var(--accent-text); }
 
-/* ---------- R28 第二批 (D160): the conversation layout ---------- */
-/* The changes after a passage: one quiet line, tap for the full list. */
+/* ---------- conversation layout ---------- */
 button.turn-changes {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; white-space: normal; gap: 2px 0; width: 100%; margin: 8px 0 2px; padding: 4px 0;
   min-height: 32px; border: none; background: transparent; text-align: left; font-family: var(--serif); font-size: 13px; color: var(--chip);
@@ -129,18 +127,16 @@ button.turn-changes {
   border-left: 3px solid color-mix(in srgb, currentColor 60%, transparent); animation: fade-up 0.3s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 40ms); }
 .change-row.gain { color: var(--gain); } .change-row.loss { color: var(--loss); } .change-row.warn { color: var(--warn); }
 
-/* The latest passage's tools: icon + word, grouped on the right. */
 .turn-tools { display: flex; justify-content: flex-end; align-items: center; gap: 2px; margin-top: 6px; flex-wrap: wrap; }
 .tool-btn {
   display: inline-flex; align-items: center; gap: 4px; min-height: 40px; padding: 4px 10px; border: none; border-radius: var(--radius-pill);
   background: transparent; font-size: 14px; color: color-mix(in srgb, var(--fg) 72%, var(--muted));
 }
-.tool-btn:active:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.tool-btn:active:not(:disabled) { background: var(--accent-soft); color: var(--accent-text); }
 .tool-more { color: var(--muted); }
-.variant-nav { display: inline-flex; align-items: center; margin-right: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.variant-nav { display: inline-flex; align-items: center; flex-wrap: wrap; margin-right: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .variant-nav .icon-btn { min-width: 36px; padding: 0 6px; }
 
-/* 接下来: the choices sit in the story, right after the latest passage. */
 .next-choices { margin: 18px 0 6px; animation: fade-up 0.35s var(--ease-out) both; }
 .next-head { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; font-size: 13px; font-weight: 500; color: var(--muted); font-family: var(--serif); letter-spacing: 0.3em; }
 .next-head::before, .next-head::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--line), transparent); }
@@ -155,12 +151,11 @@ button.turn-changes {
   text-align: left; font-size: calc(var(--story-size) * 0.92); line-height: 1.55; padding: 11px 6px; min-height: var(--tap);
   background: transparent; border: none; border-radius: 0; font-family: var(--serif);
 }
-.choice::before { content: counter(choice, cjk-decimal) "、"; color: var(--accent); }
+.choice::before { content: counter(choice, cjk-decimal) "、"; color: var(--accent-text); }
 .choice:active:not(:disabled) { background: var(--accent-soft); }
 .choice-fill { flex: none; align-self: center; width: var(--tap); height: var(--tap); padding: 0; color: var(--muted); opacity: 0.65; border-radius: var(--radius); }
-.choice-fill:active:not(:disabled) { opacity: 1; color: var(--accent); background: var(--accent-soft); }
+.choice-fill:active:not(:disabled) { opacity: 1; color: var(--accent-text); background: var(--accent-soft); }
 
-/* 原著核对 in TurnView: quiet collapsible pill matching TurnChanges. */
 .ref-review {
   margin: 6px 0 2px; border: 1px solid var(--line); border-radius: var(--radius);
   background: color-mix(in srgb, var(--surface) 75%, transparent); font-size: 13px;
@@ -173,19 +168,21 @@ button.turn-changes {
 .ref-row { margin: 0; display: flex; align-items: baseline; gap: 8px; line-height: 1.6; color: var(--fg); }
 .ref-badge { flex: none; font-size: 11px; padding: 0 6px; border-radius: 3px; line-height: 1.65; }
 .ref-badge.ok { color: var(--gain); background: color-mix(in srgb, var(--gain) 12%, transparent); }
-.ref-badge.branch { color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); }
+.ref-badge.branch { color: var(--accent-text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .ref-badge.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 
-/* The input bar: way of writing, the box with its tools, one main button. */
+/* Input dock */
 .dock {
-  position: relative; padding: 8px 10px 10px;
+  position: relative;
+  padding-block: 8px calc(10px + env(safe-area-inset-bottom));
+  padding-inline: 10px;
   border-top: 3px double var(--dock-line); background-color: var(--dock); background-image: var(--grain);
 }
 .dock textarea, .dock input { background: var(--dock-field); }
-.inputbar { display: flex; gap: 8px; align-items: flex-end; }
+.inputbar { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
 .mode-btn { flex-shrink: 0; min-width: 52px; padding: 0 10px; font-size: 15px; font-family: var(--serif); }
 .composer-field { position: relative; flex: 1; min-width: 0; display: flex; align-items: flex-end; }
-.composer-field textarea { min-height: 44px; max-height: 30vh; padding: 10px 12px; }
+.composer-field textarea { min-height: 44px; max-height: 30dvh; padding: 10px 12px; }
 .dock[data-tools]:not([data-tools="0"]) .composer-field textarea { padding-bottom: 36px; }
 .composer-tools {
   position: absolute; left: 4px; right: 4px; bottom: 2px; display: flex; justify-content: flex-end; align-items: center; gap: 2px;
@@ -197,29 +194,33 @@ button.turn-changes {
 .send-btn { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 76px; padding: 0 14px; white-space: nowrap; }
 .send-btn.stop { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 50%, transparent); }
 .send-label { font-size: 15px; }
+@media (max-width: 359px) {
+  .inputbar { gap: 5px; }
+  .mode-btn { min-width: 44px; padding: 0 7px; font-size: 14px; }
+  .send-btn { min-width: 62px; padding: 0 10px; }
+  .send-label { font-size: 14px; }
+}
 .note-chip {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 2px 4px 2px 10px;
-  border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius); background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--accent-text) 55%, transparent); border-radius: var(--radius); background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
   animation: fade-up 0.25s var(--ease-out) both;
 }
-.note-chip-label { flex-shrink: 0; font-family: var(--serif); font-size: 13px; color: var(--accent); }
+.note-chip-label { flex-shrink: 0; font-family: var(--serif); font-size: 13px; color: var(--accent-text); }
 .note-chip input { border: none; background: transparent !important; min-height: 38px; padding: 6px 4px; }
-.director-note { font-size: 14px; min-height: var(--tap); }
 
-/* Notices: an icon, the words, and real buttons. */
+/* Notices */
 .notice {
   display: flex; gap: 10px; align-items: flex-start; margin: 14px 0; padding: 12px 14px; border-radius: var(--radius-lg);
   border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 14px; line-height: 1.6; animation: fade-up 0.3s var(--ease-out) both;
 }
 .notice p { margin: 0; }
-.notice-icon { flex-shrink: 0; color: var(--accent); padding-top: 2px; }
+.notice-icon { flex-shrink: 0; color: var(--accent-text); padding-top: 2px; }
 .notice-bad { border-left-color: var(--loss); } .notice-bad .notice-icon { color: var(--loss); }
 .notice-pause { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); } .notice-pause .notice-icon { color: var(--warn); }
 .notice-body { flex: 1; min-width: 0; }
 .notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .notice-actions button { min-height: 40px; padding: 6px 16px; }
 
-/* P5: calm muted partial prose preserved above NoticeCard on stop/disconnect. */
 .partial-prose {
   margin: 12px 0 -4px; padding: 10px 14px; border-radius: var(--radius);
   border: 1px dashed var(--line); background: color-mix(in srgb, var(--surface) 70%, transparent);
@@ -229,43 +230,40 @@ button.turn-changes {
 .partial-prose-head button { min-height: 28px; padding: 2px 10px; font-size: 12px; }
 .partial-prose .story-text { opacity: 0.82; user-select: text; -webkit-user-select: text; }
 
-/* Before the first words: an ink brush circling, then the words take over. */
 .ink-wait { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
 .ink-wait-body { flex: 1; min-width: 0; display: grid; gap: 6px; }
 .phase-pill {
   display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text);
   font-family: var(--sans); font-size: 11px; font-weight: 500; letter-spacing: 0.04em; vertical-align: 1px;
 }
 .ink-progress { display: block; position: relative; height: 2px; max-width: 180px; border-radius: 999px; background: color-mix(in srgb, var(--line) 70%, transparent); overflow: hidden; }
 .ink-progress > i {
   display: block; width: 42%; height: 100%; border-radius: 999px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background: linear-gradient(90deg, transparent, var(--accent-text), transparent);
   animation: ink-slide 1.8s var(--ease-out) infinite;
 }
 @keyframes ink-slide { from { transform: translateX(-110%); } to { transform: translateX(260%); } }
 .ink-brush { position: relative; width: 34px; height: 34px; flex-shrink: 0; }
-.ink-brush i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 40%, transparent); animation: brush-turn 1.4s linear infinite; }
+.ink-brush i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent-text); border-right-color: color-mix(in srgb, var(--accent-text) 40%, transparent); animation: brush-turn 1.4s linear infinite; }
 .ink-brush i:nth-child(2) { inset: 6px; border-top-color: var(--fg); opacity: 0.55; animation-duration: 2.1s; animation-direction: reverse; }
-.ink-brush i:nth-child(3) { inset: 13px; border: none; background: var(--accent); opacity: 0.8; animation: ink-drop 1.4s ease-in-out infinite; }
+.ink-brush i:nth-child(3) { inset: 13px; border: none; background: var(--accent-text); opacity: 0.8; animation: ink-drop 1.4s ease-in-out infinite; }
 @keyframes brush-turn { to { transform: rotate(360deg); } }
 @keyframes ink-drop { 50% { transform: scale(0.45); opacity: 0.35; } }
 .ink-wait .status-line { padding: 0; }
 
-/* 每段用量 (components/TurnUsage.tsx): one quiet line under the latest passage. */
 .usage-line { display: block; margin: 2px 0 0; padding: 4px 0; min-height: 28px; border: 0; background: none; box-shadow: none; color: var(--muted); font-size: 12px; font-family: var(--sans); letter-spacing: 0.02em; text-align: left; opacity: 0.8; justify-content: flex-start; }
 .usage-line:hover, .usage-line:focus-visible { opacity: 1; color: var(--fg); }
 .usage-facts dd { font-variant-numeric: tabular-nums; }
 .notice-body .usage-line { margin-top: 4px; padding: 2px 0; min-height: 24px; }
 
-/* P4: quick input mode chips, autoplay director note bar, variant diff, changes tab jump. */
 .mode-chips { display: flex; gap: 6px; margin-bottom: 6px; overflow-x: auto; scrollbar-width: none; }
 .mode-chips::-webkit-scrollbar { display: none; }
 .mode-chip {
   flex: 0 0 auto; min-height: 30px; padding: 2px 11px; border-radius: var(--radius-pill);
   border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 13px; font-family: var(--serif);
 }
-.mode-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.mode-chip[aria-pressed="true"] { border-color: var(--accent-text); background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .autoplay-note-bar { margin-bottom: 6px; }
 .autoplay-note-input { gap: 6px; align-items: center; }
 .autoplay-note-input input { min-height: 36px; padding: 5px 10px; font-size: 13px; }
@@ -274,10 +272,10 @@ button.turn-changes {
 .variant-origin { margin-left: 4px; padding: 1px 6px; border-radius: 3px; background: var(--raised); color: var(--muted); font-size: 11px; }
 .variant-diff-btn { margin-left: 4px; padding: 2px 8px; min-height: 28px; font-size: 12px; }
 .variant-diff { margin: 6px 0 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); display: grid; gap: 6px; }
-.changes-jump { min-height: 28px; padding: 2px 8px; font-size: 12px; color: var(--accent); }
+.changes-jump { min-height: 28px; padding: 2px 8px; font-size: 12px; color: var(--accent-text); }
 @media (hover: hover) {
   .choice:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
-  .choice-fill:hover:not(:disabled) { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
-  .tool-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); color: var(--accent); }
+  .choice-fill:hover:not(:disabled) { opacity: 1; color: var(--accent-text); background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+  .tool-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); color: var(--accent-text); }
   button.turn-changes:hover { opacity: 0.88; }
 }

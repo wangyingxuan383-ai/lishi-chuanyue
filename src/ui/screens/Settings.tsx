@@ -3,7 +3,7 @@
 // with the current state on the entry. What used to be one long page is split
 // so each part can grow without the whole getting noisy.
 import { DEFAULT_NOTIFY, loadNotifyPrefs, saveNotifyPrefs } from "../app/notifyPrefs";
-import type { NotifyPrefs } from "../../platform";
+import type { NotificationStatus, NotifyPrefs, OemFamily } from "../../platform";
 import { DEPTH_LABEL } from "../../engine/depth";
 import { DepthCards } from "./play/DepthSheet";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -47,11 +47,11 @@ const FIND_WORDS: Record<string, string> = {
   reading: "主题 字号 字体 宋体 黑体 行距 段距 段首空两格 自动滚动 动画 触感 振动 阅读不锁屏 亮屏",
   sources: "原著 同人 书库 参考资料 TXT EPUB PDF DOCX 导入 通读",
   guide: "帮助 操作说明 怎么玩 常见问题",
-  notify: "通知 提醒 后台 声音 提示音 振动 静音",
+  notify: "通知 提醒 后台 声音 提示音 振动 静音 悬浮 横幅 自启动 省电 小米 澎湃 vivo OPPO 荣耀 华为 鸿蒙 三星",
   data: "存档 备份 恢复 导入 导出 数据 诊断 失败 原因",
   budget: "用量 费用 花费 单价 预算 请求次数 tokens 速度 太慢 等待 首字 整理用模型 辅助模型",
   network: "联网 网络 代理 连接方式",
-  about: "版本 更新 升级 下载 反馈 Github",
+  about: "版本 更新 升级 下载 反馈 Github 自动准备 Wi-Fi",
   dev: "开发者 日志 调试",
 };
 
@@ -61,7 +61,7 @@ export default function Settings() {
   const [page, setPage] = useState<Page>("home");
   const [defaults, setDefaults] = useState<PlayDefaults>(BUILTIN_DEFAULTS);
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [notify, setNotify] = useState<{ granted: boolean; enabled: boolean } | null>(null);
+  const [notify, setNotify] = useState<NotificationStatus | null>(null);
   const [network, setNetwork] = useState<{ proxy: "none" | "system" | "custom"; proxyUrl?: string | null }>({ proxy: "none" });
   const [spend, setSpend] = useState("预算与单价");
   const [sources, setSources] = useState(false);
@@ -78,6 +78,8 @@ export default function Settings() {
 
   const theme = THEMES.find(([v]) => v === reading.theme)?.[1] ?? "纸张";
   const android = game.platform.name === "android";
+  const windows = game.platform.name === "windows";
+  const supportsNotify = android || windows;
   const entries: { group: string; items: { page: Page; label: string; state: string; icon: IconName; hidden?: boolean }[] }[] = [
     { group: "AI", items: [
       { page: "services", label: "AI 服务", icon: "chat", state: profile ? `${profile.name} · ${profile.mainModel}` : "还没有连接" },
@@ -89,7 +91,7 @@ export default function Settings() {
       { page: "reading", label: "阅读与外观", icon: "palette", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
       { page: "sources" as Page, label: "参考书籍", icon: "book", state: "导入、查看与管理，各个故事都能选用" },
       { page: "guide" as Page, label: "游玩指南", icon: "info", state: "怎么玩、各个功能在哪、常见问题" },
-      { page: "notify", label: "通知与提醒", icon: "bell", state: !android ? "电脑上不需要" : notify?.enabled ? "已打开" : "没打开", hidden: !android && !devMode },
+      { page: "notify", label: "通知与提醒", icon: "bell", state: !supportsNotify ? "开发台预览" : notify?.enabled ? "已打开" : "没打开", hidden: !supportsNotify && !devMode },
     ] },
     { group: "应用", items: [
       { page: "data", label: "存档与数据", icon: "database", state: "备份与导出" },
@@ -403,67 +405,170 @@ function ReadingPage() {
   );
 }
 
-function NotifyPage({ status, onRefresh }: { status: { granted: boolean; enabled: boolean } | null; onRefresh: () => void }) {
+const OEM_GUIDES: { id: OemFamily; name: string; banner: string; background: string }[] = [
+  {
+    id: "xiaomi",
+    name: "小米 / Redmi（澎湃 OS · MIUI）",
+    banner: "新装应用常默认关掉悬浮通知和提示音：点下方“打开通知渠道（开启悬浮通知与铃声）”，把“悬浮通知”“锁屏通知”和“允许发声”打开。",
+    background: "省电策略选“无限制”，在“自启动管理”里允许本应用后台运行；长篇连写时可在最近任务下拉锁定。",
+  },
+  {
+    id: "vivo",
+    name: "vivo / iQOO（OriginOS）",
+    banner: "点“打开通知渠道（开启悬浮通知与铃声）”，开启“悬浮通知（顶部预览）”并确认通知铃声不是静音。",
+    background: "电池后台耗电管理中开启“允许后台高耗电”，并在权限管理的自启动与后台弹出里放行本应用。",
+  },
+  {
+    id: "oppo",
+    name: "OPPO / 一加 / 真我（ColorOS）",
+    banner: "点“打开通知渠道（开启悬浮通知与铃声）”，打开“横幅通知”与“通知铃声”。",
+    background: "应用耗电管理中开启“允许完全后台行为”和“允许自启动”，避免切屏后连接中断。",
+  },
+  {
+    id: "honor",
+    name: "荣耀（MagicOS）",
+    banner: "点“打开通知渠道（开启悬浮通知与铃声）”，打开“横幅通知”并确认提示音已开启。",
+    background: "在“应用启动管理”里关掉自动管理，手动开启“允许自启动”和“允许后台活动”。",
+  },
+  {
+    id: "huawei",
+    name: "华为（鸿蒙 HarmonyOS · EMUI）",
+    banner: "点“打开通知渠道（开启悬浮通知与铃声）”，开启“横幅通知”“锁屏通知”和“铃声”。更新安装时若遇到纯净模式提示，按指引授权即可。",
+    background: "在“应用启动管理”里改为手动管理，勾选“允许自启动”与“允许后台活动”。",
+  },
+  {
+    id: "samsung",
+    name: "三星（One UI）",
+    banner: "点“打开通知渠道（开启悬浮通知与铃声）”，设为“发出声音并弹出到屏幕上”。",
+    background: "电池里选择“不受限制”，并确认本应用没有被放进“深度休眠应用”。",
+  },
+  {
+    id: "generic",
+    name: "原生与其他安卓系统",
+    banner: "点“打开通知渠道（开启悬浮通知与铃声）”，确认通知重要程度为“紧急 / 发出声音并弹出”。",
+    background: "将应用电池用量设为“无限制”，锁屏或切到别的软件时也能把这一段写完。",
+  },
+];
+
+function NotifyPage({ status, onRefresh }: { status: NotificationStatus | null; onRefresh: () => void }) {
   const { game } = useApp();
   const system = game.platform.system;
-  const [background, setBackground] = useState<{ ignoringBattery: boolean; xiaomi: boolean } | null>(null);
+  const android = game.platform.name === "android";
+  const windows = game.platform.name === "windows";
+  const [background, setBackground] = useState<{ ignoringBattery: boolean; xiaomi: boolean; oem?: OemFamily } | null>(null);
   const [prefs, setPrefs] = useState<NotifyPrefs>(DEFAULT_NOTIFY);
   const [reminder, setReminder] = useState<{ sound: boolean; audible: boolean } | null>(null);
   const readBackground = () => {
     void system.backgroundStatus?.().then(setBackground).catch(() => setBackground(null));
     void system.reminderStatus?.().then(setReminder).catch(() => setReminder(null));
   };
-  useEffect(() => { readBackground(); void loadNotifyPrefs(game.repo).then(setPrefs); }, []);
+  useEffect(() => {
+    readBackground();
+    void loadNotifyPrefs(game.repo).then((loaded) => {
+      setPrefs(loaded);
+      void system.setNotifyPrefs?.(loaded).catch(() => {});
+    });
+  }, []);
   const change = (patch: Partial<NotifyPrefs>) => {
     const next = { ...prefs, ...patch }; setPrefs(next);
-    void saveNotifyPrefs(game.repo, next, system.setNotifyPrefs).then(() => system.reminderStatus?.().then(setReminder).catch(() => {}));
+    void saveNotifyPrefs(game.repo, next, system.setNotifyPrefs).then(() => {
+      onRefresh();
+      return system.reminderStatus?.().then(setReminder).catch(() => {});
+    });
   };
-  // Coming back from the system screen: read the switch again.
+  // Coming back from the system screen: read notification, channel, and battery status again.
   useEffect(() => {
     const again = () => { if (document.visibilityState === "visible") { onRefresh(); readBackground(); } };
+    window.addEventListener("lishi:app-resume", again);
     document.addEventListener("visibilitychange", again);
-    return () => document.removeEventListener("visibilitychange", again);
+    return () => {
+      window.removeEventListener("lishi:app-resume", again);
+      document.removeEventListener("visibilitychange", again);
+    };
   }, []);
   const on = !!status?.enabled;
+  const detectedOem: OemFamily = status?.oem ?? background?.oem ?? "generic";
+  const currentGuide = OEM_GUIDES.find((item) => item.id === detectedOem) ?? OEM_GUIDES[OEM_GUIDES.length - 1];
+  const channelMuted = prefs.sound && ((reminder !== null && !reminder.audible) || status?.reminderAudible === false || status?.canFloat === false);
+
   return (
     <>
       <div className={`status-card${on ? " ok" : ""}`}>
-        <b>{on ? "通知已打开" : "通知没打开"}</b>
-        <small>{on ? "切到后台时，写的时候通知栏会显示进度，写好了会提醒你。" : "没有通知时，故事照样会在后台写，只是写好了不会提醒你。"}</small>
-        {!on && <div className="row">
-          <button className="primary" onClick={async () => { const granted = await game.platform.system.requestNotifications().catch(() => false); if (!granted) await game.platform.system.openSystemSettings("notifications"); onRefresh(); }}>打开通知</button>
+        <b>{windows ? "电脑桌面通知已打开" : on ? "通知已打开" : "通知没打开"}</b>
+        <small>
+          {windows
+            ? "切到其他窗口或最小化时，故事写好了或中途停下会在屏幕右下角弹出横幅并响提示音。"
+            : on
+              ? "切到后台时，写的时候通知栏会显示进度，写好了会弹出横幅并响铃提醒你。"
+              : "没有通知时，故事照样会在后台写，只是写好了不会提醒你。"}
+        </small>
+        {!on && android && <div className="row">
+          <button className="primary" onClick={async () => { const granted = await system.requestNotifications().catch(() => false); if (!granted) await system.openSystemSettings("notifications"); onRefresh(); }}>打开通知</button>
         </div>}
       </div>
-      <h3 className="settings-sub">提醒的声音</h3>
-      <Choice label="写好了、没写完时响一声" note={prefs.sound ? "切到后台时，提醒会响提示音并振动（跟手机的通知音）" : "只显示在通知栏，不响"} value={prefs.sound} options={[[true, "响"], [false, "不响"]]} onChange={(v) => change({ sound: v })} />
-      {system.testReminder && <div className="row wrap">
-        <button onClick={() => void system.testReminder?.().then(() => system.reminderStatus?.().then(setReminder))}>试一下提醒</button>
-      </div>}
-      {prefs.sound && reminder && !reminder.audible && <div className="status-card">
-        <b>系统把这个提醒设成了静音</b>
-        <small>手机里这个提醒的声音被关了（小米等手机新装应用时常默认如此）。点下面打开，把“声音”或“提示音”打开。</small>
-        <div className="row"><button className="primary" onClick={() => void system.openReminderSettings?.()}>去打开声音</button></div>
-      </div>}
-      <h3 className="settings-sub">通知里显示什么</h3>
-      <Choice label="写的时候显示进度" note={prefs.progress ? "通知栏显示故事名、正在构思还是在写、已写多少字和用时，可以直接停止" : "只显示“正在写下一段”"} value={prefs.progress} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ progress: v })} />
-      <Choice label="写好了显示第一句" note={prefs.excerpt ? "提醒里带上新一段的第一句，点开直接回到那个故事" : "只提醒写好了"} value={prefs.excerpt} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ excerpt: v })} />
-      <Choice label="锁屏上也显示第一句" note={prefs.lockscreen ? "锁屏时也能看到第一句" : "锁屏时只显示故事名"} value={prefs.lockscreen} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ lockscreen: v })} />
-      <Note>没写完（比如服务出错、用到的请求太多先停下）也会提醒你，点“接着写完”回到那个故事。</Note>
-      <h3 className="settings-sub">在后台被系统停掉？</h3>
-      {system.backgroundStatus && <div className={`status-card${background?.ignoringBattery ? " ok" : ""}`}>
-        <b>{background?.ignoringBattery ? "已放行：省电不会停掉写作" : "可能被省电停掉"}</b>
-        <small>{background?.ignoringBattery ? "切到后台、锁屏时，正在写的一段会继续写完。" : "手机为了省电，可能在后台停掉应用，故事写到一半就断了。放行后会稳很多。"}</small>
+      <h3 className="settings-sub">提醒的声音与横幅</h3>
+      <Choice label="写好了、没写完时响一声" note={prefs.sound ? (windows ? "切到其他窗口时，提醒会弹出系统横幅并播放提示音" : "切到后台时，提醒会弹出横幅、响提示音并振动") : "只静默显示在通知栏，不响"} value={prefs.sound} options={[[true, "响"], [false, "不响"]]} onChange={(v) => change({ sound: v })} />
+      <div className="row wrap">
+        {system.testReminder && <button onClick={() => void system.testReminder?.().then(() => { onRefresh(); return system.reminderStatus?.().then(setReminder); })}>试一下提醒</button>}
+        {android && <button onClick={() => void system.openSystemSettings("channel_done")}>打开通知渠道（开启悬浮通知与铃声）</button>}
+      </div>
+      {android && channelMuted && <div className="status-card">
+        <b>系统把悬浮通知或铃声关了</b>
+        <small>当前提醒渠道的重要程度偏低、铃声为空，或手机正处于静音模式。点下面进入“写好了提醒”渠道，把悬浮通知（横幅）与提示音打开。</small>
         <div className="row wrap">
-          {!background?.ignoringBattery && <button className="primary" onClick={() => void system.requestBatteryExemption?.()}>放行，不限制省电</button>}
-          {background?.xiaomi && <button onClick={() => void system.openAutostart?.()}>打开自启动设置</button>}
+          <button className="primary" onClick={() => void system.openSystemSettings("channel_done")}>打开通知渠道（开启悬浮通知与铃声）</button>
+          <button className="ghost" onClick={() => void system.openSystemSettings("channel_failed")}>检查“没写完”提醒渠道</button>
         </div>
       </div>}
-      <Note>小米、华为等手机还可以在系统设置里多做两步：</Note>
-      <ol className="steps">
-        <li>{background?.xiaomi ? "在“自启动管理”里打开“穿越小说模拟”。" : "打开“自启动”（应用信息里，或手机管家里）。"}</li>
-        <li>在最近任务里下拉锁定“穿越小说模拟”。</li>
-      </ol>
-      <button onClick={() => void game.platform.system.openSystemSettings("app")}>打开应用信息</button>
+      <h3 className="settings-sub">通知里显示什么</h3>
+      {android && <Choice label="写的时候显示进度" note={prefs.progress ? "通知栏显示故事名、正在构思还是在写、已写多少字和用时，可以直接停止" : "只显示“正在写下一段”"} value={prefs.progress} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ progress: v })} />}
+      <Choice label="写好了显示第一句" note={prefs.excerpt ? "提醒里带上新一段的第一句，点开直接回到那个故事" : "只提醒写好了"} value={prefs.excerpt} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ excerpt: v })} />
+      {android && <Choice label="锁屏上也显示第一句" note={prefs.lockscreen ? "锁屏时也能看到第一句" : "锁屏时只显示故事名"} value={prefs.lockscreen} options={[[true, "开"], [false, "关"]]} onChange={(v) => change({ lockscreen: v })} />}
+      <Note>没写完（比如服务出错、用到的请求太多先停下）也会提醒你，回到故事即可接着写完。</Note>
+      {android ? (
+        <>
+          <h3 className="settings-sub">后台运行与手机系统设置</h3>
+          {system.backgroundStatus && <div className={`status-card${background?.ignoringBattery ? " ok" : ""}`}>
+            <b>{background?.ignoringBattery ? "已放行：省电不会停掉写作" : "可能被省电停掉"}</b>
+            <small>{background?.ignoringBattery ? "切到后台、锁屏时，正在写的一段会继续写完。" : "手机为了省电，可能在后台停掉应用，故事写到一半就断了。放行后会稳很多。"}</small>
+            <div className="row wrap">
+              {!background?.ignoringBattery && <button className="primary" onClick={() => void system.openSystemSettings("battery")}>放行，不限制省电</button>}
+              <button onClick={() => void system.openSystemSettings("autostart")}>后台运行与自启动设置</button>
+            </div>
+          </div>}
+          <div className="status-card">
+            <b>当前系统：{currentGuide.name}</b>
+            <small>{currentGuide.banner}</small>
+            <small>{currentGuide.background}</small>
+            <div className="row wrap">
+              <button onClick={() => void system.openSystemSettings("channel_done")}>打开通知渠道（开启悬浮通知与铃声）</button>
+              <button onClick={() => void system.openSystemSettings("autostart")}>后台运行与自启动设置</button>
+              <button className="ghost" onClick={() => void system.openSystemSettings("app")}>打开应用信息</button>
+            </div>
+          </div>
+          <details>
+            <summary className="muted">查看其他品牌手机的设置步骤</summary>
+            <div className="stack">
+              {OEM_GUIDES.filter((item) => item.id !== currentGuide.id).map((item) => (
+                <div key={item.id} className="setting">
+                  <div className="setting-head"><b>{item.name}</b><small>{item.banner} {item.background}</small></div>
+                </div>
+              ))}
+            </div>
+          </details>
+        </>
+      ) : (
+        <details>
+          <summary className="muted">手机版各品牌悬浮通知与后台不断连设置说明</summary>
+          <div className="stack">
+            {OEM_GUIDES.map((item) => (
+              <div key={item.id} className="setting">
+                <div className="setting-head"><b>{item.name}</b><small>{item.banner} {item.background}</small></div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </>
   );
 }
@@ -600,31 +705,50 @@ function NetworkPage({ value, onChange }: { value: { proxy: "none" | "system" | 
 
 function AboutPage() {
   const { game, toast } = useApp();
-  const { store: updates, state: { release: latest, checking, failed }, unread } = useUpdateNotice(game);
+  const { store: updates, state: { release: latest, readyRelease, checking, failed, preparing }, unread, readyToPrompt } = useUpdateNotice(game);
   const [autoCheck, setAutoCheck] = useState(true);
+  const [autoUpdate, setAutoUpdate] = useState(false);
   const [whatsNew, setWhatsNew] = useState(false);
-  useEffect(() => { void game.repo.getSetting("autoUpdateCheck", true).then(setAutoCheck); }, []);
+  useEffect(() => {
+    void game.repo.getSetting("autoUpdateCheck", true).then(setAutoCheck);
+    void game.repo.getSetting<boolean>("autoUpdate", false).then((v) => setAutoUpdate(v === true));
+  }, []);
   const check = () => updates.check(true);
   const hasNew = latest && newer(latest.version, __APP_VERSION__);
+  const ready = readyRelease && newer(readyRelease.version, __APP_VERSION__) ? readyRelease : null;
   return (
     <>
       <div className="about-head">
         <Seal />
         <div><h2>穿越小说模拟</h2><p className="muted">版本 {__APP_VERSION__}</p></div>
       </div>
+      {ready && (
+        <div className="status-card ok">
+          <b>新版本 {ready.version} 已准备好，校验无误</b>
+          <small>安装包已提前下载并核对通过，点“立即安装”才会打开系统安装界面，不会自动安装。</small>
+          <div className="row wrap">
+            <UpdateButton release={ready} label="立即安装" />
+            {readyToPrompt && <button className="ghost" onClick={() => void updates.dismissReady()}>稍后再说</button>}
+          </div>
+        </div>
+      )}
       <div className="status-card">
-        <b>{checking ? "正在检查…" : failed ? "没连上 GitHub" : hasNew ? `有新版本：${latest!.version}` : latest ? "已经是最新版本" : "检查更新"}{unread && <i className="update-dot" aria-hidden="true" />}</b>
+        <b>{checking ? "正在检查…" : preparing ? "正在后台准备更新…" : failed ? "没连上 GitHub" : hasNew ? `有新版本：${latest!.version}` : latest ? "已经是最新版本" : "检查更新"}{unread && <i className="update-dot" aria-hidden="true" />}</b>
         {latest && hasNew && <small className="release-notes">{plainNotes(latest.notes, 4, 160)}</small>}
-        {failed && <small>可能是网络问题，或者 GitHub 暂时访问不了；需要的话可以在“网络与代理”里设置代理。</small>}
+        {failed && <small>可能是网络问题，或者 GitHub 暂时访问不了；连回网络后会再试，需要的话也可以在“网络与代理”里设置代理。</small>}
         <div className="row">
-          {hasNew && latest && <UpdateButton release={latest} />}
+          {hasNew && latest && <UpdateButton release={latest} label={ready ? "查看详情" : "去更新"} />}
           <button className={hasNew ? "ghost" : undefined} disabled={checking} onClick={() => void check()}>检查更新</button>
           <button className="ghost" onClick={() => void openLink(game.platform, toast, `${REPO_URL}/releases`)}>全部版本</button>
         </div>
-        <small>安卓更新时下载新的安装包直接覆盖安装，不要先卸载（卸载会删掉所有世界）。</small>
+        <small>更新时下载新的安装包直接覆盖安装，不要先卸载（卸载会删掉所有世界）。</small>
       </div>
-      <Choice label="打开时自动检查更新" note="每天最多查一次，只看有没有新版本，不会自动下载" value={autoCheck} options={[[true, "开"], [false, "关"]]}
+      <Choice label="打开时自动检查更新" note="每天最多查一次，离线失败不会计入冷却时间" value={autoCheck} options={[[true, "开"], [false, "关"]]}
         onChange={(v) => { setAutoCheck(v); void game.repo.setSetting("autoUpdateCheck", v); }} />
+      {!!game.platform.update && (
+        <Choice label="Wi-Fi 下自动准备更新" note="默认关闭。打开后，连上不计流量的 Wi-Fi 且空间充足时，会在后台静默下载并校验新版安装包，准备好后提醒你手动安装" value={autoUpdate} options={[[false, "关"], [true, "开"]]}
+          onChange={(v) => { setAutoUpdate(v); void game.repo.setSetting("autoUpdate", v).then(() => { if (v) void updates.autoPrepare(); }); }} />
+      )}
       <button onClick={() => setWhatsNew(true)}>这一版新增</button>
       {whatsNew && <WhatsNewSheet onClose={() => setWhatsNew(false)} />}
       <h3 className="settings-sub">说明</h3>

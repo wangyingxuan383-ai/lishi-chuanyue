@@ -6,33 +6,43 @@ import {
   deleteSession,
   draftSetupFromCompanionText,
   escalateCompanionToAgent,
+  followCompanionRun,
   getSessionDetail,
   importHandoffMessages,
   listMemories,
   listPersonas,
   listSessions,
+  resolveCompanionAgentPolicy,
+  resolveEscalatedAgentModel,
+  resolveSessionDraftSource,
   saveCompanionMessageAsNote,
   saveMemory,
   sendCompanionMessage,
+  steerCompanionAgent,
+  stopCompanionRun,
   updateSession,
   type CompanionBookScope,
   type CompanionCitation,
   type CompanionGear,
   type CompanionHandle,
   type CompanionMessage,
+  type CompanionPiTaskSummary,
   type CompanionSession,
   type CompanionStep,
   type CompanionStreamUpdate,
 } from "../../engine/companion";
 import {
   AgentClient,
+  DEFAULT_AGENT_INPUT_TOKENS,
   agentConversationTurns,
   agentSessionProjection,
   agentSnapshotNeedsRead,
   agentTaskProjection,
   agentTaskStatus,
+  getAgentPreferences,
   mergeAgentDelta,
   mergeAgentSessionPage,
+  type AgentPolicy,
   type AgentSessionDetail,
   type AgentSnapshot,
   type AgentTask,
@@ -89,6 +99,8 @@ interface BookBrief {
 
 interface LiveStreamState {
   sessionId: string;
+  runId?: string | null;
+  optimistic?: boolean;
   mode: "send" | "edit" | "regenerate";
   userText: string;
   targetMessageId: string | null;
@@ -251,10 +263,12 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [liveStream, setLiveStream] = useState<LiveStreamState | null>(null);
-  const [agentPolicy, setAgentPolicy] = useState<"preview" | "auto-reversible">("preview");
+  const [agentPolicy, setAgentPolicy] = useState<AgentPolicy>("preview");
+  const policyTouchedRef = useRef(false);
   const [agentBusy, setAgentBusy] = useState(false);
 
   const [piDetail, setPiDetail] = useState<AgentSessionDetail | null>(null);
+  const [piTaskSummaries, setPiTaskSummaries] = useState<CompanionPiTaskSummary[]>([]);
   const [piSnapshots, setPiSnapshots] = useState<Record<string, AgentSnapshot>>({});
   const piSnapCache = useRef<Record<string, AgentSnapshot>>({});
   const piSnapVer = useRef<Record<string, string>>({});
@@ -271,6 +285,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   } | null>(null);
 
   const handleRef = useRef<CompanionHandle | null>(null);
+  const attachedRunRef = useRef<{ sessionId: string; runId: string | null } | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const bootedRef = useRef(false);
   const autoSentRef = useRef(false);
@@ -332,6 +347,64 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     [game, sessionQuery],
   );
 
+  const loadSessionRef = useRef<(sessionId: string) => Promise<unknown>>(async () => null);
+
+  const attachLiveRun = useCallback(
+    (detail: NonNullable<Awaited<ReturnType<typeof getSessionDetail>>>, runId: string) => {
+      const sid = detail.session.id;
+      if (
+        attachedRunRef.current &&
+        attachedRunRef.current.sessionId === sid &&
+        (attachedRunRef.current.runId === null || attachedRunRef.current.runId === runId)
+      ) {
+        return;
+      }
+      attachedRunRef.current = { sessionId: sid, runId };
+      const streamingMsg = detail.messages.find((m) => m.id === runId || m.status === "streaming");
+      setLiveStream({
+        sessionId: sid,
+        runId,
+        optimistic: false,
+        mode: "send",
+        userText: "",
+        targetMessageId: streamingMsg?.id ?? runId,
+        gear: streamingMsg?.gear === "research" ? "research" : "chat",
+        update: {
+          status: "streaming",
+          text: streamingMsg?.content ?? "",
+          thinking: streamingMsg?.thinking ?? "",
+          steps: streamingMsg?.steps ?? [],
+          citations: streamingMsg?.citations ?? [],
+        },
+      });
+      const handle = followCompanionRun(game, sid, runId, (u) => {
+        if (!aliveRef.current || activeSessionRef.current !== sid) return;
+        setLiveStream((prev) =>
+          prev && prev.sessionId === sid ? { ...prev, runId, update: u } : prev,
+        );
+      });
+      handleRef.current = handle;
+      void handle.done
+        .catch((err) => {
+          if (aliveRef.current && activeSessionRef.current === sid) {
+            toast(err instanceof Error ? err.message : "生成未能完成，请重试");
+          }
+        })
+        .finally(async () => {
+          if (handleRef.current === handle) handleRef.current = null;
+          if (attachedRunRef.current?.runId === runId) attachedRunRef.current = null;
+          if (!aliveRef.current) return;
+          setLiveStream((prev) => (prev?.sessionId === sid && prev.runId === runId ? null : prev));
+          if (activeSessionRef.current === sid) {
+            await loadSessionRef.current(sid);
+          }
+          await refreshSessions();
+          setBudgetTick((n) => n + 1);
+        });
+    },
+    [game, refreshSessions, toast],
+  );
+
   const loadActiveSession = useCallback(
     async (sessionId: string) => {
       activeSessionRef.current = sessionId;
@@ -339,10 +412,16 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       if (!aliveRef.current || activeSessionRef.current !== sessionId || !detail) return null;
       setSession(detail.session);
       setMessages(detail.messages);
+      setPiTaskSummaries(detail.piTasks ?? []);
+      const activeRunId = detail.activeRunId ?? detail.session.activeRunId ?? null;
+      if (activeRunId) {
+        attachLiveRun(detail, activeRunId);
+      }
       return detail;
     },
-    [game],
+    [attachLiveRun, game],
   );
+  loadSessionRef.current = loadActiveSession;
 
   // Check missing bound world or book whenever session or reference lists change.
   useEffect(() => {
@@ -397,22 +476,32 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     bootedRef.current = true;
 
     void (async () => {
-      const [loadedPersonas, refs, existingSessions] = await Promise.all([
+      const [loadedPersonas, refs, existingSessions, inheritedPolicy] = await Promise.all([
         listPersonas(game).catch(() => BUILTIN_PERSONAS),
         refreshReferenceLists(),
         listSessions(game).catch(() => [] as CompanionSession[]),
+        resolveCompanionAgentPolicy(game).catch(() => "preview" as AgentPolicy),
       ]);
       if (!aliveRef.current) return;
+      if (!policyTouchedRef.current) setAgentPolicy(inheritedPolicy);
       const availPersonas = loadedPersonas.length ? loadedPersonas : BUILTIN_PERSONAS;
       setPersonas(availPersonas);
       setSessions(existingSessions);
 
       const defaultPersonaId =
         props.personaId ?? availPersonas[0]?.id ?? BUILTIN_PERSONAS[0]?.id ?? "lingxi";
+      const chosenBootPersona = availPersonas.find((p) => p.id === defaultPersonaId) as
+        | (CompanionPersona & { boundLineId?: string | null })
+        | undefined;
+      const personaBoundLineId =
+        chosenBootPersona?.boundLineId ??
+        (typeof chosenBootPersona?.metadata?.boundLineId === "string"
+          ? chosenBootPersona.metadata.boundLineId
+          : null);
       const worldMatch = props.worldId
         ? refs.briefs.find((item) => item.world.id === props.worldId) ?? null
         : null;
-      const resolvedLineId = props.lineId ?? worldMatch?.lineId ?? null;
+      const resolvedLineId = props.lineId ?? personaBoundLineId ?? worldMatch?.lineId ?? null;
       const resolvedBookId = props.bookId ?? worldMatch?.source?.bookId ?? null;
       const initialScope: CompanionBookScope | null =
         props.handoff?.sourceScope?.mode === "chapters"
@@ -456,9 +545,18 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       }
 
       if (!targetId) {
+        const isNpcBoot =
+          chosenBootPersona?.roleKind === "npc" || defaultPersonaId.startsWith("npc:");
+        const strictLineMatch = Boolean(props.lineId || isNpcBoot || personaBoundLineId);
         const matching = existingSessions.find((s) => {
           if (props.personaId && s.personaId !== props.personaId) return false;
-          if (props.worldId) return s.boundWorldId === props.worldId;
+          if (props.worldId) {
+            if (s.boundWorldId !== props.worldId) return false;
+            if (strictLineMatch) {
+              return (s.boundLineId || "main") === (resolvedLineId || "main");
+            }
+            return true;
+          }
           if (props.bookId) return !s.boundWorldId && s.boundBookId === props.bookId;
           return !s.boundWorldId && !s.boundBookId && s.activeGear !== "agent" && !s.legacyPi;
         });
@@ -494,7 +592,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
             await escalateCompanionToAgent(game, {
               sessionId: targetId,
               text: props.prompt.trim(),
-              policy: "preview",
+              policy: policyTouchedRef.current ? agentPolicy : inheritedPolicy,
             });
             await loadActiveSession(targetId);
           } catch (err) {
@@ -609,6 +707,29 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     if (reading.autoScroll && followRef.current) scrollBottom(false);
   }, [messages, liveStream?.update.text, liveStream?.update.thinking, reading.autoScroll, scrollBottom]);
 
+  const activeLinkedTask = useMemo(() => {
+    const isLive = (st: string) =>
+      st === "starting" || st === "running" || st === "committing" || st === "compacting";
+    if (!session?.piSessionId) return null;
+    if (projectedPi?.tasks.length) {
+      for (let i = projectedPi.tasks.length - 1; i >= 0; i--) {
+        const t = projectedPi.tasks[i];
+        const st = agentTaskStatus(t, piSnapshots[t.runId]);
+        if (isLive(st)) {
+          return { id: t.id, status: st, phase: t.execution?.phase };
+        }
+      }
+      return null;
+    }
+    for (let i = piTaskSummaries.length - 1; i >= 0; i--) {
+      const s = piTaskSummaries[i];
+      if (isLive(s.status)) {
+        return { id: s.id, status: s.status, phase: undefined };
+      }
+    }
+    return null;
+  }, [piSnapshots, piTaskSummaries, projectedPi, session?.piSessionId]);
+
   function startStreamRun(
     sessionId: string,
     sendInput: {
@@ -632,8 +753,11 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         ? "regenerate"
         : "send";
 
+    attachedRunRef.current = { sessionId, runId: null };
     setLiveStream({
       sessionId,
+      runId: null,
+      optimistic: true,
       mode,
       userText: sendInput.text,
       targetMessageId: sendInput.editMessageId ?? sendInput.regenerateMessageId ?? null,
@@ -671,6 +795,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       .finally(async () => {
         clearTimeout(syncTimer);
         if (handleRef.current === handle) handleRef.current = null;
+        if (attachedRunRef.current?.sessionId === sessionId) attachedRunRef.current = null;
         if (!aliveRef.current) return;
         setLiveStream((prev) => (prev?.sessionId === sessionId ? null : prev));
         if (activeSessionRef.current === sessionId) {
@@ -683,10 +808,28 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
   const isStreaming =
     Boolean(liveStream && liveStream.sessionId === session?.id) ||
+    Boolean(session?.activeRunId) ||
     messages.some((m) => m.status === "streaming");
 
   const handleStop = () => {
     handleRef.current?.stop();
+    if (session?.id) {
+      const runId =
+        (liveStream?.sessionId === session.id ? liveStream.runId : null) ??
+        session.activeRunId ??
+        messages.find((m) => m.status === "streaming")?.id ??
+        undefined;
+      void stopCompanionRun(game, {
+        ...(runId ? { runId } : {}),
+        sessionId: session.id,
+      })
+        .then(() => {
+          if (aliveRef.current && activeSessionRef.current === session.id) {
+            void loadActiveSession(session.id);
+          }
+        })
+        .catch(() => {});
+    }
   };
 
   const handleSend = async (overrideText?: string) => {
@@ -703,14 +846,33 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       if (!overrideText) setInput("");
       setAgentBusy(true);
       try {
-        await escalateCompanionToAgent(game, {
-          sessionId: session.id,
-          text,
-          policy: agentPolicy,
-        });
-        await loadActiveSession(session.id);
-        await refreshSessions();
-        setBudgetTick((n) => n + 1);
+        if (activeLinkedTask && session.piSessionId) {
+          const steered = await steerCompanionAgent(game, {
+            sessionId: session.id,
+            piSessionId: session.piSessionId,
+            taskId: activeLinkedTask.id,
+            phase: activeLinkedTask.phase,
+            text,
+            policy: policyTouchedRef.current ? agentPolicy : undefined,
+          });
+          await loadActiveSession(session.id);
+          await refreshPiSessionNow();
+          await refreshSessions();
+          toast(
+            steered.delivery === "queued"
+              ? "补充要求已排队，当前改档完成后接着处理"
+              : "已同步给正在执行的改档任务，将在下一步处理",
+          );
+        } else {
+          await escalateCompanionToAgent(game, {
+            sessionId: session.id,
+            text,
+            policy: policyTouchedRef.current ? agentPolicy : undefined,
+          });
+          await loadActiveSession(session.id);
+          await refreshSessions();
+          setBudgetTick((n) => n + 1);
+        }
         followRef.current = true;
         requestAnimationFrame(() => scrollBottom(true));
       } catch (err) {
@@ -786,18 +948,26 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     }
   };
 
-  const handleSelectPersona = async (persona: CompanionPersona) => {
+  const handleSelectPersona = async (persona: CompanionPersona & { boundLineId?: string | null }) => {
     if (!session) return;
+    const personaLineId =
+      persona.boundLineId ??
+      (typeof persona.metadata?.boundLineId === "string" && persona.metadata.boundLineId.trim()
+        ? persona.metadata.boundLineId.trim()
+        : null);
     if (messages.length === 0) {
-      const updated = await updateSession(game, session.id, { personaId: persona.id });
+      const updated = await updateSession(game, session.id, {
+        personaId: persona.id,
+        ...(personaLineId ? { boundLineId: personaLineId } : {}),
+      });
       setSession(updated);
       await refreshSessions();
     } else {
       const created = await createSession(game, {
         personaId: persona.id,
         activeGear: persona.roleKind === "roleplay" || persona.roleKind === "npc" ? "chat" : session.activeGear,
-        boundWorldId: session.boundWorldId,
-        boundLineId: session.boundLineId,
+        boundWorldId: persona.sourceWorldId ?? session.boundWorldId,
+        boundLineId: personaLineId ?? session.boundLineId,
         boundBookId: session.boundBookId,
         bookScope: session.bookScope,
       });
@@ -842,6 +1012,9 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       setSheet(null);
       return;
     }
+    attachedRunRef.current = null;
+    handleRef.current = null;
+    setLiveStream(null);
     setEditingMsgId(null);
     await loadActiveSession(target.id);
     setSheet(null);
@@ -940,13 +1113,22 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
   const handleDraftNewGame = async (msg: CompanionMessage) => {
     try {
-      const setup = draftSetupFromCompanionText(msg.content, activePersona.name);
-      const defaults = await loadPlayDefaults(game.repo).catch(() => null);
-      const bookId = session?.boundBookId ?? boundWorldBrief?.source?.bookId ?? null;
+      const [inheritedSource, defaults] = await Promise.all([
+        resolveSessionDraftSource(game, session, props.worldId),
+        loadPlayDefaults(game.repo).catch(() => null),
+      ]);
+      const fallbackSource = inheritedSource ?? boundWorldBrief?.source ?? null;
+      const bookId = session?.boundBookId ?? props.bookId ?? fallbackSource?.bookId ?? null;
+      const setup = draftSetupFromCompanionText(msg.content, activePersona.name, {
+        worldSource: fallbackSource,
+        bookId,
+        bookScope: session?.bookScope ?? null,
+      });
+      const draftSource = setup.source ?? fallbackSource ?? (bookId ? newBinding(bookId, false) : undefined);
       const draft = normalizeOpeningDraft({
         ...EMPTY,
-        ...(bookId && !setup.source ? { source: newBinding(bookId, false) } : {}),
         ...setup,
+        ...(draftSource ? { source: draftSource } : {}),
         age: setup.age != null ? String(setup.age) : "",
         settings: {
           ...EMPTY.settings,
@@ -1072,7 +1254,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   // Merge optimistic liveStream with persisted messages cleanly (zero duplicate bubbles).
   const hasPersistedStreaming = messages.some((m) => m.status === "streaming");
   const showOptimisticPair =
-    Boolean(liveStream && liveStream.sessionId === session?.id) && !hasPersistedStreaming;
+    Boolean(liveStream && liveStream.sessionId === session?.id && liveStream.optimistic) &&
+    !hasPersistedStreaming;
 
   const piTasksById = useMemo(() => {
     const map = new Map<string, AgentTask>();
@@ -1222,6 +1405,112 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     if (snaps.length) setPiSnapshots((cur) => ({ ...cur, ...Object.fromEntries(snaps) }));
   }, [agentClient, session?.piSessionId]);
 
+  const handleContinueAgentTask = async (task: AgentTask) => {
+    if (agentBusy) return;
+    setAgentBusy(true);
+    try {
+      const prefs = await getAgentPreferences(game);
+      const directAgent = (
+        game.platform as typeof game.platform & {
+          agent?: {
+            resumeCheck?: (args: { taskId: string; limits?: unknown }) => Promise<Record<string, unknown>>;
+            resume?: (args: { taskId: string; recheck?: boolean }) => Promise<unknown>;
+          };
+        }
+      ).agent;
+
+      if (directAgent?.resumeCheck && !game.platform.execution?.agent) {
+        const rawCheck = await directAgent.resumeCheck({ taskId: task.id, limits: prefs.limits });
+        const headMoved = Boolean(
+          rawCheck.headMoved ||
+            rawCheck.needsRebase ||
+            rawCheck.conflict ||
+            (Array.isArray(rawCheck.conflicts) && rawCheck.conflicts.length > 0) ||
+            task.status === "stale",
+        );
+        if (!rawCheck.canContinue && !headMoved && rawCheck.canContinue !== undefined) {
+          throw new Error(typeof rawCheck.message === "string" ? rawCheck.message : "当前任务暂时无法继续执行");
+        }
+        if (headMoved) {
+          const ok = await ask({
+            title: "故事已有新变化，继续并重新核对？",
+            message:
+              (typeof rawCheck.message === "string" && rawCheck.message.trim()) ||
+              "在任务暂停期间，故事内容已有新进展。继续执行会按最新故事状态重新定位和校对草稿，是否继续？",
+            confirm: "重新核对并继续",
+          });
+          if (!ok) return;
+        }
+        await directAgent.resume?.({ taskId: task.id, recheck: headMoved });
+        await refreshPiSessionNow();
+        return;
+      }
+
+      let check = await agentClient.resumeCheck(task.id, prefs.limits);
+      if (check.routeChanged) {
+        const backToOrigin = await ask({
+          title: "故事已切换到其他路线",
+          message:
+            check.message ||
+            "这项改档任务原本在另一条故事路线上进行。要回到原路线继续核对吗？",
+          confirm: "回到原路线继续",
+        });
+        if (!backToOrigin) return;
+        await agentClient.selectOriginalRoute(task.id, check.currentLineId);
+        if (session?.boundWorldId) game.notifyAgentChange(session.boundWorldId);
+        check = await agentClient.resumeCheck(task.id, prefs.limits);
+      }
+
+      if (check.reasonCode === "budget_exhausted") {
+        throw new Error(check.message || "已达到助手执行上限，可在改档详情的设置中调整上限后继续");
+      }
+
+      const checkRec = check as unknown as Record<string, unknown>;
+      const headMoved = Boolean(
+        check.needsRebase ||
+          checkRec.headMoved ||
+          checkRec.conflict ||
+          (Array.isArray(checkRec.conflicts) && checkRec.conflicts.length > 0) ||
+          task.status === "stale",
+      );
+
+      if (!check.canContinue && !headMoved) {
+        throw new Error(check.message || "当前任务暂时无法继续执行");
+      }
+
+      if (headMoved) {
+        const confirmed = await ask({
+          title: "故事已有新变化，继续并重新核对？",
+          message:
+            (typeof check.message === "string" && check.message.trim()) ||
+            "在任务暂停期间，故事内容已有新进展。继续执行会按最新故事进度重新定位并核对草稿，是否继续？",
+          confirm: "重新核对并继续",
+        });
+        if (!confirmed) return;
+      }
+
+      const resolvedModel = game.llm
+        ? await resolveEscalatedAgentModel(game, prefs)
+        : task.model;
+      await agentClient.continue(
+        task.id,
+        undefined,
+        prefs.limits,
+        prefs.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
+        resolvedModel,
+        prefs.modelUrl ?? "",
+        headMoved,
+        (resolvedModel as { profileId?: string } | undefined)?.profileId,
+        prefs.thinkingMode,
+      );
+      await refreshPiSessionNow();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "继续执行未成功");
+    } finally {
+      if (aliveRef.current) setAgentBusy(false);
+    }
+  };
+
   const renderAgentTaskCard = (rawTask: AgentTask) => {
     const snap = piSnapshots[rawTask.runId];
     const task = agentTaskProjection(rawTask, snap);
@@ -1311,7 +1600,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                     await refreshPiSessionNow();
                     toast("已撤回这批修改");
                   })
-                  .catch((e) => toast(e instanceof Error ? e.message : "撤回未成功"))
+              .catch((e) => toast(e instanceof Error ? e.message : "撤回未成功"))
               }
             >
               撤回修改
@@ -1320,12 +1609,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           {resumable && (
             <button
               type="button"
-              onClick={() =>
-                void agentClient
-                  .continue(task.id)
-                  .then(() => refreshPiSessionNow())
-                  .catch((e) => toast(e instanceof Error ? e.message : "继续执行未成功"))
-              }
+              disabled={agentBusy}
+              onClick={() => void handleContinueAgentTask(task)}
             >
               继续执行
             </button>
@@ -1947,15 +2232,18 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                   改档方式：
                   {agentPolicy === "preview"
                     ? `先看修改预览，确认后才写入《${boundWorldBrief.world.title}》`
-                    : `直接生效并保留《${boundWorldBrief.world.title}》恢复点`}
+                    : agentPolicy === "auto"
+                      ? `直接采用修改并写入《${boundWorldBrief.world.title}》`
+                      : `直接生效并保留《${boundWorldBrief.world.title}》恢复点`}
                 </span>
                 <div className="row gap-1">
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() =>
-                      setAgentPolicy((p) => (p === "preview" ? "auto-reversible" : "preview"))
-                    }
+                    onClick={() => {
+                      policyTouchedRef.current = true;
+                      setAgentPolicy((p) => (p === "preview" ? "auto-reversible" : "preview"));
+                    }}
                   >
                     切换为{agentPolicy === "preview" ? "直接生效（可撤回）" : "先看预览"}
                   </button>
@@ -2005,7 +2293,9 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                 placeholder={
                   activeGear === "agent"
                     ? boundWorldBrief && !boundWorldMissing
-                      ? `说明要帮改《${boundWorldBrief.world.title}》的哪处…`
+                      ? activeLinkedTask
+                        ? "补充说明给正在执行的改档任务…"
+                        : `说明要帮改《${boundWorldBrief.world.title}》的哪处…`
                       : "先点上方“选择故事”，再说要改什么…"
                     : activeGear === "research"
                       ? `向${activePersona.name}查原著、设定或史料…`

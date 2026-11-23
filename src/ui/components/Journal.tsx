@@ -7,7 +7,9 @@ import type { Chapter, StoryNode, TimelineEvent, WorldState } from "../../engine
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
 import { ThreadsSection } from "./Continuity";
+import { EmptyVignette } from "./ChineseArt";
 import { Icon } from "./Icon";
+import { NovelExportSheet } from "./NovelExportSheet";
 import type { EraContext } from "../../engine/era";
 import type { GameClock } from "../../engine/calendar/clock";
 import { monthLabel, readDate } from "../../engine/calendar/date";
@@ -159,15 +161,16 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
   );
 }
 
-export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSave, onContinuitySaved }: {
-  worldId: string; headId: string; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save; onContinuitySaved?: () => void | Promise<void>;
+export function Journal({ worldId, headId, lineId, chapterEvery, busy, state, era, onSave, onContinuitySaved }: {
+  worldId: string; headId: string; lineId?: string; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save; onContinuitySaved?: () => void | Promise<void>;
 }) {
-  const { game, toast } = useApp();
+  const { game, push, toast } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
   const [pending, setPending] = useState<{ from: number; turns: StoryNode[] }>({ from: 1, turns: [] });
   const [open, setOpen] = useState<Row | null>(null);
   const [writing, setWriting] = useState(false);
   const [event, setEvent] = useState<{ event: TimelineEvent | null } | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const now = state.time.elapsedMinutes;
   const timeline = state.timeline ?? [];
 
@@ -201,6 +204,14 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
   const to = pending.from + pending.turns.length - 1;
   return (
     <div className="stack">
+      <div className="row wrap gap-1">
+        <button type="button" className="ghost small grow" onClick={() => push({ name: "reader", worldId, lineId })}>
+          <Icon name="book-open" size={16} />小说模式精读
+        </button>
+        <button type="button" className="ghost small grow" onClick={() => setExportOpen(true)}>
+          <Icon name="download" size={16} />导出成小说
+        </button>
+      </div>
       <ThreadsSection worldId={worldId} headId={headId} busy={busy} onSaved={onContinuitySaved} />
       {rows.length ? rows.map((row) => (
         <button key={row.chapter.id} className="item-row codex-item" disabled={busy} onClick={() => setOpen(row)}>
@@ -210,7 +221,7 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
           </div>
           <span className="person-side"><small>第 {row.from}～{row.to} 回合</small></span>
         </button>
-      )) : <p className="muted">{chapterEvery ? `还没有章节。每过 ${chapterEvery} 回合，AI 会把这段剧情写成一章摘要，帮它记住更早的事。` : "自动写章节摘要已关闭，可以手动把最近的回合写成一章。"}</p>}
+      )) : <EmptyVignette kind="blank-bamboo" title="还没有写下章回摘要" hint={chapterEvery ? `每过 ${chapterEvery} 回合，AI 会把这段剧情整理成一章摘要，帮它记住更早的事。` : "自动写章节摘要已关闭，可以手动把最近的回合写成一章。"} compact />}
       {pending.turns.length > 0 && <section className="stack gap-2">
         <b>本章进行中 · 第 {pending.from}～{to} 回合</b>
         {pending.turns.map((t, i) => <small key={t.id} className="muted">{logLine(t, pending.from + i)}</small>)}
@@ -234,6 +245,7 @@ export function Journal({ worldId, headId, chapterEvery, busy, state, era, onSav
       </section>}
       {open && <ChapterSheet row={open} worldId={worldId} onClose={() => setOpen(null)} onChanged={() => void load()} />}
       {event && <EventSheet event={event.event} others={timeline} era={era} onClose={() => setEvent(null)} onSave={onSave} />}
+      {exportOpen && <NovelExportSheet worldId={worldId} lineId={lineId} onClose={() => setExportOpen(false)} />}
     </div>
   );
 }

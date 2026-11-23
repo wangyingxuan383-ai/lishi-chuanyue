@@ -258,6 +258,15 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
   return canvas;
 }
 
+function dataUrlToPngBytes(dataUrl: string): Uint8Array {
+  const comma = dataUrl.indexOf(",");
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 /** Preview, layout choice and saving. */
 export function CardSheet({ content, onClose, title = "书摘卡", controls }: { content: CardContent; onClose: () => void; title?: string; controls?: ReactNode }) {
   const { game, toast } = useApp();
@@ -265,6 +274,7 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
   const browser = game.platform.name === "web-dev";
+  const hasBinaryExport = typeof game.platform.files.exportBytes === "function";
   const isAndroid = game.platform.name === "android" || (typeof navigator !== "undefined" && /android/i.test(navigator.userAgent));
   useEffect(() => {
     // After the fonts the page uses are ready, so the canvas draws with them.
@@ -289,6 +299,12 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
       toast("已保存图片");
       return;
     }
+    if (game.platform.files.exportBytes) {
+      if (await game.platform.files.exportBytes(`${name}.png`, dataUrlToPngBytes(url), "image/png").catch(() => false)) {
+        toast("已保存 PNG 图片");
+      }
+      return;
+    }
     const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(content.heading ?? content.title)}</title></head>`
       + `<body style="margin:0;background:#efe5cf"><img alt="${escapeHtml(content.heading ?? content.title)}" src="${url}" style="display:block;max-width:100%;margin:0 auto"></body></html>`;
     if (await game.platform.files.exportText(`${name}.html`, html).catch(() => false)) {
@@ -310,7 +326,7 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
           {url ? <img src={url} alt="书摘卡预览" onLoad={(e) => { const box = e.currentTarget.parentElement; if (box) box.scrollLeft = box.scrollWidth; }} /> : <p className={error ? "notice" : "muted"} role={error ? "alert" : undefined}>{error || "正在画…"}</p>}
         </div>
         <button className="primary" disabled={!url} onClick={() => void save()}>保存图片</button>
-        {!browser && (
+        {!browser && !hasBinaryExport && (
           <p className="muted m-0 small">
             {isAndroid
               ? "手机上暂时不能直接存进相册：会存成一个网页文件（.html），用浏览器打开就能看到这张图，再长按图片保存。"

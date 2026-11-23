@@ -1,15 +1,14 @@
 /* Settings pages. */
-/* ---------- settings (R11-T006) ---------- */
 .settings { gap: 16px; }
-.settings-group h2 { margin: 4px 0 8px; font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.1em; color: var(--accent); }
+.settings-group h2 { margin: 4px 0 8px; font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.1em; color: var(--accent-text); }
 .settings-list { display: grid; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); overflow: hidden; }
 .settings-entry { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; text-align: left; border: none; border-radius: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 12px 14px; min-height: 60px; }
 .settings-entry:last-child { border-bottom: none; }
 .settings-entry span:first-child { display: grid; gap: 2px; min-width: 0; }
 .settings-entry b { font-family: var(--serif); font-weight: 600; font-size: 16px; }
 .settings-entry small { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-entry > span:last-child { color: var(--accent); font-size: 18px; }
-.setting { display: grid; gap: 8px; }
+.settings-entry > span:last-child { color: var(--accent-text); font-size: 18px; flex-shrink: 0; }
+.setting { display: grid; gap: 8px; min-width: 0; }
 .setting-head { display: grid; gap: 2px; }
 .setting-head b { font-family: var(--serif); font-weight: 600; font-size: 15px; color: var(--fg); }
 .setting-head small { color: var(--muted); font-size: 13px; line-height: 1.6; }
@@ -22,10 +21,9 @@
 .status-card small { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .status-card .row { margin-top: 4px; flex-wrap: wrap; }
 .release-notes { white-space: pre-wrap; }
-/* 用量与花费: the month's estimate first, then the budget and the prices. */
 .spend-card { display: grid; gap: 6px; padding: 14px 16px; border: 1px solid var(--line); border-top: 3px double var(--line); border-radius: 3px; background: var(--surface); }
 .spend-card small { color: var(--muted); font-size: 13px; line-height: 1.6; }
-.spend-total { margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.spend-total { margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .spend-total b { font-family: var(--serif); font-size: 24px; font-weight: 600; letter-spacing: 0.02em; }
 .spend-total span { color: var(--muted); font-size: 14px; white-space: nowrap; }
 .spend-card .bar { height: 4px; margin-top: 2px; }
@@ -33,28 +31,28 @@
 .price-row { align-items: flex-start; }
 .settings .field-line > input { padding-right: 40px; }
 .steps { margin: 0; padding-left: 22px; color: var(--fg); font-size: 14px; line-height: 1.8; }
-.theme-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-/* 生成档位 (play/DepthSheet.tsx): the badge beside Aa and the three cards. */
+.theme-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 340px) { .theme-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .depth-btn span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid currentColor; font-family: var(--serif); font-size: 13px; line-height: 1; }
-.depth-btn.depth-fast span { color: var(--gain, var(--accent)); }
-.depth-btn.depth-deep span { color: var(--accent); background: var(--accent-soft); }
+.depth-btn.depth-fast span { color: var(--gain, var(--accent-text)); }
+.depth-btn.depth-deep span { color: var(--accent-text); background: var(--accent-soft); }
 .depth-cards { display: grid; gap: 10px; }
-.depth-card { display: flex; align-items: flex-start; gap: 12px; padding: 12px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); justify-content: flex-start; }
-.depth-card[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.depth-card { display: flex; align-items: flex-start; gap: 12px; padding: 12px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); justify-content: flex-start; white-space: normal; }
+.depth-card[aria-checked="true"] { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 .depth-mark { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--line); font-family: var(--serif); font-size: 18px; color: var(--muted); }
-.depth-card[aria-checked="true"] .depth-mark { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-.depth-text { display: grid; gap: 3px; }
+.depth-card[aria-checked="true"] .depth-mark { border-color: var(--accent-text); color: var(--accent-text); background: var(--accent-soft); }
+.depth-text { display: grid; gap: 3px; min-width: 0; }
 .depth-text b { font-family: var(--serif); font-size: 16px; font-weight: 600; }
 .depth-text b small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 4px; }
 .depth-text > small { font-size: 13px; color: var(--muted); line-height: 1.55; }
-/* 字号与主题 (play/ReadingQuick.tsx). */
+
 .reading-btn span { font-family: var(--serif); font-size: 17px; letter-spacing: 0.02em; }
 .size-stepper { display: flex; align-items: center; gap: 12px; }
 .size-stepper button { flex: 1; display: inline-flex; align-items: baseline; justify-content: center; gap: 2px; font-size: 16px; }
 .size-a { font-family: var(--serif); font-size: 20px; } .size-a.small-a { font-size: 15px; }
 .size-now { min-width: 3em; text-align: center; font-family: var(--serif); font-size: 16px; }
 .theme-card { display: grid; justify-items: center; gap: 6px; padding: 10px 4px; font-size: 14px; }
-.theme-card[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.theme-card[aria-pressed="true"] { border-color: var(--accent-text); color: var(--accent-text); background: var(--accent-soft); }
 .theme-card .swatch { width: 36px; height: 24px; border-radius: 3px; border: 1px solid var(--line); }
 .theme-paper .swatch { background: #efe5cf; }
 .theme-day .swatch { background: #faf7f0; }
@@ -71,21 +69,21 @@
 .service-main { display: block; width: 100%; text-align: left; border: none; background: transparent; padding: 12px 14px 4px; min-height: auto; }
 .service-main h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 17px; font-family: var(--serif); }
 .service-main p { margin: 0; font-size: 14px; color: var(--muted); word-break: break-all; }
-.service-actions { padding: 0 6px 4px; gap: 0; }
+.service-actions { padding: 0 6px 4px; gap: 0; flex-wrap: wrap; }
 
 .welcome { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 3px; background: var(--surface); }
 .welcome p { margin: 0; line-height: 1.7; }
 .welcome b { font-family: var(--serif); }
 .welcome .link { justify-self: start; }
 .guide-body p { margin: 0 0 10px; line-height: 1.8; font-size: 15px; }
-.guide-body b { font-family: var(--serif); color: var(--accent); }
+.guide-body b { font-family: var(--serif); color: var(--accent-text); }
 .home-links { justify-content: center; flex-wrap: wrap; gap: 4px; }
 
-/* ---------- R28 第二批 (D160): the service card, entry icons, style cards ---------- */
 .service-hero {
   display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px; text-align: left;
   border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface);
 }
+@media (max-width: 359px) { .service-hero { padding: 12px; gap: 10px; } .service-hero-icon { width: 40px; height: 40px; } }
 .service-hero-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0; background: var(--accent); color: var(--on-accent); }
 .service-hero-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .service-hero-text small { font-size: 12px; color: var(--muted); letter-spacing: 0.1em; }
@@ -95,15 +93,15 @@
 .service-hero-state i { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
 .service-hero.ok .service-hero-state { color: var(--gain); }
 .service-hero.ok .service-hero-state i { background: var(--gain); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gain) 20%, transparent); }
-.settings-entry .entry-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0; background: var(--accent-soft); color: var(--accent); }
+.settings-entry .entry-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0; background: var(--accent-soft); color: var(--accent-text); }
 .settings-entry > span.entry-icon + span { flex: 1; min-width: 0; display: grid; gap: 2px; }
 
 .style-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.style-card { display: grid; gap: 4px; justify-items: start; padding: 10px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); }
-.style-card[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+@media (max-width: 340px) { .style-cards { grid-template-columns: minmax(0, 1fr); } }
+.style-card { display: grid; gap: 4px; justify-items: start; padding: 10px; text-align: left; border-radius: var(--radius-lg); border: 2px solid var(--line); background: var(--surface); white-space: normal; }
+.style-card[aria-pressed="true"] { border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 .style-card b { font-family: var(--serif); font-size: 16px; margin-top: 6px; }
 .style-card small { font-size: 12px; color: var(--muted); line-height: 1.5; }
-/* Each preview draws its own style's colours, whatever style is in use. */
 .style-preview { position: relative; display: block; width: 100%; height: 118px; border-radius: 8px; overflow: hidden; }
 .style-preview i { position: absolute; left: 10%; display: block; }
 .style-scroll .style-preview { background: #efe5cf; box-shadow: inset 0 0 0 1px #d9c8a7; }

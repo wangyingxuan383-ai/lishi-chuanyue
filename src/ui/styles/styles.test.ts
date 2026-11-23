@@ -47,4 +47,19 @@ describe("stylesheets", () => {
     expect(companionCss).toContain(':root[data-style="ink"] .companion-gear-btn[aria-pressed="true"]');
     expect(companionCss).toContain(':root[data-style="ink"] .companion-gear-btn');
   });
+
+  it("enforces R35 contrast, specificity, motion=off, and life-stamp decoupling invariants", () => {
+    const tokensCss = readFileSync(join(dir, "styles", "tokens.css"), "utf8");
+    expect(tokensCss).toContain("#ee7a64");
+
+    const inkCss = readFileSync(join(dir, "styles", "ink.css"), "utf8");
+    expect(inkCss).toContain(':where(:root[data-style="ink"]) button');
+
+    const motionCss = readFileSync(join(dir, "styles", "motion.css"), "utf8");
+    expect(motionCss).toContain("animation-delay: 0ms !important");
+
+    const lifeTsx = readFileSync(join(dir, "components", "LifeSheet.tsx"), "utf8");
+    expect(lifeTsx).toContain("CinnabarSeal");
+    expect(lifeTsx).not.toContain('className="stamp"');
+  });
 });

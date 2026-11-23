@@ -2,9 +2,33 @@ import {assertSqlWritable,restoreWithFence} from "./sql-maintenance";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { exit, onBackButtonPress } from "@tauri-apps/api/app";
-import { PlatformError, type Failure, type InstallStatus, type Platform, type StreamEvent, type UpdateEvent, type PdfText, type NotifyPrefs } from "./types";
+import {
+  PlatformError,
+  type Failure,
+  type InstallStatus,
+  type NotificationStatus,
+  type NotifyPrefs,
+  type OemFamily,
+  type PdfText,
+  type Platform,
+  type StreamEvent,
+  type SystemSettingsTarget,
+  type UpdateEnvironmentStatus,
+  type UpdateEvent,
+  type UpdatePackageStatus,
+} from "./types";
 import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
 import { cancellable } from "./bookFiles";
+
+const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
+
+function encodeBase64Chunked(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += 32768) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + 32768)));
+  }
+  return btoa(chunks.join(""));
+}
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -48,6 +72,7 @@ function listenBack() {
 export async function createTauriPlatform(): Promise<Platform> {
   const info = await call<{ platform: string }>("platform_info");
   const name = info.platform === "android" || info.platform === "windows" ? info.platform : "other";
+  const supportsReminders = name === "android" || name === "windows";
   return {
     name,
     execution: {
@@ -109,6 +134,13 @@ export async function createTauriPlatform(): Promise<Platform> {
     },
     files: {
       exportWorld: (worldId, suggestedName) => call("file_export_world", { worldId, suggestedName }),
+      exportBytes: async (defaultName, bytes, mime) => {
+        if (bytes.byteLength > MAX_EXPORT_BYTES) {
+          throw new PlatformError("file_too_large", "文件超过 64 MiB");
+        }
+        const bytesBase64 = encodeBase64Chunked(bytes);
+        return call<boolean>("file_export_bytes", { defaultName, bytesBase64, mime });
+      },
       grantAgentResource: (directory, writable) => call("file_grant_agent", { directory, writable }),
       exportText: (suggestedName, text) => call("file_export_text", { suggestedName, text }),
       importText: () => call("file_import_text"),
@@ -131,9 +163,9 @@ export async function createTauriPlatform(): Promise<Platform> {
         if (signal?.aborted) throw new DOMException("已取消", "AbortError");
         const requestId = crypto.randomUUID();
         const abort = () => { void call("file_cancel_book", { requestId }).catch(() => {}); };
-        let raw = ""; for (let i = 0; i < bytes.length; i += 32768) raw += String.fromCharCode(...bytes.subarray(i, i + 32768));
+        const data = encodeBase64Chunked(bytes);
         signal?.addEventListener("abort", abort, { once: true });
-        try { return await cancellable(call<PdfText>("file_extract_pdf", { data: btoa(raw), requestId }), signal); }
+        try { return await cancellable(call<PdfText>("file_extract_pdf", { data, requestId }), signal); }
         finally { signal?.removeEventListener("abort", abort); }
       },
     },
@@ -147,30 +179,36 @@ export async function createTauriPlatform(): Promise<Platform> {
       fetchText: (url) => call("plugin:updates|fetch_text", { url }),
       install: async (request) => (await call<{ status: InstallStatus }>("plugin:updates|install", request)).status,
       canInstall: () => call("plugin:updates|can_install"),
+      packageStatus: (request) => call<UpdatePackageStatus>("plugin:updates|package_status", request),
+      environmentStatus: () => call<UpdateEnvironmentStatus>("plugin:updates|environment_status"),
       devSource: () => call("plugin:updates|dev_source"),
       setDevSource: (url) => call("plugin:updates|set_dev_source", { url }),
     },
     system: {
       storyCommitted: (completionId) => call("plugin:notifications|story_committed", { completionId }),
-      setKeepAwake: (enabled) => name === "android" ? setNativeKeepAwake(enabled) : setBrowserKeepAwake(enabled),
-      requestNotifications: () => call("plugin:notifications|request_notification_permission"),
-      notificationStatus: () => call("plugin:notifications|notification_status"),
-      openSystemSettings: (which) => call(which === "notifications" ? "plugin:notifications|open_notification_settings" : "plugin:notifications|open_app_settings"),
-      openUrl: (url) => call("plugin:notifications|open_url", { url }),
-      ...(name === "android" ? {
-        backgroundStatus: () => call<{ ignoringBattery: boolean; xiaomi: boolean }>("plugin:notifications|background_status"),
-        requestBatteryExemption: () => call<void>("plugin:notifications|request_battery_exemption"),
-        openAutostart: () => call<void>("plugin:notifications|open_autostart_settings"),
+      ...(supportsReminders ? {
+        notifyDone: (payload: { completionId: string; worldId?: string; title?: string; excerpt?: string }) =>
+          call<void>("plugin:notifications|notify_done", payload),
+        notifyFailed: (payload: { worldId?: string; title?: string; status?: string; line?: string; runId?: string }) =>
+          call<void>("plugin:notifications|notify_failed", payload),
         setNotifyPrefs: (prefs: NotifyPrefs) => call<void>("plugin:notifications|set_notify_prefs", { ...prefs }),
-        takeLaunchTarget: () => call<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>("plugin:notifications|take_launch_target"),
         reminderStatus: () => call<{ sound: boolean; audible: boolean }>("plugin:notifications|reminder_status"),
         testReminder: () => call<void>("plugin:notifications|test_reminder"),
+      } : {}),
+      setKeepAwake: (enabled) => name === "android" ? setNativeKeepAwake(enabled) : setBrowserKeepAwake(enabled),
+      requestNotifications: () => call("plugin:notifications|request_notification_permission"),
+      notificationStatus: () => call<NotificationStatus>("plugin:notifications|notification_status"),
+      openSystemSettings: (target: SystemSettingsTarget) => call("plugin:notifications|open_system_settings", { target }),
+      openUrl: (url) => call("plugin:notifications|open_url", { url }),
+      ...(name === "android" ? {
+        backgroundStatus: () => call<{ ignoringBattery: boolean; xiaomi: boolean; oem?: OemFamily }>("plugin:notifications|background_status"),
+        requestBatteryExemption: () => call<void>("plugin:notifications|request_battery_exemption"),
+        openAutostart: () => call<void>("plugin:notifications|open_autostart_settings"),
+        takeLaunchTarget: () => call<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>("plugin:notifications|take_launch_target"),
         openReminderSettings: () => call<void>("plugin:notifications|open_reminder_settings"),
       } : {}),
       setSystemBars: (background, dark) =>
         name === "android" ? call("plugin:notifications|set_system_bars", { background, dark }) : Promise.resolve(),
-      // Android: a native haptic, which needs no VIBRATE permission and follows the
-      // system's touch-feedback switch. Elsewhere the web API, where it exists.
       haptic: () =>
         name === "android"
           ? call<boolean>("plugin:notifications|haptic")

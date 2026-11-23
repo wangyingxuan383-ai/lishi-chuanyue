@@ -79,11 +79,11 @@ pub struct Tuning {
 impl Tuning {
     pub fn app(loopback: bool) -> Self {
         Self {
-            headers: Duration::from_secs(30),
-            idle: Duration::from_secs(30),
+            headers: Duration::from_secs(45),
+            idle: Duration::from_secs(45),
             backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
-            attempts: 6,
+            attempts: 10,
             loopback,
         }
     }
@@ -181,6 +181,44 @@ pub enum Check {
     Missing,
     /// Present but not the expected size or hash.
     Differs,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PackageState {
+    Verified(u64),
+    Partial(u64),
+    Missing,
+    Differs,
+}
+
+/// Inspects an already-downloaded package or resumable `.part` without network access.
+pub async fn inspect(file: &Path, max_size: u64, sha256: &[u8; 32]) -> PackageState {
+    match hash_file(file.to_path_buf(), max_size).await {
+        Ok(Some((hasher, length))) => {
+            if length > 0 && hasher.finalize()[..] == sha256[..] {
+                return PackageState::Verified(length);
+            }
+            return PackageState::Differs;
+        }
+        Ok(None) => return PackageState::Differs,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return PackageState::Differs,
+    }
+    let meta = meta_path(file);
+    let expected_hex = hex(sha256);
+    let matches_meta = fs::read(&meta)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PartMeta>(&bytes).ok())
+        .is_some_and(|found| found.sha256 == expected_hex && found.size <= max_size);
+    if matches_meta {
+        if let Ok(metadata) = fs::metadata(part_path(file)).await {
+            if metadata.len() > 0 && metadata.len() <= max_size {
+                return PackageState::Partial(metadata.len());
+            }
+        }
+    }
+    PackageState::Missing
 }
 
 /// Is `file` exactly the published package?

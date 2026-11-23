@@ -116,4 +116,19 @@ describe("export as a novel", () => {
     expect(minutes.get(root.id)).toBe(0);
     expect(minutes.get(a.id)).toBe(90);
   });
+
+  it("never swallows Chapter 1 when chapters[0] starts at opening and keeps fastforward nodes", () => {
+    const opening = node({ kind: "opening", actionMode: null, narrative: "长安城门初开。" });
+    const ff = node({ kind: "fastforward", actionMode: "skip", actionText: "过了三日", narrative: "三日后风雪渐紧。" });
+    const t2 = node({ kind: "turn", actionMode: "do", actionText: "入市", narrative: "西市人声鼎沸。" });
+    const text = storyText({
+      title: "长安雪",
+      path: [opening, ff, t2],
+      chapters: [chapter({ title: "雪落皇城", firstNodeId: opening.id, lastNodeId: ff.id })],
+    });
+    expect(text).toContain("第一回　雪落皇城");
+    expect(text).not.toContain("\n楔子\n");
+    expect(text).toContain("三日后风雪渐紧。");
+    expect(text).toContain("第二回（待续）");
+  });
 });

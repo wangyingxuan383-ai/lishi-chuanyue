@@ -1,6 +1,5 @@
-// 这一版新增 (R13-T104): a quiet line on the home screen until it is read or
-// dismissed, remembered per installed version, and the same notes from
-// 设置 → 关于与更新. Never a pop-up that interrupts the start.
+// 这一版新增: a quiet line on the home screen until it is read or dismissed,
+// remembered per installed version, and the same notes from 设置 → 关于与更新.
 import { useEffect, useState } from "react";
 import { useApp } from "../app/context";
 import { Icon } from "./Icon";
@@ -8,11 +7,11 @@ import { Sheet } from "./Sheet";
 
 /** What this version adds, in the player's words: a name and one line each. Update with the version. */
 const NOTES: [string, string][] = [
-  ["全新「伴聊」上线", "在首页或故事里随时打开伴聊：畅聊脑暴、查原著资料、改存档三档合一，还能记下你的偏好，聊好的点子一键拿去开新局。"],
-  ["故事人物随时私聊", "在人物志点开任意角色即可发起私聊，按角色当时的知情范围与性格对谈，不会改动正文存档。"],
-  ["提示词与原著体验打磨", "全面升级写作、查证与纠错说明，支持上中下分卷、带副标题楔子与长文件头 PDF 导入，修复多处细节问题。"],
+  ["内建轻阅读器与左右翻页", "支持直接沉浸阅读书库中的原著与本局故事小说版，可随时在「上下滚动」与「左右翻页」间切换，还支持三色划线批注与一键做书摘卡。"],
+  ["导出正式小说与电子书", "一键把走过的故事排成干净的章回小说（自动隐去操作指令、补齐章回、可选人物小传与大事纪年），支持标准 EPUB 电子书、精排文本与 Markdown。"],
+  ["双首页焕新、人物脉络与双端提醒", "升级山水场景与立体线装书架双首页、国风印鉴题签与全套线条图标，新增人物出场脉络速览、手机与电脑有声横幅提醒，以及可选的无线网自动准备更新。"],
 ];
-const SUMMARY = "全新「伴聊」、故事人物私聊、写作说明与多卷原著优化";
+const SUMMARY = "内建阅读器、左右翻页、导出 EPUB 小说、双首页焕新与双端有声提醒";
 
 export function WhatsNewSheet({ onClose }: { onClose: () => void }) {
   return (
@@ -50,8 +49,6 @@ export function WhatsNewNotice() {
     }
   };
   if (!visible) return null;
-  // The sheet is a sibling of the line, not inside it: a fixed sheet inside an
-  // animated box would be laid out within that box instead of the screen.
   return (
     <>
       <div className="whats-new">

@@ -30,6 +30,8 @@ import {
   type Draft, type PlayStyle,
 } from "./openingDraft";
 import { Icon } from "../components/Icon";
+import { EmptyVignette } from "../components/ChineseArt";
+import { useNotificationGate } from "./play/useNotificationGate";
 import { ChallengeSetup, PlayStyles, ScriptOutline } from "../components/ModeSetup";
 import { SourceLibrary, SourceSetup, SourceSummary } from "../components/Sources";
 import { newBinding, type SourceBinding } from "../../engine/sources/types";
@@ -68,13 +70,14 @@ function MyTemplateCard({ t, onUse, onMenu }: { t: UserTemplate; onUse: () => vo
       <button className="template-card" {...press} aria-label={`我的开局：${t.name}`}>
         <b>{t.name}</b><small>我的开局</small>{t.draft.premise && <span className="hook">{t.draft.premise}</span>}
       </button>
-      <button className="icon-btn my-template-menu" aria-label={`“${t.name}”的更多操作`} onClick={onMenu}>⋯</button>
+      <button className="icon-btn my-template-menu" aria-label={`“${t.name}”的更多操作`} onClick={onMenu}><Icon name="more" size={20} /></button>
     </div>
   );
 }
 
 export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) {
   const { game, replace, pop, toast, ask, askName } = useApp();
+  const notifications = useNotificationGate(game, toast);
   const [draft, setDraftState] = useState<Draft>(EMPTY);
   const free = draft.settings.mode === "free";
   const templates = free ? FREE_TEMPLATES : TEMPLATES;
@@ -539,11 +542,11 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
         <MenuSheet
           onClose={() => setSheet(null)}
           items={[
-            { label: "复制开局设定（发给朋友）", onSelect: () => void share() },
-            { label: "保存为文件", onSelect: () => void exportFile() },
-            { label: "导入开局设定", onSelect: () => { setPasted(""); setSheet("import"); } },
-            { label: "从文件导入", onSelect: async () => { importFrom(await game.platform.files.importText().catch(() => null)); } },
-            { label: "清空重填", danger: true, onSelect: clearForm },
+            { icon: "copy", label: "复制开局设定（发给朋友）", onSelect: () => void share() },
+            { icon: "download", label: "保存为文件", onSelect: () => void exportFile() },
+            { icon: "paste", label: "导入开局设定", onSelect: () => { setPasted(""); setSheet("import"); } },
+            { icon: "import", label: "从文件导入", onSelect: async () => { importFrom(await game.platform.files.importText().catch(() => null)); } },
+            { icon: "trash", label: "清空重填", danger: true, onSelect: clearForm },
           ]}
         />
       )}
@@ -552,9 +555,9 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
           title={templateMenu.name}
           onClose={() => setTemplateMenu(null)}
           items={[
-            { label: "用这个开局", onSelect: () => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(templateMenu.draft as unknown as Record<string, unknown>)); setSheet(null); } },
-            { label: "改名", onSelect: () => void renameTemplate(templateMenu) },
-            { label: "删除", danger: true, onSelect: () => void deleteTemplate(templateMenu) },
+            { icon: "play", label: "用这个开局", onSelect: () => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(templateMenu.draft as unknown as Record<string, unknown>)); setSheet(null); } },
+            { icon: "pen", label: "改名", onSelect: () => void renameTemplate(templateMenu) },
+            { icon: "trash", label: "删除", danger: true, onSelect: () => void deleteTemplate(templateMenu) },
           ]}
         />
       )}
@@ -576,7 +579,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     : draft.play === "challenge" && !draft.challenge.goal.trim() ? "挑战目标"
     : draft.openingMode === "player" && !draft.openingText.trim() ? "开场" : null;
   const startOrPoint = () => {
-    if (!missing) { void start(draft); return; }
+    if (!missing) { void notifications.gate(() => void start(draft)); return; }
     setPointed(missing);
     // A grey button that does nothing is a dead end: take the player to what is missing (AUDIT_V4 3.7).
     if (missing === "原著书籍") setSourceLibrary(true);
@@ -593,7 +596,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     <div className="stack">
       {sheet === "mine" ? <>
         <div className="segmented" role="group" aria-label="我的开局分类">{["全部", "历史", "自由", "同人"].map((name) => <button key={name} aria-pressed={mineFilter === name} onClick={() => setMineFilter(name)}>{name}</button>)}</div>
-        {!mineShown.length && <p className="muted">这里还没有保存的开局。填好后点“存为我的开局”，以后可以直接选用。</p>}
+        {!mineShown.length && <EmptyVignette kind="book-stack" title="这里还没有保存的开局" hint="填好设定后点下方“存为我的开局”，以后可以直接选用。" compact />}
         {mineShown.map((m) => <MyTemplateCard key={m.id} t={m} onUse={() => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(m.draft as unknown as Record<string, unknown>)); setSheet(null); setError(null); void (async () => { if (m.draft.source && !await getBook(game.repo, m.draft.source.bookId)) toast("这个开局的参考书籍不在本机，其他设定已保留，请重新绑定书籍。"); })(); }} onMenu={() => setTemplateMenu(m)} />)}
       </> : <>
         {free && !draft.fanfic && !draft.source?.fanfic && <details><summary>原创题材包</summary><div className="stack mt-2">
@@ -768,6 +771,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
       {genre && <GenreOpeningPreview pack={genre.pack} has={{ premise: !!draft.premise.trim(), identity: !!draft.identity.trim(), hint: !!draft.hint.trim() }} stale={genre.revision !== revision.current} onApply={useGenre} onClose={() => setGenre(null)} />}
       {sourceLibrary && <SourceLibrary onClose={() => setSourceLibrary(false)} onSelect={(book) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source: newBinding(book.id, true), fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } })); setSourceLibrary(false); }} />}
       {menuSheets}
+      {notifications.sheet}
     </div>
   );
 }

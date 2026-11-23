@@ -226,6 +226,25 @@ export async function createWebPlatform(): Promise<Platform> {
         if (!response.ok || result.error) throw new Error(result.error || "PDF 提取失败，请启动本地开发桥");
         return { pages: result.pages, headings: result.headings ?? [] };
       },
+      async exportBytes(name, bytes, mime) {
+        if (bytes.byteLength > 64 * 1024 * 1024) {
+          throw new PlatformError("file_too_large", "文件超过 64 MiB");
+        }
+        const lower = name.trim().toLowerCase();
+        const resolvedMime =
+          lower.endsWith(".epub") ? "application/epub+zip"
+          : lower.endsWith(".png") ? "image/png"
+          : lower.endsWith(".md") ? "text/markdown"
+          : lower.endsWith(".txt") ? "text/plain"
+          : mime || "application/octet-stream";
+        const copy = new Uint8Array(bytes.byteLength);
+        copy.set(bytes);
+        const url = URL.createObjectURL(new Blob([copy], { type: resolvedMime }));
+        const link = Object.assign(document.createElement("a"), { href: url, download: name });
+        link.click();
+        URL.revokeObjectURL(url);
+        return true;
+      },
       async exportText(suggestedName, text) {
         const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
         const link = Object.assign(document.createElement("a"), { href: url, download: suggestedName });
