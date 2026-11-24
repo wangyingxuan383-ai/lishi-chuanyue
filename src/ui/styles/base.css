@@ -1,5 +1,6 @@
 /* Elements, layout utilities, forms and the global motion switch. Tokens are in tokens.css. */
-:root[data-font="serif"] .story-text { font-family: var(--serif); letter-spacing: 0.03em; }
+.story-text { font-family: var(--story-font, var(--sans)); letter-spacing: var(--story-tracking, 0.03em); }
+:root[data-font="sans"] .story-text, :root[data-font="round"] .story-text { letter-spacing: var(--story-tracking, 0.015em); }
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #root { height: 100%; }

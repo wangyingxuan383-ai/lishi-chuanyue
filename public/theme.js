@@ -1,10 +1,12 @@
-// The reading theme before anything draws (R09): night readers see no paper flash.
-// Kept outside the bundle so it runs first; App.tsx writes lishi.theme.
+// Applies the saved look, reading theme, and motion preference before first paint
+// so night readers never see a light flash and reduced/off motion holds from frame 0.
 try {
+  var root = document.documentElement;
   var theme = localStorage.getItem("lishi.theme");
   if (theme === "auto") theme = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "night" : "paper";
-  if (theme === "paper" || theme === "day" || theme === "night") document.documentElement.dataset.theme = theme;
-  // 墨韵 or 宣纸书卷 (D160), so the first frame already has the right look.
-  document.documentElement.dataset.style = localStorage.getItem("lishi.style") === "ink" ? "ink" : "scroll";
+  if (theme === "paper" || theme === "day" || theme === "night") root.dataset.theme = theme;
+  root.dataset.style = localStorage.getItem("lishi.style") === "ink" ? "ink" : "scroll";
+  var motion = localStorage.getItem("lishi.motion");
+  if (motion === "rich" || motion === "simple" || motion === "off") root.dataset.motion = motion;
 } catch (e) { /* storage may be unavailable */ }
 document.documentElement.dataset.font = "serif";

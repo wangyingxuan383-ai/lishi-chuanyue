@@ -728,6 +728,89 @@ async fn haptic<R: Runtime>(app: tauri::AppHandle<R>) -> Result<bool, String> {
     }
 }
 
+fn clamp_tts_rate(rate: f32) -> f32 {
+    if rate.is_finite() {
+        rate.clamp(0.5, 2.5)
+    } else {
+        1.0
+    }
+}
+
+#[tauri::command]
+async fn set_volume_page_turn<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>(
+                "set_volume_page_turn",
+                serde_json::json!({ "enabled": enabled }),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn tts_speak<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    utterance_id: String,
+    text: String,
+    rate: f32,
+) -> Result<serde_json::Value, String> {
+    if utterance_id.trim().is_empty() || utterance_id.len() > 256 || text.trim().is_empty() {
+        return Ok(serde_json::json!({ "ok": false }));
+    }
+    let clamped_rate = clamp_tts_rate(rate);
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>(
+                "tts_speak",
+                serde_json::json!({
+                    "utteranceId": utterance_id,
+                    "text": text,
+                    "rate": clamped_rate,
+                }),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, clamped_rate);
+        Ok(serde_json::json!({ "ok": false }))
+    }
+}
+
+#[tauri::command]
+async fn tts_stop<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<AndroidNotifications<R>>()
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("tts_stop", serde_json::json!({}))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("notifications")
         .invoke_handler(tauri::generate_handler![
@@ -750,7 +833,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             take_launch_target,
             reminder_status,
             test_reminder,
-            open_reminder_settings
+            open_reminder_settings,
+            set_volume_page_turn,
+            tts_speak,
+            tts_stop
         ])
         .setup(|app, api| {
             #[cfg(target_os = "android")]
@@ -772,7 +858,16 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_hex_color, remember_completion};
+    use super::{clamp_tts_rate, is_hex_color, remember_completion};
+
+    #[test]
+    fn tts_rate_clamping_handles_bounds_and_non_finite() {
+        assert_eq!(clamp_tts_rate(1.0), 1.0);
+        assert_eq!(clamp_tts_rate(0.1), 0.5);
+        assert_eq!(clamp_tts_rate(4.0), 2.5);
+        assert_eq!(clamp_tts_rate(f32::NAN), 1.0);
+        assert_eq!(clamp_tts_rate(f32::INFINITY), 1.0);
+    }
 
     #[test]
     fn system_bar_colour_is_plain_hex_only() {

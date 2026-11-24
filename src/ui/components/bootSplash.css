@@ -1,0 +1,468 @@
+/* Single-stage true dual-scroll parting ritual (R36 R3-A):
+   - `holding` (ready === false): closed Xuan-paper / pine-smoke scroll curtains mounted with
+     5.5px-6px Song brocade silk trim (.boot-silk-trim) and 9px/11px cylindrical Zitan-rosewood
+     scroll rods capped with 22px gilded bronze finials (.boot-scroll-rod), plus gentle breathing
+     seal & astrolabe arc.
+   - `parting` (ready === true, 740ms total):
+     * 0-180ms: cinnabar seal executes stone-stamp micro-pause (1.05 -> 0.97 -> 1.0) & dual
+       golden-ink water-wash halo rings bloom;
+     * 180-740ms (560ms): left/right scroll curtains + silk trims + gilded rods unroll off-screen
+       (-104% / +104%) along physical scroll inertia curve cubic-bezier(0.34, 0.08, 0.22, 1);
+     * 0-340ms (0%->46%): central seal & astrolabe arc remain crisp at opacity: 1 while the
+       scrolls open ~140px-180px at midpoint, then smoothly disperse over 46%->84%.
+   - 100% GPU compositor-only (`transform` + `opacity`). */
+
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  --boot-rod-w: 9px;
+  --boot-trim-w: 6px;
+  --boot-arc-hi: #f2cf82;
+  --boot-arc-mid: #c8963e;
+  --boot-arc-lo: #8e6324;
+  --boot-rod-spec: #a36a42;
+  --boot-rod-hi: #7c4d2f;
+  --boot-rod-mid: #4e2d1a;
+  --boot-rod-lo: #231209;
+  --boot-finial-hi: #fff3c4;
+  --boot-finial-mid: #dfb15b;
+  --boot-finial-lo: #6c4918;
+  --boot-silk-bg: linear-gradient(180deg, rgba(226, 203, 160, 0.72) 0%, rgba(212, 184, 134, 0.62) 50%, rgba(222, 198, 152, 0.72) 100%);
+  --boot-silk-weft: rgba(168, 126, 56, 0.22);
+  --boot-silk-gold-line: rgba(196, 150, 70, 0.56);
+  --boot-curtain-shadow: rgba(26, 16, 8, 0.30);
+}
+
+@media (min-width: 700px) {
+  .boot-splash {
+    --boot-rod-w: 11px;
+  }
+}
+
+:root[data-theme="night"] .boot-splash {
+  --boot-arc-hi: #fff2c6;
+  --boot-arc-mid: #e2bd72;
+  --boot-arc-lo: #9c712c;
+  --boot-rod-spec: #7c5838;
+  --boot-rod-hi: #593e27;
+  --boot-rod-mid: #342316;
+  --boot-rod-lo: #140e0a;
+  --boot-finial-hi: #fff4cc;
+  --boot-finial-mid: #d9ac59;
+  --boot-finial-lo: #593b12;
+  --boot-silk-bg: linear-gradient(180deg, rgba(56, 44, 30, 0.88) 0%, rgba(42, 33, 22, 0.84) 50%, rgba(54, 42, 28, 0.88) 100%);
+  --boot-silk-weft: rgba(226, 188, 112, 0.16);
+  --boot-silk-gold-line: rgba(226, 189, 114, 0.46);
+  --boot-curtain-shadow: rgba(0, 0, 0, 0.66);
+}
+
+/* Zero-animation pure-ground silent layer when motion === "off" and !ready */
+.boot-splash-silent {
+  background-color: var(--bg);
+  cursor: default;
+}
+
+/* Left & right Xuan-paper / pine-smoke scroll curtains */
+.boot-splash-half {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: calc(50% + 1px);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(95% 65% at 50% 45%, color-mix(in srgb, #d4a04c 9%, transparent), transparent 74%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 45%, transparent) 0%, transparent 18%, transparent 82%, color-mix(in srgb, var(--line) 28%, transparent) 100%),
+    var(--grain);
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+.boot-splash-half.left {
+  left: 0;
+  box-shadow: 14px 0 34px var(--boot-curtain-shadow);
+}
+
+.boot-splash-half.right {
+  right: 0;
+  box-shadow: -14px 0 34px var(--boot-curtain-shadow);
+}
+
+:root[data-theme="night"] .boot-splash-half {
+  background-image:
+    radial-gradient(90% 58% at 50% 45%, rgba(217, 180, 106, 0.12), transparent 74%),
+    linear-gradient(180deg, rgba(255, 244, 214, 0.03) 0%, transparent 20%, transparent 80%, rgba(0, 0, 0, 0.25) 100%);
+}
+
+/* In holding stage, suppress cross-seam drop shadow so the closed seam reads like a unified mounted scroll */
+.boot-splash[data-stage="holding"] .boot-splash-half {
+  box-shadow: none;
+}
+
+/* 5.5px-6px Song brocade silk mounting trim (.boot-silk-trim) with woven weft & muted-gold thread border */
+.boot-silk-trim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--boot-trim-w);
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(
+      45deg,
+      transparent 0px,
+      transparent 3px,
+      var(--boot-silk-weft) 3px,
+      var(--boot-silk-weft) 4px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0px,
+      transparent 3px,
+      var(--boot-silk-weft) 3px,
+      var(--boot-silk-weft) 4px
+    ),
+    var(--boot-silk-bg);
+}
+
+.boot-splash-half.left .boot-silk-trim {
+  right: var(--boot-rod-w);
+  border-left: 1px solid var(--boot-silk-gold-line);
+  box-shadow: inset 1px 0 0 rgba(255, 244, 214, 0.24);
+}
+
+.boot-splash-half.right .boot-silk-trim {
+  left: var(--boot-rod-w);
+  border-right: 1px solid var(--boot-silk-gold-line);
+  box-shadow: inset -1px 0 0 rgba(255, 244, 214, 0.24);
+}
+
+/* Cylindrical Zitan-rosewood scroll rods (.boot-scroll-rod, 9px / 11px wide) with 22px gilded bronze finials */
+.boot-scroll-rod {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--boot-rod-w);
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-size:
+    100% 22px,
+    100% 22px,
+    100% 22px,
+    100% 22px,
+    100% 100%,
+    100% 100%;
+  background-position:
+    0 0,
+    0 100%,
+    0 0,
+    0 100%,
+    0 0,
+    0 0;
+  background-image:
+    /* Top 22px gilded finial collar rings (bronze tip + crown gleam + recessed groove + raised gilt collar) */
+    linear-gradient(
+      180deg,
+      rgba(36, 20, 6, 0.58) 0px,
+      rgba(255, 248, 220, 0.34) 2.5px,
+      rgba(255, 248, 220, 0.04) 6px,
+      rgba(0, 0, 0, 0) 14.5px,
+      rgba(34, 18, 5, 0.72) 15.5px,
+      rgba(34, 18, 5, 0.72) 17px,
+      rgba(255, 244, 200, 0.46) 18px,
+      rgba(255, 236, 172, 0.26) 20.5px,
+      rgba(18, 9, 3, 0.86) 22px
+    ),
+    /* Bottom 22px mirrored gilded finial collar rings */
+    linear-gradient(
+      0deg,
+      rgba(36, 20, 6, 0.58) 0px,
+      rgba(255, 248, 220, 0.34) 2.5px,
+      rgba(255, 248, 220, 0.04) 6px,
+      rgba(0, 0, 0, 0) 14.5px,
+      rgba(34, 18, 5, 0.72) 15.5px,
+      rgba(34, 18, 5, 0.72) 17px,
+      rgba(255, 244, 200, 0.46) 18px,
+      rgba(255, 236, 172, 0.26) 20.5px,
+      rgba(18, 9, 3, 0.86) 22px
+    ),
+    /* Top 22px 3D cylindrical burnished-gold body */
+    linear-gradient(
+      90deg,
+      var(--boot-finial-lo) 0%,
+      var(--boot-finial-mid) 24%,
+      var(--boot-finial-hi) 47%,
+      var(--boot-finial-mid) 74%,
+      var(--boot-finial-lo) 100%
+    ),
+    /* Bottom 22px 3D cylindrical burnished-gold body */
+    linear-gradient(
+      90deg,
+      var(--boot-finial-lo) 0%,
+      var(--boot-finial-mid) 24%,
+      var(--boot-finial-hi) 47%,
+      var(--boot-finial-mid) 74%,
+      var(--boot-finial-lo) 100%
+    ),
+    /* Subtle Zitan wood-grain vertical texture along shaft */
+    repeating-linear-gradient(
+      180deg,
+      rgba(255, 230, 190, 0.03) 0px,
+      rgba(255, 230, 190, 0.03) 14px,
+      rgba(16, 8, 3, 0.08) 14px,
+      rgba(16, 8, 3, 0.08) 29px
+    ),
+    /* Cylindrical 3D specular Zitan-rosewood shaft */
+    linear-gradient(
+      90deg,
+      var(--boot-rod-lo) 0%,
+      var(--boot-rod-mid) 24%,
+      var(--boot-rod-hi) 44%,
+      var(--boot-rod-spec) 52%,
+      var(--boot-rod-mid) 76%,
+      var(--boot-rod-lo) 100%
+    );
+}
+
+.boot-splash-half.left .boot-scroll-rod {
+  right: 0;
+  border-left: 1px solid rgba(232, 194, 116, 0.48);
+  border-right: 1px solid rgba(18, 9, 3, 0.58);
+}
+
+.boot-splash-half.right .boot-scroll-rod {
+  left: 0;
+  border-right: 1px solid rgba(232, 194, 116, 0.48);
+  border-left: 1px solid rgba(255, 240, 198, 0.28);
+}
+
+/* Parting stage (740ms total): 180ms-740ms authentic heavy-scroll inertia parting */
+.boot-splash[data-stage="parting"] .boot-splash-half.left {
+  animation: boot-part-left 560ms cubic-bezier(0.34, 0.08, 0.22, 1) 180ms both;
+}
+
+.boot-splash[data-stage="parting"] .boot-splash-half.right {
+  animation: boot-part-right 560ms cubic-bezier(0.34, 0.08, 0.22, 1) 180ms both;
+}
+
+/* Central homologous emblem (148x148, exact 1:1 match with index.html .first-frame) */
+.boot-splash-center {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 148px;
+  height: 148px;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.boot-splash-center::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--bg) 86%, transparent) 0%,
+    color-mix(in srgb, var(--bg) 48%, transparent) 48%,
+    transparent 74%
+  );
+  pointer-events: none;
+}
+
+.boot-splash[data-stage="parting"] .boot-splash-center {
+  animation: boot-emblem-release 740ms ease-out both;
+}
+
+/* Dual golden-ink water-wash halo rings (`晕墨`) */
+.boot-splash-halo {
+  position: absolute;
+  border-radius: 50%;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+.boot-splash-halo.outer {
+  width: 98px;
+  height: 98px;
+  border: 1.6px solid color-mix(in srgb, #d49b42 66%, var(--accent));
+  background: radial-gradient(circle, rgba(212, 155, 66, 0.16) 0%, rgba(181, 43, 29, 0.09) 56%, transparent 76%);
+}
+
+.boot-splash-halo.inner {
+  width: 80px;
+  height: 80px;
+  border: 1.15px solid rgba(232, 194, 118, 0.62);
+}
+
+:root[data-theme="night"] .boot-splash-halo.outer {
+  border-color: rgba(232, 195, 120, 0.68);
+  background: radial-gradient(circle, rgba(232, 195, 120, 0.20) 0%, rgba(196, 47, 32, 0.11) 56%, transparent 76%);
+}
+
+.boot-splash[data-stage="holding"] .boot-splash-halo.outer {
+  animation: boot-halo-breathe 2200ms ease-in-out infinite;
+}
+
+.boot-splash[data-stage="parting"] .boot-splash-halo.outer {
+  animation: boot-halo-ring 590ms cubic-bezier(0.18, 0.82, 0.26, 1) 25ms both;
+}
+
+.boot-splash[data-stage="parting"] .boot-splash-halo.inner {
+  animation: boot-halo-ring 530ms cubic-bezier(0.18, 0.82, 0.26, 1) 75ms both;
+}
+
+/* Luminous brushed-gold astrolabe arc */
+.boot-splash-arc {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--boot-arc-mid);
+  will-change: transform, opacity;
+}
+
+.boot-splash[data-stage="holding"] .boot-splash-arc {
+  animation: boot-arc-breathe 2600ms ease-in-out infinite;
+}
+
+.boot-splash[data-stage="parting"] .boot-splash-arc {
+  animation: boot-arc-settle 740ms cubic-bezier(0.22, 0.8, 0.24, 1) both;
+}
+
+/* Central chamfered cinnabar seal */
+.boot-splash-seal {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 148px;
+  height: 148px;
+  will-change: transform, opacity;
+  filter: drop-shadow(0 8px 20px var(--shadow));
+}
+
+.boot-splash[data-stage="holding"] .boot-splash-seal {
+  animation: boot-seal-breathe 2200ms ease-in-out infinite;
+}
+
+.boot-splash[data-stage="parting"] .boot-splash-seal {
+  animation: boot-seal-stamp 180ms cubic-bezier(0.24, 0.86, 0.3, 1) both;
+}
+
+/* Holding gentle breathing animations */
+@keyframes boot-seal-breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.98;
+  }
+  50% {
+    transform: scale(1.024);
+    opacity: 1;
+  }
+}
+
+@keyframes boot-arc-breathe {
+  0%, 100% {
+    transform: rotate(0deg) scale(1);
+    opacity: 0.92;
+  }
+  50% {
+    transform: rotate(4deg) scale(1.018);
+    opacity: 1;
+  }
+}
+
+@keyframes boot-halo-breathe {
+  0%, 100% {
+    transform: scale(0.94);
+    opacity: 0.18;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.36;
+  }
+}
+
+/* Parting 740ms choreography:
+   - 0-180ms: poised stone-seal stamp micro-pause (1.05 -> 0.97 -> 1.0)
+   - 0-340ms (0%->46%): seal & arc stay crystal-clear at opacity: 1 while dual halos frame the ~150px gap
+   - 340-622ms (46%->84%): smooth ink-wash release to opacity: 0, scale(1.06) */
+@keyframes boot-seal-stamp {
+  0% {
+    transform: scale(1.05);
+  }
+  62% {
+    transform: scale(0.97);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes boot-halo-ring {
+  0% {
+    opacity: 0;
+    transform: scale(0.76);
+  }
+  26% {
+    opacity: 0.90;
+  }
+  56% {
+    opacity: 0.72;
+    transform: scale(1.48);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.92);
+  }
+}
+
+@keyframes boot-arc-settle {
+  0% {
+    opacity: 0.98;
+    transform: rotate(-8deg) scale(0.98);
+  }
+  24%, 46% {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+  84%, 100% {
+    opacity: 1;
+    transform: rotate(9deg) scale(1.04);
+  }
+}
+
+@keyframes boot-emblem-release {
+  0%, 46% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  84%, 100% {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+}
+
+@keyframes boot-part-left {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-104%, 0, 0);
+  }
+}
+
+@keyframes boot-part-right {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(104%, 0, 0);
+  }
+}

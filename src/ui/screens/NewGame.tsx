@@ -81,7 +81,6 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   const [draft, setDraftState] = useState<Draft>(EMPTY);
   const free = draft.settings.mode === "free";
   const templates = free ? FREE_TEMPLATES : TEMPLATES;
-  const [loaded, setLoaded] = useState(false);
   const [mine, setMine] = useState<UserTemplate[]>([]);
   const [idea, setIdeaState] = useState("");
   const ideaRef = useRef("");
@@ -143,15 +142,17 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
       const stored = await game.repo.getSetting<SavedDraft | null>("newgameDraft", null);
       if (!live) return;
       const { idea: savedIdea, ...saved } = stored ?? ({} as SavedDraft);
-      if (savedIdea) { ideaRef.current = savedIdea; setIdeaState(savedIdea); }
+      if (savedIdea && !ideaRef.current) { ideaRef.current = savedIdea; setIdeaState(savedIdea); }
       const d = await loadPlayDefaults(game.repo);
       setDefaults(d);
       const base = fresh(d);
       const restored = stored ? normalizeOpeningDraft({ ...base, ...saved, settings: { ...base.settings, ...saved.settings } }) : base;
       const pendingSource = await game.repo.getSetting<SourceBinding | null>("source:pending", null);
       if (pendingSource) { restored.source = pendingSource; restored.fanfic = pendingSource.fanfic; if (pendingSource.fanfic) { restored.settings.mode = "free"; restored.settings.clockStyle = "elapsed"; } await game.repo.setSetting("source:pending", null); setSheet(null); }
-      draftRef.current = restored;
-      setDraftState(restored);
+      if (revision.current === 0) {
+        draftRef.current = restored;
+        setDraftState(restored);
+      }
       if (stored && (saved.name || saved.premise || saved.identity || saved.source || saved.fanfic)) setSheet(null);
       // 再挑战一次: the same opening starts at once, as a game's retry does.
       const autostart = await game.repo.getSetting<boolean>("newgameAutostart", false);
@@ -162,7 +163,6 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
         const saved = JSON.parse(r.json as string) as Draft;
         return { id: r.id as string, name: r.name as string, draft: normalizeOpeningDraft(saved as unknown as Record<string, unknown>) };
       }));
-      setLoaded(true);
       if (resumeRunId) {
         const saved = await game.unfinishedOpening(resumeRunId).catch(() => null);
         if (live && saved) {
@@ -520,8 +520,6 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
       </div>
     );
   }
-  if (!loaded) return null;
-
   const filters = ["全部", ...(free ? [] : [...GROUPS, "其他"]), ...(mine.length ? ["我的"] : [])];
   const shownTemplates = group === "全部" ? (allTemplates ? templates : templates.slice(0, 6))
     : group === "我的" ? []
@@ -636,9 +634,9 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
         </div>
         {/* Three ways to start, as cards (R28 第二批); the names stay the buttons' accessible names. */}
         <div className={`starter-row${draft.fanfic ? " two" : ""}`}>
-          <button className="starter" aria-label="随便穿" disabled={assisting} onClick={() => void randomStart()}><span className="starter-icon"><Icon name="dice" size={22} /></span><b>随便穿</b><small>交给 AI 定一个开局</small></button>
-          <button className="starter" aria-label="我的开局" onClick={() => setSheet("mine")}><span className="starter-icon"><Icon name="bookmark" size={22} /></span><b>我的开局</b><small>用存好的设定</small></button>
-          {!draft.fanfic && <button className="starter" aria-label="开局灵感" onClick={() => setSheet("ideas")}><span className="starter-icon"><Icon name="sparkle" size={22} /></span><b>开局灵感</b><small>从题材出发改一改</small></button>}
+          <button className="starter" aria-label="随便穿" disabled={assisting} onClick={() => void randomStart()}><span className="starter-icon"><Icon name="dice" size={22} /></span><b>随便穿</b><small>AI 随机生成开局</small></button>
+          <button className="starter" aria-label="我的开局" onClick={() => setSheet("mine")}><span className="starter-icon"><Icon name="bookmark" size={22} /></span><b>我的开局</b><small>调取存好的设定</small></button>
+          {!draft.fanfic && <button className="starter" aria-label="开局灵感" onClick={() => setSheet("ideas")}><span className="starter-icon"><Icon name="sparkle" size={22} /></span><b>开局灵感</b><small>{free ? "从世界题材挑选" : "从朝代题材挑选"}</small></button>}
         </div>
         <section className="stack gap-2">
           <textarea rows={2} value={idea} onChange={(e) => setIdea(e.target.value)} aria-label="一句话想法" placeholder={draft.fanfic ? "想在原著中怎样开始？也可以先选书，让 AI 帮你构思。" : "写一句想法，或直接填写下面的设定"} />

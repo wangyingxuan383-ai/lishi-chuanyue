@@ -7,7 +7,7 @@ import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
 import { AppProvider, DEFAULT_READING, STYLE_KEY, THEME_KEY, normalizeReading, resolvedTheme, useToast, type AppValue, type Reading, type Route } from "./app/context";
 import { Dialog, type DialogRequest } from "./components/Dialog";
-import { Seal } from "./components/Seal";
+import { BootSplash as RawBootSplash } from "./components/BootSplash";
 import { archiveProblems, importWorld } from "../engine/archive";
 import { useMouse } from "./components/useMedia";
 import { useShortcuts } from "./components/useShortcuts";
@@ -23,6 +23,8 @@ import Guide from "./screens/Guide";
 import { applyFallback, llmFor } from "./app/llmConfig";
 import { updateStore } from "./app/updateStore";
 
+const BootSplash: (props: { ready?: boolean }) => ReturnType<typeof RawBootSplash> = RawBootSplash;
+
 /** Each style and theme's --bg (tokens.css), for the phone's status and navigation bars. */
 const BAR_COLORS = {
   scroll: { paper: "#efe5cf", day: "#faf7f0", night: "#131518" },
@@ -35,16 +37,22 @@ function applyReading(r: Reading) {
   root.dataset.theme = theme;
   root.dataset.style = r.style;
   void getPlatform().then((p) => p.system.setSystemBars(BAR_COLORS[r.style][theme], theme === "night")).catch(() => {});
-  root.dataset.font = r.serif ? "serif" : "sans";
+  root.dataset.font = r.fontFamily;
   root.dataset.motion = r.motion;
   root.dataset.indent = r.indent ? "on" : "off";
   root.dataset.haptics = r.haptics ? "on" : "off";
-  try { localStorage.setItem(THEME_KEY, r.theme); localStorage.setItem(STYLE_KEY, r.style); } catch { /* storage may be unavailable */ }
+  try {
+    localStorage.setItem(THEME_KEY, r.theme);
+    localStorage.setItem(STYLE_KEY, r.style);
+    localStorage.setItem("lishi.motion", r.motion);
+  } catch { /* storage may be unavailable */ }
   root.style.setProperty("--story-size", `${r.size}px`);
   // Sans text reads better a little tighter (AUDIT_V4 10.3).
   root.style.setProperty("--story-leading", String(r.serif ? r.leading : Math.max(1.6, r.leading - 0.2)));
   root.style.setProperty("--story-paragraph", `${r.paragraph}em`);
   root.style.setProperty("--story-measure", `${r.measure}em`);
+  root.style.setProperty("--story-tracking", `${r.letterSpacing}em`);
+  root.style.setProperty("--story-pad-x", r.pageMargin === "compact" ? "14px" : r.pageMargin === "wide" ? "30px" : "20px");
 }
 
 /**
@@ -146,8 +154,7 @@ export default function App() {
       setProfileState(active);
       // Reattaches runs still being written; it never opens a story by itself.
       if (active) await game.recoverPending().catch(() => {});
-      const welcomed = await game.repo.getSetting("welcomed", false);
-      setStack(!active && !welcomed ? [{ name: "home" }, { name: "setup", first: true }] : [{ name: "home" }]);
+      setStack([{ name: "home" }]);
       setBoot({ platform, game });
     })().catch((e) => setError(String(e?.message ?? e)));
   }, []);
@@ -160,10 +167,21 @@ export default function App() {
   const scrolls = useRef<number[]>([]);
   const push = useCallback((r: Route) => {
     clearToast(); markNavigation("push");
-    if (r.name === "play") nameForTransition(document.querySelector(`[data-world-id="${r.worldId}"] .book-art`), "story-card");
+    const esc = (id: string) => (typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(id) : id);
+    if (r.name === "play") {
+      nameForTransition(document.querySelector(`[data-world-id="${esc(r.worldId)}"] .book-art`), "story-card");
+    } else if (r.name === "reader" && r.bookId) {
+      const id = esc(r.bookId);
+      nameForTransition(
+        document.querySelector(`[data-book-id="${id}"].opening .book-art`) ??
+          document.querySelector(`[data-book-id="${id}"] .book-art`),
+        "story-card",
+      );
+    }
     scrolls.current.push(window.scrollY);
     withViewTransition("push", () => { flushSync(() => setStack((s) => [...s, r])); window.scrollTo?.(0, 0); }, () => {
       if (r.name === "play") nameForTransition(document.querySelector(".preserved-play:not([data-inactive]) > *"), "story-card");
+      else if (r.name === "reader" && r.bookId) nameForTransition(document.querySelector(".reader-screen"), "story-card");
     });
   }, [clearToast]);
   const replace = useCallback((r: Route) => { clearToast(); markNavigation("push"); withViewTransition("push", () => { flushSync(() => setStack((s) => [...s.slice(0, -1), r])); window.scrollTo?.(0, 0); }); }, [clearToast]);
@@ -176,6 +194,8 @@ export default function App() {
   // R29-T006: a tapped "写好了" or "没写完" opens that story, at start, on resume, and from foreground taps.
   const topRoute = useRef<Route>(stack.at(-1) ?? { name: "home" });
   topRoute.current = stack.at(-1) ?? { name: "home" };
+  const focusModeRef = useRef(reading.focusMode);
+  focusModeRef.current = reading.focusMode;
   useEffect(() => {
     if (!boot?.platform.system.takeLaunchTarget) return;
     const { platform, game } = boot;
@@ -256,7 +276,7 @@ export default function App() {
           const headNode = await game.repo.getNode(line.nodeId).catch(() => null);
           if (!headNode || headNode.kind === "edit" || headNode.status === "interrupted") continue;
           notifiedNodes.add(headNode.id);
-          if (live) {
+          if (live && !(topRoute.current.name === "reader" && focusModeRef.current)) {
             toast(`《${w.title}》下一段写好了`, {
               label: "去看",
               run: () => push({ name: "play", worldId: wid }),
@@ -345,28 +365,28 @@ export default function App() {
     "F1": { inInputs: true, run: () => { if (!value || here === "guide") return false; value.push({ name: "guide" }); } },
   }, mouse && !!value && here !== "play");
 
-  if (error) return <div className="screen-body"><p>启动失败：{error}</p></div>;
-  if (!value) {
+  if (error) {
     return (
-      <div className="boot" role="status" aria-label="正在打开">
-        <Seal />
-        <p className="boot-name">穿越小说模拟</p>
-        <p className="muted">正在打开…</p>
+      <div className="screen-body stack">
+        <p>启动失败：{error}</p>
+        <button type="button" onClick={() => window.location.reload()}>重试</button>
       </div>
     );
   }
-  const route = value.route;
+  const route = value?.route ?? null;
   // Keep the player's ordinary draft, loaded passages and viewport alive
   // while the separate assistant, companion, or reader page is open.
-  const underlyingPlay = [...stack].reverse().find((item) => item.name === "play");
-  const assistantRoute = [...stack].reverse().find(
-    (item) =>
-      item.name === "agent" ||
-      (item.name === "companion" && !!item.worldId) ||
-      (item.name === "reader" && (!!item.worldId || !!underlyingPlay)),
-  );
+  const underlyingPlay = value ? [...stack].reverse().find((item) => item.name === "play") : undefined;
+  const assistantRoute = value
+    ? [...stack].reverse().find(
+        (item) =>
+          item.name === "agent" ||
+          (item.name === "companion" && !!item.worldId) ||
+          (item.name === "reader" && (!!item.worldId || !!underlyingPlay)),
+      )
+    : undefined;
   const storyId =
-    route.name === "play"
+    route?.name === "play"
       ? route.worldId
       : assistantRoute
         ? ("worldId" in assistantRoute && assistantRoute.worldId
@@ -374,23 +394,28 @@ export default function App() {
             : underlyingPlay?.worldId ?? null)
         : null;
   return (
-    <AppProvider value={value}>
-      {route.name === "home" && <Home key={homeKey} />}
-      {route.name === "setup" && <Setup first={route.first} profileId={route.profileId} />}
-      {route.name === "newgame" && <NewGame resumeRunId={route.resumeRunId} />}
-      {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} resumeRunId={route.name === "play" ? route.resumeRunId : undefined} /></div>}
-      {route.name === "agent" && <AgentConversation key={`${route.worldId}:${route.lineId}`} route={route} />}
-      {route.name === "companion" && <CompanionScreen {...route} />}
-      {route.name === "reader" && <ReaderScreen key={`${route.bookId ?? ""}:${route.worldId ?? ""}:${route.lineId ?? ""}`} {...route} />}
-      {route.name === "settings" && <Settings />}
-      {route.name === "guide" && <Guide />}
-      {toastState && (
-        <div className={`toast${toastState.leaving ? " leaving" : ""}`} role="status">
-          <span>{toastState.text}</span>
-          {toastState.action && <button className="toast-action" onClick={() => { const run = toastState.action!.run; clearToast(); run(); }}>{toastState.action.label}</button>}
-        </div>
+    <>
+      {value && route && (
+        <AppProvider value={value}>
+          {route.name === "home" && <Home key={homeKey} />}
+          {route.name === "setup" && <Setup first={route.first} profileId={route.profileId} />}
+          {route.name === "newgame" && <NewGame resumeRunId={route.resumeRunId} />}
+          {storyId && <div className="preserved-play" data-inactive={route.name !== "play" || undefined} inert={route.name !== "play" || undefined} aria-hidden={route.name !== "play" || undefined}><Play key={storyId} worldId={storyId} active={route.name === "play"} resumeRunId={route.name === "play" ? route.resumeRunId : undefined} /></div>}
+          {route.name === "agent" && <AgentConversation key={`${route.worldId}:${route.lineId}`} route={route} />}
+          {route.name === "companion" && <CompanionScreen {...route} />}
+          {route.name === "reader" && <ReaderScreen key={`${route.bookId ?? ""}:${route.worldId ?? ""}:${route.lineId ?? ""}`} {...route} />}
+          {route.name === "settings" && <Settings />}
+          {route.name === "guide" && <Guide />}
+          {toastState && (
+            <div className={`toast${toastState.leaving ? " leaving" : ""}`} role="status">
+              <span>{toastState.text}</span>
+              {toastState.action && <button className="toast-action" onClick={() => { const run = toastState.action!.run; clearToast(); run(); }}>{toastState.action.label}</button>}
+            </div>
+          )}
+          {dialog && <Dialog key={dialog.id} request={dialog} onDone={() => setDialog(null)} />}
+        </AppProvider>
       )}
-      {dialog && <Dialog key={dialog.id} request={dialog} onDone={() => setDialog(null)} />}
-    </AppProvider>
+      <BootSplash ready={!!value} />
+    </>
   );
 }

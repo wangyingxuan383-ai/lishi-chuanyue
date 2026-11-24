@@ -9,7 +9,7 @@ import { challengeInputOf, challengeView } from "../../engine/modes";
 import type { TurnRecord } from "../../engine/state/apply";
 import * as tree from "../../engine/tree";
 import type { ActionMode, Challenge, Script, StoryNode, World, WorldState } from "../../engine/types";
-import { useApp, useBack } from "../app/context";
+import { PAPER_TONES, resolvedTheme, useApp, useBack } from "../app/context";
 import { BookmarkSheet, LinesSheet } from "../components/Lines";
 import { Panel, type Tab } from "../components/Panel";
 import { TimeCorrectionSheet } from "../components/TimeCorrectionSheet";
@@ -125,6 +125,35 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const scroller = useRef<HTMLDivElement>(null);
   const shownPage = useRef(active);
   shownPage.current = active;
+  const readingRef = useRef(reading);
+  readingRef.current = reading;
+
+  // Sync :root[data-reader-tone] & system bars only while Play is the active top route
+  useEffect(() => {
+    if (!active) return;
+    const root = document.documentElement;
+    if (reading.paperTone !== "default") {
+      root.dataset.readerTone = reading.paperTone;
+    } else {
+      delete root.dataset.readerTone;
+    }
+    const baseBars = {
+      scroll: { paper: "#efe5cf", day: "#faf7f0", night: "#131518" },
+      ink: { paper: "#f7f5f0", day: "#fbfaf7", night: "#121212" },
+    } as const;
+    const baseTheme = resolvedTheme(reading.theme);
+    const tone = PAPER_TONES.find((t) => t.id === reading.paperTone);
+    const toneBg = tone?.id === "oled" ? "#000000" : tone?.bg;
+    const bg = tone && tone.id !== "default" && toneBg ? toneBg : baseBars[reading.style][baseTheme];
+    const dark = tone && tone.id !== "default" ? tone.dark : baseTheme === "night";
+    void game.platform.system.setSystemBars(bg, dark).catch(() => {});
+    return () => {
+      delete root.dataset.readerTone;
+      const r = readingRef.current;
+      const t = resolvedTheme(r.theme);
+      void game.platform.system.setSystemBars(baseBars[r.style][t], t === "night").catch(() => {});
+    };
+  }, [active, game.platform.system, reading.paperTone, reading.style, reading.theme]);
   type ReadingAnchor = { nodeId: string; paragraph: number; offset: number; top: number; order: string[] };
   const assistantAnchor = useRef<ReadingAnchor | null>(null);
   const [returnAnchor, setReturnAnchor] = useState<ReadingAnchor | null>(null);
@@ -298,6 +327,21 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     if (n >= 3) { setPressTip(true); await game.repo.setSetting("tip:longPress", true); }
   };
   const [modePicker, setModePicker] = useState(false);
+  const playOverlayOpen =
+    !!sheet || (panel && !wide) || !!menuNode || !!menuMore || !!editing ||
+    !!rawNode || !!context || !!remember || !!bookmark || !!cardNode ||
+    !!writing || !!factAsk || desk || modePicker || !!usageNode || typing;
+  useEffect(() => {
+    if (!active) return;
+    const enabled = isPaged && reading.volumeKeyTurn && !playOverlayOpen;
+    const sync = () => { void game.platform.system.setVolumePageTurn?.(enabled).catch(() => {}); };
+    sync();
+    window.addEventListener("lishi:app-resume", sync);
+    return () => {
+      window.removeEventListener("lishi:app-resume", sync);
+      void game.platform.system.setVolumePageTurn?.(false).catch(() => {});
+    };
+  }, [active, game.platform.system, isPaged, playOverlayOpen, reading.volumeKeyTurn]);
   /** 整理成札记 from a 设定集 card or the character panel opens the new note filled in (D174). */
   const [notesStart, setNotesStart] = useState<NoteStart | null>(null);
   const noteFor = (start: NoteStart) => { setNotesStart(start); setSheet("notes"); };
@@ -722,7 +766,12 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   }, mouse && active);
 
   if (!world || !cursor || !state) return (
-    <div className="screen-body skeleton-story" aria-label="正在读取" role="status">
+    <div
+      className="screen-body skeleton-story"
+      aria-label="正在读取"
+      role="status"
+      data-paper-tone={reading.paperTone === "default" ? undefined : reading.paperTone}
+    >
       {[92, 100, 96, 70, 0, 100, 88, 94, 60].map((w, i) => w ? <i key={i} className="skeleton" style={{ width: `${w}%` }} /> : <br key={i} />)}
     </div>
   );
@@ -789,7 +838,10 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   };
 
   return (
-    <div className={`play-layout${wide ? " wide" : ""}`}>
+    <div
+      className={`play-layout${wide ? " wide" : ""}`}
+      data-paper-tone={reading.paperTone === "default" ? undefined : reading.paperTone}
+    >
     <PlayQualityEffects revision={`${head.id}:${gen?.phase ?? "idle"}:${writing?.kind ?? ""}:${sheet ?? ""}`} />
     <div className="play" data-daypart={daypart(now.hour)}>
       <div className="topbar">
@@ -809,11 +861,16 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         {isPaged ? (
           <Paginator
             ref={paginatorRef}
-            contentKey={`${head.id}:${shown.length}:${gen?.text?.length ?? 0}:${gen?.phase ?? ""}:${notice?.text ?? ""}:${reading.size}:${reading.leading}:${reading.paragraph}:${reading.serif}:${reading.indent}:${reading.measure}`}
+            contentKey={`${head.id}:${shown.length}:${gen?.text?.length ?? 0}:${gen?.phase ?? ""}:${notice?.text ?? ""}:${reading.size}:${reading.leading}:${reading.paragraph}:${reading.fontFamily}:${reading.indent}:${reading.measure}:${reading.pageMargin}:${reading.letterSpacing}:${reading.readerFooter}`}
             initialPage="last"
             streaming={!!gen}
             autoFollow={reading.autoScroll}
-            footerLeft={`${place} · ${now.text}`}
+            footerLeft={routeTurns > 0 ? `${world.title} · 第 ${routeTurns} 回` : `${world.title} · 开篇`}
+            pageTurnAnim={reading.pageTurnAnim}
+            tapZones={reading.tapZones}
+            volumeKeys={active && reading.volumeKeyTurn}
+            showStatusMeta={reading.readerFooter}
+            hideFooter={!reading.readerFooter}
             onBoundaryStart={hasMore ? () => { const next = limit.current + PAGE; limit.current = next; void refresh(next); } : undefined}
             onPageChange={(p, total, anchorId) => {
               const onLast = p >= total - 1;
@@ -1086,6 +1143,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {notifications.sheet}
     </div>
     {wide && <div className="play-side"><NoteEntry.Provider value={noteFor}><Panel {...panelProps} docked /></NoteEntry.Provider></div>}
+    {active && reading.nightDim > 0 && (
+      <div
+        className="reader-dim-veil"
+        aria-hidden="true"
+        style={{ opacity: Number((reading.nightDim / 100).toFixed(2)) }}
+      />
+    )}
     </div>
   );
 }

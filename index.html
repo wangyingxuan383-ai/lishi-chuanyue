@@ -6,10 +6,116 @@
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/assets/app-icon.svg" />
     <script src="/theme.js"></script>
+    <style>
+      :where(html) { background: #efe5cf; color: #2a2019; }
+      :where(html[data-theme="day"]) { background: #faf7f0; color: #26201a; }
+      :where(html[data-style="ink"]) { background: #f7f5f0; color: #1f1d1a; }
+      :where(html[data-style="ink"][data-theme="day"]) { background: #fbfaf7; color: #1f1d1a; }
+      :where(html[data-theme="night"]) { background: #131518; color: #e9dcc5; }
+      :where(html[data-style="ink"][data-theme="night"]) { background: #121212; color: #ede6da; }
+      :where(body) { margin: 0; }
+      .first-frame {
+        position: relative;
+        min-height: 100vh;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        color: currentColor;
+        --ff-arc: #c8963e;
+        --ff-rod-hi: #7c5234;
+        --ff-rod-mid: #533420;
+        --ff-rod-lo: #29180e;
+        --ff-rod-gilt: rgba(230, 192, 115, 0.72);
+      }
+      html[data-theme="night"] .first-frame {
+        --ff-arc: #e2bd72;
+        --ff-rod-hi: #56422b;
+        --ff-rod-mid: #332619;
+        --ff-rod-lo: #15110d;
+        --ff-rod-gilt: rgba(236, 200, 126, 0.68);
+      }
+      .first-frame::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        width: 16px;
+        transform: translateX(-50%);
+        box-sizing: border-box;
+        border-left: 1px solid var(--ff-rod-gilt);
+        border-right: 1px solid var(--ff-rod-gilt);
+        background:
+          linear-gradient(
+            180deg,
+            var(--ff-rod-gilt) 0px,
+            var(--ff-rod-gilt) 18px,
+            transparent 19px,
+            transparent calc(100% - 19px),
+            var(--ff-rod-gilt) calc(100% - 18px),
+            var(--ff-rod-gilt) 100%
+          ),
+          linear-gradient(
+            90deg,
+            var(--ff-rod-lo) 0%,
+            var(--ff-rod-mid) 16%,
+            var(--ff-rod-hi) 26%,
+            var(--ff-rod-lo) 48%,
+            #120a05 50%,
+            var(--ff-rod-lo) 52%,
+            var(--ff-rod-hi) 74%,
+            var(--ff-rod-mid) 84%,
+            var(--ff-rod-lo) 100%
+          );
+      }
+      @media (min-width: 700px) {
+        .first-frame::before { width: 20px; }
+      }
+      .first-frame > svg {
+        position: relative;
+        z-index: 1;
+      }
+      html[data-motion="off"] .first-frame > *,
+      html[data-motion="off"] .first-frame::before {
+        display: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .first-frame > *,
+        .first-frame::before {
+          display: none;
+        }
+      }
+    </style>
     <title>穿越小说模拟</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="first-frame" aria-hidden="true">
+        <svg width="148" height="148" viewBox="0 0 148 148" fill="none">
+          <defs>
+            <linearGradient id="ffSealFace" x1="16%" y1="10%" x2="86%" y2="92%">
+              <stop offset="0%" stop-color="#e04d35" />
+              <stop offset="48%" stop-color="#b52b1d" />
+              <stop offset="100%" stop-color="#8c1b12" />
+            </linearGradient>
+          </defs>
+          <circle cx="74" cy="74" r="61" stroke="var(--ff-arc)" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="10 5 3 5" />
+          <path d="M74 9v4M74 135v4M9 74h4M135 74h4" stroke="var(--ff-arc)" stroke-opacity="0.32" stroke-width="1.2" stroke-linecap="round" />
+          <g transform="rotate(-24 74 74)">
+            <path d="M 21.4 65.7 A 54.5 47.4 0 1 1 26.3 96.9 A 51.0 44.0 0 1 0 21.4 65.7 Z" fill="var(--ff-arc)" fill-opacity="0.88" />
+          </g>
+          <path d="M119.5 41.2 Q119.9 44.7 123.4 45.1 Q119.9 45.5 119.5 49.0 Q119.1 45.5 115.6 45.1 Q119.1 44.7 119.5 41.2 Z" fill="var(--ff-arc)" fill-opacity="0.82" />
+          <rect x="42" y="44" width="64" height="64" rx="12.5" fill="#6b140c" fill-opacity="0.85" />
+          <rect x="42" y="42" width="64" height="64" rx="12.5" fill="url(#ffSealFace)" />
+          <rect x="46.2" y="46.2" width="55.6" height="55.6" rx="9.2" stroke="#f8e8c6" stroke-opacity="0.92" stroke-width="1.55" />
+          <rect x="49.2" y="49.2" width="49.6" height="49.6" rx="7.2" stroke="#fbf1de" stroke-opacity="0.54" stroke-width="0.65" />
+          <path d="M49.4 74h4.2M94.4 74h4.2" stroke="#fbf1de" stroke-opacity="0.44" stroke-width="0.75" stroke-linecap="round" />
+          <text x="74" y="68.5" text-anchor="middle" fill="#fbf2df" font-family="'Noto Serif SC Variable', 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif" font-size="22.5" font-weight="700">穿</text>
+          <text x="74" y="92.5" text-anchor="middle" fill="#fbf2df" font-family="'Noto Serif SC Variable', 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', serif" font-size="22.5" font-weight="700">越</text>
+        </svg>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

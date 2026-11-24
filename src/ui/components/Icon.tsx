@@ -339,6 +339,66 @@ const PATHS = {
       <path d="M12 12h8M17 12v3M20 12v2" />
     </>
   ),
+  headphones: (
+    <>
+      <path d="M4.5 13.5V12a7.5 7.5 0 0115 0v1.5" />
+      <rect x="3.5" y="13" width="3.8" height="6" rx="1.6" />
+      <rect x="16.7" y="13" width="3.8" height="6" rx="1.6" />
+    </>
+  ),
+  pause: (
+    <>
+      <rect x="7" y="6" width="3.5" height="12" rx="1" fill="currentColor" stroke="none" />
+      <rect x="13.5" y="6" width="3.5" height="12" rx="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  volume: (
+    <>
+      <path d="M5 9.5h3.5L13 6v12l-4.5-3.5H5z" />
+      <path d="M16 9.2a4.2 4.2 0 010 5.6M18.5 6.8a7.5 7.5 0 010 10.4" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4L18 18M18 6l-1.6 1.6M7.6 16.4L6 18" />
+    </>
+  ),
+  moon: <path d="M19.5 14.5A7.5 7.5 0 019.5 4.5a7.5 7.5 0 1010 10z" />,
+  sliders: (
+    <>
+      <path d="M4.5 7h9M17.5 7h2M4.5 12h3M11.5 12h8M4.5 17h11M19.5 17h0" />
+      <circle cx="15.5" cy="7" r="2" />
+      <circle cx="9.5" cy="12" r="2" />
+      <circle cx="17.5" cy="17" r="2" />
+    </>
+  ),
+  timer: (
+    <>
+      <path d="M9.5 3.5h5M12 3.5v2" />
+      <circle cx="12" cy="13" r="7" />
+      <path d="M12 9.5V13l2.5 1.8" />
+    </>
+  ),
+  sort: <path d="M7 5v14M4 16l3 3 3-3M14 7h6M14 12h4.5M14 17h3" />,
+  "pushpin-fill": (
+    <>
+      <path d="M9 4.5h6l-.8 4.8 2.3 2.2v1.5H7.5v-1.5l2.3-2.2z" fill="currentColor" />
+      <path d="M12 13v6.5" />
+    </>
+  ),
+  "auto-read": (
+    <>
+      <circle cx="12" cy="12" r="7.5" />
+      <path d="M10.2 9.2l4.8 2.8-4.8 2.8z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  "library-hall": (
+    <>
+      <path d="M4 9.5L12 5l8 4.5" />
+      <path d="M5.5 9.5v8.5M9.8 9.5v8.5M14.2 9.5v8.5M18.5 9.5v8.5M4 18.5h16" />
+    </>
+  ),
 } as const;
 
 export type IconName = keyof typeof PATHS;

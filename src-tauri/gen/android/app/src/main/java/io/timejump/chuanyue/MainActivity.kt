@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebView
@@ -12,10 +13,25 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import java.lang.ref.WeakReference
 
 class MainActivity : TauriActivity() {
+  companion object {
+    @Volatile var volumePageTurnActive: Boolean = false
+    @Volatile var activeInstance: WeakReference<MainActivity>? = null
+  }
+
   private var agentBrowser: AgentBrowserHost? = null
   private var webView: WebView? = null
+
+  fun emitWebEvent(eventName: String, detailJson: String) {
+    webView?.post {
+      webView?.evaluateJavascript(
+        "window.dispatchEvent(new CustomEvent('$eventName', { detail: $detailJson }))",
+        null
+      )
+    }
+  }
 
   private fun hardenWebView(view: WebView) {
     // Prevent OEM system 130%+ fontScale from double-scaling CSS px on top of the app's own font-size slider.
@@ -59,6 +75,7 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    activeInstance = WeakReference(this)
     agentBrowser = AgentBrowserHost(this)
 
     // Required for IME insets on older Android versions; the content listener
@@ -96,6 +113,23 @@ class MainActivity : TauriActivity() {
     LaunchTarget.capture(intent)
   }
 
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    if (
+      volumePageTurnActive &&
+        hasWindowFocus() &&
+        (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+    ) {
+      if (event.action == KeyEvent.ACTION_DOWN) {
+        if (event.repeatCount == 0 || event.repeatCount % 3 == 0) {
+          val direction = if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) "\"prev\"" else "\"next\""
+          emitWebEvent("lishi:volume-page", direction)
+        }
+      }
+      return true
+    }
+    return super.dispatchKeyEvent(event)
+  }
+
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
@@ -115,7 +149,17 @@ class MainActivity : TauriActivity() {
     refreshShell(dispatchResume = true)
   }
 
+  override fun onPause() {
+    super.onPause()
+    // Immediately release hardware volume keys when leaving the app or opening system shade.
+    volumePageTurnActive = false
+  }
+
   override fun onDestroy() {
+    volumePageTurnActive = false
+    if (activeInstance?.get() === this) {
+      activeInstance = null
+    }
     webView = null
     agentBrowser?.destroy(); agentBrowser = null
     super.onDestroy()
@@ -123,6 +167,7 @@ class MainActivity : TauriActivity() {
 
   override fun onResume() {
     super.onResume()
+    activeInstance = WeakReference(this)
     // Back in the app: the "写好了" notification has done its job.
     GenerationService.clearReady(this)
     webView?.let { hardenWebView(it) }

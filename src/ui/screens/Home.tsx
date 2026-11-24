@@ -1,25 +1,33 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { archiveProblems, exportWorldFile, importWorld } from "../../engine/archive";
-import { eraContext } from "../../engine/era";
 import { nowOf } from "../../engine/calendar/clock";
+import { eraContext } from "../../engine/era";
+import {
+  countAllHighlights,
+  getReadingStatsSummary,
+  listLibraryShelfItems,
+  saveWorldNovelToLibrary,
+  type LibraryShelfItem,
+  type ReadingStatsSummary,
+} from "../../engine/reader/shelf";
 import type { World } from "../../engine/types";
 import { useApp } from "../app/context";
-import { MenuSheet } from "../components/Sheet";
-import { fromSetup } from "./openingDraft";
-import { Seal } from "../components/Seal";
+import { localFind } from "../app/localFind";
+import { openWithFlourish } from "../app/motion";
 import { useUpdateNotice } from "../app/updateStore";
-import { EmptyVignette } from "../components/ChineseArt";
+import { CinnabarSeal, EmptyVignette } from "../components/ChineseArt";
 import { ExcerptsSheet } from "../components/ExcerptsSheet";
 import { Icon } from "../components/Icon";
 import { BudgetReminder } from "../components/MonthlyBudget";
 import { NovelExportSheet } from "../components/NovelExportSheet";
+import { MenuSheet } from "../components/Sheet";
 import { UpdateSheet } from "../components/UpdateSheet";
 import { WhatsNewNotice } from "../components/WhatsNew";
-import { localFind } from "../app/localFind";
-import { openWithFlourish } from "../app/motion";
+import { HomeLibrary } from "./home/HomeLibrary";
 import { HomeScene } from "./home/HomeScene";
 import { HomeShelf } from "./home/HomeShelf";
 import type { WorldCard } from "./home/types";
+import { fromSetup } from "./openingDraft";
 
 const QUOTE_PAIRS: Record<string, string> = { "“": "”", "「": "」", "『": "』", "‘": "’" };
 const CLOSING_QUOTES = new Set(Object.values(QUOTE_PAIRS));
@@ -44,14 +52,11 @@ function balanceQuotes(text: string): string {
 
 /**
  * The last sentence of a passage, for the card: at most 40 characters, cut at
- * the front. The card shows it as it is — no quote marks of its own around it
- * (a line of dialogue already has them: …不讲情面！” must not become ””).
+ * the front. The card shows it as it is — no quote marks of its own around it.
  */
 export function lastSentence(text: string): string {
-  // A closing quote stays with its sentence: “……？”
   const sentences = text.replace(/\s+/g, "").match(/[^。！？]+[。！？]*[”」』]*/g) ?? [];
   const last = sentences[sentences.length - 1] ?? "";
-  // Cut in the middle: no comma right after the ellipsis.
   return last.length > 40 ? `…${balanceQuotes(last.slice(-40)).replace(/^[，、；：,;:]+/, "")}` : balanceQuotes(last);
 }
 
@@ -62,29 +67,30 @@ const REIGNS: [RegExp, string][] = [
   [/至正|至元|大德/, "元"], [/崇祯|万历|永乐|洪武|嘉靖|天启|正德|成化|弘治|隆庆/, "明"],
   [/康熙|乾隆|雍正|光绪|道光|咸丰|同治|嘉庆|宣统/, "清"],
 ];
-/**
- * The dynasty for the cover's seal: 唐, 宋, 明…, from the dynasty or reign
- * named in the date. Nothing when neither is known — a wrong seal (or the
- * first character of “第 4 天”) is worse than none.
- */
+
 function dynastyMark(clock: string): string | undefined {
   const named = clock.match(/^(秦|汉|唐|宋|元|明|清|晋|隋|周)/)?.[1];
   if (named) return named;
   return REIGNS.find(([re]) => re.test(clock))?.[1];
 }
 
-/** Paper-coloured placeholders with a passing light while the shelf loads. */
 function ShelfSkeleton() {
   return (
     <div className="stack" aria-hidden="true">
-      <div className="skeleton skeleton-hero"><span className="skeleton-cover" /><span className="skeleton-lines"><i /><i /><i /></span></div>
+      <div className="skeleton skeleton-hero">
+        <span className="skeleton-cover" />
+        <span className="skeleton-lines"><i /><i /><i /></span>
+      </div>
       <div className="skeleton skeleton-btn" />
-      <div className="shelf"><div className="skeleton skeleton-book" /><div className="skeleton skeleton-book" /></div>
+      <div className="shelf">
+        <div className="skeleton skeleton-book" />
+        <div className="skeleton skeleton-book" />
+      </div>
     </div>
   );
 }
 
-/** Stories still being written (D160: leaving the page does not stop them). */
+/** Stories still being written in the background. */
 function useWritingWorlds(game: ReturnType<typeof useApp>["game"]) {
   const [writing, setWriting] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -105,15 +111,97 @@ function useWritingWorlds(game: ReturnType<typeof useApp>["game"]) {
   return writing;
 }
 
+/** Song-Painting Panorama Welcome Card when no stories exist yet. */
+function PanoramaWelcomeCard({
+  hasProfile,
+  onStart,
+  onGoLibrary,
+}: {
+  hasProfile: boolean;
+  onStart: () => void;
+  onGoLibrary: () => void;
+}) {
+  return (
+    <section className="welcome-panorama" aria-label="欢迎来到穿越小说模拟">
+      <div className="welcome-art" aria-hidden="true">
+        <svg className="welcome-svg" viewBox="0 0 800 260" preserveAspectRatio="xMidYMax slice">
+          <defs>
+            <linearGradient id="wp-far" x1="0" y1="0" x2="0" y2="1">
+              <stop className="wp-far-0" offset="0" />
+              <stop className="wp-far-1" offset="1" />
+            </linearGradient>
+            <linearGradient id="wp-mid" x1="0" y1="0" x2="0" y2="1">
+              <stop className="wp-mid-0" offset="0" />
+              <stop className="wp-mid-1" offset="1" />
+            </linearGradient>
+            <linearGradient id="wp-near" x1="0" y1="0" x2="0" y2="1">
+              <stop className="wp-near-0" offset="0" />
+              <stop className="wp-near-1" offset="1" />
+            </linearGradient>
+          </defs>
+          <circle className="wp-orb" cx="628" cy="64" r="36" />
+          <path
+            fill="url(#wp-far)"
+            d="M0 260V128C68 116 124 62 186 68C248 74 288 134 356 122C424 110 478 52 548 58C618 64 676 126 738 118L800 102V260Z"
+          />
+          <path
+            className="wp-gilt"
+            fill="none"
+            d="M0 168C76 154 138 106 208 114C278 122 332 168 412 152C492 136 558 88 634 98C696 106 748 148 800 142"
+          />
+          <path
+            fill="url(#wp-mid)"
+            d="M0 260V168C76 154 138 106 208 114C278 122 332 168 412 152C492 136 558 88 634 98C696 106 748 148 800 142V260Z"
+          />
+          <path
+            fill="url(#wp-near)"
+            d="M0 260V206C94 196 164 166 248 176C332 186 410 218 504 206C598 194 692 162 800 178V260Z"
+          />
+          <path
+            className="wp-ripples"
+            fill="none"
+            d="M110 228h110M320 236h140M560 226h120M210 246h96"
+          />
+        </svg>
+        <div className="welcome-mist" />
+      </div>
+
+      <div className="welcome-content">
+        <CinnabarSeal text="穿越" variant="yin" size={54} tilt={-3} />
+        <h2 className="welcome-headline">醒来时，你已在另一个时代</h2>
+        <p className="welcome-sub">
+          历史朝堂、市井烟火，或架空异界——不设固定路线，落笔皆成因果。
+          {!hasProfile && "连接任一 AI 服务即可开启穿越；书斋可免配直接畅读本地小说。"}
+        </p>
+        <div className="welcome-actions">
+          <button type="button" className="primary welcome-primary-btn" onClick={onStart}>
+            <Icon name="sparkle" size={18} />
+            <span>开始第一场穿越</span>
+          </button>
+          <button type="button" className="welcome-secondary-btn" onClick={onGoLibrary}>
+            <Icon name="library-hall" size={18} />
+            <span>去书斋读本地小说（免配 AI）</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function Home() {
   const { game, push, profile, toast, ask, askName, reading, setReading } = useApp();
   const [deleted, setDeleted] = useState<World[]>([]);
   const [cards, setCards] = useState<WorldCard[] | null>(null);
+  const [libraryItems, setLibraryItems] = useState<LibraryShelfItem[] | null>(null);
+  const [readingStats, setReadingStats] = useState<ReadingStatsSummary | null>(null);
+  const [totalHighlights, setTotalHighlights] = useState(0);
+
   const [query, setQuery] = useState("");
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
   const [exportFor, setExportFor] = useState<WorldCard | null>(null);
-  const [excerptsWorldId, setExcerptsWorldId] = useState<string | null | false>(false);
+  const [excerptsTarget, setExcerptsTarget] = useState<{ worldId?: string | null; bookId?: string | null } | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
+
   const exporting = useRef(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const importingRef = useRef(false);
@@ -126,62 +214,18 @@ export default function Home() {
     return raw || "文件读取或校验失败，请稍后重试";
   };
 
-  // R08-T001: a world as one file.
-  const exportOne = async (card: WorldCard) => {
-    if (exporting.current) return;
-    exporting.current = true; setExportStatus("正在准备完整存档…");
-    try {
-      const saved = await exportWorldFile(game.repo, card.world.id, card.world.title);
-      setExportStatus(null); if (saved) toast("已导出");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String(error.message) : "导出失败，请稍后重试";
-      setExportStatus(message);
-    } finally { exporting.current = false; }
-  };
-  const importOne = async () => {
-    if (importingRef.current) return;
-    importingRef.current = true;
-    setImporting(true);
-    try {
-      const text = await game.platform.files.importText();
-      if (!text) return;
-      let file: unknown = null;
-      try { file = JSON.parse(text); } catch { /* reported below */ }
-      const problems = archiveProblems(file);
-      if (problems.length) { toast(`没有导入：${problems[0]}`); return; }
-      const world = (file as { world: { id: string; title: string } }).world;
-      // The same world is already here: ask whether to replace it or keep both.
-      if (await game.repo.getWorld(world.id)) { setIncoming({ file, title: world.title }); return; }
-      await importWorld(game.repo, file, "replace");
-      toast(`已导入“${world.title}”`);
-      await load();
-    } catch (error) {
-      toast(`没有导入：${importErrorText(error)}`);
-    } finally {
-      importingRef.current = false;
-      setImporting(false);
-    }
-  };
-  const finishImport = async (mode: "new" | "replace") => {
-    if (!incoming || importingRef.current) return;
-    const pending = incoming;
-    setIncoming(null);
-    importingRef.current = true;
-    setImporting(true);
-    try {
-      if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
-      await importWorld(game.repo, pending.file, mode);
-      toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${pending.title}”`);
-      await load();
-    } catch (error) {
-      toast(`没有导入：${importErrorText(error)}`);
-    } finally {
-      importingRef.current = false;
-      setImporting(false);
-    }
-  };
+  const loadLibrary = useCallback(async () => {
+    const [items, stats, hlCount] = await Promise.all([
+      listLibraryShelfItems(game.repo).catch(() => []),
+      getReadingStatsSummary(game.repo).catch(() => null),
+      countAllHighlights(game.repo).catch(() => 0),
+    ]);
+    setLibraryItems(items);
+    setReadingStats(stats);
+    setTotalHighlights(hlCount);
+  }, [game.repo]);
 
-  const load = async () => {
+  const loadWorlds = useCallback(async () => {
     const worlds = await game.repo.listWorlds();
     const out: WorldCard[] = [];
     for (const world of worlds) {
@@ -194,21 +238,93 @@ export default function Home() {
       const clock = now.text;
       const free = world.settings.mode === "free" || state.era.mode === "free";
       out.push({
-        world, protagonist: state.protagonist.name, lastLine: lastSentence(summary.last),
-        clock, hour: now.hour, turns: summary.turns, seal: free ? undefined : dynastyMark(clock),
+        world,
+        protagonist: state.protagonist.name,
+        lastLine: lastSentence(summary.last),
+        clock,
+        hour: now.hour,
+        turns: summary.turns,
+        seal: free ? undefined : dynastyMark(clock),
       });
     }
     setCards(out);
     await game.repo.purgeDeletedWorlds();
     setDeleted(await game.repo.deletedWorlds());
-  };
-  useEffect(() => { void load(); return game.subscribe(() => { void load(); }); }, [game]);
+  }, [game.repo]);
 
-  // Once a day, if the player allows it: is there a newer release? (设置 → 关于与更新)
+  const loadAll = useCallback(async () => {
+    await Promise.all([loadWorlds(), loadLibrary()]);
+  }, [loadLibrary, loadWorlds]);
+
+  useEffect(() => {
+    void loadAll();
+    return game.subscribe(() => {
+      void loadWorlds();
+    });
+  }, [game, loadAll, loadWorlds]);
+
+  const exportOne = async (card: WorldCard) => {
+    if (exporting.current) return;
+    exporting.current = true;
+    setExportStatus("正在准备完整存档…");
+    try {
+      const saved = await exportWorldFile(game.repo, card.world.id, card.world.title);
+      setExportStatus(null);
+      if (saved) toast("已导出");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String(error.message) : "导出失败，请稍后重试";
+      setExportStatus(message);
+    } finally {
+      exporting.current = false;
+    }
+  };
+
+  const importOne = async () => {
+    if (importingRef.current) return;
+    importingRef.current = true;
+    setImporting(true);
+    try {
+      const text = await game.platform.files.importText();
+      if (!text) return;
+      let file: unknown = null;
+      try { file = JSON.parse(text); } catch { /* reported below */ }
+      const problems = archiveProblems(file);
+      if (problems.length) { toast(`没有导入：${problems[0]}`); return; }
+      const world = (file as { world: { id: string; title: string } }).world;
+      if (await game.repo.getWorld(world.id)) { setIncoming({ file, title: world.title }); return; }
+      await importWorld(game.repo, file, "replace");
+      toast(`已导入“${world.title}”`);
+      await loadWorlds();
+    } catch (error) {
+      toast(`没有导入：${importErrorText(error)}`);
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
+    }
+  };
+
+  const finishImport = async (mode: "new" | "replace") => {
+    if (!incoming || importingRef.current) return;
+    const pending = incoming;
+    setIncoming(null);
+    importingRef.current = true;
+    setImporting(true);
+    try {
+      if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
+      await importWorld(game.repo, pending.file, mode);
+      toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${pending.title}”`);
+      await loadWorlds();
+    } catch (error) {
+      toast(`没有导入：${importErrorText(error)}`);
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
+    }
+  };
+
   const { store: updates, state: updateState, unread, readyToPrompt } = useUpdateNotice(game);
   useEffect(() => { void updates.check().catch(() => {}); }, [updates]);
 
-  // Without a service, connecting leads straight on to the new story (AUDIT_V4_FUNCTION C4).
   const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup", first: true }));
   const again = async (worldId: string) => {
     const setup = await game.setupOf(worldId);
@@ -216,47 +332,101 @@ export default function Home() {
     await game.repo.setSetting("newgameDraft", fromSetup(setup));
     start();
   };
-  const shownCards = cards?.filter(card => localFind(query, card.world.title, card.protagonist, card.lastLine));
+
+  const shownCards = cards?.filter((card) =>
+    localFind(query, card.world.title, card.protagonist, card.lastLine, card.clock),
+  );
   const writing = useWritingWorlds(game);
-  // Each design opens its book its own way before the story comes up (D163).
+
   const openCard = (card: WorldCard, from: HTMLElement | null) => {
     const host = from?.closest<HTMLElement>(".home-scene, .shelf-book, .strip-card") ?? null;
-    openWithFlourish(host, from, () => push({ name: "play", worldId: card.world.id }), host?.classList.contains("shelf-book") ? 600 : 420);
+    openWithFlourish(
+      host,
+      from,
+      () => push({ name: "play", worldId: card.world.id }),
+      host?.classList.contains("shelf-book") ? 600 : 420,
+    );
   };
-  const newStory = cards ? <button className={`big-btn new-story${cards.length > 0 ? "" : " primary"}`} onClick={start}>
-    <span className="new-story-mark" aria-hidden="true"><Icon name="plus" size={22} /></span>
-    <span className="new-story-text"><b>{cards.length > 0 ? "开始新的故事" : "开始穿越"}</b><small>随便穿、我的开局，或从灵感出发</small></span>
-  </button> : null;
+
+  const switchSpace = (tab: "stories" | "library") => {
+    if (reading.homeTab === tab) return;
+    setReading({ ...reading, homeTab: tab });
+  };
+
+  const isLibrary = reading.homeTab === "library";
+  const libraryCount = libraryItems?.length ?? 0;
+  const activeBridgeBook = libraryItems && libraryItems.length > 0
+    ? (libraryItems.find((x) => x.progress) ?? libraryItems[0])
+    : null;
+
+  const newStory = cards && cards.length > 0 ? (
+    <button className="big-btn new-story" onClick={start}>
+      <span className="new-story-mark" aria-hidden="true"><Icon name="plus" size={22} /></span>
+      <span className="new-story-text">
+        <b>开始新的故事</b>
+        <small>随便穿、我的开局，或从灵感出发</small>
+      </span>
+    </button>
+  ) : null;
 
   return (
     <div className="screen">
       <div className="topbar home-topbar">
-        <div className="title brand"><span className="brand-mark" aria-hidden="true">穿越</span><h1>穿越小说模拟</h1></div>
-        {cards && cards.length > 0 && (
-          <div className="home-view-switch" role="group" aria-label="首页样式">
-            <button
-              type="button"
-              aria-label="场景视图"
-              aria-pressed={reading.home !== "shelf"}
-              onClick={() => setReading({ ...reading, home: "scene" })}
-            >
-              <Icon name="landscape" size={15} />
-              <span className="switch-label">场景</span>
-            </button>
-            <button
-              type="button"
-              aria-label="书架视图"
-              aria-pressed={reading.home === "shelf"}
-              onClick={() => setReading({ ...reading, home: "shelf" })}
-            >
-              <Icon name="bookshelf" size={15} />
-              <span className="switch-label">书架</span>
-            </button>
-          </div>
-        )}
-        <button className="ghost" aria-label="伴聊" onClick={() => push({ name: "companion" })}>伴聊</button>
-        <button className="icon-btn update-mark" aria-label={unread ? "设置，有新版本" : "设置"} onClick={() => push({ name: "settings" })}><Icon name="settings" />{unread && <i className="update-dot" aria-hidden="true" />}</button>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">穿越</span>
+          <h1 className="brand-title" aria-label="穿越小说模拟">
+            穿越<span className="brand-sub">小说模拟</span>
+          </h1>
+        </div>
+
+        <div
+          className="home-space-switch"
+          data-active={isLibrary ? "library" : "stories"}
+          role="group"
+          aria-label="主空间切换"
+        >
+          <span className="space-thumb" aria-hidden="true" />
+          <button
+            type="button"
+            className="space-btn"
+            aria-pressed={!isLibrary}
+            onClick={() => switchSpace("stories")}
+          >
+            <Icon name="compass" size={15} />
+            <span>穿越</span>
+          </button>
+          <button
+            type="button"
+            className="space-btn"
+            aria-pressed={isLibrary}
+            onClick={() => switchSpace("library")}
+          >
+            <Icon name="library-hall" size={15} />
+            <span>书斋</span>
+            {libraryCount > 0 && <em className="space-badge">{libraryCount}</em>}
+          </button>
+        </div>
+
+        <div className="home-topbar-right">
+          <button
+            className="ghost home-companion-btn"
+            aria-label="伴聊"
+            onClick={() => push({ name: "companion" })}
+          >
+            <Icon name="chat" size={16} />
+            <span>伴聊</span>
+          </button>
+          <button
+            className="icon-btn update-mark"
+            aria-label={unread ? "设置，有新版本" : "设置"}
+            onClick={() => push({ name: "settings" })}
+          >
+            <Icon name="settings" />
+            {unread && <i className="update-dot" aria-hidden="true" />}
+          </button>
+        </div>
       </div>
+
       <div className="screen-body home-body stack">
         {readyToPrompt && updateState.readyRelease && (
           <div className="update-ready-bar" role="status">
@@ -283,56 +453,204 @@ export default function Home() {
         {importing && <div className="notice" role="status">正在导入存档…</div>}
         <BudgetReminder />
         <WhatsNewNotice />
-        {!cards && <ShelfSkeleton />}
-        {cards && cards.length === 0 && (
-          <div className="hero">
-            <Seal />
-            <h1>穿越小说模拟</h1>
-            <p className="muted">醒来时，你已在另一个时代。</p>
-            <EmptyVignette kind="desk-lamp" compact />
-          </div>
-        )}
-        {cards && cards.length > 3 && <input type="search" aria-label="查找故事" placeholder="按书名、主角或最近剧情查找故事" value={query} onChange={event => setQuery(event.target.value)} />}
-        {cards && cards.length > 0 && shownCards && !shownCards.length && (
-          <div role="status">
-            <EmptyVignette kind="mist-search" title="没有找到相关故事" hint="清空查找即可查看全部。" compact />
-          </div>
-        )}
-        {shownCards && shownCards.length > 0 && (reading.home === "shelf"
-          ? <HomeShelf cards={shownCards} writing={writing} onOpen={openCard} onMenu={setMenuFor} onNew={start} newStory={newStory} />
-          : <HomeScene cards={shownCards} writing={writing} onOpen={openCard} onMenu={setMenuFor} newStory={newStory} />)}
-        {shownCards && shownCards.length === 0 && newStory}
-        {!profile && <p className="muted t-center">先连接一个 AI 服务才能开始。</p>}
-        {deleted.length > 0 && <details className="recent-deleted">
-          <summary className="muted">最近删除（{deleted.length}，30 天后自动清除）</summary>
-          <div className="stack gap-1 mt-2">
-            {deleted.map((w) => (
-              <div key={w.id} className="item-row">
-                <span className="grow">{w.title}</span>
-                <button className="ghost" onClick={async () => { await game.repo.restoreWorld(w.id); toast(`已恢复“${w.title}”`); void load(); }}>恢复</button>
-                <button className="ghost danger-text" onClick={async () => {
-                  if (!await ask({ title: `彻底删除“${w.title}”？`, message: "所有路线和存档都会删掉，不能恢复。", confirm: "彻底删除", danger: true })) return;
-                  await game.repo.deleteWorld(w.id);
-                  void load();
-                }}>彻底删除</button>
+
+        {isLibrary ? (
+          <>
+            <HomeLibrary
+              items={libraryItems}
+              stats={readingStats}
+              totalHighlights={totalHighlights}
+              worlds={cards}
+              onReload={loadLibrary}
+              onOpenExcerpts={(bookId) => {
+                setExcerptsTarget({ worldId: null, bookId });
+              }}
+            />
+            <div className="row wrap home-links">
+              <button className="ghost" onClick={() => setExcerptsTarget({ worldId: null, bookId: null })}>
+                佳句摘录簿
+              </button>
+              <button className="ghost" onClick={() => push({ name: "guide" })}>
+                游玩指南
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Cross-Space Quick Bridge to active novel in 书斋 */}
+            {activeBridgeBook && (
+              <div className="library-bridge-bar" role="region" aria-label="书斋在读快捷入口">
+                <button
+                  type="button"
+                  className="bridge-space-tag"
+                  onClick={() => switchSpace("library")}
+                >
+                  <Icon name="library-hall" size={14} />
+                  <span>书斋在读</span>
+                </button>
+                <button
+                  type="button"
+                  className="bridge-open-btn"
+                  data-book-id={activeBridgeBook.id}
+                  onClick={() => push({ name: "reader", bookId: activeBridgeBook.id })}
+                >
+                  <span className="bridge-book-title">《{activeBridgeBook.title}》</span>
+                  <span className="bridge-book-pct">
+                    {activeBridgeBook.finished
+                      ? "已读完"
+                      : activeBridgeBook.progress
+                        ? `${activeBridgeBook.progressPct}%`
+                        : "未开卷"}
+                  </span>
+                  <span className="bridge-book-cta">继续读 ›</span>
+                </button>
               </div>
-            ))}
-          </div>
-        </details>}
-        <div className="row wrap home-links">
-          <button className="ghost" onClick={() => setExcerptsWorldId(null)}>佳句摘录簿</button>
-          <button className="ghost" onClick={() => push({ name: "guide" })}>游玩指南</button>
-          <button className="ghost" disabled={importing} onClick={() => void importOne()}>{importing ? "正在导入存档…" : "从文件导入世界…"}</button>
-        </div>
-        {incoming && !importing && <MenuSheet
-          title={`已经有“${incoming.title}”了`}
-          onClose={() => setIncoming(null)}
-          items={[
-            { label: "另存为新的世界（两个都留着，新的标“导入”）", onSelect: () => void finishImport("new") },
-            { label: "覆盖现有的（会先自动备份一次）", danger: true, onSelect: () => void finishImport("replace") },
-          ]}
-        />}
+            )}
+
+            {/* Sub-header bar: Search + 画卷 | 书阁 view toggle */}
+            {cards && cards.length > 0 && (
+              <div className="stories-toolbar">
+                <div className="stories-search">
+                  <Icon name="search" size={16} />
+                  <input
+                    type="search"
+                    aria-label="查找故事"
+                    placeholder="搜书名、主角或剧情"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+                <div
+                  className="home-view-switch"
+                  data-view={reading.home === "shelf" ? "shelf" : "scene"}
+                  role="group"
+                  aria-label="穿越视图样式"
+                >
+                  <span className="view-thumb" aria-hidden="true" />
+                  <button
+                    type="button"
+                    aria-label="画卷视图"
+                    aria-pressed={reading.home !== "shelf"}
+                    onClick={() => setReading({ ...reading, home: "scene" })}
+                  >
+                    <Icon name="landscape" size={15} />
+                    <span className="switch-label">画卷</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="书阁视图"
+                    aria-pressed={reading.home === "shelf"}
+                    onClick={() => setReading({ ...reading, home: "shelf" })}
+                  >
+                    <Icon name="bookshelf" size={15} />
+                    <span className="switch-label">书阁</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!cards && <ShelfSkeleton />}
+
+            {cards && cards.length === 0 && (
+              <PanoramaWelcomeCard
+                hasProfile={!!profile}
+                onStart={start}
+                onGoLibrary={() => switchSpace("library")}
+              />
+            )}
+
+            {cards && cards.length > 0 && shownCards && !shownCards.length && (
+              <div role="status">
+                <EmptyVignette kind="mist-search" title="没有找到相关故事" hint="清空查找即可查看全部。" compact />
+              </div>
+            )}
+
+            {shownCards && shownCards.length > 0 && (
+              reading.home === "shelf" ? (
+                <HomeShelf
+                  cards={shownCards}
+                  writing={writing}
+                  onOpen={openCard}
+                  onMenu={setMenuFor}
+                  onNew={start}
+                  newStory={newStory}
+                />
+              ) : (
+                <HomeScene
+                  cards={shownCards}
+                  writing={writing}
+                  onOpen={openCard}
+                  onMenu={setMenuFor}
+                  newStory={newStory}
+                />
+              )
+            )}
+
+            {cards && cards.length > 0 && shownCards && shownCards.length === 0 && newStory}
+
+            {cards && cards.length > 0 && !profile && (
+              <p className="muted t-center">连接 AI 服务后即可继续推演或开启新故事。</p>
+            )}
+
+            {deleted.length > 0 && (
+              <details className="recent-deleted">
+                <summary className="muted">最近删除（{deleted.length}，30 天后自动清除）</summary>
+                <div className="stack gap-1 mt-2">
+                  {deleted.map((w) => (
+                    <div key={w.id} className="item-row">
+                      <span className="grow">{w.title}</span>
+                      <button
+                        className="ghost"
+                        onClick={async () => {
+                          await game.repo.restoreWorld(w.id);
+                          toast(`已恢复“${w.title}”`);
+                          void loadWorlds();
+                        }}
+                      >
+                        恢复
+                      </button>
+                      <button
+                        className="ghost danger-text"
+                        onClick={async () => {
+                          if (!await ask({ title: `彻底删除“${w.title}”？`, message: "所有路线和存档都会删掉，不能恢复。", confirm: "彻底删除", danger: true })) return;
+                          await game.repo.deleteWorld(w.id);
+                          void loadWorlds();
+                        }}
+                      >
+                        彻底删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            <div className="row wrap home-links">
+              <button className="ghost" onClick={() => setExcerptsTarget({ worldId: null, bookId: null })}>
+                佳句摘录簿
+              </button>
+              <button className="ghost" onClick={() => push({ name: "guide" })}>
+                游玩指南
+              </button>
+              <button className="ghost" disabled={importing} onClick={() => void importOne()}>
+                {importing ? "正在导入存档…" : "从文件导入世界…"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {incoming && !importing && (
+          <MenuSheet
+            title={`已经有“${incoming.title}”了`}
+            onClose={() => setIncoming(null)}
+            items={[
+              { label: "另存为新的世界（两个都留着，新的标“导入”）", onSelect: () => void finishImport("new") },
+              { label: "覆盖现有的（会先自动备份一次）", danger: true, onSelect: () => void finishImport("replace") },
+            ]}
+          />
+        )}
       </div>
+
       {menuFor && (
         <MenuSheet
           title={menuFor.world.title}
@@ -340,35 +658,59 @@ export default function Home() {
           items={[
             { icon: "play", label: "继续游玩", onSelect: () => push({ name: "play", worldId: menuFor.world.id }) },
             { icon: "book-open", label: "小说模式阅读", onSelect: () => push({ name: "reader", worldId: menuFor.world.id }) },
-            { icon: "highlight", label: "佳句摘录簿", onSelect: () => setExcerptsWorldId(menuFor.world.id) },
+            {
+              icon: "library-hall",
+              label: "编纂入书斋藏书",
+              onSelect: async () => {
+                try {
+                  const res = await saveWorldNovelToLibrary(game.repo, menuFor.world.id);
+                  await loadLibrary();
+                  toast(`已将《${res.title}》收入书斋`, {
+                    label: "去书斋",
+                    run: () => switchSpace("library"),
+                  });
+                } catch (err) {
+                  toast(err instanceof Error ? err.message : "尚无足够正文可编纂成书");
+                }
+              },
+            },
+            { icon: "highlight", label: "佳句摘录簿", onSelect: () => setExcerptsTarget({ worldId: menuFor.world.id, bookId: null }) },
             { icon: "download", label: "导出成小说（EPUB / TXT / MD）", onSelect: () => setExportFor(menuFor) },
-            { icon: "pen", label: "改名", onSelect: async () => {
-              const title = await askName({ title: "给这个故事改名", initial: menuFor.world.title });
-              if (!title) return;
-              await game.repo.renameWorld(menuFor.world.id, title);
-              toast("已改名");
-              void load();
-            } },
+            {
+              icon: "pen",
+              label: "改名",
+              onSelect: async () => {
+                const title = await askName({ title: "给这个故事改名", initial: menuFor.world.title });
+                if (!title) return;
+                await game.repo.renameWorld(menuFor.world.id, title);
+                toast("已改名");
+                void loadWorlds();
+              },
+            },
             { icon: "refresh", label: "用同样设定再开一局", onSelect: () => void again(menuFor.world.id) },
             { icon: "export", label: "导出成存档文件", onSelect: () => void exportOne(menuFor) },
             {
               icon: "trash",
-              label: "删除这个世界", danger: true,
-              // Into the recycle bin, with a way back right away (AUDIT_V4_FUNCTION C2).
+              label: "删除这个世界",
+              danger: true,
               onSelect: async () => {
                 const { id, title } = menuFor.world;
                 try {
                   await game.repo.trashWorld(id);
-                  toast(`已删除“${title}”，30 天内可以在“最近删除”里恢复`, { label: "撤销", run: () => void game.repo.restoreWorld(id).then(() => load()) });
+                  toast(`已删除“${title}”，30 天内可以在“最近删除”里恢复`, {
+                    label: "撤销",
+                    run: () => void game.repo.restoreWorld(id).then(() => loadWorlds()),
+                  });
                 } catch {
                   toast("没删掉，请再试一次");
                 }
-                void load();
+                void loadWorlds();
               },
             },
           ]}
         />
       )}
+
       {exportFor && (
         <NovelExportSheet
           worldId={exportFor.world.id}
@@ -376,12 +718,18 @@ export default function Home() {
           onClose={() => setExportFor(null)}
         />
       )}
-      {excerptsWorldId !== false && (
+
+      {excerptsTarget !== null && (
         <ExcerptsSheet
-          worldId={excerptsWorldId}
-          onClose={() => setExcerptsWorldId(false)}
+          worldId={excerptsTarget.worldId}
+          bookId={excerptsTarget.bookId}
+          onClose={() => {
+            setExcerptsTarget(null);
+            void loadLibrary();
+          }}
         />
       )}
+
       {updateOpen && (updateState.readyRelease ?? updateState.release) && (
         <UpdateSheet
           release={(updateState.readyRelease ?? updateState.release)!}

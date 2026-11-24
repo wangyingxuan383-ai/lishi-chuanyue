@@ -254,12 +254,17 @@
   gap: var(--s1);
   min-height: 52px;
   padding: var(--s1) var(--s2);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 3px double var(--line);
   background: color-mix(in srgb, var(--bg) 90%, transparent);
   backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   z-index: 5;
   min-width: 0;
   max-width: 100%;
+}
+
+:root[data-style="ink"] .companion-topbar {
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
 }
 
 .companion-topbar-side {
@@ -385,6 +390,7 @@
   max-width: 800px;
   width: 100%;
   min-width: 0;
+  min-height: 100%;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -393,9 +399,11 @@
 
 /* ---------- Empty State (Persona Greeting & Starters) ---------- */
 .companion-empty {
-  padding: var(--s5) var(--s1) var(--s3);
+  margin-block: auto;
+  padding: var(--s4) var(--s1);
   display: grid;
   justify-items: center;
+  align-content: center;
   gap: var(--s3);
   text-align: center;
 }
@@ -922,11 +930,17 @@
 
 /* ---------- Compact Bottom Dock ---------- */
 .companion-dock {
-  border-top: 1px solid var(--dock-line);
+  border-top: 3px double var(--dock-line);
   background-color: var(--dock);
+  background-image: var(--grain);
   padding: var(--s2) var(--s-gutter, 16px) calc(var(--s2) + env(safe-area-inset-bottom));
   min-width: 0;
   max-width: 100%;
+}
+
+:root[data-style="ink"] .companion-dock {
+  border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  background-image: none;
 }
 
 .companion-dock-inner {
@@ -968,7 +982,7 @@
   min-height: 30px;
   padding: 2px 10px;
   border-radius: var(--radius-pill);
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
   box-shadow: none;
   font-size: 13px;
@@ -977,8 +991,10 @@
 }
 
 .companion-gear-btn[aria-pressed="true"] {
-  background: var(--accent);
-  color: var(--on-accent);
+  background: var(--surface);
+  color: var(--accent-text);
+  border: 1px solid color-mix(in srgb, var(--accent-text) 42%, var(--line));
+  box-shadow: var(--elev-1);
   font-weight: 600;
 }
 
@@ -1360,7 +1376,13 @@
   box-shadow: none;
 }
 
-:root[data-style="ink"] .companion-gear-btn[aria-pressed="true"],
+:root[data-style="ink"] .companion-gear-btn[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent-text) 38%, var(--line));
+  box-shadow: var(--elev-1);
+}
+
 :root[data-style="ink"] .companion-new-chat-btn,
 :root[data-style="ink"] .companion-send-btn.ready {
   background: var(--accent);

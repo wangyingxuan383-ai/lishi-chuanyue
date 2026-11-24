@@ -1,22 +1,271 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- 穿越小说模拟 app icon (R28, D160): 墨韵·新中式. Ink ground, a round cinnabar seal
-       with 穿越 in Noto Serif SC 700 (SIL OFL, rendered by scripts/ui/icon.mjs), and a
-       pale-gold brush ring with one open end — a passage through time. Desktop: the mark fills the rounded square. -->
+  <!-- 穿越小说模拟 desktop app icon (R36 R2-A): 「宋韵书卷·流金时空朱砂印」
+       Full rounded-square desktop badge (x=24 y=24 width=976 height=976 rx=216) with
+       dual-layer gilded micro-glow outer rim (1.5px rgba(226,188,112,0.52) outer + warm inner specular highlight)
+       for crisp silhouette separation on pure-black Windows 11 taskbar and dark desktop wallpapers,
+       and 1.42x enlarged Song scroll wings + cinnabar seal occupying ~80% (78%-82%) of badge width. -->
   <defs>
-    <radialGradient id="bg" cx="50%" cy="36%" r="72%"><stop offset="0" stop-color="#2b2721"/><stop offset="0.65" stop-color="#171512"/><stop offset="1" stop-color="#0f0e0c"/></radialGradient>
-    <linearGradient id="gold" x1="0.9" y1="0.1" x2="0.1" y2="0.9"><stop offset="0" stop-color="#f6dfa6"/><stop offset="0.45" stop-color="#d9b46a"/><stop offset="1" stop-color="#9c7536" stop-opacity="0.25"/></linearGradient>
-    <radialGradient id="seal" cx="38%" cy="32%" r="78%"><stop offset="0" stop-color="#d84a33"/><stop offset="0.7" stop-color="#b22a1d"/><stop offset="1" stop-color="#951f16"/></radialGradient>
-    <radialGradient id="halo" cx="50%" cy="50%" r="50%"><stop offset="0.55" stop-color="#d9b46a" stop-opacity="0.18"/><stop offset="1" stop-color="#d9b46a" stop-opacity="0"/></radialGradient>
+    <clipPath id="badgeClip">
+      <rect x="24" y="24" width="976" height="976" rx="216"/>
+    </clipPath>
+
+    <!-- Deep warm jade-obsidian ink ground -->
+    <radialGradient id="bg" cx="50%" cy="36%" r="72%">
+      <stop offset="0%" stop-color="#201a14"/>
+      <stop offset="58%" stop-color="#110e0c"/>
+      <stop offset="100%" stop-color="#0a0807"/>
+    </radialGradient>
+
+    <!-- Dual-layer gilded rim gradients -->
+    <linearGradient id="gildedOuterBand" x1="12%" y1="4%" x2="88%" y2="96%">
+      <stop offset="0%" stop-color="#f3d590" stop-opacity="0.68"/>
+      <stop offset="50%" stop-color="#e2bc70" stop-opacity="0.52"/>
+      <stop offset="100%" stop-color="#c99b49" stop-opacity="0.46"/>
+    </linearGradient>
+    <linearGradient id="badgeInnerHighlight" x1="15%" y1="2%" x2="85%" y2="98%">
+      <stop offset="0%" stop-color="#fff6dc" stop-opacity="0.46"/>
+      <stop offset="42%" stop-color="#ebd098" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.08"/>
+    </linearGradient>
+
+    <!-- Subtle warm golden-amber inner aura -->
+    <radialGradient id="aura" cx="50%" cy="49%" r="50%">
+      <stop offset="0%" stop-color="#f2c675" stop-opacity="0.28"/>
+      <stop offset="50%" stop-color="#cc9540" stop-opacity="0.12"/>
+      <stop offset="84%" stop-color="#8e6325" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#8e6325" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Warm cinnabar core glow behind the seal -->
+    <radialGradient id="cinnabarGlow" cx="50%" cy="45%" r="36%">
+      <stop offset="0%" stop-color="#e35138" stop-opacity="0.24"/>
+      <stop offset="65%" stop-color="#b2291c" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#8b1b12" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Luminous brushed-gold time-portal arc gradient -->
+    <linearGradient id="goldArc" gradientUnits="userSpaceOnUse" x1="740" y1="280" x2="250" y2="700">
+      <stop offset="0%" stop-color="#fff5cf"/>
+      <stop offset="34%" stop-color="#f6d58b"/>
+      <stop offset="68%" stop-color="#e2b665"/>
+      <stop offset="100%" stop-color="#9a6c2a"/>
+    </linearGradient>
+    <linearGradient id="goldBrocade" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fae5b2"/>
+      <stop offset="55%" stop-color="#d5a654"/>
+      <stop offset="100%" stop-color="#8e6325"/>
+    </linearGradient>
+
+    <!-- Song-edition Xuan paper gradients -->
+    <linearGradient id="xuanLeft" x1="0%" y1="15%" x2="100%" y2="85%">
+      <stop offset="0%" stop-color="#fdf7e9"/>
+      <stop offset="72%" stop-color="#f2e4c8"/>
+      <stop offset="93%" stop-color="#e6d5b5"/>
+      <stop offset="100%" stop-color="#d4be98"/>
+    </linearGradient>
+    <linearGradient id="xuanRight" x1="100%" y1="15%" x2="0%" y2="85%">
+      <stop offset="0%" stop-color="#fdf7e9"/>
+      <stop offset="70%" stop-color="#f1e2c5"/>
+      <stop offset="92%" stop-color="#e6d5b5"/>
+      <stop offset="100%" stop-color="#cfb890"/>
+    </linearGradient>
+    <linearGradient id="pageBlock" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#dcc7a2"/>
+      <stop offset="44%" stop-color="#c8b086"/>
+      <stop offset="50%" stop-color="#a88d62"/>
+      <stop offset="56%" stop-color="#c8b086"/>
+      <stop offset="100%" stop-color="#d6c099"/>
+    </linearGradient>
+    <linearGradient id="brocadeCover" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2c394c"/>
+      <stop offset="50%" stop-color="#1e2736"/>
+      <stop offset="100%" stop-color="#141a24"/>
+    </linearGradient>
+
+    <!-- Dimensional Cinnabar Stone Seal gradients -->
+    <linearGradient id="sealFace" x1="16%" y1="10%" x2="86%" y2="92%">
+      <stop offset="0%" stop-color="#e55239"/>
+      <stop offset="48%" stop-color="#b82c1e"/>
+      <stop offset="100%" stop-color="#8d1b12"/>
+    </linearGradient>
+    <linearGradient id="sealBase" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7c170f"/>
+      <stop offset="100%" stop-color="#4e0b07"/>
+    </linearGradient>
+    <linearGradient id="sealBevel" x1="10%" y1="6%" x2="90%" y2="94%">
+      <stop offset="0%" stop-color="#ffa38c" stop-opacity="0.58"/>
+      <stop offset="45%" stop-color="#de4d35" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#4a0905" stop-opacity="0.56"/>
+    </linearGradient>
+    <linearGradient id="ivoryGoldRim" x1="15%" y1="10%" x2="85%" y2="90%">
+      <stop offset="0%" stop-color="#fff9eb"/>
+      <stop offset="55%" stop-color="#f7e6c1"/>
+      <stop offset="100%" stop-color="#e0c18a"/>
+    </linearGradient>
+    <linearGradient id="sealGlyph" x1="30%" y1="10%" x2="70%" y2="95%">
+      <stop offset="0%" stop-color="#fffbf2"/>
+      <stop offset="65%" stop-color="#fcf3e0"/>
+      <stop offset="100%" stop-color="#ecd6ad"/>
+    </linearGradient>
+
+    <!-- Soft shadows -->
+    <filter id="bookShadow" x="-16%" y="-16%" width="132%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#040302" flood-opacity="0.66"/>
+    </filter>
+    <filter id="sealShadow" x="-20%" y="-16%" width="140%" height="146%">
+      <feDropShadow dx="0" dy="14" stdDeviation="12" flood-color="#220c05" flood-opacity="0.52"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#160703" flood-opacity="0.36"/>
+    </filter>
+    <filter id="goldGlow" x="-18%" y="-18%" width="136%" height="136%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#f5ca73" flood-opacity="0.32"/>
+    </filter>
+
+    <clipPath id="frontOrbitClip">
+      <polygon points="480,0 1024,0 1024,1024 180,1024 180,625 480,580"/>
+    </clipPath>
+
+    <!-- Thicker luminous gold crescent ribbon so desktop 48/64/128/256 stay vivid -->
+    <g id="portalOrbit">
+      <g transform="rotate(-24 512 512)">
+        <path d="M 230 466
+                 A 292 254 0 1 1 256 636
+                 A 271 233 0 1 0 230 466 Z"
+              fill="url(#goldArc)"/>
+        <path d="M 526 278 A 271 233 0 0 1 783 520 A 271 233 0 0 1 486 745"
+              fill="none" stroke="#fff9de" stroke-width="2.8" stroke-linecap="round" stroke-opacity="0.76"/>
+        <path d="M 752 416 A 254 220 0 0 1 564 724"
+              fill="none" stroke="#f2d48d" stroke-width="3.2" stroke-linecap="round" stroke-opacity="0.48"/>
+      </g>
+    </g>
   </defs>
-  <rect width="1024" height="1024" rx="200" fill="url(#bg)"/>
-  <g transform="translate(512 512) scale(1.32) translate(-512 -522)">
-  <circle cx="512" cy="522" r="330" fill="url(#halo)"/>
-  <path d="M 784 384 A 300 300 0 1 1 650 252" fill="none" stroke="url(#gold)" stroke-width="30" stroke-linecap="round"/>
-  <circle cx="724" cy="300" r="13" fill="#f6dfa6"/>
-  <circle cx="512" cy="522" r="206" fill="url(#seal)"/>
-  <circle cx="512" cy="522" r="184" fill="none" stroke="#fbf1de" stroke-width="9" stroke-opacity="0.92"/>
-  <g fill="#fbf1de" font-family="'Noto Serif SC', 'Noto Serif CJK SC', serif" font-weight="700" font-size="152" text-anchor="middle">
-    <text x="512" y="502">穿</text><text x="512" y="658">越</text>
+
+  <!-- Clipped rounded-square desktop badge (x=24 y=24 width=976 height=976 rx=216) -->
+  <g clip-path="url(#badgeClip)">
+    <rect x="24" y="24" width="976" height="976" rx="216" fill="url(#bg)"/>
+
+    <!-- Motif scaled 1.42x: Song scroll wings span ~778px = 79.7% of 976px badge width (within 78%-82% target) -->
+    <g transform="translate(512 516) scale(1.42) translate(-512 -512)">
+      <circle cx="512" cy="512" r="324" fill="url(#aura)"/>
+      <circle cx="512" cy="466" r="240" fill="url(#cinnabarGlow)"/>
+
+      <g fill="none" stroke="#ecd19a" stroke-opacity="0.15">
+        <circle cx="512" cy="512" r="298" stroke-width="1.8" stroke-dasharray="74 16 24 16"/>
+        <circle cx="512" cy="512" r="262" stroke-width="1.4" stroke-dasharray="108 24 36 24"/>
+        <circle cx="512" cy="512" r="224" stroke-width="1.2" stroke-dasharray="48 20"/>
+      </g>
+
+      <!-- Back Layer of Gold Time-Portal Arc -->
+      <use href="#portalOrbit" filter="url(#goldGlow)"/>
+
+      <!-- Open Song-Edition Thread-Bound Book / Scroll -->
+      <g transform="rotate(-5.5 512 512)">
+        <g filter="url(#bookShadow)">
+          <path d="M 246 426
+                   Q 378 394, 512 438
+                   Q 646 394, 778 426
+                   L 784 640
+                   Q 648 610, 512 664
+                   Q 376 610, 240 640 Z"
+                fill="url(#brocadeCover)" stroke="#485973" stroke-width="1.8"/>
+        </g>
+
+        <g fill="url(#goldBrocade)">
+          <path d="M 246 426 L 274 420 L 273 429 L 254 434 L 253 454 L 245 455 Z"/>
+          <path d="M 240 640 L 242 610 L 251 609 L 250 630 L 272 626 L 271 635 Z"/>
+          <path d="M 778 426 L 750 420 L 751 429 L 770 434 L 771 454 L 779 455 Z"/>
+          <path d="M 784 640 L 782 610 L 773 609 L 774 630 L 752 626 L 753 635 Z"/>
+        </g>
+
+        <path d="M 252 608
+                 Q 380 578, 512 632
+                 Q 644 578, 772 608
+                 L 776 631
+                 Q 646 600, 512 654
+                 Q 378 600, 248 631 Z"
+              fill="url(#pageBlock)"/>
+        <polygon points="256,418 248,631 255,612 262,420" fill="#cbb389"/>
+        <polygon points="768,418 776,631 769,612 762,420" fill="#c3a97d"/>
+        <g fill="none" stroke="#8a6d43" stroke-width="1.6" stroke-opacity="0.52">
+          <path d="M 250 616 Q 379 586, 512 640 Q 645 586, 774 616"/>
+          <path d="M 249 624 Q 378 594, 512 648 Q 646 594, 775 624"/>
+        </g>
+
+        <path d="M 258 416
+                 Q 382 384, 512 430
+                 L 512 632
+                 Q 380 578, 254 610 Z"
+              fill="url(#xuanLeft)"/>
+
+        <path d="M 512 430
+                 Q 642 384, 766 416
+                 L 770 610
+                 Q 644 578, 512 632 Z"
+              fill="url(#xuanRight)"/>
+
+        <g fill="none" stroke="#6f5539">
+          <path d="M 274 431 Q 386 404, 498 442 L 498 612 Q 384 566, 271 593 Z"
+                stroke-width="2.4" stroke-opacity="0.34"/>
+          <line x1="312" y1="430" x2="309" y2="580" stroke-width="1.3" stroke-opacity="0.22"/>
+          <line x1="350" y1="424" x2="348" y2="575" stroke-width="1.3" stroke-opacity="0.20"/>
+
+          <path d="M 526 442 Q 638 404, 750 431 L 753 593 Q 640 566, 526 612 Z"
+                stroke-width="2.4" stroke-opacity="0.34"/>
+          <line x1="712" y1="430" x2="715" y2="580" stroke-width="1.3" stroke-opacity="0.22"/>
+          <line x1="674" y1="424" x2="676" y2="575" stroke-width="1.3" stroke-opacity="0.20"/>
+        </g>
+
+        <line x1="512" y1="430" x2="512" y2="634" stroke="#9e8259" stroke-width="2.4" stroke-opacity="0.62"/>
+        <g stroke="#fbf4e4" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.80">
+          <line x1="505" y1="598" x2="519" y2="598"/>
+          <line x1="505" y1="616" x2="519" y2="616"/>
+        </g>
+      </g>
+
+      <!-- Dimensional Chamfered Square-Rounded Cinnabar Stone Seal (rx="54") -->
+      <g filter="url(#sealShadow)">
+        <rect x="372" y="322" width="280" height="280" rx="55" fill="url(#sealBase)"/>
+        <rect x="372" y="314" width="280" height="280" rx="55" fill="url(#sealFace)"/>
+        <rect x="373.5" y="315.5" width="277" height="277" rx="53.5" fill="none" stroke="url(#sealBevel)" stroke-width="2.5"/>
+      </g>
+
+      <rect x="390" y="332" width="244" height="244" rx="41" fill="none" stroke="url(#ivoryGoldRim)" stroke-width="7.4"/>
+      <rect x="404" y="346" width="216" height="216" rx="31" fill="none" stroke="#fbf1de" stroke-width="2.1" stroke-opacity="0.56"/>
+      <g stroke="#fbf1de" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.44">
+        <line x1="405" y1="454" x2="424" y2="454"/>
+        <line x1="600" y1="454" x2="619" y2="454"/>
+      </g>
+
+      <g font-family="'Noto Serif SC Variable', 'Noto Serif SC', serif" font-weight="700" font-size="103" text-anchor="middle">
+        <g fill="#681009" opacity="0.48" transform="translate(0 2.5)">
+          <text x="512" y="438">穿</text>
+          <text x="512" y="544">越</text>
+        </g>
+        <g fill="url(#sealGlyph)">
+          <text x="512" y="438">穿</text>
+          <text x="512" y="544">越</text>
+        </g>
+      </g>
+
+      <!-- Front Layer of Seamless Gold Time-Portal Arc -->
+      <g clip-path="url(#frontOrbitClip)">
+        <use href="#portalOrbit"/>
+      </g>
+
+      <path d="M 754 334 Q 755.6 356.4, 778 358 Q 755.6 359.6, 754 382 Q 752.4 359.6, 730 358 Q 752.4 356.4, 754 334 Z"
+            fill="#fff6d6"/>
+      <circle cx="754" cy="358" r="3.6" fill="#ffffff"/>
+
+      <path d="M 314 684 Q 315.2 698.8, 330 700 Q 315.2 701.2, 314 716 Q 312.8 701.2, 298 700 Q 312.8 698.8, 314 684 Z"
+            fill="#fae4ab"/>
+    </g>
+
+    <!-- Dual-layer gilded micro-glow border inside badgeClip so anti-aliased edge never bleeds:
+         1) Gilded bevel rim band (scales down to ~1.3px-1.5px at 128px/148px)
+         2) Crisp inner champagne-ivory specular highlight -->
+    <rect x="28" y="28" width="968" height="968" rx="212" fill="none" stroke="url(#gildedOuterBand)" stroke-width="8"/>
+    <rect x="35" y="35" width="954" height="954" rx="205" fill="none" stroke="url(#badgeInnerHighlight)" stroke-width="3.5"/>
   </g>
-  </g>
+
+  <!-- Exact 1.5px rgba(226,188,112,0.52) outer gilded contour on x=24..1000 rx=216 -->
+  <rect x="24.75" y="24.75" width="974.5" height="974.5" rx="215.25" fill="none" stroke="rgba(226, 188, 112, 0.52)" stroke-width="1.5"/>
 </svg>

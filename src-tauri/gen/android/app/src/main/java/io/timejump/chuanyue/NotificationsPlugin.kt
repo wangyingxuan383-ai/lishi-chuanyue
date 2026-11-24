@@ -10,6 +10,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.HapticFeedbackConstants
 import android.view.WindowManager
 import app.tauri.PermissionState
@@ -21,6 +23,8 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import org.json.JSONObject
+import java.util.Locale
 
 @InvokeArg
 class UrlArgs {
@@ -63,6 +67,16 @@ class AwakeArgs { var enabled: Boolean = false }
 
 @InvokeArg
 class SettingsTargetArgs { var target: String = "app" }
+
+@InvokeArg
+class VolumeTurnArgs { var enabled: Boolean = false }
+
+@InvokeArg
+class TtsSpeakArgs {
+    var utteranceId: String = ""
+    var text: String = ""
+    var rate: Float = 1.0f
+}
 
 internal object RomCompat {
     private fun prop(key: String): String = try {
@@ -159,6 +173,52 @@ internal object RomCompat {
 
 @TauriPlugin(permissions = [Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "notifications")])
 class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
+    private var tts: TextToSpeech? = null
+    private var ttsReady: Boolean = false
+    private var ttsInitializing: Boolean = false
+    private var pendingSpeak: Pair<TtsSpeakArgs, Invoke>? = null
+
+    private fun emitTtsEvent(utteranceId: String?, state: String) {
+        val id = utteranceId ?: return
+        val detailJson = JSONObject()
+            .put("utteranceId", id)
+            .put("state", state)
+            .toString()
+        MainActivity.activeInstance?.get()?.emitWebEvent("lishi:tts-event", detailJson)
+    }
+
+    private fun performSpeak(engine: TextToSpeech, args: TtsSpeakArgs, invoke: Invoke) {
+        val safeRate = if (args.rate.isFinite()) args.rate.coerceIn(0.5f, 2.5f) else 1.0f
+        val ok = try {
+            engine.setSpeechRate(safeRate)
+            engine.speak(args.text, TextToSpeech.QUEUE_FLUSH, null, args.utteranceId) == TextToSpeech.SUCCESS
+        } catch (_: Throwable) {
+            false
+        }
+        invoke.resolve(JSObject().put("ok", ok))
+    }
+
+    private fun configureTtsLanguage(engine: TextToSpeech) {
+        try {
+            when {
+                engine.isLanguageAvailable(Locale.SIMPLIFIED_CHINESE) >= TextToSpeech.LANG_AVAILABLE -> {
+                    engine.language = Locale.SIMPLIFIED_CHINESE
+                }
+                engine.isLanguageAvailable(Locale.CHINA) >= TextToSpeech.LANG_AVAILABLE -> {
+                    engine.language = Locale.CHINA
+                }
+                else -> {
+                    val zh = Locale.forLanguageTag("zh")
+                    if (engine.isLanguageAvailable(zh) >= TextToSpeech.LANG_AVAILABLE) {
+                        engine.language = zh
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            // Keep engine default voice if OEM engine throws on locale query.
+        }
+    }
+
     private fun appDetailsIntent(): Intent =
         Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
 
@@ -341,6 +401,98 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
             if (enabled) activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             else activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             invoke.resolve()
+        }
+    }
+
+    @Command
+    fun set_volume_page_turn(invoke: Invoke) {
+        val args = invoke.parseArgs(VolumeTurnArgs::class.java)
+        MainActivity.volumePageTurnActive = args.enabled
+        invoke.resolve()
+    }
+
+    @Command
+    fun tts_speak(invoke: Invoke) {
+        val args = invoke.parseArgs(TtsSpeakArgs::class.java)
+        if (args.utteranceId.isBlank() || args.text.isBlank()) {
+            invoke.resolve(JSObject().put("ok", false))
+            return
+        }
+        activity.runOnUiThread {
+            val existing = tts
+            if (existing != null && ttsReady) {
+                performSpeak(existing, args, invoke)
+                return@runOnUiThread
+            }
+
+            pendingSpeak?.second?.resolve(JSObject().put("ok", false))
+            pendingSpeak = args to invoke
+
+            if (!ttsInitializing) {
+                ttsInitializing = true
+                try {
+                    tts = TextToSpeech(activity.applicationContext) { status ->
+                        activity.runOnUiThread {
+                            ttsInitializing = false
+                            val engine = tts
+                            if (status == TextToSpeech.SUCCESS && engine != null) {
+                                configureTtsLanguage(engine)
+                                engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                                    override fun onStart(utteranceId: String?) {}
+
+                                    override fun onDone(utteranceId: String?) {
+                                        emitTtsEvent(utteranceId, "done")
+                                    }
+
+                                    @Deprecated("Deprecated in Java")
+                                    override fun onError(utteranceId: String?) {
+                                        emitTtsEvent(utteranceId, "error")
+                                    }
+
+                                    override fun onError(utteranceId: String?, errorCode: Int) {
+                                        emitTtsEvent(utteranceId, "error")
+                                    }
+                                })
+                                ttsReady = true
+                                val queued = pendingSpeak
+                                pendingSpeak = null
+                                if (queued != null) {
+                                    performSpeak(engine, queued.first, queued.second)
+                                }
+                            } else {
+                                ttsReady = false
+                                try { engine?.shutdown() } catch (_: Throwable) {}
+                                tts = null
+                                val queued = pendingSpeak
+                                pendingSpeak = null
+                                queued?.second?.resolve(JSObject().put("ok", false))
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                    ttsInitializing = false
+                    ttsReady = false
+                    tts = null
+                    val queued = pendingSpeak
+                    pendingSpeak = null
+                    queued?.second?.resolve(JSObject().put("ok", false))
+                }
+            }
+        }
+    }
+
+    @Command
+    fun tts_stop(invoke: Invoke) {
+        activity.runOnUiThread {
+            val queued = pendingSpeak
+            pendingSpeak = null
+            queued?.second?.resolve(JSObject().put("ok", false))
+            try {
+                tts?.stop()
+            } catch (_: Throwable) {
+                // Ignore if system TTS engine is unavailable or disconnected.
+            }
+            invoke.resolve(JSObject())
         }
     }
 

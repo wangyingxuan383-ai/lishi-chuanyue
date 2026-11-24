@@ -1,30 +1,138 @@
 /* Covers and name seals (BookArt.tsx). The covers are physical objects —
-   cloth, paper, cinnabar — so they keep their colours in every theme; at
-   night only the paper is dimmed and the edges lit a little. */
-.book-art { display: block; flex: none; width: 50px; height: 70px; overflow: visible; filter: drop-shadow(0 2px 3px rgba(50, 34, 18, 0.28)); }
+   Song-brocade cloth, Xuan paper, cinnabar — so they keep their rich cloth hues
+   in every theme; at night the paper is gently warmed and edges catch candlelight. */
+.book-art { display: block; flex: none; width: 50px; height: 70px; overflow: visible; filter: drop-shadow(0 3px 5px rgba(42, 28, 14, 0.3)); }
 .cover-0 { --cover: #34506b; } /* 靛青 */
 .cover-1 { --cover: #8a5a3c; } /* 赭石 */
 .cover-2 { --cover: #415e52; } /* 黛绿 */
-.cover-3 { --cover: #6e3b42; } /* 绛色 */
-.cover-4 { --cover: #55626b; } /* 苍色 */
-.cover-5 { --cover: #6b5036; } /* 栗色 */
-.cover-6 { --cover: #5b4f66; } /* 紫灰 */
+.cover-3 { --cover: #6e3b42; } /* 绛红 */
+.cover-4 { --cover: #55626b; } /* 苍青 */
+.cover-5 { --cover: #6b5036; } /* 栗壳 */
+.cover-6 { --cover: #5b4f66; } /* 暮紫 */
 .cover-7 { --cover: #6f6a3e; } /* 秋香 */
-.cover-board { fill: var(--cover); stroke: color-mix(in srgb, var(--cover) 68%, #000); stroke-width: 1; }
-.cover-brocade { fill: none; stroke: rgba(244, 236, 218, 0.28); stroke-width: 0.65; }
-.cover-thread { fill: none; stroke: #efe5cf; stroke-width: 1.05; stroke-linecap: round; opacity: 0.76; }
-.cover-knot { fill: #efe5cf; opacity: 0.85; }
-.cover-slip { fill: #f4ecda; }
-.cover-slip-frame { fill: none; stroke: #a8936c; stroke-width: 0.55; }
-.cover-title { fill: #2a2019; font-family: var(--serif); font-size: 9.4px; font-weight: 600; }
-.cover-title.tight { font-size: 8px; }
-.cover-seal { fill: #a83221; }
-.cover-seal-frame { fill: none; stroke: rgba(255, 255, 255, 0.72); stroke-width: 0.5; }
-.cover-seal-mark { fill: #ffffff; font-family: var(--serif); font-size: 7.6px; font-weight: 700; }
-:root[data-theme="night"] .book-art { filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.58)); }
-:root[data-theme="night"] .cover-board { stroke: rgba(255, 255, 255, 0.16); }
-:root[data-theme="night"] .cover-slip { fill: #dfd4bc; }
-:root[data-theme="night"] .cover-thread, :root[data-theme="night"] .cover-knot { stroke: #dfd4bc; fill: #dfd4bc; opacity: 0.64; }
+
+.cover-board {
+  fill: var(--cover);
+  stroke: color-mix(in srgb, var(--cover) 62%, #0d0906);
+  stroke-width: 1;
+}
+.cover-sheen {
+  fill: rgba(255, 248, 232, 0.085);
+}
+.cover-spine-band {
+  fill: rgba(0, 0, 0, 0.14);
+}
+.cover-crease-dark {
+  fill: none;
+  stroke: rgba(0, 0, 0, 0.32);
+  stroke-width: 0.75;
+}
+.cover-crease-light {
+  fill: none;
+  stroke: rgba(255, 248, 232, 0.22);
+  stroke-width: 0.55;
+}
+.cover-brocade {
+  fill: none;
+  stroke: rgba(245, 234, 210, 0.34);
+  stroke-width: 0.62;
+  stroke-linejoin: miter;
+}
+.cover-thread {
+  fill: none;
+  stroke: #f2e7cf;
+  stroke-width: 1.05;
+  stroke-linecap: round;
+  opacity: 0.82;
+}
+.cover-knot {
+  fill: #f5ecda;
+  opacity: 0.92;
+}
+.cover-slip-shadow {
+  fill: rgba(16, 10, 6, 0.22);
+}
+.cover-slip {
+  fill: #f7efe0;
+}
+.cover-slip-frame {
+  fill: none;
+  stroke: #9e865c;
+  stroke-width: 0.6;
+}
+.cover-slip-inner {
+  fill: none;
+  stroke: rgba(158, 134, 92, 0.45);
+  stroke-width: 0.35;
+}
+.cover-slip-ticks {
+  fill: none;
+  stroke: rgba(158, 134, 92, 0.5);
+  stroke-width: 0.35;
+}
+.cover-title {
+  fill: #261c15;
+  font-family: var(--serif);
+  font-size: 9.3px;
+  font-weight: 600;
+}
+.cover-title.tight {
+  font-size: 7.9px;
+}
+.cover-seal {
+  fill: #a83221;
+}
+.cover-seal-frame {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.76);
+  stroke-width: 0.5;
+}
+.cover-seal-mark {
+  fill: #ffffff;
+  font-family: var(--serif);
+  font-size: 7.5px;
+  font-weight: 700;
+}
+.cover-ribbon {
+  fill: #ab2f21;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.28));
+}
+.cover-badge-bg {
+  fill: rgba(18, 14, 10, 0.44);
+  stroke: rgba(246, 236, 214, 0.34);
+  stroke-width: 0.45;
+}
+.cover-badge-text {
+  fill: #f6ecd8;
+  font-family: var(--sans);
+  font-size: 4.8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* Standing 3D shelf books rest flat on the plank without a dangling ribbon */
+.book-front .cover-ribbon {
+  display: none;
+}
+
+:root[data-theme="night"] .book-art {
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.62));
+}
+:root[data-theme="night"] .cover-board {
+  stroke: rgba(245, 230, 198, 0.2);
+}
+:root[data-theme="night"] .cover-slip {
+  fill: #e4d8bf;
+}
+:root[data-theme="night"] .cover-thread,
+:root[data-theme="night"] .cover-knot {
+  stroke: #e4d8bf;
+  fill: #e4d8bf;
+  opacity: 0.7;
+}
+:root[data-theme="night"] .cover-ribbon {
+  fill: #be3b2a;
+}
 
 /* 朱文 name seal: red character in a double red frame, on a slip of paper. */
 .person-avatar {

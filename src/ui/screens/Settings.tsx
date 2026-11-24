@@ -11,13 +11,15 @@ import { deleteProfile, listProfiles, saveProfile, type Profile } from "../../en
 import type { Intensity, Perspective } from "../../engine/types";
 import { FORTUNE_MODES, FORTUNE_MODE_NOTE } from "../../engine/fortune";
 import type { BackupInfo, BackupInventory, Row } from "../../platform";
-import { useApp, useBack, type Reading } from "../app/context";
+import { FONT_FAMILIES, PAGE_TURN_ANIMS, PAPER_TONES, useApp, useBack, type Reading } from "../app/context";
 import { BUILTIN_DEFAULTS, loadPlayDefaults, savePlayDefaults, type PlayDefaults } from "../app/playDefaults";
 import { REPO_URL, openLink, newer, plainNotes } from "../app/update";
 import { useUpdateNotice } from "../app/updateStore";
 import { exportWorldFile } from "../../engine/archive";
 import { purposeLabel } from "../../engine/usage";
 import { Seal } from "../components/Seal";
+import { Switch } from "../components/Switch";
+import "./reader.css";
 import { recentDiagnosis } from "../components/FailureSheet";
 import { applyFallback } from "../app/llmConfig";
 import { backupSize, BackupRestore } from "../components/BackupRestore";
@@ -44,7 +46,7 @@ const FIND_WORDS: Record<string, string> = {
   writing: "文风 篇幅 每段长短 叙述视角 第一人称 第二人称 第三人称 建议选项 写作",
   memory: "上下文 输入预算 前文 章节摘要 设定集 自动整理 记忆 主线梗概 札记",
   play: "难度 运势 运气 用词提醒 内容尺度 战斗 感情 死亡",
-  reading: "主题 字号 字体 宋体 黑体 行距 段距 段首空两格 自动滚动 动画 触感 振动 阅读不锁屏 亮屏",
+  reading: "主题 字号 字体 宋体 黑体 行距 段距 段首空两格 自动滚动 动画 触感 振动 阅读不锁屏 亮屏 翻页 音量键 单手 护眼 青竹 羊皮纸 纯黑 减光 楷体 圆体 页边距 字距 免打扰 画卷 书阁 首页样式",
   sources: "原著 同人 书库 参考资料 TXT EPUB PDF DOCX 导入 通读",
   guide: "帮助 操作说明 怎么玩 常见问题",
   notify: "通知 提醒 后台 声音 提示音 振动 静音 悬浮 横幅 自启动 省电 小米 澎湃 vivo OPPO 荣耀 华为 鸿蒙 三星",
@@ -88,7 +90,7 @@ export default function Settings() {
     ] },
     { group: "游戏", items: [
       { page: "play", label: "游玩默认", icon: "dice", state: `${DEPTH_LABEL[defaults.depth]}档 · 难度${defaults.difficulty} · 建议选项 ${defaults.choiceCount || "不要"}` },
-      { page: "reading", label: "阅读与外观", icon: "palette", state: `${theme} · ${SIZES.find(([s]) => s === reading.size)?.[1] ?? "中"}号 · ${reading.serif ? "宋体" : "黑体"}` },
+      { page: "reading", label: "阅读与外观", icon: "palette", state: `${theme} · ${reading.size}px · ${FONT_FAMILIES.find(([f]) => f === reading.fontFamily)?.[1] ?? (reading.serif ? "宋体" : "黑体")}` },
       { page: "sources" as Page, label: "参考书籍", icon: "book", state: "导入、查看与管理，各个故事都能选用" },
       { page: "guide" as Page, label: "游玩指南", icon: "info", state: "怎么玩、各个功能在哪、常见问题" },
       { page: "notify", label: "通知与提醒", icon: "bell", state: !supportsNotify ? "开发台预览" : notify?.enabled ? "已打开" : "没打开", hidden: !supportsNotify && !devMode },
@@ -374,13 +376,133 @@ export function StylePicker() {
   );
 }
 
+export const LETTER_SPACING_OPTIONS: [number, string][] = [
+  [0.03, "标准"],
+  [0.06, "舒展"],
+  [0.1, "宽朗"],
+];
+
+export function resolveLetterSpacingBucket(val: number): number {
+  if (val <= 0.045) return 0.03;
+  if (val <= 0.08) return 0.06;
+  return 0.1;
+}
+
+export function FontSizeControl({ size, onChange }: { size: number; onChange: (size: number) => void }) {
+  const clamped = Math.min(28, Math.max(14, Math.round(size)));
+  return (
+    <div className="setting">
+      <div className="setting-head">
+        <b>字号</b>
+        <small>14px–28px 连续无级调节</small>
+      </div>
+      <div className="size-stepper">
+        <button type="button" aria-label="字号小一些" disabled={clamped <= 14} onClick={() => onChange(Math.max(14, clamped - 1))}>
+          <span className="size-a small-a">A</span>−
+        </button>
+        <span className="size-now" aria-live="polite">{clamped}px</span>
+        <button type="button" aria-label="字号大一些" disabled={clamped >= 28} onClick={() => onChange(Math.min(28, clamped + 1))}>
+          <span className="size-a">A</span>+
+        </button>
+      </div>
+      <input
+        type="range"
+        className="reading-range"
+        aria-label="字号滑杆"
+        min={14}
+        max={28}
+        step={1}
+        value={clamped}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+    </div>
+  );
+}
+
+export function PaperTonePicker({
+  value,
+  onChange,
+}: {
+  value: Reading["paperTone"];
+  onChange: (tone: Reading["paperTone"]) => void;
+}) {
+  return (
+    <div className="setting">
+      <div className="setting-head">
+        <b>护眼纸色</b>
+        <small>在阅读器与故事正文中生效，“随主题”则跟随应用明暗</small>
+      </div>
+      <div className="paper-tone-row" role="radiogroup" aria-label="护眼纸色">
+        {PAPER_TONES.map((tone) => {
+          const active = value === tone.id;
+          return (
+            <button
+              key={tone.id}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              className={`paper-tone-chip tone-${tone.id}${active ? " is-active" : ""}`}
+              onClick={() => onChange(tone.id)}
+            >
+              <span
+                className="paper-swatch-dot"
+                aria-hidden="true"
+                style={
+                  tone.bg
+                    ? { background: tone.id === "oled" ? "#000000" : tone.bg, color: tone.fg }
+                    : undefined
+                }
+              >
+                文
+              </span>
+              <small>{tone.label}</small>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function NightDimControl({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (dim: number) => void;
+}) {
+  const clamped = Math.min(50, Math.max(0, Math.round(value)));
+  return (
+    <div className="setting">
+      <div className="setting-head">
+        <div className="row between center">
+          <b>深夜减光</b>
+          <small aria-live="polite">{clamped > 0 ? `已压暗 ${clamped}%` : "不额外减光（0%）"}</small>
+        </div>
+        <small>关灯夜读时柔化屏幕亮度（也可沿左侧边缘上下滑动调节）</small>
+      </div>
+      <input
+        type="range"
+        className="reading-range"
+        aria-label="深夜减光幅度"
+        min={0}
+        max={50}
+        step={1}
+        value={clamped}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+    </div>
+  );
+}
+
 function ReadingPage() {
   const { reading, setReading } = useApp();
   const set = (patch: Partial<Reading>) => setReading({ ...reading, ...patch });
+  const padPreview = reading.pageMargin === "compact" ? "12px" : reading.pageMargin === "wide" ? "26px" : "18px";
   return (
     <>
       <StylePicker />
-      <Choice label="首页样式" note="场景突出正在读的故事，书架按书脊排列；随时可以切换" value={reading.home} options={[["scene", "场景"], ["shelf", "书架"]]} onChange={(v) => set({ home: v })} />
+      <Choice label="首页样式" note="画卷展四时山水与在读故事，书阁按博古书脊陈列" value={reading.home} options={[["scene", "画卷"], ["shelf", "书阁"]]} onChange={(v) => set({ home: v })} />
       <div className="setting">
         <div className="setting-head"><b>明暗</b><small>跟随系统：手机是浅色时用纸张，深色时用夜间</small></div>
         <div className="theme-cards">
@@ -389,13 +511,102 @@ function ReadingPage() {
           ))}
         </div>
       </div>
-      <Choice label="字号" value={reading.size} options={SIZES} onChange={(v) => set({ size: v })} />
-      <Choice label="正文字体" value={reading.serif} options={[[true, "宋体"], [false, "黑体"]]} onChange={(v) => set({ serif: v })} />
+
+      <h3 className="settings-sub">翻页与护眼</h3>
+      <Choice
+        label="阅读方式"
+        note="内置阅读器与穿越正文的展现方式"
+        value={reading.pageMode}
+        options={[
+          ["scroll", "上下滚动"],
+          ["paged", "左右翻页"],
+        ]}
+        onChange={(pageMode) => set({ pageMode })}
+      />
+      {reading.pageMode === "paged" && (
+        <>
+          <Choice
+            label="翻页动效"
+            value={reading.pageTurnAnim}
+            options={PAGE_TURN_ANIMS}
+            onChange={(pageTurnAnim) => set({ pageTurnAnim })}
+          />
+          <Choice
+            label="点击翻页区"
+            note={reading.tapZones === "onehand" ? "下半屏与右侧点击均为下一页，左上角回翻上一页" : "左侧 28% 上一页、中间呼出菜单、右侧 28% 下一页"}
+            value={reading.tapZones}
+            options={[
+              ["classic", "经典左中右"],
+              ["onehand", "单手全屏下一页"],
+            ]}
+            onChange={(tapZones) => set({ tapZones })}
+          />
+          <Switch
+            label="音量键翻页"
+            note="在阅读器中按手机音量上/下键翻页（打开菜单或离开页面时自动恢复调节音量）"
+            checked={reading.volumeKeyTurn}
+            onChange={(volumeKeyTurn) => set({ volumeKeyTurn })}
+          />
+        </>
+      )}
+      <PaperTonePicker value={reading.paperTone} onChange={(paperTone) => set({ paperTone })} />
+      <NightDimControl value={reading.nightDim} onChange={(nightDim) => set({ nightDim })} />
+
+      <h3 className="settings-sub">字号与版式</h3>
+      <FontSizeControl size={reading.size} onChange={(size) => set({ size })} />
+      <Choice
+        label="字体"
+        value={reading.fontFamily}
+        options={FONT_FAMILIES}
+        onChange={(fontFamily) => set({ fontFamily, serif: fontFamily === "serif" || fontFamily === "kai" })}
+      />
       <Choice label="行距" value={reading.leading} options={[[1.7, "紧"], [2, "适中"], [2.3, "松"]]} onChange={(v) => set({ leading: v })} />
+      <Choice
+        label="页边距"
+        value={reading.pageMargin}
+        options={[
+          ["compact", "紧凑"],
+          ["normal", "标准"],
+          ["wide", "宽裕"],
+        ]}
+        onChange={(pageMargin) => set({ pageMargin })}
+      />
+      <Choice
+        label="字间距"
+        value={resolveLetterSpacingBucket(reading.letterSpacing)}
+        options={LETTER_SPACING_OPTIONS}
+        onChange={(letterSpacing) => set({ letterSpacing })}
+      />
       <Choice label="段距" value={reading.paragraph} options={[[0.3, "紧"], [0.7, "适中"], [1.2, "松"]]} onChange={(v) => set({ paragraph: v })} />
       <Choice label="段首空两格" value={reading.indent} options={[[true, "空"], [false, "不空"]]} onChange={(v) => set({ indent: v })} />
-      <div className="story-text reading-preview" aria-label="效果预览"><p>西市的鼓声一声接一声，你裹紧单衣，跟着人流走进坊门。</p><p>“郎君，买胡饼么？”炉边的老汉抬起头。</p></div>
-      <h3 className="settings-sub">更多</h3>
+
+      <div
+        className="story-text reading-preview"
+        aria-label="效果预览"
+        data-paper-tone={reading.paperTone === "default" ? undefined : reading.paperTone}
+        style={{
+          fontFamily: `var(--${reading.fontFamily})`,
+          letterSpacing: `${reading.letterSpacing}em`,
+          paddingInline: padPreview,
+        }}
+      >
+        <p>西市的鼓声一声接一声，你裹紧单衣，跟着人流走进坊门。</p>
+        <p>“郎君，买胡饼么？”炉边的老汉抬起头。</p>
+      </div>
+
+      <h3 className="settings-sub">沉浸与更多</h3>
+      <Switch
+        label="常驻页脚状态栏"
+        note="左右翻页时在底部显示章节、全书进度、时间与电量"
+        checked={reading.readerFooter}
+        onChange={(readerFooter) => set({ readerFooter })}
+      />
+      <Switch
+        label="阅读专注免打扰"
+        note="专注看书时静默后台动态提示"
+        checked={reading.focusMode}
+        onChange={(focusMode) => set({ focusMode })}
+      />
       <Choice label="生成时自动滚动" note="打开后，跟着新写出的内容往下读" value={reading.autoScroll} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ autoScroll: v })} />
       <Choice label="显示每段用量" note="最新一段下面一行小字：请求几次、多少 tokens、大约多少钱、多少秒" value={reading.usageLine} options={[[true, "开"], [false, "关"]]} onChange={(v) => set({ usageLine: v })} />
       <Choice label="动画" note="华丽：页面、回合和印章都有动效；简洁：只留轻微的淡入淡出。系统设置了减少动态效果时一律关闭" value={reading.motion} options={[["rich", "华丽"], ["simple", "简洁"], ["off", "关"]]} onChange={(v) => set({ motion: v })} />

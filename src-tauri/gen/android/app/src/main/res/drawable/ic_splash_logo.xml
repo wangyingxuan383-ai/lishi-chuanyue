@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ animated splash icon vector (R36 R2-A): 108dp canvas, strictly inside 66dp inner circle ([21..87]).
+     Centered seal (rx=5.8 on 29.6dp = 19.6%), Song-serif carved 「穿/越」 glyph strokes, and -24deg brushed-gold
+     C-crescent time-portal arc aligned 1:1 with index.html .first-frame and BootSplash.tsx. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Warm jade-obsidian circular medallion inside 66dp safe zone -->
+    <path
+        android:fillColor="#FF161310"
+        android:pathData="M54,22.8 A31.2,31.2 0 1,1 53.99,22.8 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#42E5C687"
+        android:strokeWidth="0.85"
+        android:pathData="M54,24.6 A29.4,29.4 0 1,1 53.99,24.6 Z" />
+
+    <!-- Open ivory Xuan-paper Song book cradling the seal -->
+    <group
+        android:name="book_group"
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-5.5">
+        <path
+            android:fillColor="#FF252E3D"
+            android:pathData="M29.8,47.0 Q41.9,44.0 54.0,48.2 Q66.1,44.0 78.2,47.0 L78.8,65.8 Q66.3,63.0 54.0,67.8 Q41.7,63.0 29.2,65.8 Z" />
+        <path
+            android:fillColor="#FFCBB389"
+            android:pathData="M30.5,62.8 Q42.2,60.0 54.0,64.8 Q65.8,60.0 77.5,62.8 L77.9,65.0 Q66.0,62.2 54.0,67.0 Q42.0,62.2 30.1,65.0 Z" />
+        <path
+            android:fillColor="#FFFBF4E4"
+            android:pathData="M30.9,46.0 Q42.4,43.0 54.0,47.4 L54.0,64.8 Q42.2,60.0 30.5,62.8 Z" />
+        <path
+            android:fillColor="#FFF2E4C8"
+            android:pathData="M54.0,47.4 Q65.6,43.0 77.1,46.0 L77.5,62.8 Q65.8,60.0 54.0,64.8 Z" />
+    </group>
+
+    <!-- Rotating luminous brushed-gold -24deg C-crescent time-portal arc (homologous with BootSplash) -->
+    <group
+        android:name="arc_group"
+        android:pivotX="54"
+        android:pivotY="54">
+        <group
+            android:pivotX="54"
+            android:pivotY="54"
+            android:rotation="-24">
+            <path
+                android:fillColor="#FFEBBE6B"
+                android:pathData="M27.8,49.9 A27.2,23.6 0 1,1 30.2,65.4 A25.4,21.9 0 1,0 27.8,49.9 Z" />
+        </group>
+        <!-- Four-point star sparkles -->
+        <path
+            android:fillColor="#FFFFF5D4"
+            android:pathData="M76.6,37.2 Q77.0,39.5 79.3,39.9 Q77.0,40.3 76.6,42.6 Q76.2,40.3 73.9,39.9 Q76.2,39.5 76.6,37.2 Z" />
+        <path
+            android:fillColor="#FFF6DF9E"
+            android:pathData="M35.4,69.8 Q35.7,71.5 37.4,71.8 Q35.7,72.1 35.4,73.8 Q35.1,72.1 33.4,71.8 Q35.1,71.5 35.4,69.8 Z" />
+    </group>
+
+    <!-- Centered Chamfered Square-Rounded Cinnabar Seal (x=39.2..68.8, y=39.2..68.8, rx=5.8 => 19.6%) -->
+    <group
+        android:name="seal_group"
+        android:pivotX="54"
+        android:pivotY="54">
+        <!-- 3D seal base shadow -->
+        <path
+            android:name="seal_shadow"
+            android:fillColor="#FF6E130C"
+            android:pathData="M45.0,40.3 h18.0 a5.8,5.8 0 0 1 5.8,5.8 v18.0 a5.8,5.8 0 0 1 -5.8,5.8 h-18.0 a5.8,5.8 0 0 1 -5.8,-5.8 v-18.0 a5.8,5.8 0 0 1 5.8,-5.8 z" />
+        <!-- Main Cinnabar seal body -->
+        <path
+            android:name="seal_body"
+            android:fillColor="#FFC42F20"
+            android:pathData="M45.0,39.2 h18.0 a5.8,5.8 0 0 1 5.8,5.8 v18.0 a5.8,5.8 0 0 1 -5.8,5.8 h-18.0 a5.8,5.8 0 0 1 -5.8,-5.8 v-18.0 a5.8,5.8 0 0 1 5.8,-5.8 z" />
+        <!-- Ivory-gold double inner border & carved Song-serif 「穿 / 越」 glyph strokes -->
+        <path
+            android:name="seal_detail"
+            android:fillColor="#FFFBF1DE"
+            android:fillType="evenOdd"
+            android:pathData="M45.5,41.2 h17.0 a4.3,4.3 0 0 1 4.3,4.3 v17.0 a4.3,4.3 0 0 1 -4.3,4.3 h-17.0 a4.3,4.3 0 0 1 -4.3,-4.3 v-17.0 a4.3,4.3 0 0 1 4.3,-4.3 z M45.8,42.3 h16.4 a3.4,3.4 0 0 1 3.4,3.4 v16.6 a3.4,3.4 0 0 1 -3.4,3.4 h-16.4 a3.4,3.4 0 0 1 -3.4,-3.4 v-16.6 a3.4,3.4 0 0 1 3.4,-3.4 z M53.3,43.8 h1.4 v1.3 h5.1 v2.1 h-1.2 v-1.1 h-9.2 v1.1 h-1.2 v-2.1 h5.1 z M50.2,46.6 l1.1,0.6 l-1.9,1.8 l-0.9,-0.7 z M57.8,46.6 l1.9,1.7 l-0.9,0.8 l-1.9,-1.8 z M48.6,49.0 h10.8 v1.0 h-3.2 v3.8 c0,0.8 -0.5,1.2 -1.6,1.2 h-1.1 v-0.9 h0.9 c0.4,0 0.6,-0.1 0.6,-0.4 v-1.5 l-5.8,2.2 l-0.5,-1.0 l6.3,-2.3 v-1.1 h-4.8 l-0.4,1.3 h-1.1 l0.5,-2.3 z M48.2,56.5 h2.3 v-1.2 h1.1 v1.2 h2.0 v0.9 h-2.0 v1.2 h2.2 v0.9 h-1.9 v1.4 l1.8,-0.4 v0.9 l-3.3,0.8 l-0.3,-0.9 l0.7,-0.2 v-1.6 h-1.5 l-0.5,2.6 c1.2,0.9 3.1,1.2 6.2,1.2 h4.8 l-0.3,1.0 h-4.7 c-3.4,0 -5.4,-0.5 -6.6,-1.7 l-0.8,1.5 l-0.9,-0.6 l1.3,-3.6 h1.0 l-0.1,0.5 h1.0 v-1.5 h-2.5 v-0.9 h2.5 v-1.2 h-2.2 z M54.3,57.2 h2.5 v-1.8 h1.1 v1.8 h2.3 v0.9 h-2.2 c0.1,1.3 0.4,2.3 0.8,3.0 c0.4,-0.7 0.7,-1.5 0.9,-2.4 l1.0,0.4 c-0.3,1.2 -0.8,2.2 -1.3,3.0 c0.4,0.5 0.8,0.6 1.0,0.5 c0.2,-0.1 0.3,-0.5 0.4,-1.1 l0.9,0.4 c-0.2,1.1 -0.6,1.7 -1.3,1.8 c-0.7,0.1 -1.3,-0.3 -1.8,-1.0 c-0.7,0.6 -1.5,1.1 -2.4,1.4 l-0.6,-0.8 c0.9,-0.3 1.7,-0.8 2.3,-1.5 c-0.5,-0.9 -0.8,-2.1 -0.9,-3.7 h-1.6 v2.2 l1.3,-0.5 v0.9 l-2.3,0.9 v-4.4 z M58.9,55.3 l1.2,0.9 l-0.7,0.7 l-1.2,-0.9 z" />
+    </group>
+</vector>

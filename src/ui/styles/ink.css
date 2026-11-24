@@ -188,12 +188,14 @@
 :root[data-style="ink"] {
   --gilt: #b8914a; --gilt-soft: rgba(184, 145, 74, 0.26);
   --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.45' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E");
+  --meander-tr: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.45' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 1h22v22M5 5h14v18M5 5v10h10V9H9'/%3E%3C/svg%3E");
   --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a07a3c' stroke-opacity='0.45' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
   --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%231f1d1a' fill-opacity='0.055' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%231f1d1a' fill-opacity='0.045' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
 }
 :root[data-style="ink"][data-theme="night"] {
   --gilt: #d9b46a; --gilt-soft: rgba(217, 180, 106, 0.22);
   --meander: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.38' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 23V1h22M5 23V5h14v10H9V9h6'/%3E%3C/svg%3E");
+  --meander-tr: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.38' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M1 1h22v22M5 5h14v18M5 5v10h10V9H9'/%3E%3C/svg%3E");
   --meander-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23d9b46a' stroke-opacity='0.38' stroke-width='1.4' stroke-linecap='square'%3E%3Cpath d='M23 1v22H1M19 1v18H5V9h10v6H9'/%3E%3C/svg%3E");
   --hills: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 120' preserveAspectRatio='none'%3E%3Cpath fill='%23d9b46a' fill-opacity='0.045' d='M0 120V70C30 62 44 30 70 34s40 40 68 30 40-46 72-40 34 38 62 36 40-30 64-26 40 28 64 22v64Z'/%3E%3Cpath fill='%23000000' fill-opacity='0.35' d='M0 120V96c26-6 50-24 80-18s38 22 70 18 52-28 84-22 42 24 76 20 60-14 90-10v36Z'/%3E%3C/svg%3E");
 }
@@ -215,9 +217,20 @@
     radial-gradient(60% 45% at 100% 106%, rgba(217, 180, 106, 0.07), transparent 72%),
     var(--hills), url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.3 0 0 0 0 0.27 0 0 0 0 0.22 0 0 0 0.07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
-:root[data-style="ink"] :is(.card, .status-card, .settings-list, .whats-new, .new-story, .shelf-slip, .next-choices) {
+:root[data-style="ink"] :is(.card, .status-card, .settings-list, .whats-new, .next-choices) {
   background-image: var(--meander), var(--meander-br);
   background-repeat: no-repeat; background-size: 13px 13px; background-position: 8px 8px, calc(100% - 8px) calc(100% - 8px);
+  box-shadow: var(--elev-2), inset 0 0 0 1px var(--gilt-soft);
+}
+/* Avoid top-left meander colliding with .new-story-mark (+) and .shelf-slip mini cover */
+:root[data-style="ink"] .new-story {
+  background-image: var(--meander-tr), var(--meander-br);
+  background-repeat: no-repeat; background-size: 12px 12px; background-position: calc(100% - 8px) 8px, calc(100% - 8px) calc(100% - 8px);
+  box-shadow: var(--elev-2), inset 0 0 0 1px var(--gilt-soft);
+}
+:root[data-style="ink"] .shelf-slip {
+  background-image: var(--meander-br);
+  background-repeat: no-repeat; background-size: 12px 12px; background-position: calc(100% - 7px) calc(100% - 7px);
   box-shadow: var(--elev-2), inset 0 0 0 1px var(--gilt-soft);
 }
 :root[data-style="ink"] :is(.settings-sub, .section-title)::after {

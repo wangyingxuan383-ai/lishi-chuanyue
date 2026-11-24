@@ -1,5 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 13+ themed icon: the notification seal silhouette, 48dp of the 108dp canvas (inside the 66dp safe zone). -->
-<inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:drawable="@drawable/ic_stat_seal"
-    android:inset="30dp" />
+<!-- Android 13+ themed monochrome icon (R36-T002): 108dp canvas, artwork strictly within [24..84] safe zone.
+     Depicts the open Song book + central chamfered seal + sweeping time-portal arc silhouette in #FFFFFFFF. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Sweeping time-portal crescent arc (upper-left to upper-right) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M28.2,45.8 C31.4,33.2 42.8,25.2 55.8,25.8 C65.2,26.2 73.4,31.2 77.6,38.8 C72.8,33.0 65.0,29.2 55.6,28.8 C43.8,28.3 33.4,35.2 28.2,45.8 Z" />
+
+    <!-- Sweeping time-portal crescent arc (lower-right cradling bottom to lower-left) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M79.8,44.2 C82.4,55.6 76.8,68.2 65.4,75.2 C53.2,82.6 37.6,79.8 29.8,68.4 C37.8,76.8 52.2,78.8 63.6,72.0 C74.0,65.8 79.6,54.8 79.8,44.2 Z" />
+
+    <!-- Four-point star sparkle near upper-right portal crest -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M78.0,30.5 Q78.4,33.6 81.5,34.0 Q78.4,34.4 78.0,37.5 Q77.6,34.4 74.5,34.0 Q77.6,33.6 78.0,30.5 Z" />
+
+    <!-- Open Song-edition book left wing (separated cleanly from central seal) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M28.5,43.8 Q34.2,41.6 39.2,43.0 L39.2,60.6 Q33.8,58.8 28.0,60.8 Z M32.2,45.8 L32.0,57.4 L33.4,57.1 L33.6,45.5 Z M35.8,45.2 L35.6,57.0 L37.0,57.2 L37.2,45.4 Z" />
+
+    <!-- Open Song-edition book right wing -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M68.8,43.0 Q73.8,41.6 79.5,43.8 L80.0,60.8 Q74.2,58.8 68.8,60.6 Z M71.0,45.4 L71.2,57.2 L72.6,57.0 L72.4,45.2 Z M74.6,45.5 L74.8,57.1 L76.2,57.4 L76.0,45.8 Z" />
+
+    <!-- Open book lower page-block & spine valley cradling the seal -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M29.2,63.0 Q41.5,60.0 54.0,64.8 Q66.5,60.0 78.8,63.0 L79.2,66.2 Q66.6,63.2 54.0,68.4 Q41.4,63.2 28.8,66.2 Z" />
+
+    <!-- Central chamfered square-rounded Cinnabar seal with crisp inner cutout + stylized seal glyph strokes -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M46.8,33.5 h14.4 a5.3,5.3 0 0 1 5.3,5.3 v14.4 a5.3,5.3 0 0 1 -5.3,5.3 h-14.4 a5.3,5.3 0 0 1 -5.3,-5.3 v-14.4 a5.3,5.3 0 0 1 5.3,-5.3 z M47.4,36.3 h13.2 a3.1,3.1 0 0 1 3.1,3.1 v13.2 a3.1,3.1 0 0 1 -3.1,3.1 h-13.2 a3.1,3.1 0 0 1 -3.1,-3.1 v-13.2 a3.1,3.1 0 0 1 3.1,-3.1 z M47.5,39.4 h13.0 v2.2 h-5.4 v2.4 h4.6 v2.0 h-11.4 v-2.0 h4.6 v-2.4 h-5.4 z M47.5,48.0 h13.0 v2.1 h-5.4 v2.0 h5.6 v2.1 h-13.2 v-2.1 h5.4 v-2.0 h-5.4 z" />
+</vector>

@@ -269,6 +269,9 @@ export async function createWebPlatform(): Promise<Platform> {
       openSystemSettings: async () => {},
       openUrl: async (url) => { assertLink(url, "browser"); window.open(url, "_blank", "noopener"); },
       setSystemBars: async () => {},
+      setVolumePageTurn: async (enabled: boolean) => {
+        (window as unknown as { __lishiVolumePageTurnActive?: boolean }).__lishiVolumePageTurnActive = enabled;
+      },
       haptic: async () => navigator.vibrate?.(10) ?? false,
       onBack(handler) {
         backHandlers.push(handler);

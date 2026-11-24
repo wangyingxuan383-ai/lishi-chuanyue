@@ -32,6 +32,9 @@ fn main() {
                     "reminder_status",
                     "test_reminder",
                     "open_reminder_settings",
+                    "set_volume_page_turn",
+                    "tts_speak",
+                    "tts_stop",
                 ]),
             )
             .plugin(

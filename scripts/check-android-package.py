@@ -253,7 +253,7 @@ def main():
             "Lio/timejump/chuanyue/RustFileAccessBridge;": ["openFdForRust"],
             "Lio/timejump/chuanyue/GenerationService;": ["start", "stop", "onStartCommand", "onTimeout"],
             "Lio/timejump/chuanyue/GenerationService$Companion;": ["start", "stop", "storyCommitted"],
-            "Lio/timejump/chuanyue/NotificationsPlugin;": ["story_committed", "set_keep_awake", "notification_status"],
+            "Lio/timejump/chuanyue/NotificationsPlugin;": ["story_committed", "set_keep_awake", "notification_status", "set_volume_page_turn", "tts_speak", "tts_stop"],
             "Lio/timejump/chuanyue/SecretStorePlugin;": ["save", "delete", "status"],
             "Lio/timejump/chuanyue/DocumentPickerPlugin;": ["openDocument", "createDocument", "ensureIdle"],
             "Lio/timejump/chuanyue/FilesPlugin;": ["exportBytes", "exportBytesResult"],

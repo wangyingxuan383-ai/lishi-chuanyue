@@ -1,5 +1,15 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { buildNovelBook, type NovelBook, type NovelParagraph } from "../../engine/novel";
+import { recordReadingSeconds, saveWorldNovelToLibrary } from "../../engine/reader/shelf";
 import {
   addReaderBookmark,
   addReaderHighlight,
@@ -23,9 +33,9 @@ import {
   type BookSectionContent,
   type BookTocItem,
 } from "../../engine/sources/library";
-import { useApp, useBack, type ReaderRouteProps } from "../app/context";
+import { PAPER_TONES, resolvedTheme, useApp, useBack, type ReaderRouteProps } from "../app/context";
 import { localFind } from "../app/localFind";
-import { buzz } from "../app/motion";
+import { buzz, motionOn } from "../app/motion";
 import { ChapterOrnament, EmptyVignette, TitleCartouche } from "../components/ChineseArt";
 import { ExcerptsSheet } from "../components/ExcerptsSheet";
 import { Icon } from "../components/Icon";
@@ -33,7 +43,12 @@ import { NovelExportSheet } from "../components/NovelExportSheet";
 import { Paginator, type PaginatorHandle } from "../components/Paginator";
 import { CardSheet, SEPARATOR, type CardContent } from "../components/ShareCard";
 import { Sheet } from "../components/Sheet";
+import { useMouse } from "../components/useMedia";
+import { useShortcuts } from "../components/useShortcuts";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
+import { ReaderAskSheet } from "./reader/ReaderAskSheet";
+import { ReaderResplitSheet } from "./reader/ReaderResplitSheet";
+import { TTS_RATES, TTS_SLEEP_OPTIONS, formatSleepRemaining, useReaderTts } from "./reader/readerTts";
 import "./reader.css";
 
 interface UnifiedTocItem {
@@ -44,12 +59,19 @@ interface UnifiedTocItem {
   locked?: boolean;
 }
 
+interface SelectionAnchorRect {
+  top: number;
+  bottom: number;
+  centerX: number;
+}
+
 interface SelectionDraft {
   paragraphIndex: number;
   charStart: number;
   charEnd: number;
   selectedText: string;
   nodeId: string | null;
+  anchorRect?: SelectionAnchorRect | null;
 }
 
 interface SearchResultRow {
@@ -59,13 +81,127 @@ interface SearchResultRow {
   snippet: { before: string; hit: string; after: string };
 }
 
+interface JumpUndoState {
+  sectionIndex: number;
+  page: number;
+  scrollRatio: number;
+  title: string;
+}
+
+interface AskSheetState {
+  selectedText: string;
+  contextParagraphs: string[];
+}
+
 const SECTION_CACHE_LIMIT = 5;
+const AUTO_READ_PAGE_MS = [18_000, 13_000, 9_500, 6_800, 4_600] as const;
+const AUTO_READ_SCROLL_PX_PER_SEC = [18, 28, 42, 60, 84] as const;
+
+const BASE_BAR_COLORS = {
+  scroll: { paper: "#efe5cf", day: "#faf7f0", night: "#131518" },
+  ink: { paper: "#f7f5f0", day: "#fbfaf7", night: "#121212" },
+} as const;
 
 const HIGHLIGHT_COLORS: { id: HighlightColor; label: string; hex: string }[] = [
   { id: "cinnabar", label: "朱砂", hex: "#b33b2a" },
   { id: "amber", label: "藤黄", hex: "#c88a22" },
   { id: "bamboo", label: "竹青", hex: "#3f7a58" },
 ];
+
+/**
+ * Pure helper computing character-weighted total book progress percentage (`0`..`100`, 1 decimal).
+ * Returns `null` when TOC is empty.
+ */
+export function computeBookProgressPct(
+  toc: { chars: number }[],
+  sectionIndex: number,
+  intraRatio = 0,
+): number | null {
+  if (!toc.length) return null;
+  const sec = Math.max(0, Math.min(toc.length - 1, Math.trunc(sectionIndex)));
+  const intra = Number.isFinite(intraRatio) ? Math.min(1, Math.max(0, intraRatio)) : 0;
+  const rawSum = toc.reduce((acc, item) => acc + Math.max(0, item.chars || 0), 0);
+  const weights = rawSum > 0 ? toc.map((item) => Math.max(1, item.chars || 0)) : toc.map(() => 1);
+  const total = weights.reduce((a, b) => a + b, 0);
+  let before = 0;
+  for (let i = 0; i < sec; i++) {
+    before += weights[i]!;
+  }
+  const progressed = before + weights[sec]! * intra;
+  const pct = (progressed / Math.max(1, total)) * 100;
+  return Math.min(100, Math.max(0, Number(pct.toFixed(1))));
+}
+
+const CHARS_PER_MINUTE = 420;
+
+/**
+ * Pure helper estimating remaining chapter reading time at ~420 Chinese chars/minute.
+ * - Returns `null` when chapter has 0 chars and not at end.
+ * - Returns `"本章末"` when `isAtEnd` is true or `intraRatio >= 1`.
+ * - Returns `"剩 <1 分钟"` when remaining chars < 420, otherwise `"剩 X 分钟"`.
+ */
+export function computeReadingEtaText(
+  chapterChars: number,
+  intraRatio: number,
+  isAtEnd = false,
+): string | null {
+  if (isAtEnd) return "本章末";
+  if (!Number.isFinite(chapterChars) || chapterChars <= 0) return null;
+  const clamped = Number.isFinite(intraRatio) ? Math.min(1, Math.max(0, intraRatio)) : 0;
+  if (clamped >= 0.995) return "本章末";
+  const remainingChars = Math.max(0, (1 - clamped) * chapterChars);
+  if (remainingChars <= 0) return "本章末";
+  const mins = remainingChars / CHARS_PER_MINUTE;
+  if (mins < 1) return "剩 <1 分钟";
+  return `剩 ${Math.max(1, Math.round(mins))} 分钟`;
+}
+
+function measureSelectionAnchor(
+  paraEl: HTMLElement,
+  rangeRect?: DOMRect | null,
+  point?: { x: number; y: number },
+): SelectionAnchorRect {
+  const vw = typeof window !== "undefined" ? window.innerWidth || 390 : 390;
+  if (
+    rangeRect &&
+    (rangeRect.width > 0 || rangeRect.height > 0) &&
+    rangeRect.right > 4 &&
+    rangeRect.left < vw - 4
+  ) {
+    return {
+      top: rangeRect.top,
+      bottom: rangeRect.bottom,
+      centerX: rangeRect.left + rangeRect.width / 2,
+    };
+  }
+  const clientRects = Array.from(paraEl.getClientRects()).filter(
+    (r) => r.width > 0 && r.height > 0 && r.right > 4 && r.left < vw - 4,
+  );
+  if (clientRects.length > 0) {
+    let chosen = clientRects[0]!;
+    if (point) {
+      let bestDist = Infinity;
+      for (const r of clientRects) {
+        const dy = point.y < r.top ? r.top - point.y : point.y > r.bottom ? point.y - r.bottom : 0;
+        if (dy < bestDist) {
+          bestDist = dy;
+          chosen = r;
+        }
+      }
+    }
+    return {
+      top: chosen.top,
+      bottom: chosen.bottom,
+      centerX: chosen.left + chosen.width / 2,
+    };
+  }
+  const fallback = paraEl.getBoundingClientRect();
+  return {
+    top: fallback.top,
+    bottom: fallback.bottom,
+    centerX: fallback.left + fallback.width / 2,
+  };
+}
 
 function renderHighlightedText(
   text: string,
@@ -125,11 +261,12 @@ export default function ReaderScreen({
   initialNodeId,
   through: propThrough,
 }: ReaderRouteProps) {
-  const { game, pop, reading, setReading, toast, ask } = useApp();
+  const { game, pop, push, reading, setReading, toast, ask } = useApp();
   const targetType: ReaderTargetType = bookId ? "book" : "world_novel";
   const targetId = bookId ?? worldId ?? "";
 
   const [bookTitle, setBookTitle] = useState("正在打开书卷…");
+  const [bookFormat, setBookFormat] = useState("");
   const [toc, setToc] = useState<UnifiedTocItem[]>([]);
   const [novelBook, setNovelBook] = useState<NovelBook | null>(null);
   const [sectionIndex, setSectionIndex] = useState(initialSection ?? 0);
@@ -147,7 +284,7 @@ export default function ReaderScreen({
 
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
   const [highlights, setHighlights] = useState<ReaderHighlight[]>([]);
-  const [hudHidden, setHudHidden] = useState(false);
+  const [hudHidden, setHudHidden] = useState(true);
   const [drawerTab, setDrawerTab] = useState<"toc" | "bookmarks" | "search" | null>(null);
   const [tocFilter, setTocFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -155,13 +292,39 @@ export default function ReaderScreen({
   const [searching, setSearching] = useState(false);
 
   const [readingSheet, setReadingSheet] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [excerptsOpen, setExcerptsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [resplitOpen, setResplitOpen] = useState(false);
+  const [askSheetState, setAskSheetState] = useState<AskSheetState | null>(null);
   const [selection, setSelection] = useState<SelectionDraft | null>(null);
   const [activeHighlight, setActiveHighlight] = useState<ReaderHighlight | null>(null);
   const [noteInput, setNoteInput] = useState("");
   const [newNoteSheet, setNewNoteSheet] = useState<{ draft: SelectionDraft; color: HighlightColor } | null>(null);
   const [cardContent, setCardContent] = useState<CardContent | null>(null);
+
+  // Page/scroll progress, slider scrub preview, 8s jump-undo, ribbon animation, auto-read & TTS
+  const [pageStats, setPageStats] = useState<{ page: number; totalPages: number }>({ page: 0, totalPages: 1 });
+  const [scrollRatio, setScrollRatio] = useState(0);
+  const [scrubSection, setScrubSection] = useState<number | null>(null);
+  const [jumpUndo, setJumpUndo] = useState<JumpUndoState | null>(null);
+  const [ribbonDropKey, setRibbonDropKey] = useState(0);
+  const [shelvingBusy, setShelvingBusy] = useState(false);
+  const [shelvedBookId, setShelvedBookId] = useState<string | null>(null);
+
+  const [ttsOpen, setTtsOpen] = useState(false);
+  const [ttsTimerOpen, setTtsTimerOpen] = useState(false);
+  const [autoRead, setAutoRead] = useState<{ active: boolean; paused: boolean; speed: 1 | 2 | 3 | 4 | 5 }>({
+    active: false,
+    paused: false,
+    speed: 3,
+  });
+  const [autoReadProgress, setAutoReadProgress] = useState<number | null>(null);
+
+  const [brightnessHud, setBrightnessHud] = useState<number | null>(null);
+  const [docVisible, setDocVisible] = useState(
+    typeof document === "undefined" ? true : document.visibilityState === "visible",
+  );
 
   const sectionCache = useRef<Map<number, BookSectionContent>>(new Map());
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -169,6 +332,15 @@ export default function ReaderScreen({
   const paginatorRef = useRef<PaginatorHandle>(null);
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jumpUndoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const brightnessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sliderPointerDownRef = useRef(false);
+  const lastReportedPageRef = useRef<{ section: number; page: number } | null>(null);
+  const programmaticScrollUntilRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
+  const mouse = useMouse();
+  const readingRef = useRef(reading);
+  readingRef.current = reading;
 
   useBack(() => {
     if (selection) {
@@ -176,8 +348,8 @@ export default function ReaderScreen({
       setSelection(null);
       return true;
     }
-    if (hudHidden) {
-      setHudHidden(false);
+    if (!hudHidden) {
+      setHudHidden(true);
       return true;
     }
     return false;
@@ -190,6 +362,111 @@ export default function ReaderScreen({
       void game.platform.system.setKeepAwake(false).catch(() => {});
     };
   }, [game.platform.system, reading.keepAwake]);
+
+  // Track document visibility, app resume & window blur/focus for volume-key release and accurate reading stats
+  useEffect(() => {
+    const syncVis = () => {
+      setDocVisible(document.visibilityState === "visible" && document.hasFocus?.() !== false);
+    };
+    const onBlur = () => setDocVisible(false);
+    const onFocusOrResume = () => setDocVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", syncVis);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocusOrResume);
+    window.addEventListener("lishi:app-resume", onFocusOrResume);
+    return () => {
+      document.removeEventListener("visibilitychange", syncVis);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocusOrResume);
+      window.removeEventListener("lishi:app-resume", onFocusOrResume);
+    };
+  }, []);
+
+  // Sync :root[data-reader-tone] so portaled Sheets, MenuSheets, Dialogs, and Toasts inherit active paper tone
+  useEffect(() => {
+    const root = document.documentElement;
+    if (reading.paperTone !== "default") {
+      root.dataset.readerTone = reading.paperTone;
+    } else {
+      delete root.dataset.readerTone;
+    }
+    return () => {
+      delete root.dataset.readerTone;
+    };
+  }, [reading.paperTone]);
+
+  // Sync Android system bars with active eye-care paper tone, and restore app theme bar on unmount
+  useEffect(() => {
+    const baseTheme = resolvedTheme(reading.theme);
+    const tone = PAPER_TONES.find((t) => t.id === reading.paperTone);
+    const toneBg = tone?.id === "oled" ? "#000000" : tone?.bg;
+    const bg = tone && tone.id !== "default" && toneBg ? toneBg : BASE_BAR_COLORS[reading.style][baseTheme];
+    const dark = tone && tone.id !== "default" ? tone.dark : baseTheme === "night";
+    void game.platform.system.setSystemBars(bg, dark).catch(() => {});
+  }, [game.platform.system, reading.paperTone, reading.style, reading.theme]);
+
+  useEffect(
+    () => () => {
+      const r = readingRef.current;
+      const baseTheme = resolvedTheme(r.theme);
+      void game.platform.system
+        .setSystemBars(BASE_BAR_COLORS[r.style][baseTheme], baseTheme === "night")
+        .catch(() => {});
+    },
+    [game.platform.system],
+  );
+
+  // Active reading duration tracker: flushes every 30s + on pause/unmount
+  useEffect(() => {
+    if (!targetId || loading || !!error) return;
+    let lastMark = Date.now();
+    const flush = () => {
+      const now = Date.now();
+      const elapsedSec = Math.floor((now - lastMark) / 1000);
+      lastMark = now;
+      if (elapsedSec >= 2) {
+        void recordReadingSeconds(game.repo, targetType, targetId, elapsedSec).catch(() => {});
+      }
+    };
+    if (!docVisible) {
+      lastMark = Date.now();
+      return;
+    }
+    const timer = setInterval(flush, 30_000);
+    return () => {
+      clearInterval(timer);
+      flush();
+    };
+  }, [docVisible, error, game.repo, loading, targetId, targetType]);
+
+  const hasOverlayOpen =
+    drawerTab !== null ||
+    readingSheet ||
+    shortcutsOpen ||
+    excerptsOpen ||
+    exportOpen ||
+    resplitOpen ||
+    askSheetState !== null ||
+    newNoteSheet !== null ||
+    activeHighlight !== null ||
+    cardContent !== null;
+
+  const volumeTurnActive = reading.volumeKeyTurn && !hasOverlayOpen && docVisible && !loading && !error;
+
+  // Sync Android hardware volume-key interception & immediately restore on notification-shade / foreground resume
+  useEffect(() => {
+    const sync = () => {
+      void game.platform.system.setVolumePageTurn?.(volumeTurnActive).catch(() => {});
+    };
+    sync();
+    window.addEventListener("lishi:app-resume", sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.removeEventListener("lishi:app-resume", sync);
+      window.removeEventListener("focus", sync);
+      void game.platform.system.setVolumePageTurn?.(false).catch(() => {});
+    };
+  }, [game.platform.system, volumeTurnActive]);
 
   const refreshAnnotations = useCallback(async () => {
     if (!targetId) return;
@@ -232,6 +509,7 @@ export default function ReaderScreen({
           }
           setSpoilerCeiling(effectiveThrough);
           setBookTitle(meta.title);
+          setBookFormat(meta.format.toLowerCase());
           setToc(
             rawToc.map((item: BookTocItem) => ({
               index: item.section,
@@ -273,6 +551,7 @@ export default function ReaderScreen({
           }
           setNovelBook(built);
           setBookTitle(built.title);
+          setBookFormat("novel");
           setToc(
             built.sections.map((s) => ({
               index: s.index,
@@ -351,6 +630,28 @@ export default function ReaderScreen({
     };
   }, [bookId, fetchSectionCached, sectionIndex, spoilerCeiling, spoilerUnlocked, toc.length]);
 
+  const reloadAfterResplit = useCallback(async () => {
+    if (!bookId) return;
+    setJumpUndo(null);
+    sectionCache.current.clear();
+    const rawToc = await listBookToc(game.repo, bookId);
+    if (!rawToc.length) return;
+    setToc(
+      rawToc.map((item) => ({
+        index: item.section,
+        title: item.title || `第 ${item.section + 1} 节`,
+        chars: item.chars,
+        locked: spoilerCeiling != null && item.section > spoilerCeiling,
+      })),
+    );
+    const clampedSec = Math.max(0, Math.min(rawToc.length - 1, sectionIndex));
+    setEntryPage(0);
+    setPendingScrollRatio(0);
+    setSectionIndex(clampedSec);
+    const fresh = await fetchSectionCached(clampedSec);
+    setBookSection(fresh);
+  }, [bookId, fetchSectionCached, game.repo, sectionIndex, spoilerCeiling]);
+
   const currentSection = useMemo(() => {
     if (bookId) {
       if (!bookSection || bookSection.section !== sectionIndex) return null;
@@ -387,8 +688,51 @@ export default function ReaderScreen({
     [bookmarks, sectionIndex],
   );
 
+  const intraProgressRatio =
+    reading.pageMode === "paged"
+      ? pageStats.totalPages <= 1
+        ? 1
+        : (pageStats.page + 1) / pageStats.totalPages
+      : scrollRatio;
+
+  const currentChapterChars = useMemo(() => {
+    const tocChars = toc[sectionIndex]?.chars ?? 0;
+    if (tocChars > 0) return tocChars;
+    if (!currentSection) return 0;
+    return currentSection.paragraphs.reduce(
+      (sum, p) => sum + (p.kind === "divider" ? 0 : p.text.length),
+      0,
+    );
+  }, [currentSection, sectionIndex, toc]);
+
+  const isAtChapterEnd =
+    reading.pageMode === "paged"
+      ? pageStats.totalPages <= 1 || pageStats.page >= pageStats.totalPages - 1
+      : scrollRatio >= 0.98;
+
+  const readingEtaText = useMemo(
+    () => computeReadingEtaText(currentChapterChars, intraProgressRatio, isAtChapterEnd),
+    [currentChapterChars, intraProgressRatio, isAtChapterEnd],
+  );
+
+  const nextChapterTailHint = useMemo(() => {
+    const nextItem = toc[sectionIndex + 1];
+    if (!nextItem) return null;
+    const locked = !spoilerUnlocked && spoilerCeiling != null && nextItem.index > spoilerCeiling;
+    if (locked) {
+      return `下一节：第 ${nextItem.index + 1} 节（防剧透保护中）`;
+    }
+    const estMins = Math.max(1, Math.round((nextItem.chars || CHARS_PER_MINUTE) / CHARS_PER_MINUTE));
+    return `下一节：〈${nextItem.title}〉（约 ${estMins} 分钟）`;
+  }, [sectionIndex, spoilerCeiling, spoilerUnlocked, toc]);
+
+  const bookProgressPct = useMemo(
+    () => computeBookProgressPct(toc, sectionIndex, intraProgressRatio),
+    [intraProgressRatio, sectionIndex, toc],
+  );
+
   const scheduleSaveProgress = useCallback(
-    (nextSection: number, pageIndex: number, scrollRatio: number, nodeId: string | null = null) => {
+    (nextSection: number, pageIndex: number, ratio: number, nodeId: string | null = null) => {
       if (!targetId) return;
       if (progressTimer.current) clearTimeout(progressTimer.current);
       progressTimer.current = setTimeout(() => {
@@ -398,7 +742,7 @@ export default function ReaderScreen({
           targetId,
           sectionIndex: nextSection,
           pageIndex,
-          scrollRatio,
+          scrollRatio: ratio,
           anchorText: snippet,
           nodeId,
         }).catch(() => {});
@@ -411,16 +755,34 @@ export default function ReaderScreen({
     () => () => {
       if (progressTimer.current) clearTimeout(progressTimer.current);
       if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      if (jumpUndoTimerRef.current) clearTimeout(jumpUndoTimerRef.current);
+      if (brightnessTimerRef.current) clearTimeout(brightnessTimerRef.current);
     },
     [],
   );
+
+  const armJumpUndo = useCallback(() => {
+    const curTitle = currentSection?.title ?? `第 ${sectionIndex + 1} 节`;
+    setJumpUndo({
+      sectionIndex,
+      page: pageStats.page,
+      scrollRatio,
+      title: curTitle,
+    });
+    if (jumpUndoTimerRef.current) clearTimeout(jumpUndoTimerRef.current);
+    jumpUndoTimerRef.current = setTimeout(() => {
+      setJumpUndo(null);
+    }, 8000);
+  }, [currentSection?.title, pageStats.page, scrollRatio, sectionIndex]);
 
   // Restore scroll position or flash jumped paragraph in scroll mode
   useEffect(() => {
     if (reading.pageMode !== "scroll" || !currentSection) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
+    programmaticScrollUntilRef.current = performance.now() + 280;
     requestAnimationFrame(() => {
+      programmaticScrollUntilRef.current = performance.now() + 280;
       if (pendingFlashPara !== null) {
         const el = scroller.querySelector<HTMLElement>(`[data-para-index="${pendingFlashPara}"]`);
         if (el) {
@@ -428,6 +790,7 @@ export default function ReaderScreen({
           el.classList.add("toc-flash");
           setTimeout(() => el.classList.remove("toc-flash"), 1600);
         }
+        lastScrollTopRef.current = scroller.scrollTop;
         setPendingFlashPara(null);
         return;
       }
@@ -438,21 +801,28 @@ export default function ReaderScreen({
           el.classList.add("toc-flash");
           setTimeout(() => el.classList.remove("toc-flash"), 1600);
         }
+        lastScrollTopRef.current = scroller.scrollTop;
         setEntrySelector(null);
         return;
       }
       if (pendingScrollRatio !== null && pendingScrollRatio > 0) {
         const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
         scroller.scrollTop = Math.round(maxScroll * pendingScrollRatio);
+        lastScrollTopRef.current = scroller.scrollTop;
         setPendingScrollRatio(null);
       } else {
         scroller.scrollTop = 0;
+        lastScrollTopRef.current = 0;
+        setScrollRatio(0);
       }
     });
   }, [currentSection, entrySelector, pendingFlashPara, pendingScrollRatio, reading.pageMode]);
 
   const goSection = useCallback(
-    async (targetSec: number, opts?: { page?: number | "last"; paraIndex?: number; selector?: string }) => {
+    async (
+      targetSec: number,
+      opts?: { page?: number | "last"; paraIndex?: number; selector?: string; scrollRatio?: number; recordUndo?: boolean },
+    ) => {
       if (!toc.length) return;
       const clamped = Math.max(0, Math.min(toc.length - 1, targetSec));
       if (bookId && spoilerCeiling != null && clamped > spoilerCeiling && !spoilerUnlocked) {
@@ -464,6 +834,13 @@ export default function ReaderScreen({
         if (!ok) return;
         setSpoilerUnlocked(true);
       }
+      if (opts?.recordUndo && (clamped !== sectionIndex || opts.paraIndex !== undefined)) {
+        armJumpUndo();
+        setHudHidden(true);
+      } else if (!opts?.recordUndo) {
+        if (jumpUndoTimerRef.current) clearTimeout(jumpUndoTimerRef.current);
+        setJumpUndo(null);
+      }
       setSelection(null);
       setEntryPage(opts?.page ?? 0);
       setEntrySelector(
@@ -471,12 +848,249 @@ export default function ReaderScreen({
           (opts?.paraIndex !== undefined ? `[data-para-index="${opts.paraIndex}"]` : null),
       );
       if (opts?.paraIndex !== undefined) setPendingFlashPara(opts.paraIndex);
-      setPendingScrollRatio(null);
+      setPendingScrollRatio(opts?.scrollRatio ?? null);
       setSectionIndex(clamped);
-      scheduleSaveProgress(clamped, typeof opts?.page === "number" ? opts.page : 0, 0);
+      scheduleSaveProgress(clamped, typeof opts?.page === "number" ? opts.page : 0, opts?.scrollRatio ?? 0);
     },
-    [ask, bookId, scheduleSaveProgress, spoilerCeiling, spoilerUnlocked, toc.length],
+    [armJumpUndo, ask, bookId, scheduleSaveProgress, sectionIndex, spoilerCeiling, spoilerUnlocked, toc.length],
   );
+
+  // Scroll-mode hardware volume-key handler
+  useEffect(() => {
+    if (!volumeTurnActive || reading.pageMode !== "scroll") return;
+    const onVolumeScroll = (ev: Event) => {
+      if (document.querySelector(".sheet-layer, .dialog, .panel:not(.docked)")) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active &&
+        (active.tagName === "INPUT" ||
+          active.tagName === "TEXTAREA" ||
+          active.tagName === "SELECT" ||
+          active.isContentEditable)
+      ) {
+        return;
+      }
+      const detail = (ev as CustomEvent<"prev" | "next">).detail;
+      if (detail !== "prev" && detail !== "next") return;
+      setAutoRead((prev) => (prev.active && !prev.paused ? { ...prev, paused: true } : prev));
+      const el = scrollerRef.current;
+      if (!el) return;
+      const stepPx = Math.max(120, Math.round(el.clientHeight * 0.85));
+      if (detail === "prev") {
+        if (el.scrollTop <= 4) {
+          if (sectionIndex > 0) void goSection(sectionIndex - 1);
+          else toast("已经是第一章了");
+        } else {
+          el.scrollBy({ top: -stepPx, behavior: motionOn() ? "smooth" : "auto" });
+        }
+      } else {
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 6) {
+          if (sectionIndex < toc.length - 1) void goSection(sectionIndex + 1);
+          else toast("已经读到最后一章了");
+        } else {
+          el.scrollBy({ top: stepPx, behavior: motionOn() ? "smooth" : "auto" });
+        }
+      }
+    };
+    window.addEventListener("lishi:volume-page", onVolumeScroll);
+    return () => window.removeEventListener("lishi:volume-page", onVolumeScroll);
+  }, [goSection, reading.pageMode, sectionIndex, toast, toc.length, volumeTurnActive]);
+
+  // Offline dual-engine TTS audiobook controller
+  const focusSpokenParagraph = useCallback(
+    (pIdx: number) => {
+      if (reading.pageMode === "paged") {
+        paginatorRef.current?.jumpToSelector(`[data-para-index="${pIdx}"]`);
+      } else {
+        programmaticScrollUntilRef.current = performance.now() + 450;
+        const el = scrollerRef.current?.querySelector<HTMLElement>(`[data-para-index="${pIdx}"]`);
+        el?.scrollIntoView({ behavior: motionOn() ? "smooth" : "auto", block: "center" });
+      }
+    },
+    [reading.pageMode],
+  );
+
+  const tts = useReaderTts({
+    platform: game.platform,
+    paragraphs: currentSection?.paragraphs ?? [],
+    sectionIndex,
+    onParagraphFocus: focusSpokenParagraph,
+    onSectionEnd: async () => {
+      if (sectionIndex < toc.length - 1) {
+        await goSection(sectionIndex + 1, { page: 0 });
+      } else {
+        tts.stop();
+        toast("整本书已朗读完毕");
+      }
+    },
+    toast,
+  });
+
+  // Auto-page / Auto-scroll controller
+  const pauseAutoReadOnTouch = useCallback(() => {
+    setAutoRead((prev) => {
+      if (!prev.active || prev.paused) return prev;
+      return { ...prev, paused: true };
+    });
+    setAutoReadProgress(null);
+  }, []);
+
+  useEffect(() => {
+    if (!autoRead.active || autoRead.paused || hasOverlayOpen || !docVisible || !currentSection) {
+      setAutoReadProgress(null);
+      return;
+    }
+
+    if (reading.pageMode === "paged") {
+      const durationMs = AUTO_READ_PAGE_MS[autoRead.speed - 1];
+      let startedAt = performance.now();
+      const timer = setInterval(() => {
+        const elapsed = performance.now() - startedAt;
+        const pct = Math.min(100, (elapsed / durationMs) * 100);
+        if (pct >= 100) {
+          startedAt = performance.now();
+          setAutoReadProgress(0);
+          const p = paginatorRef.current;
+          if (!p) return;
+          if (p.page >= p.totalPages - 1 && sectionIndex >= toc.length - 1) {
+            setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+            setAutoReadProgress(null);
+            toast("已自动读完全书");
+            return;
+          }
+          p.stepBy(1);
+        } else {
+          setAutoReadProgress(pct);
+        }
+      }, 100);
+      return () => {
+        clearInterval(timer);
+        setAutoReadProgress(null);
+      };
+    }
+
+    // Smooth rAF auto-scroll in scroll mode
+    const pxPerSec = AUTO_READ_SCROLL_PX_PER_SEC[autoRead.speed - 1];
+    let rafId = 0;
+    let lastTs = performance.now();
+    let subPixelCarry = 0;
+    let advancing = false;
+
+    const tick = (ts: number) => {
+      const dt = Math.min(0.1, Math.max(0, (ts - lastTs) / 1000));
+      lastTs = ts;
+      const el = scrollerRef.current;
+      if (el && !advancing) {
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) {
+          advancing = true;
+          if (sectionIndex < toc.length - 1) {
+            void goSection(sectionIndex + 1, { scrollRatio: 0 });
+          } else {
+            setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+            toast("已自动读完全书");
+            return;
+          }
+        } else {
+          subPixelCarry += pxPerSec * dt;
+          const whole = Math.trunc(subPixelCarry);
+          if (whole >= 1) {
+            el.scrollTop += whole;
+            subPixelCarry -= whole;
+          }
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [
+    autoRead.active,
+    autoRead.paused,
+    autoRead.speed,
+    currentSection,
+    docVisible,
+    goSection,
+    hasOverlayOpen,
+    reading.pageMode,
+    sectionIndex,
+    toast,
+    toc.length,
+  ]);
+
+  // Leftmost 16px bezel gesture: vertical swipe adjusts eye-care dim; quick tap flips prev page
+  const bezelGestureRef = useRef<{
+    id: number;
+    startX: number;
+    startY: number;
+    startTime: number;
+    startDim: number;
+    mode: "undecided" | "dim" | "horizontal";
+  } | null>(null);
+
+  const onBezelPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    bezelGestureRef.current = {
+      id: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      startTime: performance.now(),
+      startDim: reading.nightDim,
+      mode: "undecided",
+    };
+  };
+
+  const onBezelPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = bezelGestureRef.current;
+    if (!g || g.id !== e.pointerId) return;
+    e.stopPropagation();
+    const dx = e.clientX - g.startX;
+    const dy = e.clientY - g.startY;
+    if (g.mode === "undecided") {
+      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx) * 1.2) {
+        g.mode = "dim";
+        if (brightnessTimerRef.current) clearTimeout(brightnessTimerRef.current);
+      } else if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+        g.mode = "horizontal";
+        return;
+      } else {
+        return;
+      }
+    }
+    if (g.mode !== "dim") return;
+    // Dragging down increases nightDim (0..50); dragging up decreases nightDim toward 0
+    const nextDim = Math.min(50, Math.max(0, Math.round(g.startDim + dy / 4.2)));
+    setBrightnessHud(nextDim);
+    if (nextDim !== readingRef.current.nightDim) {
+      setReading({ ...readingRef.current, nightDim: nextDim });
+    }
+  };
+
+  const finishBezelPointer = (e: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
+    const g = bezelGestureRef.current;
+    if (!g || g.id !== e.pointerId) return;
+    bezelGestureRef.current = null;
+    e.stopPropagation();
+    if (g.mode === "dim") {
+      if (brightnessTimerRef.current) clearTimeout(brightnessTimerRef.current);
+      brightnessTimerRef.current = setTimeout(() => setBrightnessHud(null), 900);
+      return;
+    }
+    if (cancelled || reading.pageMode !== "paged") return;
+    const dx = e.clientX - g.startX;
+    const dy = e.clientY - g.startY;
+    const dt = Math.max(1, performance.now() - g.startTime);
+    if (g.mode === "horizontal" && (Math.abs(dx) >= 40 || Math.abs(dx) / dt > 0.38)) {
+      pauseAutoReadOnTouch();
+      paginatorRef.current?.stepBy(dx < 0 ? 1 : -1);
+      return;
+    }
+    if (dt < 280 && Math.hypot(dx, dy) < 10) {
+      pauseAutoReadOnTouch();
+      paginatorRef.current?.stepBy(-1);
+    }
+  };
 
   // Selection detection inside .reader-prose
   const checkTextSelection = useCallback(() => {
@@ -497,12 +1111,14 @@ export default function ReaderScreen({
     const pos = fullText.indexOf(raw);
     const charStart = pos >= 0 ? pos : 0;
     const charEnd = pos >= 0 ? pos + raw.length : raw.length;
+    const anchorRect = measureSelectionAnchor(startEl, range.getBoundingClientRect());
     setSelection({
       paragraphIndex: pIdx,
       charStart,
       charEnd,
       selectedText: raw.slice(0, 1200),
       nodeId: startEl.dataset.nodeId ?? null,
+      anchorRect,
     });
   }, [currentSection]);
 
@@ -529,6 +1145,21 @@ export default function ReaderScreen({
     toast(note.trim() ? "已记下划线与批注" : "已划线收入佳句摘录");
   };
 
+  const openAskCompanionFromSelection = () => {
+    if (!selection || !currentSection) return;
+    const pIdx = selection.paragraphIndex;
+    const contextParagraphs = currentSection.paragraphs
+      .slice(Math.max(0, pIdx - 2), Math.min(currentSection.paragraphs.length, pIdx + 3))
+      .filter((p) => p.kind !== "divider")
+      .map((p) => p.text);
+    setAskSheetState({
+      selectedText: selection.selectedText,
+      contextParagraphs,
+    });
+    window.getSelection?.()?.removeAllRanges();
+    setSelection(null);
+  };
+
   const toggleBookmark = async () => {
     if (!currentSection) return;
     if (sectionBookmark) {
@@ -548,9 +1179,32 @@ export default function ReaderScreen({
       paragraphIndex: paraIdx,
       nodeId: para?.nodeId ?? null,
     });
+    setRibbonDropKey((k) => k + 1);
     buzz(game.platform);
     await refreshAnnotations();
-    toast("已添加书签");
+    toast("已夹入朱砂书签");
+  };
+
+  const handleSaveToLibrary = async () => {
+    if (!worldId || shelvingBusy) return;
+    if (shelvedBookId) {
+      push({ name: "reader", bookId: shelvedBookId });
+      return;
+    }
+    setShelvingBusy(true);
+    try {
+      const saved = await saveWorldNovelToLibrary(game.repo, worldId, { lineId });
+      setShelvedBookId(saved.bookId);
+      buzz(game.platform);
+      toast(`已收入书斋：《${saved.title}》（共 ${saved.sectionCount} 章）`, {
+        label: "去翻阅",
+        run: () => push({ name: "reader", bookId: saved.bookId }),
+      });
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "收入书斋失败");
+    } finally {
+      setShelvingBusy(false);
+    }
   };
 
   // Full-text search across imported book or novel sections
@@ -646,36 +1300,48 @@ export default function ReaderScreen({
         }
         const paraHighlights = sectionHighlights.filter((h) => h.paragraphIndex === pIdx);
         const notesWithText = paraHighlights.filter((h) => h.note.trim());
+        const isSpeaking = tts.status !== "idle" && tts.speakingIndex === pIdx;
+        const isSelected = selection?.paragraphIndex === pIdx;
         return (
           <Fragment key={pIdx}>
             <p
-              className={`reader-para is-${para.kind}`}
+              className={`reader-para is-${para.kind}${isSpeaking ? " is-speaking" : ""}${isSelected ? " is-selected" : ""}`}
               data-para-index={pIdx}
               data-node-id={para.nodeId ?? undefined}
               onContextMenu={(e) => {
                 const existingSel = window.getSelection?.()?.toString().trim();
                 if (existingSel) return;
                 e.preventDefault();
+                const anchorRect = measureSelectionAnchor(e.currentTarget, null, {
+                  x: e.clientX,
+                  y: e.clientY,
+                });
                 setSelection({
                   paragraphIndex: pIdx,
                   charStart: 0,
                   charEnd: para.text.length,
                   selectedText: para.text.slice(0, 1200),
                   nodeId: para.nodeId ?? null,
+                  anchorRect,
                 });
               }}
-              onTouchStart={() => {
+              onTouchStart={(e) => {
                 if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                const paraEl = e.currentTarget;
+                const touch = e.touches[0];
+                const pt = touch ? { x: touch.clientX, y: touch.clientY } : undefined;
                 longPressTimer.current = setTimeout(() => {
                   const existingSel = window.getSelection?.()?.toString().trim();
                   if (existingSel) return;
                   buzz(game.platform);
+                  const anchorRect = measureSelectionAnchor(paraEl, null, pt);
                   setSelection({
                     paragraphIndex: pIdx,
                     charStart: 0,
                     charEnd: para.text.length,
                     selectedText: para.text.slice(0, 1200),
                     nodeId: para.nodeId ?? null,
+                    anchorRect,
                   });
                 }, 520);
               }}
@@ -701,20 +1367,111 @@ export default function ReaderScreen({
                   setNoteInput(h.note);
                 }}
               >
-                批注：{h.note}
+                <i className="rpn-seal" aria-hidden="true">
+                  批
+                </i>
+                <span className="rpn-text">{h.note}</span>
               </span>
             ))}
           </Fragment>
         );
       })}
       {currentSection.statusLine && <p className="reader-colophon">{currentSection.statusLine}</p>}
+      <footer className="reader-chapter-tail" aria-label="本节尾记">
+        <span className="rct-count">◇ 本节 {currentChapterChars.toLocaleString()} 字</span>
+        {nextChapterTailHint && <span className="rct-next">{nextChapterTailHint}</span>}
+      </footer>
     </div>
   );
 
-  const paginatorKey = `${targetId}:${sectionIndex}:${sectionHighlights.map((h) => `${h.id}:${h.color}:${h.note}`).join("|")}:${reading.size}:${reading.leading}:${reading.paragraph}:${reading.serif}:${reading.indent}:${reading.measure}`;
+  const padX = reading.pageMargin === "compact" ? "12px" : reading.pageMargin === "wide" ? "28px" : "20px";
+  const screenVars = {
+    "--story-font": `var(--${reading.fontFamily})`,
+    "--story-tracking": `${reading.letterSpacing}em`,
+    "--story-pad-x": padX,
+  } as CSSProperties;
+
+  const paginatorKey = `${targetId}:${sectionIndex}:${toc.length}:${sectionHighlights
+    .map((h) => `${h.id}:${h.color}:${h.note}`)
+    .join("|")}:${reading.size}:${reading.leading}:${reading.paragraph}:${reading.fontFamily}:${reading.indent}:${reading.measure}:${reading.pageMargin}:${reading.letterSpacing}:${reading.readerFooter}`;
+
+  const selectionPopover = useMemo(() => {
+    if (!selection?.anchorRect || typeof window === "undefined") return null;
+    const vw = window.innerWidth || 390;
+    const vh = window.innerHeight || 800;
+    const bubbleH = 88;
+    const bubbleW = Math.min(296, Math.max(220, vw - 24));
+    const halfW = bubbleW / 2;
+    const preferAbove = selection.anchorRect.top - bubbleH - 12 >= 64;
+    const rawTop = preferAbove
+      ? selection.anchorRect.top - bubbleH - 10
+      : selection.anchorRect.bottom + 10;
+    const minTop = 64;
+    const maxTop = Math.max(64, vh - 150);
+    const clampedTop = Math.round(Math.min(maxTop, Math.max(minTop, rawTop)));
+    const clampedCenterX = Math.round(
+      Math.min(Math.max(12 + halfW, selection.anchorRect.centerX), vw - 12 - halfW),
+    );
+    const arrowOffset = Math.round(
+      Math.min(halfW - 20, Math.max(-(halfW - 20), selection.anchorRect.centerX - clampedCenterX)),
+    );
+    return {
+      placement: preferAbove ? ("above" as const) : ("below" as const),
+      style: {
+        top: `${clampedTop}px`,
+        left: `${clampedCenterX}px`,
+        bottom: "auto",
+        "--rsb-arrow-x": `${arrowOffset}px`,
+      } as CSSProperties,
+    };
+  }, [selection]);
+
+  // Desktop & hardware-keyboard reader shortcuts (inactive while any sheet/dialog/input is focused)
+  useShortcuts(
+    {
+      "[": {
+        run: () => {
+          if (!currentSection) return false;
+          if (sectionIndex > 0) void goSection(sectionIndex - 1);
+          else toast("已经是第一章了");
+        },
+      },
+      "]": {
+        run: () => {
+          if (!currentSection) return false;
+          if (sectionIndex < toc.length - 1) void goSection(sectionIndex + 1);
+          else toast("已经读到最后一章了");
+        },
+      },
+      T: { run: () => setDrawerTab("toc") },
+      B: {
+        run: () => {
+          if (!currentSection) return false;
+          void toggleBookmark();
+        },
+      },
+      "/": { run: () => setDrawerTab("search") },
+      "Ctrl+F": { inInputs: true, run: () => setDrawerTab("search") },
+      A: { run: () => setReadingSheet(true) },
+      M: { run: () => setHudHidden((h) => !h) },
+      "?": { run: () => setShortcutsOpen(true) },
+      "Ctrl+/": { inInputs: true, run: () => setShortcutsOpen(true) },
+    },
+    !hasOverlayOpen && !loading && !error,
+  );
+
+  const previewSec = scrubSection ?? sectionIndex;
+  const scrubPct =
+    scrubSection !== null ? computeBookProgressPct(toc, scrubSection, 0) : null;
+  const sleepCountdownText = formatSleepRemaining(tts.sleepRemainingSec);
 
   return (
-    <div className={`reader-screen${hudHidden ? " hud-hidden" : ""}`}>
+    <div
+      className={`reader-screen${hudHidden ? " hud-hidden" : ""}`}
+      data-paper-tone={reading.paperTone === "default" ? undefined : reading.paperTone}
+      data-focus-mode={reading.focusMode ? "on" : undefined}
+      style={screenVars}
+    >
       <div className="topbar reader-topbar">
         <button className="icon-btn" aria-label="返回" onClick={pop}>
           <Icon name="back" />
@@ -741,29 +1498,91 @@ export default function ReaderScreen({
         >
           <Icon name={sectionBookmark ? "bookmark-fill" : "bookmark"} />
         </button>
-        {targetType === "world_novel" && worldId && (
+        {bookId && bookFormat === "txt" && (
           <button
             type="button"
             className="icon-btn"
-            aria-label="导出成书"
-            title="导出成正式小说"
-            onClick={() => setExportOpen(true)}
+            aria-label="重分章节目录"
+            title="重分章节目录"
+            onClick={() => setResplitOpen(true)}
           >
-            <Icon name="download" />
+            <Icon name="sliders" />
           </button>
+        )}
+        {targetType === "world_novel" && worldId && (
+          <>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={shelvedBookId ? "已在书斋，点此打开" : "收入书斋"}
+              title={shelvedBookId ? "已收入书斋" : "收入书斋永久珍藏"}
+              disabled={shelvingBusy}
+              onClick={() => void handleSaveToLibrary()}
+            >
+              <Icon name="library-hall" />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="导出成书"
+              title="导出成正式小说"
+              onClick={() => setExportOpen(true)}
+            >
+              <Icon name="download" />
+            </button>
+          </>
         )}
         <button
           type="button"
           className="icon-btn reading-btn"
-          aria-label="排版与主题"
-          title="排版与主题"
+          aria-label="排版与护眼"
+          title="排版与护眼（A）"
           onClick={() => setReadingSheet(true)}
         >
           <span aria-hidden="true">Aa</span>
         </button>
+        {mouse && (
+          <button
+            type="button"
+            className="icon-btn reader-keys-btn"
+            aria-label="阅读快捷键"
+            title="阅读快捷键（?）"
+            onClick={() => setShortcutsOpen(true)}
+          >
+            <span aria-hidden="true">?</span>
+          </button>
+        )}
       </div>
 
       <div className="reader-stage">
+        {/* Cinnabar silk bookmark ribbon */}
+        {sectionBookmark && (
+          <div
+            key={ribbonDropKey}
+            className={`reader-silk-ribbon${ribbonDropKey > 0 ? " is-dropping" : ""}`}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Leftmost 16px bezel: vertical drag adjusts dim, quick tap flips previous page */}
+        {!hasOverlayOpen && (
+          <div
+            className="reader-brightness-edge"
+            aria-hidden="true"
+            onPointerDown={onBezelPointerDown}
+            onPointerMove={onBezelPointerMove}
+            onPointerUp={(e) => finishBezelPointer(e, false)}
+            onPointerCancel={(e) => finishBezelPointer(e, true)}
+          />
+        )}
+
+        {brightnessHud !== null && (
+          <div className="reader-brightness-pill" role="status" aria-live="polite">
+            <Icon name={brightnessHud >= 20 ? "moon" : "sun"} size={16} />
+            <span>{brightnessHud > 0 ? `深夜减光 ${brightnessHud}%` : "标准亮度（减光 0%）"}</span>
+          </div>
+        )}
+
         {loading ? (
           <div className="screen-body skeleton-story" role="status" aria-label="正在加载章节">
             {[86, 100, 94, 72, 0, 98, 90, 64].map((w, i) =>
@@ -788,21 +1607,52 @@ export default function ReaderScreen({
             contentKey={paginatorKey}
             initialPage={entryPage}
             initialSelector={entrySelector}
+            headerTitle={bookTitle}
+            headerRight={toc.length > 1 ? `第 ${sectionIndex + 1} / ${toc.length} 节` : undefined}
             footerLeft={currentSection.title}
+            readingEtaText={readingEtaText}
+            bookProgressPct={bookProgressPct}
+            showStatusMeta={true}
+            hideFooter={!reading.readerFooter}
+            hasBookmarkRibbon={!!sectionBookmark}
+            hudVisible={!hudHidden}
+            autoReadProgress={autoReadProgress}
+            pageTurnAnim={reading.pageTurnAnim}
+            tapZones={reading.tapZones}
+            volumeKeys={volumeTurnActive}
+            onUserInteract={pauseAutoReadOnTouch}
             onCenterTap={() => {
               if (!selection) setHudHidden((h) => !h);
             }}
             onBoundaryStart={
               sectionIndex > 0
-                ? () => void goSection(sectionIndex - 1, { page: "last" })
+                ? () => {
+                    setHudHidden(true);
+                    void goSection(sectionIndex - 1, { page: "last" });
+                  }
                 : () => toast("已经是第一章了")
             }
             onBoundaryEnd={
               sectionIndex < toc.length - 1
-                ? () => void goSection(sectionIndex + 1, { page: 0 })
+                ? () => {
+                    setHudHidden(true);
+                    void goSection(sectionIndex + 1, { page: 0 });
+                  }
                 : () => toast("已经读到最后一章了")
             }
-            onPageChange={(p, _total, anchorNodeId) => {
+            onPageChange={(p, total, anchorNodeId) => {
+              const prev = lastReportedPageRef.current;
+              if (prev && prev.section === sectionIndex && prev.page !== p) {
+                setHudHidden(true);
+                if (selection) {
+                  window.getSelection?.()?.removeAllRanges();
+                  setSelection(null);
+                }
+              }
+              lastReportedPageRef.current = { section: sectionIndex, page: p };
+              setPageStats((old) =>
+                old.page === p && old.totalPages === total ? old : { page: p, totalPages: total },
+              );
               scheduleSaveProgress(sectionIndex, p, 0, anchorNodeId);
             }}
           >
@@ -812,14 +1662,58 @@ export default function ReaderScreen({
           <div
             className="reader-scroller"
             ref={scrollerRef}
+            onPointerDown={(e) => {
+              const t = e.target as Element | null;
+              if (!t?.closest("button, a, mark")) {
+                pauseAutoReadOnTouch();
+              }
+            }}
+            onWheel={pauseAutoReadOnTouch}
+            onClick={(e) => {
+              const t = e.target as Element | null;
+              if (t?.closest("button, a, mark, [data-no-page-tap]")) return;
+              const sel = window.getSelection?.()?.toString().trim();
+              if (sel || selection) return;
+              // Center tap in scroll mode toggles HUD cleanly
+              const rect = e.currentTarget.getBoundingClientRect();
+              const relY = (e.clientY - rect.top) / Math.max(1, rect.height);
+              if (relY > 0.22 && relY < 0.78) {
+                setHudHidden((h) => !h);
+              }
+            }}
             onScroll={() => {
               const el = scrollerRef.current;
               if (!el) return;
               const max = Math.max(1, el.scrollHeight - el.clientHeight);
-              scheduleSaveProgress(sectionIndex, 0, el.scrollTop / max);
+              const ratio = Math.min(1, Math.max(0, el.scrollTop / max));
+              if (
+                performance.now() > programmaticScrollUntilRef.current &&
+                Math.abs(el.scrollTop - lastScrollTopRef.current) > 8
+              ) {
+                lastScrollTopRef.current = el.scrollTop;
+                setHudHidden(true);
+              }
+              setScrollRatio(ratio);
+              scheduleSaveProgress(sectionIndex, 0, ratio);
             }}
           >
             {proseBody}
+            {targetType === "world_novel" && worldId && currentSection.isLast && (
+              <div className="reader-world-novel-cta">
+                <button
+                  type="button"
+                  disabled={shelvingBusy}
+                  onClick={() => void handleSaveToLibrary()}
+                >
+                  <Icon name="library-hall" size={18} />
+                  <span>{shelvedBookId ? "已入书斋 · 打开书卷" : "收入书斋"}</span>
+                </button>
+                <button type="button" className="ghost" onClick={() => setExportOpen(true)}>
+                  <Icon name="download" size={18} />
+                  <span>导出成书</span>
+                </button>
+              </div>
+            )}
             <nav className="reader-chapter-nav" aria-label="章节翻页">
               <button
                 type="button"
@@ -844,80 +1738,77 @@ export default function ReaderScreen({
         )}
       </div>
 
-      {hudHidden && (
+      {/* 8s Jump-Undo Floating Pill */}
+      {jumpUndo && (
         <button
           type="button"
-          className="icon-btn reader-hud-fab"
-          aria-label="显示阅读工具栏"
-          onClick={() => setHudHidden(false)}
+          className="reader-undo-pill"
+          onClick={() => {
+            const target = jumpUndo;
+            if (jumpUndoTimerRef.current) clearTimeout(jumpUndoTimerRef.current);
+            setJumpUndo(null);
+            void goSection(target.sectionIndex, {
+              page: target.page,
+              scrollRatio: target.scrollRatio,
+              recordUndo: false,
+            });
+          }}
         >
-          <Icon name="more" />
+          <span>↩ 回到刚才位置（{jumpUndo.title}）</span>
         </button>
       )}
 
-      {selection && (
-        <div className="reader-selection-bar" role="toolbar" aria-label="划线与摘录工具">
-          {HIGHLIGHT_COLORS.map((c) => (
+      {/* Compact Auto-Read Floating Control Bar */}
+      {autoRead.active && (
+        <div className="reader-floating-bar reader-autoread-bar" role="region" aria-label="自动阅读控制">
+          <button
+            type="button"
+            className="ghost small"
+            onClick={() =>
+              setAutoRead((prev) => ({ ...prev, paused: !prev.paused }))
+            }
+          >
+            <Icon name={autoRead.paused ? "play" : "pause"} size={16} />
+            <span>{autoRead.paused ? "继续自动读" : "自动阅读中"}</span>
+          </button>
+          <div className="reader-speed-pills">
             <button
-              key={c.id}
               type="button"
-              className="reader-color-dot"
-              aria-label={`${c.label}划线`}
-              title={`${c.label}划线`}
-              style={{ background: c.hex }}
-              onClick={() => void applyQuickHighlight(c.id)}
-            />
-          ))}
+              className="ghost small"
+              aria-label="放慢自动翻页速度"
+              disabled={autoRead.speed <= 1}
+              onClick={() =>
+                setAutoRead((prev) => ({
+                  ...prev,
+                  speed: Math.max(1, prev.speed - 1) as 1 | 2 | 3 | 4 | 5,
+                }))
+              }
+            >
+              慢
+            </button>
+            <span className="reader-speed-now">{autoRead.speed} 档</span>
+            <button
+              type="button"
+              className="ghost small"
+              aria-label="加快自动翻页速度"
+              disabled={autoRead.speed >= 5}
+              onClick={() =>
+                setAutoRead((prev) => ({
+                  ...prev,
+                  speed: Math.min(5, prev.speed + 1) as 1 | 2 | 3 | 4 | 5,
+                }))
+              }
+            >
+              快
+            </button>
+          </div>
           <button
             type="button"
-            className="ghost small"
+            className="icon-btn reader-mini-close"
+            aria-label="退出自动阅读"
             onClick={() => {
-              setNewNoteSheet({ draft: selection, color: "cinnabar" });
-              setNoteInput("");
-              window.getSelection?.()?.removeAllRanges();
-              setSelection(null);
-            }}
-          >
-            写批注
-          </button>
-          <button
-            type="button"
-            className="ghost small"
-            onClick={() => {
-              setCardContent({
-                title: bookTitle,
-                heading: currentSection?.title,
-                body: selection.selectedText,
-                date: "",
-                place: "",
-                name: "",
-                seal: "书摘",
-              });
-              window.getSelection?.()?.removeAllRanges();
-              setSelection(null);
-            }}
-          >
-            书摘卡
-          </button>
-          <button
-            type="button"
-            className="ghost small"
-            onClick={() => {
-              void navigator.clipboard?.writeText(selection.selectedText);
-              window.getSelection?.()?.removeAllRanges();
-              setSelection(null);
-              toast("已复制选中文字");
-            }}
-          >
-            复制
-          </button>
-          <button
-            type="button"
-            className="ghost small"
-            aria-label="关闭划线菜单"
-            onClick={() => {
-              window.getSelection?.()?.removeAllRanges();
-              setSelection(null);
+              setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+              setAutoReadProgress(null);
             }}
           >
             <Icon name="close" size={16} />
@@ -925,7 +1816,206 @@ export default function ReaderScreen({
         </div>
       )}
 
+      {/* Offline Dual-Engine TTS Audiobook Bar */}
+      {ttsOpen && (
+        <div className="reader-floating-bar reader-tts-bar" role="region" aria-label="语音听书控制">
+          <div className="reader-tts-main">
+            <button
+              type="button"
+              className="icon-btn reader-tts-btn"
+              aria-label="上一段"
+              onClick={() => tts.prevParagraph()}
+            >
+              <Icon name="back" size={17} />
+            </button>
+            <button
+              type="button"
+              className="primary reader-tts-play"
+              aria-label={tts.status === "playing" ? "暂停朗读" : "开始朗读"}
+              onClick={() => tts.toggle()}
+            >
+              <Icon name={tts.status === "playing" ? "pause" : "play"} size={17} />
+              <span>{tts.status === "playing" ? "暂停" : tts.status === "paused" ? "继续" : "朗读"}</span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn reader-tts-btn"
+              aria-label="下一段"
+              onClick={() => tts.nextParagraph()}
+            >
+              <Icon name="forward" size={17} />
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              aria-label="切换语速"
+              onClick={() => {
+                const idx = TTS_RATES.indexOf(tts.rate);
+                const next = TTS_RATES[(idx + 1) % TTS_RATES.length]!;
+                tts.setRate(next);
+              }}
+            >
+              {tts.rate}x
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              aria-pressed={tts.sleepMode !== 0}
+              onClick={() => setTtsTimerOpen((o) => !o)}
+            >
+              <Icon name="timer" size={15} />
+              <span>
+                {tts.sleepMode === "chapter"
+                  ? "本章完"
+                  : sleepCountdownText
+                    ? sleepCountdownText
+                    : "定时"}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn reader-mini-close"
+              aria-label="停止并关闭听书"
+              onClick={() => {
+                tts.stop();
+                setTtsTimerOpen(false);
+                setTtsOpen(false);
+              }}
+            >
+              <Icon name="close" size={16} />
+            </button>
+          </div>
+          {ttsTimerOpen && (
+            <div className="reader-tts-sleep-row" role="group" aria-label="睡眠定时">
+              {TTS_SLEEP_OPTIONS.map(([mode, label]) => (
+                <button
+                  key={String(mode)}
+                  type="button"
+                  className="ghost small"
+                  aria-pressed={tts.sleepMode === mode}
+                  onClick={() => {
+                    tts.setSleepMode(mode);
+                    setTtsTimerOpen(false);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {mouse && hudHidden && (
+        <button
+          type="button"
+          className="icon-btn reader-hud-fab"
+          aria-label="显示阅读工具栏"
+          title="显示阅读工具栏（M）"
+          onClick={() => setHudHidden(false)}
+        >
+          <Icon name="more" size={18} />
+        </button>
+      )}
+
+      {selection && (
+        <div
+          className={`reader-selection-bar${selectionPopover ? ` is-${selectionPopover.placement}` : ""}`}
+          role="toolbar"
+          aria-label="划线与摘录工具"
+          style={selectionPopover?.style}
+        >
+          <div className="rsb-row rsb-row-top">
+            <div className="rsb-dots">
+              {HIGHLIGHT_COLORS.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className="reader-color-dot"
+                  aria-label={`${c.label}划线`}
+                  title={`${c.label}划线`}
+                  style={{ background: c.hex }}
+                  onClick={() => void applyQuickHighlight(c.id)}
+                />
+              ))}
+            </div>
+            <span className="rsb-divider" aria-hidden="true" />
+            <button
+              type="button"
+              className="ghost small reader-ask-trigger"
+              onClick={openAskCompanionFromSelection}
+            >
+              <Icon name="sparkle" size={14} />
+              <span>问伴聊</span>
+            </button>
+          </div>
+          <div className="rsb-row rsb-row-actions">
+            <button
+              type="button"
+              className="ghost small"
+              onClick={() => {
+                setNewNoteSheet({ draft: selection, color: "cinnabar" });
+                setNoteInput("");
+                window.getSelection?.()?.removeAllRanges();
+                setSelection(null);
+              }}
+            >
+              写批注
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              onClick={() => {
+                setCardContent({
+                  title: bookTitle,
+                  heading: currentSection?.title,
+                  body: selection.selectedText,
+                  date: "",
+                  place: "",
+                  name: "",
+                  seal: "书摘",
+                });
+                window.getSelection?.()?.removeAllRanges();
+                setSelection(null);
+              }}
+            >
+              书摘卡
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              onClick={() => {
+                void navigator.clipboard?.writeText(selection.selectedText);
+                window.getSelection?.()?.removeAllRanges();
+                setSelection(null);
+                toast("已复制选中文字");
+              }}
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              className="ghost small rsb-close"
+              aria-label="关闭划线菜单"
+              onClick={() => {
+                window.getSelection?.()?.removeAllRanges();
+                setSelection(null);
+              }}
+            >
+              <Icon name="close" size={15} />
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="reader-dock">
+        {scrubSection !== null && toc[scrubSection] && (
+          <div className="reader-scrub-bubble" role="status" aria-live="polite">
+            <b>第 {scrubSection + 1} 节</b>
+            <span className="scrub-title">{toc[scrubSection]!.title}</span>
+            {scrubPct !== null && <span className="scrub-pct">{scrubPct.toFixed(1)}%</span>}
+          </div>
+        )}
         {toc.length > 1 && (
           <div className="reader-progress-row">
             <button
@@ -941,8 +2031,32 @@ export default function ReaderScreen({
               aria-label="章节进度"
               min={0}
               max={Math.max(0, toc.length - 1)}
-              value={sectionIndex}
-              onChange={(e) => void goSection(Number(e.target.value))}
+              value={previewSec}
+              onPointerDown={() => {
+                sliderPointerDownRef.current = true;
+                setScrubSection(sectionIndex);
+              }}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                if (sliderPointerDownRef.current) {
+                  setScrubSection(next);
+                } else {
+                  void goSection(next, { recordUndo: true });
+                }
+              }}
+              onPointerUp={(e) => {
+                if (!sliderPointerDownRef.current) return;
+                sliderPointerDownRef.current = false;
+                const target = scrubSection ?? Number((e.target as HTMLInputElement).value);
+                setScrubSection(null);
+                if (target !== sectionIndex) {
+                  void goSection(target, { recordUndo: true });
+                }
+              }}
+              onPointerCancel={() => {
+                sliderPointerDownRef.current = false;
+                setScrubSection(null);
+              }}
             />
             <button
               type="button"
@@ -973,24 +2087,109 @@ export default function ReaderScreen({
           </button>
           <button
             type="button"
-            className="reader-tool-btn"
-            aria-label={reading.pageMode === "paged" ? "切换为上下滚动" : "切换为左右翻页"}
-            onClick={() =>
-              setReading({
-                ...reading,
-                pageMode: reading.pageMode === "paged" ? "scroll" : "paged",
-              })
-            }
+            className={`reader-tool-btn${ttsOpen || tts.status === "playing" ? " is-active" : ""}`}
+            aria-pressed={ttsOpen || tts.status === "playing"}
+            onClick={() => {
+              if (!ttsOpen) {
+                setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+                if (jumpUndoTimerRef.current) clearTimeout(jumpUndoTimerRef.current);
+                setJumpUndo(null);
+                setTtsOpen(true);
+                setHudHidden(true);
+                if (tts.status === "idle") {
+                  const pIdx = Number(paginatorRef.current?.currentAnchorId("data-para-index") ?? 0) || 0;
+                  tts.play(pIdx);
+                }
+              } else {
+                tts.stop();
+                setTtsTimerOpen(false);
+                setTtsOpen(false);
+              }
+            }}
           >
-            <Icon name={reading.pageMode === "paged" ? "page-scroll" : "page-turn"} size={19} />
-            <span>{reading.pageMode === "paged" ? "翻页中" : "滚动中"}</span>
+            <Icon name="headphones" size={19} />
+            <span>{tts.status === "playing" ? "听书中" : "听书"}</span>
+          </button>
+          <button
+            type="button"
+            className={`reader-tool-btn${autoRead.active ? " is-active" : ""}`}
+            aria-pressed={autoRead.active}
+            onClick={() => {
+              if (!autoRead.active) {
+                if (tts.status !== "idle") {
+                  tts.stop();
+                  setTtsOpen(false);
+                }
+                setAutoRead((prev) => ({ ...prev, active: true, paused: false }));
+                setHudHidden(true);
+              } else {
+                setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+                setAutoReadProgress(null);
+              }
+            }}
+          >
+            <Icon name="auto-read" size={19} />
+            <span>{autoRead.active ? "自动中" : "自动读"}</span>
           </button>
         </div>
       </div>
 
+      {/* Eye-comfort late-night dim veil (0%..50%) */}
+      {reading.nightDim > 0 && (
+        <div
+          className="reader-dim-veil"
+          aria-hidden="true"
+          style={{ opacity: Number((reading.nightDim / 100).toFixed(2)) }}
+        />
+      )}
+
       {drawerTab === "toc" && (
         <Sheet title="目录" onClose={() => setDrawerTab(null)}>
           <div className="stack gap-2">
+            {(bookId && bookFormat === "txt") || (targetType === "world_novel" && worldId) ? (
+              <div className="row between wrap gap-2">
+                {bookId && bookFormat === "txt" && (
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={() => {
+                      setDrawerTab(null);
+                      setResplitOpen(true);
+                    }}
+                  >
+                    <Icon name="sliders" size={16} />
+                    <span>TXT 重分章节</span>
+                  </button>
+                )}
+                {targetType === "world_novel" && worldId && (
+                  <div className="row gap-1">
+                    <button
+                      type="button"
+                      className="ghost small"
+                      disabled={shelvingBusy}
+                      onClick={() => {
+                        setDrawerTab(null);
+                        void handleSaveToLibrary();
+                      }}
+                    >
+                      <Icon name="library-hall" size={16} />
+                      <span>{shelvedBookId ? "已入书斋" : "收入书斋"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost small"
+                      onClick={() => {
+                        setDrawerTab(null);
+                        setExportOpen(true);
+                      }}
+                    >
+                      <Icon name="download" size={16} />
+                      <span>导出成书</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : null}
             {spoilerCeiling != null && !spoilerUnlocked && (
               <div className="row between wrap gap-1">
                 <small className="muted">防剧透保护开启：截至第 {spoilerCeiling + 1} 节</small>
@@ -1027,7 +2226,7 @@ export default function ReaderScreen({
                       aria-current={active ? "true" : undefined}
                       onClick={() => {
                         setDrawerTab(null);
-                        void goSection(item.index);
+                        void goSection(item.index, { recordUndo: true });
                       }}
                     >
                       <div className="grow">
@@ -1075,7 +2274,7 @@ export default function ReaderScreen({
                     style={{ textAlign: "left", justifyContent: "flex-start" }}
                     onClick={() => {
                       setDrawerTab(null);
-                      void goSection(bm.sectionIndex, { paraIndex: bm.paragraphIndex });
+                      void goSection(bm.sectionIndex, { paraIndex: bm.paragraphIndex, recordUndo: true });
                     }}
                   >
                     <div className="stack gap-0">
@@ -1127,7 +2326,7 @@ export default function ReaderScreen({
                   className="item-row codex-item"
                   onClick={() => {
                     setDrawerTab(null);
-                    void goSection(hit.sectionIndex, { paraIndex: hit.paragraphIndex });
+                    void goSection(hit.sectionIndex, { paraIndex: hit.paragraphIndex, recordUndo: true });
                   }}
                 >
                   <div className="grow">
@@ -1283,7 +2482,9 @@ export default function ReaderScreen({
                   setCardContent({
                     title: bookTitle,
                     heading: h.sectionTitle || undefined,
-                    body: noteInput.trim() ? `${h.selectedText}\n\n${SEPARATOR}\n\n批注：${noteInput.trim()}` : h.selectedText,
+                    body: noteInput.trim()
+                      ? `${h.selectedText}\n\n${SEPARATOR}\n\n批注：${noteInput.trim()}`
+                      : h.selectedText,
                     date: h.createdAt.slice(0, 10),
                     place: "",
                     name: "",
@@ -1311,13 +2512,44 @@ export default function ReaderScreen({
       )}
 
       {readingSheet && <ReadingQuickSheet onClose={() => setReadingSheet(false)} />}
+      {shortcutsOpen && (
+        <Sheet title="阅读快捷键" onClose={() => setShortcutsOpen(false)}>
+          <div className="stack gap-2">
+            <dl className="facts reader-shortcut-list m-0">
+              {(
+                [
+                  ["← / → / Space", "上一页 / 下一页（翻页模式）"],
+                  ["[ / ]", "上一章 / 下一章"],
+                  ["T", "打开章节目录"],
+                  ["B", "添加 / 移除本章书签"],
+                  ["/ 或 Ctrl+F", "全文检索"],
+                  ["A", "排版与护眼设置"],
+                  ["M", "显示 / 隐藏顶底工具栏"],
+                  ["? 或 Ctrl+/", "打开这张快捷键表"],
+                  ["Esc", "收起面板或返回书架"],
+                ] as const
+              ).map(([keys, desc]) => (
+                <div key={keys} className="contents">
+                  <dt>
+                    <kbd className="reader-kbd">{keys}</kbd>
+                  </dt>
+                  <dd>{desc}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="muted m-0">
+              鼠标滚轮或触控板滑动也可翻页；沿左侧边缘上下拖动可调节深夜减光。
+            </p>
+          </div>
+        </Sheet>
+      )}
       {excerptsOpen && (
         <ExcerptsSheet
           worldId={targetType === "world_novel" ? targetId : worldId}
           bookId={targetType === "book" ? targetId : null}
           onJumpHighlight={(h) => {
             if (h.targetType === targetType && h.targetId === targetId) {
-              void goSection(h.sectionIndex, { paraIndex: h.paragraphIndex });
+              void goSection(h.sectionIndex, { paraIndex: h.paragraphIndex, recordUndo: true });
             }
           }}
           onClose={() => {
@@ -1332,6 +2564,39 @@ export default function ReaderScreen({
           lineId={lineId}
           worldTitle={bookTitle}
           onClose={() => setExportOpen(false)}
+        />
+      )}
+      {resplitOpen && bookId && (
+        <ReaderResplitSheet
+          bookId={bookId}
+          bookTitle={bookTitle}
+          onApplied={async () => {
+            await reloadAfterResplit();
+          }}
+          onClose={() => setResplitOpen(false)}
+        />
+      )}
+      {askSheetState && currentSection && (
+        <ReaderAskSheet
+          bookId={bookId}
+          worldId={worldId}
+          bookTitle={bookTitle}
+          sectionIndex={sectionIndex}
+          sectionTitle={currentSection.title}
+          selectedText={askSheetState.selectedText}
+          contextParagraphs={askSheetState.contextParagraphs}
+          onOpenFullCompanion={(prompt) => {
+            push({
+              name: "companion",
+              worldId,
+              lineId,
+              bookId,
+              gear: "research",
+              prompt,
+              autoSend: false,
+            });
+          }}
+          onClose={() => setAskSheetState(null)}
         />
       )}
       {cardContent && <CardSheet content={cardContent} onClose={() => setCardContent(null)} />}

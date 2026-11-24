@@ -1,0 +1,10 @@
+<resources>
+    <!-- Android 12+ (API 31+) native animated splash screen on night ink ground. -->
+    <style name="Theme.lishi_app" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowBackground">@color/ink</item>
+        <item name="android:windowSplashScreenBackground">@color/ink</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash_animated</item>
+        <item name="android:windowSplashScreenAnimationDuration">480</item>
+    </style>
+</resources>

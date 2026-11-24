@@ -295,6 +295,12 @@ export interface Platform {
      * background (`#rrggbb`); `dark` asks for light icons. A no-op off Android.
      */
     setSystemBars(background: string, dark: boolean): Promise<void>;
+    /** Intercepts Android hardware Volume Up/Down keys for page turning while active in reader/paged story view; release immediately on blur/overlay/unmount. */
+    setVolumePageTurn?(enabled: boolean): Promise<void>;
+    /** Speaks one paragraph via native Android TextToSpeech (fires `lishi:tts-event` when finished); returns false when native TTS is unavailable. */
+    ttsSpeak?(payload: { utteranceId: string; text: string; rate: number }): Promise<boolean>;
+    /** Stops any active native TextToSpeech playback immediately. */
+    ttsStop?(): Promise<void>;
     /** A short native tap of the vibration motor (long press); false when there is none. */
     haptic(): Promise<boolean>;
   };
