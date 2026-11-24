@@ -231,7 +231,7 @@ export function HomeLibrary({
         setImportProgress("正在存入书斋…");
         await saveBook(game.repo, parsed, run.signal);
         await onReload();
-        if (parsed.format === "txt") {
+        if (parsed.format === "txt" && chosen.bytes.byteLength <= 4 * 1024 * 1024) {
           setLastTxtSession({ bookId: parsed.id, title: parsed.title, file: chosen });
         } else {
           setLastTxtSession(null);

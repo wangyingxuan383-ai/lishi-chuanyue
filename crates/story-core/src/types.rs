@@ -241,7 +241,7 @@ impl ModelConfig {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .or(self.max_tokens)
-            .unwrap_or(2048)
+            .unwrap_or(8192)
     }
 }
 

@@ -30,6 +30,19 @@ impl Store {
             .execute_batch(include_str!("agent_schema.sql"))?;
         self.lock()?
             .execute_batch(include_str!("reader_schema.sql"))?;
+        {
+            let db = self.lock()?;
+            let has_chunks: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_chunks')",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_chunks {
+                db.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS source_chunks_book_section ON source_chunks(book_id, section, ordinal);",
+                )?;
+            }
+        }
         crate::companion_store::CompanionStore(self.clone()).initialize()?;
         lease::ensure_schema(&*self.lock()?)?;
         crate::agent_workspace::install_hooks(&*self.lock()?);

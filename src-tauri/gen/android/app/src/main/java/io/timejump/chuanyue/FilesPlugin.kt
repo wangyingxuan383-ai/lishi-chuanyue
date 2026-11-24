@@ -50,6 +50,8 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         val sourcePath: String?,
         val bytesBase64: String?
     ) {
+        @Volatile
+        var callbackReceived: Boolean = false
         lateinit var timeout: Runnable
     }
 
@@ -132,6 +134,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         mainHandler.post {
             val current = pending ?: return@post
             if (current.invoke !== invoke) return@post
+            current.callbackReceived = true
             val decoded = try {
                 decodeDocumentPickerResult(result)
             } catch (_: Throwable) {
@@ -203,7 +206,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         val current = pending ?: return
         if (!current.gate.hasPaused) return
         mainHandler.postDelayed({
-            if (pending === current) {
+            if (pending === current && !current.callbackReceived) {
                 cleanupSource(current.sourcePath)
                 current.gate.returnedWithoutCallback()
                 mainHandler.removeCallbacks(current.timeout)

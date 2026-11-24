@@ -205,8 +205,47 @@ impl Serialize for Book<'_> {
                 .report(Error::Invalid("参考书籍缺失，无法导出完整故事".into()))
         })?;
         let mut map = serializer.serialize_map(Some(4))?;
-        let book = ws::parse(ws::text(row, "json"));
+        let mut book = ws::parse(ws::text(row, "json"));
         drop(rows);
+        if book["sections"]
+            .as_array()
+            .is_some_and(|sections| sections.iter().any(|s| !s["text"].is_string()))
+        {
+            let mut by_section: std::collections::BTreeMap<usize, String> =
+                std::collections::BTreeMap::new();
+            let mut stmt = self
+                .db
+                .prepare(
+                    "SELECT section, text FROM source_chunks WHERE book_id=? ORDER BY section ASC, ordinal ASC",
+                )
+                .map_err(|e| self.errors.report(e.into()))?;
+            let mut chunk_rows = stmt
+                .query([&self.id])
+                .map_err(|e| self.errors.report(e.into()))?;
+            while let Some(r) = chunk_rows.next().map_err(|e| self.errors.report(e.into()))? {
+                let sec: i64 = r.get(0).map_err(|e| self.errors.report(e.into()))?;
+                let txt: String = r.get(1).map_err(|e| self.errors.report(e.into()))?;
+                if let Ok(idx) = usize::try_from(sec) {
+                    by_section.entry(idx).or_default().push_str(&txt);
+                }
+            }
+            if let Some(sections) = book["sections"].as_array_mut() {
+                for (idx, section) in sections.iter_mut().enumerate() {
+                    if !section["text"].is_string() {
+                        let sec_key = section
+                            .get("index")
+                            .or_else(|| section.get("section"))
+                            .and_then(Value::as_u64)
+                            .and_then(|n| usize::try_from(n).ok())
+                            .unwrap_or(idx);
+                        let full_text = by_section.get(&sec_key).cloned().unwrap_or_default();
+                        if let Some(obj) = section.as_object_mut() {
+                            obj.insert("text".into(), Value::String(full_text));
+                        }
+                    }
+                }
+            }
+        }
         map.serialize_entry("book", &book)?;
         drop(book);
         let book_only: &[&dyn ToSql] = &[&self.id];
@@ -344,5 +383,29 @@ mod tests {
         drop(db);
         let error = export_to(&store, "w", std::io::sink()).unwrap_err();
         assert!(matches!(error, Error::Invalid(message) if message.contains("参考书籍缺失")));
+    }
+
+    #[test]
+    fn slim_book_sections_rehydrate_full_text_from_source_chunks_on_export() {
+        let store = store();
+        {
+            let db = store.lock().unwrap();
+            db.execute(
+                "UPDATE source_books SET json=? WHERE id='b'",
+                [r#"{"id":"b","title":"样书","sections":[{"title":"第一章"},{"title":"第二章"}]}"#],
+            )
+            .unwrap();
+            db.execute_batch(
+                "INSERT INTO source_chunks(book_id,ordinal,section,text) VALUES
+                   ('b',1,0,'后半段。'),
+                   ('b',0,0,'前半段，'),
+                   ('b',2,1,'第二章全文。');",
+            )
+            .unwrap();
+        }
+        let exported = export(&store, "w").unwrap();
+        let sections = exported["books"][0]["book"]["sections"].as_array().unwrap();
+        assert_eq!(sections[0]["text"], "前半段，后半段。");
+        assert_eq!(sections[1]["text"], "第二章全文。");
     }
 }

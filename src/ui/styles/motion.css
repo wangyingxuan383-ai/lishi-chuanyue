@@ -2,35 +2,27 @@
    简洁 keeps light fades; 关 (or system reduce-motion) disables all motion & delays.
    Compositor-only (transform, opacity, filter) for zero-drop 60fps. */
 
-/* ---------- page changes (View Transitions; App.tsx) ---------- */
-::view-transition-group(*) { animation-duration: 360ms; animation-timing-function: var(--ease-out); }
-:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 420ms var(--ease-in) both; }
+/* ---------- page changes (View Transitions; App.tsx) — pure GPU compositor (transform + opacity) ---------- */
+::view-transition-group(*) { animation-duration: 210ms; animation-timing-function: var(--ease-out); }
+:root[data-vt="push"]::view-transition-old(root) { animation: vt-recede 210ms var(--ease-in) both; }
 :root[data-vt="push"]::view-transition-new(root) {
-  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E");
-  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 22c7-6 15 2 20 0s14 4 12 12 6 10 4 17 3 13-4 17-6 12-14 11-11 6-18 2-14 1-17-6-12-6-11-14-7-10-4-18 1-14 9-15 9-9 16-7 6-11 7-6z'/%3E%3Ccircle cx='18' cy='26' r='4'/%3E%3Ccircle cx='84' cy='20' r='3'/%3E%3Ccircle cx='88' cy='74' r='4.5'/%3E%3Ccircle cx='14' cy='78' r='3.5'/%3E%3Ccircle cx='50' cy='92' r='2.5'/%3E%3Ccircle cx='30' cy='10' r='2'/%3E%3C/svg%3E");
-  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: 50% 62%; mask-position: 50% 62%;
-  animation: vt-ink-bloom 560ms cubic-bezier(0.25, 0.75, 0.2, 1) both;
+  animation: vt-enter 220ms var(--ease-out) both;
 }
-/* When opening a book from Home, the book flourish already played — settle crisply in 240ms */
+/* When opening a book from Home, the book flourish already played — settle crisply in 180ms */
 :root[data-vt="push"][data-book-open="1"]::view-transition-new(root) {
-  -webkit-mask-image: none; mask-image: none;
-  animation: fade 240ms var(--ease-out) both;
+  animation: fade 180ms var(--ease-out) both;
 }
 :root[data-vt="push"][data-book-open="1"]::view-transition-old(root) {
-  animation: fade-out 220ms var(--ease-in) both;
+  animation: fade-out 170ms var(--ease-in) both;
 }
-:root[data-vt="pop"]::view-transition-old(root) { animation: vt-pop-away 360ms var(--ease-in) both; z-index: 2; }
-:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 420ms var(--spring-soft) both; }
-::view-transition-group(story-card) { animation-duration: 380ms; animation-timing-function: var(--spring-soft); z-index: 2; }
+:root[data-vt="pop"]::view-transition-old(root) { animation: vt-pop-away 190ms var(--ease-in) both; z-index: 2; }
+:root[data-vt="pop"]::view-transition-new(root) { animation: vt-come-back 210ms var(--ease-out) both; }
+::view-transition-group(story-card) { animation-duration: 230ms; animation-timing-function: var(--ease-out); z-index: 2; }
 ::view-transition-old(story-card), ::view-transition-new(story-card) { height: 100%; object-fit: cover; }
-@keyframes vt-recede { to { opacity: 0.28; transform: scale(0.94) translateY(1.5%); } }
-@keyframes vt-ink-bloom {
-  0% { -webkit-mask-size: 0% 0%; mask-size: 0% 0%; }
-  40% { -webkit-mask-size: 130% 130%; mask-size: 130% 130%; }
-  100% { -webkit-mask-size: 520% 520%; mask-size: 520% 520%; }
-}
-@keyframes vt-pop-away { to { opacity: 0; transform: scale(0.92) translateY(3%); } }
-@keyframes vt-come-back { from { opacity: 0.35; transform: scale(1.03); } }
+@keyframes vt-recede { to { opacity: 0.45; transform: translate3d(0, 8px, 0) scale(0.98); } }
+@keyframes vt-enter { from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.985); } }
+@keyframes vt-pop-away { to { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.97); } }
+@keyframes vt-come-back { from { opacity: 0.55; transform: scale(1.015); } }
 :root[data-vt] .screen, :root[data-vt] .agent-conversation, :root[data-vt] .play-layout { animation: none !important; }
 
 /* ---------- lists come in one after another ---------- */
@@ -65,7 +57,7 @@
   animation: fly-in 540ms var(--spring-soft) both;
 }
 @keyframes fly-in { from { opacity: 0; transform: translate3d(0, 40vh, 0) scale(0.94); } 60% { opacity: 1; } }
-:root[data-motion="rich"] .turn.fresh { position: relative; overflow: hidden; }
+:root[data-motion="rich"] .turn.fresh { position: relative; overflow: clip; }
 :root[data-motion="rich"] .turn.fresh::after {
   content: ""; position: absolute; top: 0; bottom: 0; left: -60%; width: 55%; pointer-events: none;
   background: linear-gradient(105deg, transparent 0%, color-mix(in srgb, #e6c27a 32%, transparent) 50%, transparent 100%);
@@ -142,7 +134,7 @@
 
 :root[data-motion="rich"] .hero .seal { animation: stamp-arrive 760ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
 @keyframes stamp-arrive { 0% { opacity: 0; transform: scale(2) rotate(-18deg); } 60% { opacity: 1; transform: scale(0.95) rotate(-3deg); } }
-:root[data-motion="rich"] .play { overflow: hidden; }
+:root[data-motion="rich"] .play { overflow: clip; }
 
 .dust-burst { position: fixed; z-index: 60; width: 0; height: 0; pointer-events: none; }
 .dust-burst i {

@@ -3,11 +3,10 @@
 :root[data-font="sans"] .story-text, :root[data-font="round"] .story-text { letter-spacing: var(--story-tracking, 0.015em); }
 
 *, *::before, *::after { box-sizing: border-box; }
-html, body, #root { height: 100%; }
+html, body, #root { height: 100%; max-width: 100%; overflow-x: clip; }
 body {
   margin: 0; overscroll-behavior: none;
   background-color: var(--bg); background-image: var(--glow), var(--grain);
-  overflow-x: clip;
 }
 ::selection { background: var(--accent-soft); }
 .story, .panel-body, .sheet, .choices { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
@@ -69,7 +68,7 @@ label { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 .mb-1 { margin-bottom: var(--s1) !important; } .contents { display: contents; } .tap-row { min-height: var(--tap); }
 .hero-title { font-size: 20px; letter-spacing: 4px; }
 .label-col { min-width: 84px; } .age-box { width: 84px; } .stat-label { width: 92px; }
-.story-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.story-wrap { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: clip; display: flex; }
 .source-name { min-width: 0; overflow-wrap: anywhere; }
 .date-y { flex: 1 1 96px; min-width: 0; } .date-m { flex: 1 1 80px; min-width: 0; } .date-d { flex: 1 1 64px; min-width: 0; }
 .codex-note { margin: 2px 0 6px; }

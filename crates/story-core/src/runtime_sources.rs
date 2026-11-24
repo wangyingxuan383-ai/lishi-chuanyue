@@ -269,11 +269,16 @@ pub(crate) fn list_sections(db: &Connection, plan: &RunPlan, args: &Value) -> Re
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"].as_u64().unwrap_or(40).clamp(1, 80) as usize;
     let mut stmt = db.prepare(
-        "SELECT s.section, s.title, s.page, COALESCE(SUM(LENGTH(c.text)), 0) AS chars, COUNT(c.ordinal) AS chunks
+        "WITH chunk_stats AS (
+           SELECT section, SUM(LENGTH(text)) AS chars, COUNT(ordinal) AS chunks
+           FROM source_chunks
+           WHERE book_id = ?1 AND section >= ?2 AND section <= ?3
+           GROUP BY section
+         )
+         SELECT s.section, s.title, s.page, COALESCE(cs.chars, 0) AS chars, COALESCE(cs.chunks, 0) AS chunks
          FROM source_sections s
-         LEFT JOIN source_chunks c ON c.book_id = s.book_id AND c.section = s.section
-         WHERE s.book_id = ? AND s.section >= ? AND s.section <= ?
-         GROUP BY s.section, s.title, s.page
+         LEFT JOIN chunk_stats cs ON cs.section = s.section
+         WHERE s.book_id = ?1 AND s.section >= ?2 AND s.section <= ?3
          ORDER BY s.section",
     )?;
     let all = stmt

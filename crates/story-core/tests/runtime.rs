@@ -2298,3 +2298,125 @@ async fn note_within_scope_accepts_explicit_through_ceiling_and_continue_correct
     assert_eq!(&services[..2], &["fake", "fake"]);
     assert!(services[2..].iter().all(|s| s == "backup-corr"), "resumed correction must stick to backup-corr: {services:?}");
 }
+
+#[tokio::test]
+async fn deep_tier_empty_passages_and_reference_review_3_preserve_prose_and_apply_verified_fix() {
+    // 1. Custom fanfic skill action with 0 pre-supplied passages and no tool calls commits cleanly without FailKind::Review.
+    let f0 = Fixture::new(vec![Step::Reply(prose(r#"你催动凤凰第三变加第四魂技横扫全场。<record>{"time":5,"log":"凤凰第三变"}</record>"#))]);
+    let mut p0 = bound(&f0, "deep-fanfic-custom", "deep");
+    p0.action = json!({"mode":"do","text":"凤凰第三变加第四魂技结束全场"});
+    p0.reference = Some(json!({"bookId":"book","binding":p0.state["source"],"passages":[],"status":"insufficient","reason":"no_match"}));
+    p0.meta["referenceReviewVersion"] = "reference-review-4".into();
+    f0.engine.start(p0).unwrap();
+    let s0 = f0.settled("deep-fanfic-custom").await;
+    assert_eq!(s0.status, "committed", "fanfic custom action must not fail review: {:?}", s0.error);
+    assert_eq!(s0.draft["insufficientRead"], true);
+    assert_eq!(s0.draft["referenceReview"]["status"], "skipped");
+    assert_eq!(f0.model.count(), 1);
+
+    // 2. Deep review_reference-3 applies verified sentence + recordPatch fix in a single compact pass.
+    let f1 = Fixture::new(vec![
+        Step::Reply(written()),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"第一章写明三文","fix":"三文","citations":[{"section":1,"chunk":1,"quote":"一张纸卖三文"}],"recordPatch":{"money":-3}}],"findings":[{"claim":"纸价","status":"corrected","detail":"按第一章改为三文","citations":[{"section":1,"chunk":1,"quote":"一张纸卖三文"}]}],"unresolved":[]}"#)),
+    ]);
+    let mut p1 = bound(&f1, "deep-review-fix", "deep");
+    p1.meta["referenceReviewVersion"] = "reference-review-4".into();
+    f1.engine.start(p1).unwrap();
+    let s1 = f1.settled("deep-review-fix").await;
+    assert_eq!(s1.status, "committed", "{:?}", s1.error);
+    let node_id = s1.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    assert_eq!(f1.text(&format!("SELECT narrative FROM nodes WHERE id='{node_id}'")), "你付了三文，收好一张纸。");
+    assert_eq!(s1.draft["referenceReview"]["version"], "reference-review-4");
+    assert_eq!(s1.draft["referenceReview"]["status"], "reviewed");
+
+    // 3. Truncated/malformed JSON or needsPlayer in review_reference-3 keeps finished prose intact and commits.
+    for reply in [
+        Completion { finish_reason: Some("length".into()), ..prose(r#"{"issues":[{"quote":"两文""#) },
+        prose(r#"{"needsPlayer":true,"unresolved":["需要玩家决定是否认输"]}"#),
+    ] {
+        let f2 = Fixture::new(vec![Step::Reply(written()), Step::Reply(reply)]);
+        let mut p2 = bound(&f2, "deep-review-fallback", "deep");
+        p2.meta["referenceReviewVersion"] = "reference-review-4".into();
+        f2.engine.start(p2).unwrap();
+        let s2 = f2.settled("deep-review-fallback").await;
+        assert_eq!(s2.status, "committed", "truncated or needsPlayer review must not discard prose: {:?}", s2.error);
+        let nid = s2.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+        assert_eq!(f2.text(&format!("SELECT narrative FROM nodes WHERE id='{nid}'")), "你付了两文，收好一张纸。");
+    }
+}
+
+#[tokio::test]
+async fn default_max_output_tokens_is_8192_and_steps_down_on_http_400_max_tokens_rejection() {
+    let reject_8192 = Error::Provider {
+        kind: "http".into(),
+        status: Some(400),
+        message: "HTTP 400: max_tokens (8192) exceeds maximum allowed completion tokens (2048)".into(),
+        partial: false,
+    };
+    let reject_4096 = Error::Provider {
+        kind: "http".into(),
+        status: Some(422),
+        message: "HTTP 422: max_tokens (4096) exceeds maximum allowed completion tokens (2048)".into(),
+        partial: false,
+    };
+    // Multi-step 8192 -> 4096 -> 2048 step-down, and persisted 2048 onto shared for subsequent `extract`!
+    let f = Fixture::new(vec![
+        Step::Fail(reject_8192),
+        Step::Fail(reject_4096),
+        Step::Reply(prose("你在灯下收好一张纸。")),
+        Step::Reply(prose(&record().to_string())),
+    ]);
+    let mut plan = f.plan("max-tokens-stepdown");
+    plan.model.max_tokens = None;
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("max-tokens-stepdown").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let requests = f.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0]["max_tokens"], 8192);
+    assert_eq!(requests[1]["max_tokens"], 4096);
+    assert_eq!(requests[2]["max_tokens"], 2048);
+    assert_eq!(requests[3]["max_tokens"], 2048, "stepped-down max_tokens must persist to extract stage");
+}
+
+#[tokio::test]
+async fn inline_think_with_record_mention_never_truncates_prose_or_hijacks_settlement() {
+    let tricky_reply = concat!(
+        "<THINK >先核对输出格式：稍后在末尾附上 <record>{\"time\":999,\"money\":-99}</record>，",
+        "但现在先写正文。</think >\n\n",
+        "你付了两文，收好一张青纸。<record>{\"time\":5,\"money\":-2,\"items\":[{\"name\":\"青纸\",\"delta\":1}]}</record>"
+    );
+    let f = Fixture::new(vec![Step::Reply(prose(tricky_reply))]);
+    f.engine.start(f.plan("inline-think-record-trap")).unwrap();
+    let saved = f.settled("inline-think-record-trap").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let node_id = saved.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    let narrative = f.text(&format!("SELECT narrative FROM nodes WHERE id='{node_id}'"));
+    assert_eq!(narrative, "你付了两文，收好一张青纸。");
+    assert!(!narrative.to_ascii_lowercase().contains("think"));
+    let rec: Value = serde_json::from_str(&f.text(&format!("SELECT record_json FROM nodes WHERE id='{node_id}'"))).unwrap();
+    assert_eq!(rec["time"], 5);
+    assert_eq!(rec["money"], -2);
+    assert_eq!(rec["items"][0]["name"], "青纸");
+    assert!(
+        saved.events.iter().any(|e| e.event["type"] == "thinking" && e.event["deep"] == true),
+        "inline <think> before prose must fire deep thinking RunEvent once: {:?}",
+        saved.events
+    );
+    for ev in &saved.events {
+        if ev.event["type"] == "text" {
+            let full = ev.event["full"].as_str().unwrap_or("");
+            assert!(!full.to_ascii_lowercase().contains("think"), "streamed text leaked <think>: {full}");
+        }
+    }
+
+    // Truncated unclosed <think> must fail as format/empty and NEVER save raw reasoning as partialNarrative.
+    let f_trunc = Fixture::new(vec![Step::Reply(Completion {
+        finish_reason: Some("length".into()),
+        ..prose("<think>长篇推理里提到 <record>{\"time\":5}</record> 却没写完")
+    })]);
+    f_trunc.engine.start(f_trunc.plan("unclosed-think-trunc")).unwrap();
+    let trunc_snap = f_trunc.settled("unclosed-think-trunc").await;
+    assert_eq!(trunc_snap.status, "failed");
+    assert!(trunc_snap.draft["partialNarrative"].is_null(), "must never persist <think> as partialNarrative");
+}

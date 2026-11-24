@@ -35,7 +35,7 @@ import { useNotificationGate } from "./play/useNotificationGate";
 import { ChallengeSetup, PlayStyles, ScriptOutline } from "../components/ModeSetup";
 import { SourceLibrary, SourceSetup, SourceSummary } from "../components/Sources";
 import { newBinding, type SourceBinding } from "../../engine/sources/types";
-import { getBook } from "../../engine/sources/library";
+import { bookExists } from "../../engine/sources/library";
 
 /** "唐 · 天宝七载" → "唐" */
 const dynastyOf = (t: OpeningTemplate) => t.era.split(" · ")[0];
@@ -371,7 +371,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
 
   const start = async (d: Draft, defs: PlayDefaults | null = defaults) => {
     if (!game.llm) { toast("先连接 AI 服务"); return; }
-    if (d.source && !await getBook(game.repo, d.source.bookId)) { setError("这台设备上没有选中的参考书籍，请重新选择或导入。"); return; }
+    if (d.source && !await bookExists(game.repo, d.source.bookId)) { setError("这台设备上没有选中的参考书籍，请重新选择或导入。"); return; }
     setError(null); setFailure(null); setFailedRun(null);
     let streamed = d.openingMode === "player" ? d.openingText : "";
     let reachedOrg = d.openingMode === "player";
@@ -595,7 +595,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
       {sheet === "mine" ? <>
         <div className="segmented" role="group" aria-label="我的开局分类">{["全部", "历史", "自由", "同人"].map((name) => <button key={name} aria-pressed={mineFilter === name} onClick={() => setMineFilter(name)}>{name}</button>)}</div>
         {!mineShown.length && <EmptyVignette kind="book-stack" title="这里还没有保存的开局" hint="填好设定后点下方“存为我的开局”，以后可以直接选用。" compact />}
-        {mineShown.map((m) => <MyTemplateCard key={m.id} t={m} onUse={() => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(m.draft as unknown as Record<string, unknown>)); setSheet(null); setError(null); void (async () => { if (m.draft.source && !await getBook(game.repo, m.draft.source.bookId)) toast("这个开局的参考书籍不在本机，其他设定已保留，请重新绑定书籍。"); })(); }} onMenu={() => setTemplateMenu(m)} />)}
+        {mineShown.map((m) => <MyTemplateCard key={m.id} t={m} onUse={() => { setOpeningScope(AUTO_SCOPE); setDraft(normalizeOpeningDraft(m.draft as unknown as Record<string, unknown>)); setSheet(null); setError(null); void (async () => { if (m.draft.source && !await bookExists(game.repo, m.draft.source.bookId)) toast("这个开局的参考书籍不在本机，其他设定已保留，请重新绑定书籍。"); })(); }} onMenu={() => setTemplateMenu(m)} />)}
       </> : <>
         {free && !draft.fanfic && !draft.source?.fanfic && <details><summary>原创题材包</summary><div className="stack mt-2">
           <p className="muted">通用设定与身份灵感，先预览、编辑，再填入勾选的部分。</p>
@@ -609,7 +609,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   </Sheet>;
 
   return (
-    <div className="screen">
+    <div className="screen newgame">
       <div className="topbar">
         <button className="icon-btn" aria-label="返回" onClick={pop}><Icon name="back" /></button>
         <div className="title"><h1>新的故事</h1></div>
@@ -628,7 +628,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
         {error && <div className="notice"><div className="notice-body"><p>{error}{failedRun?.proseSaved ? " 正文已保留，点“接着写完”可直接补记入库。" : ""}</p><div className="notice-actions">{failedRun && failedRun.revision === revision.current && <button className="primary" onClick={() => retryOpening(failedRun.id, failedRun.proseSaved ? failedRun.partialText ?? "" : "")}>{failedRun.proseSaved ? "接着写完" : "再试一次"}</button>}{failure && (failure.failure || failure.detail) && <button className="ghost" onClick={() => setWhy(true)}>查看原因</button>}</div></div></div>}
         {why && error && failure && <FailureSheet text={error} failure={failure.failure} failures={failure.failures} detail={failure.detail} runId={failedRun?.id} onClose={() => setWhy(false)} />}
         <div className="segmented mode-tabs" role="group" aria-label="故事模式">
-          <button aria-pressed={!free} onClick={() => switchMode("history")}>历史穿越</button>
+          <button aria-pressed={!free && !draft.fanfic} onClick={() => switchMode("history")}>历史穿越</button>
           <button aria-pressed={free && !draft.fanfic} onClick={() => switchMode("free")}>自由世界</button>
           <button aria-pressed={!!draft.fanfic} onClick={() => switchMode("fanfic")}>同人</button>
         </div>

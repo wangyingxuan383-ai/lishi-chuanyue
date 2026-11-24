@@ -16,37 +16,83 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
   const loaded = useRef(false);
   const touched = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const pendingWriteRef = useRef(false);
+  const buildDraftPayload = (rawInput: string, rawNote: string, isNoteOpen: boolean, modeName: string) => {
+    const text = rawInput.trim() ? rawInput : "";
+    const kept = isNoteOpen && rawNote.trim() ? rawNote : "";
+    return text || kept || modeName !== modeList[0].mode ? { text, note: kept, mode: modeName } : null;
+  };
+  const latestRef = useRef<{ worldId: string; value: { text: string; note: string; mode: string } | null }>({
+    worldId,
+    value: null,
+  });
+  latestRef.current = {
+    worldId,
+    value: buildDraftPayload(input, note, noteOpen, currentMode.mode),
+  };
 
   // Switching who plays the protagonist starts again from the first way of writing.
   useEffect(() => { if (loaded.current) setModeIndex(0); }, [watch]);
   useEffect(() => {
+    loaded.current = false;
+    touched.current = false;
+    pendingWriteRef.current = false;
+  }, [worldId]);
+  useEffect(() => {
     if (!ready || loaded.current) return;
+    let live = true;
     void game.repo.getSetting<{ text?: string; note?: string; mode?: string } | null>(`draft:${worldId}`, null).then((saved) => {
+      if (!live) return;
       loaded.current = true;
       if (!saved) return;
       if (saved.text) setInput((current) => current || saved.text!);
       if (saved.note && !touched.current) { setNote((current) => current || saved.note!); setNoteOpen(true); }
       const index = modeList.findIndex((m) => m.mode === saved.mode);
       if (index > 0 && !touched.current) setModeIndex(index);
-    }).catch(() => { loaded.current = true; });
+    }).catch(() => { if (live) loaded.current = true; });
+    return () => { live = false; };
   }, [ready, worldId]);
   useEffect(() => {
     if (!loaded.current) return;
     clearTimeout(timer.current);
+    pendingWriteRef.current = true;
     timer.current = setTimeout(() => {
-      const text = input.trim() ? input : "", kept = noteOpen && note.trim() ? note : "";
-      void game.repo.setSetting(`draft:${worldId}`, text || kept || currentMode.mode !== modeList[0].mode ? { text, note: kept, mode: currentMode.mode } : null).catch(() => {});
+      pendingWriteRef.current = false;
+      timer.current = undefined;
+      const { worldId: id, value } = latestRef.current;
+      void game.repo.setSetting(`draft:${id}`, value).catch(() => {});
     }, 500);
     return () => clearTimeout(timer.current);
   }, [input, note, noteOpen, currentMode.mode, worldId]);
+  // Flush any pending debounced draft write synchronously when Play unmounts or switches worldId.
+  useEffect(() => {
+    return () => {
+      if (timer.current !== undefined) {
+        clearTimeout(timer.current);
+        timer.current = undefined;
+      }
+      if (loaded.current && pendingWriteRef.current) {
+        pendingWriteRef.current = false;
+        const { worldId: id, value } = latestRef.current;
+        void game.repo.setSetting(`draft:${id}`, value).catch(() => {});
+      }
+    };
+  }, [game, worldId]);
 
   const selectMode = (mode: string) => { touched.current = true; setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === mode))); };
   /** After sending: the box and the note are emptied; 写 and 幕后 are one-off ways of writing. */
   const clearAfterSend = (mode: string) => {
     touched.current = true;
+    if (timer.current !== undefined) {
+      clearTimeout(timer.current);
+      timer.current = undefined;
+    }
+    pendingWriteRef.current = false;
     setNote("");
     setNoteOpen(false);
     if (mode === "write" || (mode === "direct" && !watch)) setModeIndex(0);
+    latestRef.current = { worldId, value: null };
+    void game.repo.setSetting(`draft:${worldId}`, null).catch(() => {});
   };
   /** A failed action comes back to the box, with its way of writing and note. */
   const restore = (r: Restore, force = false) => {

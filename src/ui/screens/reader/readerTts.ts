@@ -44,7 +44,7 @@ export interface UseReaderTtsOptions {
   paragraphs: TtsParagraphInput[];
   sectionIndex: number;
   onParagraphFocus?: (paragraphIndex: number) => void;
-  onSectionEnd?: () => void | Promise<void>;
+  onSectionEnd?: () => void | boolean | Promise<void | boolean>;
   toast: (msg: string) => void;
 }
 
@@ -123,22 +123,27 @@ export function useReaderTts({
   const prevSectionRef = useRef(sectionIndex);
   const pendingSectionContinueRef = useRef(false);
 
-  const cancelEngines = useCallback(() => {
-    seqRef.current += 1;
-    activeUtteranceIdRef.current = null;
-    if (webGuardTimerRef.current) {
-      clearTimeout(webGuardTimerRef.current);
-      webGuardTimerRef.current = null;
-    }
-    void platform.system.ttsStop?.().catch(() => {});
-    if (hasWebSpeech()) {
-      try {
-        window.speechSynthesis.cancel();
-      } catch {
-        /* ignore web speech cancel errors */
+  const cancelEngines = useCallback(
+    (opts?: { skipNativeStop?: boolean }) => {
+      seqRef.current += 1;
+      activeUtteranceIdRef.current = null;
+      if (webGuardTimerRef.current) {
+        clearTimeout(webGuardTimerRef.current);
+        webGuardTimerRef.current = null;
       }
-    }
-  }, [platform.system]);
+      if (!opts?.skipNativeStop) {
+        void platform.system.ttsStop?.().catch(() => {});
+      }
+      if (hasWebSpeech()) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch {
+          /* ignore web speech cancel errors */
+        }
+      }
+    },
+    [platform.system],
+  );
 
   const markUnavailable = useCallback(() => {
     cancelEngines();
@@ -188,10 +193,17 @@ export function useReaderTts({
       }
       if (onSectionEndRef.current) {
         pendingSectionContinueRef.current = true;
-        void Promise.resolve(onSectionEndRef.current()).catch(() => {
-          pendingSectionContinueRef.current = false;
-          stop();
-        });
+        void Promise.resolve(onSectionEndRef.current())
+          .then((res) => {
+            if (res === false) {
+              pendingSectionContinueRef.current = false;
+              stop();
+            }
+          })
+          .catch(() => {
+            pendingSectionContinueRef.current = false;
+            stop();
+          });
       } else {
         stop();
       }
@@ -299,7 +311,11 @@ export function useReaderTts({
         return;
       }
 
-      cancelEngines();
+      const nativeTtsSpeak =
+        platform.name === "android" && typeof platform.system.ttsSpeak === "function"
+          ? platform.system.ttsSpeak.bind(platform.system)
+          : null;
+      cancelEngines({ skipNativeStop: nativeTtsSpeak !== null });
       const seq = ++seqRef.current;
       setStatus("playing");
       statusRef.current = "playing";
@@ -307,11 +323,10 @@ export function useReaderTts({
       indexRef.current = targetIdx;
       onFocusRef.current?.(targetIdx);
 
-      if (platform.name === "android" && typeof platform.system.ttsSpeak === "function") {
+      if (nativeTtsSpeak) {
         const utteranceId = `tts-${seq}-${targetIdx}`;
         activeUtteranceIdRef.current = utteranceId;
-        void platform.system
-          .ttsSpeak({ utteranceId, text, rate: rateRef.current })
+        void nativeTtsSpeak({ utteranceId, text, rate: rateRef.current })
           .then((ok) => {
             if (seq !== seqRef.current) return;
             if (!ok) {
@@ -364,21 +379,29 @@ export function useReaderTts({
     if (prevSectionRef.current === sectionIndex) return;
     prevSectionRef.current = sectionIndex;
     if (pendingSectionContinueRef.current || statusRef.current === "playing") {
-      pendingSectionContinueRef.current = false;
+      cancelEngines();
       if (paragraphs.length > 0) {
-        speakAt(0);
+        pendingSectionContinueRef.current = false;
+        void speakAt(0);
+      } else {
+        setStatus("playing");
+        statusRef.current = "playing";
+        setSpeakingIndex(null);
+        indexRef.current = null;
+        pendingSectionContinueRef.current = true;
       }
     } else if (statusRef.current === "paused") {
+      cancelEngines();
       setSpeakingIndex(0);
       indexRef.current = 0;
     }
-  }, [paragraphs, sectionIndex, speakAt]);
+  }, [cancelEngines, paragraphs, sectionIndex, speakAt]);
 
   // Also handle async section content load when `pendingSectionContinueRef` is waiting on paragraphs
   useEffect(() => {
-    if (pendingSectionContinueRef.current && paragraphs.length > 0) {
+    if (pendingSectionContinueRef.current && statusRef.current === "playing" && paragraphs.length > 0) {
       pendingSectionContinueRef.current = false;
-      speakAt(0);
+      void speakAt(0);
     }
   }, [paragraphs, speakAt]);
 
@@ -425,6 +448,7 @@ export function useReaderTts({
   );
 
   const pause = useCallback(() => {
+    pendingSectionContinueRef.current = false;
     if (statusRef.current !== "playing") return;
     if (platform.name !== "android" && hasWebSpeech()) {
       try {
@@ -485,9 +509,19 @@ export function useReaderTts({
       speakAt(next);
     } else if (onSectionEndRef.current) {
       pendingSectionContinueRef.current = true;
-      void Promise.resolve(onSectionEndRef.current());
+      void Promise.resolve(onSectionEndRef.current())
+        .then((res) => {
+          if (res === false) {
+            pendingSectionContinueRef.current = false;
+            stop();
+          }
+        })
+        .catch(() => {
+          pendingSectionContinueRef.current = false;
+          stop();
+        });
     }
-  }, [findSpeakable, speakAt]);
+  }, [findSpeakable, speakAt, stop]);
 
   const setRate = useCallback(
     (next: TtsRate) => {

@@ -292,6 +292,33 @@ impl Engine {
         plan.base_id = Some(parent.head_id.clone());
         plan.state = live.state;
         plan.settings = live.settings;
+        let step_depth = crate::writing_context::normalize_depth(
+            plan.settings["depth"]
+                .as_str()
+                .filter(|s| matches!(*s, "fast" | "standard" | "deep"))
+                .or_else(|| plan.meta["depth"].as_str()),
+        );
+        plan.settings["depth"] = step_depth.into();
+        plan.meta["depth"] = step_depth.into();
+        if crate::runtime_sources::notes_only(&plan) || !plan.state["source"].is_object() {
+            if let Some(m) = plan.meta.as_object_mut() {
+                m.remove("referenceReviewVersion");
+            }
+        } else {
+            let review_ver = match step_depth {
+                "deep" => Some("reference-review-4"),
+                "standard" if plan.state["source"]["fanfic"] == true => Some("reference-review-lite-5"),
+                _ => None,
+            };
+            match review_ver {
+                Some(v) => plan.meta["referenceReviewVersion"] = v.into(),
+                None => {
+                    if let Some(m) = plan.meta.as_object_mut() {
+                        m.remove("referenceReviewVersion");
+                    }
+                }
+            }
+        }
         if index < total {
             // Intermediate autoplay steps continue immediately; never trigger a fallback extract call just for unused choices.
             plan.settings["choiceCount"] = 0.into();
@@ -971,7 +998,13 @@ fn prepare_messages(
     } else {
         saved["canonNotes"].clone()
     };
-    let input=json!({"state":plan.state,"settings":plan.settings,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","directorNote":note_str,"pins":saved["pins"],"chapters":chapters,"canonNotes":canon_notes});
+    let step_depth = crate::writing_context::normalize_depth(
+        plan.meta["depth"]
+            .as_str()
+            .filter(|s| matches!(*s, "fast" | "standard" | "deep"))
+            .or_else(|| plan.settings["depth"].as_str()),
+    );
+    let input=json!({"state":plan.state,"settings":plan.settings,"depth":step_depth,"era":era,"template":template,"history":history,"historyOffset":offset,"budgetChars":cap,"reference":reference,"mode":"continue","text":"","directorNote":note_str,"pins":saved["pins"],"chapters":chapters,"canonNotes":canon_notes});
     let mut input=input;
     let fact_ids = plan.state["facts"].as_array().into_iter().flatten()
         .filter(|fact| fact["origin"] == "ai").filter_map(|fact| fact["nodeId"].as_str()).collect::<Vec<_>>();

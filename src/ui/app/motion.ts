@@ -127,7 +127,7 @@ export function burstDust(x: number, y: number, count = 18): void {
  * on `host`, then `go` transitions smoothly into the story (~580ms total).
  * Without 华丽 it navigates at once.
  */
-export function openWithFlourish(host: HTMLElement | null, from: HTMLElement | null, go: () => void, ms = 360): void {
+export function openWithFlourish(host: HTMLElement | null, from: HTMLElement | null, go: () => void, ms = 120): void {
   if (!host || motionLevel() !== "rich") { go(); return; }
   const rect = (from ?? host).getBoundingClientRect();
   host.style.setProperty("--dx", `${Math.round(window.innerWidth / 2 - (rect.left + rect.width / 2))}px`);
@@ -136,14 +136,14 @@ export function openWithFlourish(host: HTMLElement | null, from: HTMLElement | n
   const group = host.closest(".home-shelf");
   group?.classList.add("opening");
   document.documentElement.dataset.bookOpen = "1";
-  burstDust(rect.left + rect.width / 2, rect.top + rect.height / 2, 18);
-  const clamped = Math.min(ms, 420);
+  burstDust(rect.left + rect.width / 2, rect.top + rect.height / 2, 10);
+  const clamped = Math.min(ms, 140);
   window.setTimeout(() => {
     go();
     window.setTimeout(() => {
       host.classList.remove("opening");
       group?.classList.remove("opening");
       delete document.documentElement.dataset.bookOpen;
-    }, 640);
+    }, 320);
   }, clamped);
 }

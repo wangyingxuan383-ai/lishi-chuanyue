@@ -73,11 +73,13 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
 
   return {
     onPointerDown(e: React.PointerEvent) {
+      if (!e.isPrimary) return;
       // Only the main mouse button presses and holds; a right click is handled below.
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const inner = (e.target as HTMLElement).closest("button, a, input, textarea, select");
       if (inner && inner !== e.currentTarget) return;
       clearGhost();
+      clearTimeout(timer.current);
       fired.current = false;
       start.current = { x: e.clientX, y: e.clientY };
       timer.current = setTimeout(() => {
@@ -91,9 +93,11 @@ export function useLongPress(onLongPress: () => void, onTap?: () => void) {
       }, 450);
     },
     onPointerMove(e: React.PointerEvent) {
+      if (e.isPrimary === false) return;
       if (start.current && Math.hypot(e.clientX - start.current.x, e.clientY - start.current.y) > 10) cancel();
     },
-    onPointerUp() {
+    onPointerUp(e?: React.PointerEvent) {
+      if (e && e.isPrimary === false) return;
       const wasTap = start.current && !fired.current;
       cancel();
       if (wasTap) onTap?.();

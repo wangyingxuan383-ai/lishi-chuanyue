@@ -1,8 +1,9 @@
 // The 记事 tab of the character panel (PLAN §4.5): chapter summaries on the
 // current path, the turns not yet in a chapter, what happened in each turn,
 // the world's great events and how this world's history has changed (R05-T004).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TurnRecord } from "../../engine/state/apply";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
 import type { Chapter, StoryNode, TimelineEvent, WorldState } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
@@ -86,7 +87,7 @@ function ChapterSheet({ row, worldId, onClose, onChanged }: { row: Row; worldId:
   );
 }
 
-type Save = (patch: TurnRecord, summary: string) => Promise<void>;
+type Save = (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
 
 /**
  * The CE year an edited event keeps. The AI organizer gives one for a date in
@@ -101,7 +102,7 @@ export function keptCeYear(event: TimelineEvent | null, text: string, clock: Gam
   return event.ceYear + (after.year - before.year);
 }
 
-function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEvent | null; others: TimelineEvent[]; era: EraContext; onClose: () => void; onSave: Save }) {
+function EventSheet({ event, others, era, headId, onClose, onSave }: { event: TimelineEvent | null; others: TimelineEvent[]; era: EraContext; headId: string; onClose: () => void; onSave: Save }) {
   const { toast } = useApp();
   const [editing, setEditing] = useState(!event);
   const [date, setDate] = useState(event?.date ?? "");
@@ -110,7 +111,7 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
   const [saving, setSaving] = useState(false);
   const run = async (patch: TurnRecord, summary: string) => {
     setSaving(true);
-    try { await onSave(patch, summary); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
+    try { await onSave(patch, summary, headId); onClose(); } catch (e) { toast(rejectedReason(e)); } finally { setSaving(false); }
   };
   // The date is checked while typing, so a date the game cannot count is never saved silently (AUDIT_V4_FUNCTION F9).
   const clean = title.trim();
@@ -161,8 +162,8 @@ function EventSheet({ event, others, era, onClose, onSave }: { event: TimelineEv
   );
 }
 
-export function Journal({ worldId, headId, lineId, chapterEvery, busy, state, era, onSave, onContinuitySaved }: {
-  worldId: string; headId: string; lineId?: string; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save; onContinuitySaved?: () => void | Promise<void>;
+export function Journal({ worldId, headId, lineId, path, captureReading, chapterEvery, busy, state, era, onSave, onContinuitySaved }: {
+  worldId: string; headId: string; lineId?: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; captureReading?: () => void; chapterEvery: number; busy: boolean; state: WorldState; era: EraContext; onSave: Save; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { game, push, toast } = useApp();
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -170,9 +171,46 @@ export function Journal({ worldId, headId, lineId, chapterEvery, busy, state, er
   const [open, setOpen] = useState<Row | null>(null);
   const [writing, setWriting] = useState(false);
   const [event, setEvent] = useState<{ event: TimelineEvent | null } | null>(null);
+  const [expectedHeadId, setExpectedHeadId] = useState(headId);
   const [exportOpen, setExportOpen] = useState(false);
   const now = state.time.elapsedMinutes;
   const timeline = state.timeline ?? [];
+  const prevAnchor = useRef({ worldId, headId });
+  useEffect(() => {
+    const prev = prevAnchor.current;
+    if (prev.worldId === worldId && prev.headId === headId) return;
+    prevAnchor.current = { worldId, headId };
+    if (prev.worldId !== worldId) {
+      setExpectedHeadId(headId);
+      setEvent(null);
+      return;
+    }
+    if (path) {
+      if (headFollowsUpkeep(path, prev.headId, headId)) {
+        setExpectedHeadId(headId);
+      } else {
+        setExpectedHeadId(headId);
+        setEvent(null);
+      }
+      return;
+    }
+    let live = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (!live) return;
+      if (headFollowsUpkeep(loadedPath, prev.headId, headId)) {
+        setExpectedHeadId(headId);
+      } else {
+        setExpectedHeadId(headId);
+        setEvent(null);
+      }
+    }).catch(() => {
+      if (live) {
+        setExpectedHeadId(headId);
+        setEvent(null);
+      }
+    });
+    return () => { live = false; };
+  }, [game.repo, worldId, headId, path]);
 
   const load = async () => {
     const [chapters, path] = await Promise.all([game.repo.chaptersOnPath(worldId, headId), game.repo.path(headId)]);
@@ -205,7 +243,7 @@ export function Journal({ worldId, headId, lineId, chapterEvery, busy, state, er
   return (
     <div className="stack">
       <div className="row wrap gap-1">
-        <button type="button" className="ghost small grow" onClick={() => push({ name: "reader", worldId, lineId })}>
+        <button type="button" className="ghost small grow" onClick={() => { captureReading?.(); push({ name: "reader", worldId, lineId }); }}>
           <Icon name="book-open" size={16} />小说模式精读
         </button>
         <button type="button" className="ghost small grow" onClick={() => setExportOpen(true)}>
@@ -230,10 +268,10 @@ export function Journal({ worldId, headId, lineId, chapterEvery, busy, state, er
       {state.era.mode !== "free" && <section className="stack gap-1">
         <div className="row between">
           <b>天下大事</b>
-          <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => setEvent({ event: null })}><Icon name="plus" size={18} />添加</button>
+          <button className="ghost" aria-label="添加大事" disabled={busy} onClick={() => { setExpectedHeadId(headId); setEvent({ event: null }); }}><Icon name="plus" size={18} />添加</button>
         </div>
         {timeline.length ? timeline.map((e) => (
-          <button key={e.id} className="item-row codex-item" disabled={busy} style={e.atMinute !== null && e.atMinute <= now ? { opacity: 0.7 } : undefined} onClick={() => setEvent({ event: e })}>
+          <button key={e.id} className="item-row codex-item" disabled={busy} style={e.atMinute !== null && e.atMinute <= now ? { opacity: 0.7 } : undefined} onClick={() => { setExpectedHeadId(headId); setEvent({ event: e }); }}>
             <div className="grow"><b>{e.title}</b><small>{e.date}{e.atMinute === null ? "（日期换算不了，不会提醒）" : e.atMinute < 0 ? " · 开局之前" : e.atMinute <= now ? " · 已到" : ""}</small></div>
             <span className="tag">{e.kind}</span>
           </button>
@@ -244,7 +282,7 @@ export function Journal({ worldId, headId, lineId, chapterEvery, busy, state, er
         {state.deviations.map((d, i) => <small key={i} className="muted">{d}</small>)}
       </section>}
       {open && <ChapterSheet row={open} worldId={worldId} onClose={() => setOpen(null)} onChanged={() => void load()} />}
-      {event && <EventSheet event={event.event} others={timeline} era={era} onClose={() => setEvent(null)} onSave={onSave} />}
+      {event && <EventSheet event={event.event} others={timeline} era={era} headId={expectedHeadId} onClose={() => setEvent(null)} onSave={onSave} />}
       {exportOpen && <NovelExportSheet worldId={worldId} lineId={lineId} onClose={() => setExportOpen(false)} />}
     </div>
   );

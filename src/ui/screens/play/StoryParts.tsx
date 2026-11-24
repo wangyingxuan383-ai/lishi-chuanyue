@@ -131,6 +131,7 @@ const PAUSED = new Set(["cancelled", "limit", "interrupted", "system_stop", "bus
 export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; onAction: (action: NoticeAction) => void; onOpenUsage?: () => void }) {
   const { toast } = useApp();
   const [why, setWhy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const tone = notice.reason ? (PAUSED.has(notice.reason) ? "pause" : "bad")
     : /拒绝|失败|不对|没有权限|连不上|出了问题/.test(notice.text) ? "bad" : /停下|保存|中断|没有写完/.test(notice.text) ? "pause" : "info";
   const icon: IconName = tone === "bad" ? "alert" : tone === "pause" ? "hourglass" : "info";
@@ -143,13 +144,17 @@ export function NoticeCard({ notice, onAction, onOpenUsage }: { notice: Notice; 
     const full = parts.join(" · ");
     return full.length > 64 ? `${full.slice(0, 64)}…` : full;
   })();
+  const longPartial = (notice.partialText?.length ?? 0) > 70 || (notice.partialText?.includes("\n") ?? false);
   return (
     <>
       {notice.partialText && (
-        <div className="partial-prose" aria-label="已收到的未完成正文">
+        <div className={`partial-prose${expanded ? " expanded" : ""}`} aria-label="已收到的未完成正文">
           <div className="partial-prose-head">
             <span>{notice.proseSaved ? "已收到的正文（待补记）" : "已收到的部分正文（仅供参考）"}</span>
-            <button type="button" className="ghost small" onClick={() => void navigator.clipboard?.writeText(notice.partialText!).then(() => toast("已复制"), () => toast("没能复制"))}>复制</button>
+            <span className="row gap-1">
+              {longPartial && <button type="button" className="ghost small" onClick={() => setExpanded((v) => !v)}>{expanded ? "收起" : "展开全文"}</button>}
+              <button type="button" className="ghost small" onClick={() => void navigator.clipboard?.writeText(notice.partialText!).then(() => toast("已复制"), () => toast("没能复制"))}>复制</button>
+            </span>
           </div>
           <StoryText text={notice.partialText} />
         </div>

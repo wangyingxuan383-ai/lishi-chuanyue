@@ -167,6 +167,25 @@ class GenerationService : Service() {
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_seal), "停止", stop).build())
+        if (prefs(this).getBoolean(PREF_LOCKSCREEN, false)) {
+            builder.setVisibility(Notification.VISIBILITY_PUBLIC)
+        } else {
+            val pubBuilder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+            val pub = pubBuilder
+                .setSmallIcon(R.drawable.ic_stat_seal)
+                .setContentTitle(title)
+                .setContentText("正在写下一段…")
+                .setCategory(Notification.CATEGORY_PROGRESS)
+                .build()
+            builder
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setPublicVersion(pub)
+        }
         if (detailed && phase != "writing") builder.setProgress(0, 0, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
@@ -253,15 +272,33 @@ class GenerationService : Service() {
             return ensureChannel(context, issue, sound)
         }
 
-        /** Builds a heads-up + audible reminder notification with NotificationCompat. */
-        private fun reminderCompatBuilder(context: Context, channel: String): NotificationCompat.Builder {
+        /** Builds a heads-up + audible reminder notification with NotificationCompat, respecting lockscreen privacy. */
+        private fun reminderCompatBuilder(
+            context: Context,
+            channel: String,
+            publicTitle: String,
+            publicText: String
+        ): NotificationCompat.Builder {
             val sound = channel == DONE_SOUND_CHANNEL || channel == ISSUE_SOUND_CHANNEL
+            val showLockscreen = prefs(context).getBoolean(PREF_LOCKSCREEN, false)
             val builder = NotificationCompat.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_stat_seal)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setAutoCancel(true)
+            if (showLockscreen) {
+                builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            } else {
+                val publicVersion = NotificationCompat.Builder(context, channel)
+                    .setSmallIcon(R.drawable.ic_stat_seal)
+                    .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                    .setContentTitle(publicTitle)
+                    .setContentText(publicText)
+                    .build()
+                builder
+                    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                    .setPublicVersion(publicVersion)
+            }
             if (sound) {
                 builder.setDefaults(NotificationCompat.DEFAULT_ALL)
             }
@@ -335,9 +372,10 @@ class GenerationService : Service() {
                         .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
+                val heading = "试一下：写好了提醒"
                 val body = "以后切到后台时写好一段，会像这样弹出横幅并响提示音提醒你。"
-                val builder = reminderCompatBuilder(app, channel)
-                    .setContentTitle("试一下：写好了提醒")
+                val builder = reminderCompatBuilder(app, channel, heading, "下一段写好了，回来看看")
+                    .setContentTitle(heading)
                     .setContentText(body)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                     .setContentIntent(openApp)
@@ -391,7 +429,8 @@ class GenerationService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val summaryLine = "$activeCount 个故事有新进展，点开查看。"
-            val summary = NotificationCompat.Builder(context, channel)
+            val showLockscreen = prefs(context).getBoolean(PREF_LOCKSCREEN, false)
+            val summaryBuilder = NotificationCompat.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_stat_seal)
                 .setContentTitle("穿越小说模拟")
                 .setContentText(summaryLine)
@@ -399,14 +438,25 @@ class GenerationService : Service() {
                 .setContentIntent(openApp)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .setGroup(GROUP_STORIES)
                 .setGroupSummary(true)
                 .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
-                .build()
-            manager.notify(SUMMARY_NOTIFICATION_ID, summary)
+            if (showLockscreen) {
+                summaryBuilder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            } else {
+                val publicSummary = NotificationCompat.Builder(context, channel)
+                    .setSmallIcon(R.drawable.ic_stat_seal)
+                    .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                    .setContentTitle("穿越小说模拟")
+                    .setContentText(summaryLine)
+                    .build()
+                summaryBuilder
+                    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                    .setPublicVersion(publicSummary)
+            }
+            manager.notify(SUMMARY_NOTIFICATION_ID, summaryBuilder.build())
         }
 
         /** Called only after the selected passage was saved, never by the stream timer. */
@@ -470,9 +520,11 @@ class GenerationService : Service() {
                 val channel = reminderChannel(app, issue = true)
                 val id = storyNotificationId(worldId, 1)
                 val resume = storyIntent(app, worldId, "resume", id, run)
-                val body = line.ifBlank { "切回来可以接着写完。" }
-                val builder = reminderCompatBuilder(app, channel)
-                    .setContentTitle(if (title.isNotBlank()) "《$title》没写完" else "这一段没写完")
+                val genericIssue = "切回来可以接着写完。"
+                val body = line.ifBlank { genericIssue }
+                val heading = if (title.isNotBlank()) "《$title》没写完" else "这一段没写完"
+                val builder = reminderCompatBuilder(app, channel, heading, genericIssue)
+                    .setContentTitle(heading)
                     .setContentText(body)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                     .setContentIntent(resume)
@@ -528,9 +580,10 @@ class GenerationService : Service() {
                 val id = storyNotificationId(worldId, 0)
                 val open = storyIntent(context, worldId, "read", id)
                 val settings = prefs(context)
-                val line = if (settings.getBoolean(PREF_EXCERPT, true) && excerpt.isNotBlank()) excerpt else "下一段写好了，回来看看"
+                val genericReady = "下一段写好了，回来看看"
+                val line = if (settings.getBoolean(PREF_EXCERPT, true) && excerpt.isNotBlank()) excerpt else genericReady
                 val heading = if (title.isNotBlank()) "《$title》写好了" else "穿越小说模拟"
-                val builder = reminderCompatBuilder(context, channel)
+                val builder = reminderCompatBuilder(context, channel, heading, genericReady)
                     .setContentTitle(heading)
                     .setContentText(line)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(line))

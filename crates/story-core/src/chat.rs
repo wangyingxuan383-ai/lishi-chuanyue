@@ -251,6 +251,185 @@ pub fn assistant_message(reply: &Completion) -> Value {
     message
 }
 
+fn match_open_think(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() < 7 || b[0] != b'<' || !b[1..6].eq_ignore_ascii_case(b"think") {
+        return None;
+    }
+    let mut i = 6;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'>' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+fn match_close_think(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.is_empty() || b[0] != b'<' {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
+        i += 1;
+    }
+    if i >= b.len() || b[i] != b'/' {
+        return None;
+    }
+    i += 1;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
+        i += 1;
+    }
+    if i + 5 > b.len() || !b[i..i + 5].eq_ignore_ascii_case(b"think") {
+        return None;
+    }
+    i += 5;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'>' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+fn is_partial_open_think(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.is_empty() || b[0] != b'<' {
+        return false;
+    }
+    let rest = &b[1..];
+    if rest.len() < 5 {
+        b"think"[..rest.len()].eq_ignore_ascii_case(rest)
+    } else {
+        rest[..5].eq_ignore_ascii_case(b"think")
+            && rest[5..].iter().all(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n'))
+    }
+}
+
+fn trim_trailing_partial_close_think(s: &str) -> &str {
+    if let Some(lt_rel) = s.rfind('<') {
+        let tail = &s[lt_rel..];
+        let b = tail.as_bytes();
+        let mut i = 1;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+        }
+        if i == b.len() {
+            return &s[..lt_rel];
+        }
+        if b[i] == b'/' {
+            i += 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
+                i += 1;
+            }
+            let rem = &b[i..];
+            let matches_prefix = if rem.len() < 5 {
+                b"think"[..rem.len()].eq_ignore_ascii_case(rem)
+            } else {
+                rem[..5].eq_ignore_ascii_case(b"think")
+                    && rem[5..].iter().all(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n'))
+            };
+            if matches_prefix {
+                return &s[..lt_rel];
+            }
+        }
+    }
+    s
+}
+
+/// Splits inline `<think>...</think>` blocks from `raw` into `(visible_text, inline_thinking)`.
+/// Hides unclosed `<think>` tails and partial leading `<`..`<think` prefixes during streaming.
+pub fn split_inline_think(raw: &str) -> (String, String) {
+    if !raw.contains('<') {
+        return (raw.to_owned(), String::new());
+    }
+    let mut visible = String::with_capacity(raw.len());
+    let mut thinking_parts: Vec<String> = Vec::new();
+    let bytes = raw.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(rel_lt) = raw[pos..].find('<') else {
+            visible.push_str(&raw[pos..]);
+            break;
+        };
+        let lt = pos + rel_lt;
+        if let Some(open_len) = match_open_think(&raw[lt..]) {
+            let before = &raw[pos..lt];
+            if !(visible.is_empty()
+                && before.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')))
+            {
+                visible.push_str(before);
+            }
+            let inner_start = lt + open_len;
+            let mut scan = inner_start;
+            let mut closed_at = None;
+            while let Some(rel_close_lt) = raw[scan..].find('<') {
+                let close_lt = scan + rel_close_lt;
+                if let Some(close_len) = match_close_think(&raw[close_lt..]) {
+                    closed_at = Some((close_lt, close_lt + close_len));
+                    break;
+                }
+                scan = close_lt + 1;
+            }
+            if let Some((inner_end, after_close)) = closed_at {
+                let inner = raw[inner_start..inner_end].trim();
+                if !inner.is_empty() {
+                    thinking_parts.push(inner.to_owned());
+                }
+                pos = after_close;
+                if visible.is_empty() {
+                    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n') {
+                        pos += 1;
+                    }
+                }
+            } else {
+                let inner = trim_trailing_partial_close_think(&raw[inner_start..]).trim();
+                if !inner.is_empty() {
+                    thinking_parts.push(inner.to_owned());
+                }
+                break;
+            }
+        } else if visible.is_empty()
+            && raw[pos..lt]
+                .bytes()
+                .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            && is_partial_open_think(&raw[lt..])
+        {
+            break;
+        } else if lt + 2 <= bytes.len() && is_partial_open_think(&raw[lt..]) {
+            visible.push_str(&raw[pos..lt]);
+            break;
+        } else {
+            visible.push_str(&raw[pos..=lt]);
+            pos = lt + 1;
+        }
+    }
+    (visible, thinking_parts.join("\n\n"))
+}
+
+pub fn strip_inline_think(raw: &str) -> String {
+    split_inline_think(raw).0
+}
+
+pub fn next_max_tokens_stepdown(current: u32) -> Option<u32> {
+    if current > 8192 {
+        Some(8192)
+    } else if current > 4096 {
+        Some(4096)
+    } else if current > 2048 {
+        Some(2048)
+    } else if current > 1024 {
+        Some(1024)
+    } else {
+        None
+    }
+}
+
 pub fn provider_context_rejected(status: Option<u16>, detail: &str) -> bool {
     if status == Some(413) {
         return true;
@@ -261,6 +440,43 @@ pub fn provider_context_rejected(status: Option<u16>, detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
     ["context_length_exceeded", "maximum context length", "exceeds the context window", "prompt is too long", "上下文窗口"]
         .iter().any(|marker| detail.contains(marker))
+}
+
+pub fn provider_wants_max_completion_tokens(status: Option<u16>, message: &str) -> bool {
+    if !matches!(status, Some(400 | 422)) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("max_completion_tokens")
+        && ((lower.contains("max_tokens")
+            && (lower.contains("not supported")
+                || lower.contains("unsupported")
+                || lower.contains("instead")))
+            || lower.contains("use 'max_completion_tokens'")
+            || lower.contains("use \"max_completion_tokens\"")
+            || lower.contains("use `max_completion_tokens`")
+            || lower.contains("use max_completion_tokens"))
+}
+
+pub fn provider_max_tokens_rejected(status: Option<u16>, detail: &str) -> bool {
+    if !matches!(status, Some(400 | 422))
+        || provider_context_rejected(status, detail)
+        || provider_wants_max_completion_tokens(status, detail)
+    {
+        return false;
+    }
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("greater than") || lower.contains("budget_tokens") {
+        return false;
+    }
+    if lower.contains("max_completion_tokens")
+        && (lower.contains("not supported") || lower.contains("unsupported"))
+    {
+        return false;
+    }
+    ["max_tokens", "max_output_tokens", "max_completion_tokens", "maxoutputtokens"]
+        .iter()
+        .any(|m| lower.contains(m))
 }
 
 pub(crate) fn wire_messages(messages: &[Value]) -> Vec<Value> {
@@ -291,7 +507,9 @@ pub fn request_with(config: &ModelConfig, messages: &[Value], tools: &[Value], a
     .clone()
     .into();
     body["messages"] = Value::Array(wire_messages(messages));
-    body["max_tokens"] = config.max_output_tokens().into();
+    if body.get("max_completion_tokens").is_none() {
+        body["max_tokens"] = config.max_output_tokens().into();
+    }
     body["stream"] = true.into();
     if config.include_usage {
         body["stream_options"] = json!({"include_usage":true});
@@ -517,5 +735,47 @@ mod tests {
             .unwrap()
             .contains("read evidence"));
         assert_eq!(wire["messages"][1]["content"], "continue");
+    }
+
+    #[test]
+    fn split_inline_think_strips_tags_routes_reasoning_and_hides_partial_prefixes() {
+        for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "<THINK ", "  \n<th"] {
+            assert_eq!(split_inline_think(partial), (String::new(), String::new()), "partial={partial}");
+        }
+        assert_eq!(
+            split_inline_think("<THINK >构思第一幕</think >\n\n灯火微明。"),
+            ("灯火微明。".to_owned(), "构思第一幕".to_owned())
+        );
+        assert_eq!(
+            split_inline_think("<think>推理写到一半 </th"),
+            (String::new(), "推理写到一半".to_owned())
+        );
+        assert_eq!(
+            strip_inline_think("正文开头 <think>中间插想</think>正文结尾"),
+            "正文开头 正文结尾"
+        );
+    }
+
+    #[test]
+    fn max_tokens_classifiers_distinguish_anthropic_budget_and_openai_completion_tokens() {
+        assert!(provider_max_tokens_rejected(
+            Some(400),
+            "max_tokens (8192) exceeds maximum allowed (4096)"
+        ));
+        assert!(!provider_max_tokens_rejected(
+            Some(400),
+            "max_tokens: 4096 must be greater than thinking.budget_tokens: 4096"
+        ));
+        assert!(!provider_max_tokens_rejected(
+            Some(400),
+            "Unknown parameter: 'max_completion_tokens' is not supported"
+        ));
+        let openai_swap = "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.";
+        assert!(provider_wants_max_completion_tokens(Some(400), openai_swap));
+        assert!(!provider_max_tokens_rejected(Some(400), openai_swap));
+        assert_eq!(next_max_tokens_stepdown(8192), Some(4096));
+        assert_eq!(next_max_tokens_stepdown(4096), Some(2048));
+        assert_eq!(next_max_tokens_stepdown(2048), Some(1024));
+        assert_eq!(next_max_tokens_stepdown(1024), None);
     }
 }

@@ -54,6 +54,14 @@ fn last_mention_pos(v: &Value, recent: &str) -> Option<usize> {
     names(v).iter().filter_map(|name| recent.rfind(name)).max()
 }
 
+pub(crate) fn normalize_depth(raw: Option<&str>) -> &'static str {
+    match raw {
+        Some("fast") => "fast",
+        Some("deep") => "deep",
+        _ => "standard",
+    }
+}
+
 pub fn project_state(state: &Value, era: &Value, recent: &str) -> String {
     let me = &state["protagonist"];
     let currency = &era["currency"];
@@ -571,8 +579,13 @@ pub fn build(input: &Value) -> Result<Value> {
         .map(|l| l["chars"].as_u64().unwrap_or(0) as usize)
         .sum();
     // Message roles, delimiters and the small active read-only tool catalog.
-    // Generation tier (D161): absent means a caller from before tiers.
-    let depth = input["depth"].as_str().or(settings["depth"].as_str()).unwrap_or("deep");
+    // Generation tier (D161): unset defaults to "standard" matching TS normalizeDepth.
+    let depth = normalize_depth(
+        input["depth"]
+            .as_str()
+            .filter(|s| matches!(*s, "fast" | "standard" | "deep"))
+            .or_else(|| settings["depth"].as_str()),
+    );
     let overhead = input["toolOverheadChars"]
         .as_u64()
         .map(|n| n as usize)

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { archiveProblems, exportWorldFile, importWorld } from "../../engine/archive";
 import { nowOf } from "../../engine/calendar/clock";
-import { eraContext } from "../../engine/era";
+import { worldClock } from "../../engine/era";
 import {
   countAllHighlights,
   getReadingStatsSummary,
@@ -10,6 +10,7 @@ import {
   type LibraryShelfItem,
   type ReadingStatsSummary,
 } from "../../engine/reader/shelf";
+import type { Repo } from "../../engine/db/repo";
 import type { World } from "../../engine/types";
 import { useApp } from "../app/context";
 import { localFind } from "../app/localFind";
@@ -28,6 +29,7 @@ import { HomeScene } from "./home/HomeScene";
 import { HomeShelf } from "./home/HomeShelf";
 import type { WorldCard } from "./home/types";
 import { fromSetup } from "./openingDraft";
+import * as PlayModule from "./Play";
 
 const QUOTE_PAIRS: Record<string, string> = { "“": "”", "「": "」", "『": "』", "‘": "’" };
 const CLOSING_QUOTES = new Set(Object.values(QUOTE_PAIRS));
@@ -90,23 +92,65 @@ function ShelfSkeleton() {
   );
 }
 
+interface HomeMemoryCache {
+  cards: WorldCard[] | null;
+  deleted: World[];
+  libraryItems: LibraryShelfItem[] | null;
+  readingStats: ReadingStatsSummary | null;
+  totalHighlights: number;
+  purgedOnce: boolean;
+}
+
+const homeCacheByRepo = new WeakMap<Repo, HomeMemoryCache>();
+
+function getHomeCache(repo: Repo): HomeMemoryCache {
+  let cached = homeCacheByRepo.get(repo);
+  if (!cached) {
+    cached = {
+      cards: null,
+      deleted: [],
+      libraryItems: null,
+      readingStats: null,
+      totalHighlights: 0,
+      purgedOnce: false,
+    };
+    homeCacheByRepo.set(repo, cached);
+  }
+  return cached;
+}
+
 /** Stories still being written in the background. */
 function useWritingWorlds(game: ReturnType<typeof useApp>["game"]) {
   const [writing, setWriting] = useState<Set<string>>(new Set());
   useEffect(() => {
     let live = true, timer = 0;
+    const schedule = (ms: number) => {
+      window.clearTimeout(timer);
+      if (live) timer = window.setTimeout(() => void check(), ms);
+    };
     const check = async () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        schedule(15000);
+        return;
+      }
       try {
         const rows = await game.platform.sql.query("SELECT DISTINCT world_id FROM execution_runs WHERE status IN ('running','committing')");
         if (!live) return;
         const next = new Set(rows.map((r) => String((r as { world_id: string }).world_id)));
         setWriting((old) => (old.size === next.size && [...next].every((id) => old.has(id)) ? old : next));
-        timer = window.setTimeout(check, next.size ? 1500 : 6000);
-      } catch { if (live) timer = window.setTimeout(check, 6000); }
+        schedule(next.size ? 1500 : 15000);
+      } catch { schedule(15000); }
     };
+    const onVisible = () => { if (document.visibilityState === "visible") void check(); };
     void check();
-    const off = game.subscribe(() => { window.clearTimeout(timer); void check(); });
-    return () => { live = false; window.clearTimeout(timer); off(); };
+    const off = game.subscribe(() => void check());
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [game]);
   return writing;
 }
@@ -190,11 +234,12 @@ function PanoramaWelcomeCard({
 
 export default function Home() {
   const { game, push, profile, toast, ask, askName, reading, setReading } = useApp();
-  const [deleted, setDeleted] = useState<World[]>([]);
-  const [cards, setCards] = useState<WorldCard[] | null>(null);
-  const [libraryItems, setLibraryItems] = useState<LibraryShelfItem[] | null>(null);
-  const [readingStats, setReadingStats] = useState<ReadingStatsSummary | null>(null);
-  const [totalHighlights, setTotalHighlights] = useState(0);
+  const mem = getHomeCache(game.repo);
+  const [deleted, setDeleted] = useState<World[]>(() => mem.deleted);
+  const [cards, setCards] = useState<WorldCard[] | null>(() => mem.cards);
+  const [libraryItems, setLibraryItems] = useState<LibraryShelfItem[] | null>(() => mem.libraryItems);
+  const [readingStats, setReadingStats] = useState<ReadingStatsSummary | null>(() => mem.readingStats);
+  const [totalHighlights, setTotalHighlights] = useState(() => mem.totalHighlights);
 
   const [query, setQuery] = useState("");
   const [menuFor, setMenuFor] = useState<WorldCard | null>(null);
@@ -220,36 +265,43 @@ export default function Home() {
       getReadingStatsSummary(game.repo).catch(() => null),
       countAllHighlights(game.repo).catch(() => 0),
     ]);
+    const cache = getHomeCache(game.repo);
+    cache.libraryItems = items;
+    cache.readingStats = stats;
+    cache.totalHighlights = hlCount;
     setLibraryItems(items);
     setReadingStats(stats);
     setTotalHighlights(hlCount);
   }, [game.repo]);
 
   const loadWorlds = useCallback(async () => {
-    const worlds = await game.repo.listWorlds();
-    const out: WorldCard[] = [];
-    for (const world of worlds) {
-      const line = world.currentLineId ? await game.repo.getLine(world.currentLineId) : null;
-      if (!line) continue;
-      const state = await game.repo.getState(line.nodeId);
-      const summary = await game.repo.homeSummary(line.nodeId);
-      const era = eraContext(world.eraId, state);
-      const now = nowOf(era.clock, state.time.elapsedMinutes);
+    const cache = getHomeCache(game.repo);
+    if (!cache.purgedOnce) {
+      cache.purgedOnce = true;
+      await game.repo.purgeDeletedWorlds().catch(() => 0);
+    }
+    const [inputs, trashed] = await Promise.all([
+      game.repo.listWorldCardInputs(),
+      game.repo.deletedWorlds(),
+    ]);
+    const out: WorldCard[] = inputs.map(({ world, protagonistName, time, era: stateEra, turns, last }) => {
+      const now = nowOf(worldClock(world.eraId, { time, era: stateEra }), time.elapsedMinutes);
       const clock = now.text;
-      const free = world.settings.mode === "free" || state.era.mode === "free";
-      out.push({
+      const free = world.settings.mode === "free" || stateEra.mode === "free";
+      return {
         world,
-        protagonist: state.protagonist.name,
-        lastLine: lastSentence(summary.last),
+        protagonist: protagonistName,
+        lastLine: lastSentence(last),
         clock,
         hour: now.hour,
-        turns: summary.turns,
+        turns,
         seal: free ? undefined : dynastyMark(clock),
-      });
-    }
+      };
+    });
+    cache.cards = out;
+    cache.deleted = trashed;
     setCards(out);
-    await game.repo.purgeDeletedWorlds();
-    setDeleted(await game.repo.deletedWorlds());
+    setDeleted(trashed);
   }, [game.repo]);
 
   const loadAll = useCallback(async () => {
@@ -258,10 +310,18 @@ export default function Home() {
 
   useEffect(() => {
     void loadAll();
-    return game.subscribe(() => {
+    const onLibraryChanged = () => {
+      void loadLibrary();
+    };
+    window.addEventListener("lishi:library-changed", onLibraryChanged);
+    const off = game.subscribe(() => {
       void loadWorlds();
     });
-  }, [game, loadAll, loadWorlds]);
+    return () => {
+      window.removeEventListener("lishi:library-changed", onLibraryChanged);
+      off();
+    };
+  }, [game, loadAll, loadLibrary, loadWorlds]);
 
   const exportOne = async (card: WorldCard) => {
     if (exporting.current) return;
@@ -293,6 +353,7 @@ export default function Home() {
       const world = (file as { world: { id: string; title: string } }).world;
       if (await game.repo.getWorld(world.id)) { setIncoming({ file, title: world.title }); return; }
       await importWorld(game.repo, file, "replace");
+      (PlayModule as { invalidatePlayViewCache?: () => void }).invalidatePlayViewCache?.();
       toast(`已导入“${world.title}”`);
       await loadWorlds();
     } catch (error) {
@@ -312,6 +373,9 @@ export default function Home() {
     try {
       if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
       await importWorld(game.repo, pending.file, mode);
+      if (mode === "replace") {
+        (PlayModule as { invalidatePlayViewCache?: () => void }).invalidatePlayViewCache?.();
+      }
       toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${pending.title}”`);
       await loadWorlds();
     } catch (error) {
@@ -502,7 +566,9 @@ export default function Home() {
                         ? `${activeBridgeBook.progressPct}%`
                         : "未开卷"}
                   </span>
-                  <span className="bridge-book-cta">继续读 ›</span>
+                  <span className="bridge-book-cta">
+                    {activeBridgeBook.progress ? "继续读 ›" : "展卷 ›"}
+                  </span>
                 </button>
               </div>
             )}

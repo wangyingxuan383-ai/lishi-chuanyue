@@ -210,6 +210,7 @@ export interface CompanionStreamUpdate {
 export interface CompanionHandle {
   done: Promise<CompanionRunSnapshot>;
   stop: () => void;
+  detach: () => void;
 }
 
 export interface CompanionSendInput {
@@ -2127,14 +2128,43 @@ export function followCompanionRun(
 ): CompanionHandle {
   const client = new CompanionClient(game);
   let stopped = false;
+  let detached = false;
+  let detachWake: (() => void) | null = null;
+  let lastSnap: CompanionRunSnapshot = {
+    runId,
+    sessionId,
+    messageId: runId,
+    seq: 0,
+    status: "streaming",
+    phase: "thinking",
+    content: "",
+    thinking: "",
+    steps: [],
+    citations: [],
+    usage: null,
+    errorText: null,
+    done: false,
+  };
 
   const done = (async (): Promise<CompanionRunSnapshot> => {
     if (stopped) {
       await stopCompanionRun(game, { runId, sessionId }).catch(() => {});
     }
+    if (detached) return lastSnap;
     let seq = 0;
-    while (true) {
-      const snap = await client.snapshot(runId, seq, 350);
+    while (!detached) {
+      const snap = await Promise.race([
+        client.snapshot(runId, seq, 350).catch((err) => {
+          if (detached) return null;
+          throw err;
+        }),
+        new Promise<null>((resolve) => {
+          detachWake = () => resolve(null);
+        }),
+      ]);
+      detachWake = null;
+      if (detached || !snap) return lastSnap;
+      lastSnap = snap;
       seq = Math.max(seq, snap.seq);
       onUpdate?.({
         status: snap.status,
@@ -2153,6 +2183,7 @@ export function followCompanionRun(
         return snap;
       }
     }
+    return lastSnap;
   })();
 
   return {
@@ -2160,6 +2191,11 @@ export function followCompanionRun(
     stop: () => {
       stopped = true;
       void stopCompanionRun(game, { runId, sessionId }).catch(() => {});
+    },
+    detach: () => {
+      detached = true;
+      detachWake?.();
+      detachWake = null;
     },
   };
 }
@@ -2171,6 +2207,8 @@ export function sendCompanionMessage(
 ): CompanionHandle {
   const client = new CompanionClient(game);
   let stopped = false;
+  let detached = false;
+  let detachWake: (() => void) | null = null;
   let activeRunId: string | null = null;
 
   const done = (async (): Promise<CompanionRunSnapshot> => {
@@ -2179,9 +2217,36 @@ export function sendCompanionMessage(
     if (stopped) {
       await stopCompanionRun(game, { runId: started.runId, sessionId: input.sessionId }).catch(() => {});
     }
+    let lastSnap: CompanionRunSnapshot = {
+      runId: started.runId,
+      sessionId: started.sessionId,
+      messageId: started.assistantMessage.id,
+      seq: 0,
+      status: started.assistantMessage.status,
+      phase: "thinking",
+      content: started.assistantMessage.content,
+      thinking: started.assistantMessage.thinking,
+      steps: started.assistantMessage.steps,
+      citations: started.assistantMessage.citations,
+      usage: started.assistantMessage.usage,
+      errorText: started.assistantMessage.errorText,
+      done: false,
+    };
+    if (detached) return lastSnap;
     let seq = 0;
-    while (true) {
-      const snap = await client.snapshot(started.runId, seq, 350);
+    while (!detached) {
+      const snap = await Promise.race([
+        client.snapshot(started.runId, seq, 350).catch((err) => {
+          if (detached) return null;
+          throw err;
+        }),
+        new Promise<null>((resolve) => {
+          detachWake = () => resolve(null);
+        }),
+      ]);
+      detachWake = null;
+      if (detached || !snap) return lastSnap;
+      lastSnap = snap;
       seq = Math.max(seq, snap.seq);
       onUpdate?.({
         status: snap.status,
@@ -2200,6 +2265,7 @@ export function sendCompanionMessage(
         return snap;
       }
     }
+    return lastSnap;
   })();
 
   return {
@@ -2211,6 +2277,11 @@ export function sendCompanionMessage(
       } else {
         void stopCompanionRun(game, { sessionId: input.sessionId }).catch(() => {});
       }
+    },
+    detach: () => {
+      detached = true;
+      detachWake?.();
+      detachWake = null;
     },
   };
 }

@@ -14,6 +14,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.HapticFeedbackConstants
 import android.view.WindowManager
+import androidx.appcompat.app.AppCompatActivity
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -189,9 +190,20 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun performSpeak(engine: TextToSpeech, args: TtsSpeakArgs, invoke: Invoke) {
         val safeRate = if (args.rate.isFinite()) args.rate.coerceIn(0.5f, 2.5f) else 1.0f
+        val maxLen = (try {
+            TextToSpeech.getMaxSpeechInputLength()
+        } catch (_: Throwable) {
+            4000
+        }).coerceAtLeast(1000) - 32
+        val safeText = if (args.text.length > maxLen) {
+            val end = if (maxLen > 0 && Character.isHighSurrogate(args.text[maxLen - 1])) maxLen - 1 else maxLen
+            args.text.substring(0, end)
+        } else {
+            args.text
+        }
         val ok = try {
             engine.setSpeechRate(safeRate)
-            engine.speak(args.text, TextToSpeech.QUEUE_FLUSH, null, args.utteranceId) == TextToSpeech.SUCCESS
+            engine.speak(safeText, TextToSpeech.QUEUE_FLUSH, null, args.utteranceId) == TextToSpeech.SUCCESS
         } catch (_: Throwable) {
             false
         }
@@ -573,6 +585,25 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
         activity.runOnUiThread {
             val done = activity.window.decorView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             invoke.resolve(JSObject().put("done", done))
+        }
+    }
+
+    override fun onDestroy(activity: AppCompatActivity) {
+        if (activity !== this.activity) return
+        val queued = pendingSpeak
+        pendingSpeak = null
+        queued?.second?.resolve(JSObject().put("ok", false))
+        val engine = tts
+        tts = null
+        ttsReady = false
+        ttsInitializing = false
+        if (engine != null) {
+            try {
+                engine.stop()
+            } catch (_: Throwable) {}
+            try {
+                engine.shutdown()
+            } catch (_: Throwable) {}
         }
     }
 

@@ -4,7 +4,7 @@
 // so zero new SQLite schema tables are introduced and `empty_database()` stays untouched.
 import { newId, type Repo } from "../db/repo";
 import { buildNovelBook } from "../novel";
-import { saveBook } from "../sources/library";
+import { getBooksCharMetrics, saveBook } from "../sources/library";
 import type { SourceBook } from "../sources/types";
 import {
   ensureReaderSchema,
@@ -17,6 +17,7 @@ export interface BookShelfPref {
   coverTone?: number | null;
   finished?: boolean;
   author?: string;
+  origin?: string;
 }
 
 export interface ReadingStatsStore {
@@ -77,6 +78,9 @@ export async function getAllBookShelfPrefs(repo: Repo): Promise<Record<string, B
         : null,
       finished: item.finished === true,
       author: typeof item.author === "string" ? item.author.trim().slice(0, 40) : "",
+      ...(typeof item.origin === "string" && item.origin.trim()
+        ? { origin: item.origin.trim().slice(0, 40) }
+        : {}),
     };
   }
   return out;
@@ -89,6 +93,8 @@ export async function updateBookShelfPref(
 ): Promise<BookShelfPref> {
   const all = await getAllBookShelfPrefs(repo);
   const prev = all[bookId] ?? {};
+  const nextOrigin =
+    patch.origin !== undefined ? patch.origin.trim().slice(0, 40) : (prev.origin ?? "");
   const next: BookShelfPref = {
     pinned: patch.pinned !== undefined ? !!patch.pinned : !!prev.pinned,
     coverTone:
@@ -102,11 +108,14 @@ export async function updateBookShelfPref(
       patch.author !== undefined
         ? patch.author.trim().slice(0, 40)
         : (prev.author ?? ""),
+    ...(nextOrigin ? { origin: nextOrigin } : {}),
   };
   all[bookId] = next;
   await repo.setSetting(BOOK_PREFS_KEY, all);
   return next;
 }
+
+export const upsertReaderShelfMeta = updateBookShelfPref;
 
 async function loadStatsStore(repo: Repo): Promise<ReadingStatsStore> {
   const raw = await repo.getSetting<unknown>(DAILY_STATS_KEY, null);
@@ -137,33 +146,42 @@ async function loadStatsStore(repo: Repo): Promise<ReadingStatsStore> {
   return { totalSeconds, byDate, byTarget };
 }
 
-export async function recordReadingSeconds(
+let latestReadingStatsFlush: Promise<void> = Promise.resolve();
+
+export function recordReadingSeconds(
   repo: Repo,
   targetType: ReaderTargetType,
   targetId: string,
   deltaSeconds: number,
   now = new Date(),
 ): Promise<void> {
-  if (!targetId || !Number.isFinite(deltaSeconds) || deltaSeconds <= 0) return;
+  if (!targetId || !Number.isFinite(deltaSeconds) || deltaSeconds <= 0) return Promise.resolve();
   const clamped = Math.min(300, Math.max(1, Math.round(deltaSeconds)));
-  const store = await loadStatsStore(repo);
-  const dayKey = localDateKey(now);
-  store.totalSeconds += clamped;
-  store.byDate[dayKey] = (store.byDate[dayKey] ?? 0) + clamped;
-  const targetKey = `${targetType}:${targetId}`;
-  store.byTarget[targetKey] = (store.byTarget[targetKey] ?? 0) + clamped;
+  const run = latestReadingStatsFlush
+    .catch(() => {})
+    .then(async () => {
+      const store = await loadStatsStore(repo);
+      const dayKey = localDateKey(now);
+      store.totalSeconds += clamped;
+      store.byDate[dayKey] = (store.byDate[dayKey] ?? 0) + clamped;
+      const targetKey = `${targetType}:${targetId}`;
+      store.byTarget[targetKey] = (store.byTarget[targetKey] ?? 0) + clamped;
 
-  // Keep only the latest 120 calendar days in `byDate` to bound settings JSON size.
-  const keys = Object.keys(store.byDate).sort();
-  if (keys.length > 120) {
-    for (const oldKey of keys.slice(0, keys.length - 120)) {
-      delete store.byDate[oldKey];
-    }
-  }
-  await repo.setSetting(DAILY_STATS_KEY, store);
+      // Keep only the latest 120 calendar days in `byDate` to bound settings JSON size.
+      const keys = Object.keys(store.byDate).sort();
+      if (keys.length > 120) {
+        for (const oldKey of keys.slice(0, keys.length - 120)) {
+          delete store.byDate[oldKey];
+        }
+      }
+      await repo.setSetting(DAILY_STATS_KEY, store);
+    });
+  latestReadingStatsFlush = run.catch(() => {});
+  return run;
 }
 
 export async function getReadingStatsSummary(repo: Repo, now = new Date()): Promise<ReadingStatsSummary> {
+  await latestReadingStatsFlush;
   const store = await loadStatsStore(repo);
   const todayKey = localDateKey(now);
   const todaySeconds = store.byDate[todayKey] ?? 0;
@@ -211,12 +229,12 @@ export async function countAllHighlights(repo: Repo): Promise<number> {
  * without loading book body JSON or chunks into JS memory.
  */
 export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfItem[]> {
+  await latestReadingStatsFlush;
   await ensureReaderSchema(repo.platform);
   const [rows, prefs, stats] = await Promise.all([
     repo.platform.sql.query(
       `SELECT b.id, b.title, b.format, b.created_at AS createdAt,
          (SELECT COUNT(*) FROM source_sections s WHERE s.book_id = b.id) AS sectionCount,
-         (SELECT COALESCE(SUM(LENGTH(c.text)), 0) FROM source_chunks c WHERE c.book_id = b.id) AS totalChars,
          p.section_index AS progSection,
          p.page_index AS progPage,
          p.scroll_ratio AS progRatio,
@@ -236,6 +254,11 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
     getAllBookShelfPrefs(repo),
     loadStatsStore(repo),
   ]);
+
+  const charMetrics = await getBooksCharMetrics(
+    repo,
+    rows.map((r) => ({ id: String(r.id), sectionCount: Number(r.sectionCount ?? 0) })),
+  );
 
   const items: LibraryShelfItem[] = rows.map((r) => {
     const id = String(r.id);
@@ -276,7 +299,7 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
       format: String(r.format || "txt"),
       createdAt,
       sectionCount: Number(r.sectionCount ?? 0),
-      totalChars: Number(r.totalChars ?? 0),
+      totalChars: charMetrics.get(id)?.totalChars ?? 0,
       progress,
       currentSectionTitle: String(r.currentSectionTitle ?? ""),
       progressPct,
@@ -320,16 +343,29 @@ export async function saveWorldNovelToLibrary(
     title: built.title,
     format: "epub",
     createdAt: new Date().toISOString(),
-    sections: built.sections.map((sec) => ({
-      title: sec.subtitle ? `${sec.title} · ${sec.subtitle}` : sec.title,
-      text: sec.paragraphs
-        .map((p) => (p.kind === "divider" ? `◇ ${p.text} ◇` : p.text))
-        .join("\n\n"),
-    })),
+    sections: built.sections.map((sec, idx) => {
+      const body = sec.paragraphs
+        .map((p) => (p.kind === "divider" ? (p.text === "◇" ? "◇" : `◇ ${p.text} ◇`) : p.text))
+        .join("\n\n");
+      const withStatus =
+        idx === built.sections.length - 1 && built.statusLine && !body.includes(built.statusLine)
+          ? body
+            ? `${body}\n\n${built.statusLine}`
+            : built.statusLine
+          : body;
+      return {
+        title: sec.subtitle ? `${sec.title} · ${sec.subtitle}` : sec.title,
+        text: withStatus,
+      };
+    }),
   };
   await saveBook(repo, sourceBook);
   await updateBookShelfPref(repo, bookId, {
     author: opts?.author ?? (built.author ? `${built.author} · 穿越成书` : "穿越成书"),
+    origin: "world-novel",
   });
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(new CustomEvent("lishi:library-changed", { detail: { bookId } }));
+  }
   return { bookId, title: sourceBook.title, sectionCount: sourceBook.sections.length };
 }

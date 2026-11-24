@@ -84,6 +84,8 @@ export interface PaginatorProps {
   children: ReactNode;
   /** Bumped when content changes so columns remeasure immediately. */
   contentKey?: string | number;
+  /** Bumped on explicit jumps (including same-chapter jumps) to re-apply initialSelector/initialPage. */
+  jumpNonce?: number;
   /** Initial page ("last" opens at the final page of the section/story). */
   initialPage?: number | "last";
   /** Optional selector to jump to once rendered (e.g. `[data-node-id="..."]`). */
@@ -137,6 +139,7 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
   {
     children,
     contentKey,
+    jumpNonce,
     initialPage = 0,
     initialSelector,
     streaming = false,
@@ -189,6 +192,7 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
   totalRef.current = totalPages;
   const followTailRef = useRef(initialPage === "last" || autoFollow);
   const initializedRef = useRef(false);
+  const appliedJumpNonceRef = useRef<number | undefined>(jumpNonce);
   const anchorBeforeResizeRef = useRef<string | null>(null);
   const turnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -345,16 +349,16 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
   const measureColumns = useCallback(() => {
     const stage = stageRef.current;
     const cols = columnsRef.current;
-    if (!stage || !cols) return 1;
+    if (!stage || !cols || stage.clientWidth <= 0) return totalRef.current;
     const { w, h } = readStageInnerBox(stage);
-    if (w > 0 && h > 0 && (w !== box.w || h !== box.h)) {
+    if (w <= 0 || h <= 0) return totalRef.current;
+    if (w !== box.w || h !== box.h) {
       if (!anchorBeforeResizeRef.current) {
         anchorBeforeResizeRef.current = findVisibleAnchor("data-node-id") ?? findVisibleAnchor("data-para-index");
       }
       setBox({ w, h });
       return totalRef.current;
     }
-    if (w <= 0) return 1;
     const s = w + COLUMN_GAP;
     const computed = Math.max(1, Math.round((cols.scrollWidth + COLUMN_GAP) / s));
     setTotalPages((prev) => (prev === computed ? prev : computed));
@@ -443,9 +447,11 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
     const stage = stageRef.current;
     const cols = columnsRef.current;
     if (!stage || !cols) return;
-    const { w, h } = readStageInnerBox(stage);
-    if (w > 0 && h > 0 && (w !== box.w || h !== box.h)) {
-      setBox({ w, h });
+    if (stage.clientWidth > 0) {
+      const { w, h } = readStageInnerBox(stage);
+      if (w > 0 && h > 0 && (w !== box.w || h !== box.h)) {
+        setBox({ w, h });
+      }
     }
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
@@ -456,22 +462,59 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
     return () => ro.disconnect();
   }, [box.h, box.w, measureColumns]);
 
-  // Re-measure whenever content, typography variables, or box dimensions change
+  // Re-measure whenever content, typography variables, jumpNonce, or box dimensions change
   useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || stage.clientWidth <= 0) return;
+    const { w, h } = readStageInnerBox(stage);
+    if (w <= 0 || h <= 0) return;
     const count = measureColumns();
-    if (box.w <= 0) return;
+    if (box.w <= 0 || box.h <= 0) return;
     if (!initializedRef.current) {
       initializedRef.current = true;
+      appliedJumpNonceRef.current = jumpNonce;
       if (initialSelector && jumpToSelector(initialSelector)) return;
       if (initialPage === "last") {
+        followTailRef.current = true;
         const last = Math.max(0, count - 1);
         pageRef.current = last;
         setPage(last);
         return;
       }
+      followTailRef.current = autoFollow;
       const start = Math.max(0, Math.min(count - 1, initialPage));
       pageRef.current = start;
       setPage(start);
+      return;
+    }
+    if (jumpNonce !== appliedJumpNonceRef.current) {
+      appliedJumpNonceRef.current = jumpNonce;
+      anchorBeforeResizeRef.current = null;
+      if (initialSelector && jumpToSelector(initialSelector)) return;
+      if (initialPage === "last") {
+        followTailRef.current = true;
+        const last = Math.max(0, count - 1);
+        const prev = pageRef.current;
+        pageRef.current = last;
+        setPage(last);
+        triggerTurnVisual(prev, last);
+        return;
+      }
+      followTailRef.current = autoFollow;
+      const target = Math.max(0, Math.min(count - 1, initialPage));
+      const prev = pageRef.current;
+      pageRef.current = target;
+      setPage(target);
+      triggerTurnVisual(prev, target);
+      return;
+    }
+    if ((streaming && (autoFollow || followTailRef.current)) || (followTailRef.current && initialPage === "last")) {
+      anchorBeforeResizeRef.current = null;
+      const last = Math.max(0, count - 1);
+      if (pageRef.current !== last) {
+        pageRef.current = last;
+        setPage(last);
+      }
       return;
     }
     if (anchorBeforeResizeRef.current) {
@@ -481,20 +524,24 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
         return;
       }
     }
-    if (streaming && (autoFollow || followTailRef.current)) {
-      const last = Math.max(0, count - 1);
-      if (pageRef.current !== last) {
-        pageRef.current = last;
-        setPage(last);
-      }
-      return;
-    }
     if (pageRef.current >= count) {
       const clamped = Math.max(0, count - 1);
       pageRef.current = clamped;
       setPage(clamped);
     }
-  }, [autoFollow, box.h, box.w, contentKey, initialPage, initialSelector, jumpToSelector, measureColumns, streaming]);
+  }, [
+    autoFollow,
+    box.h,
+    box.w,
+    contentKey,
+    initialPage,
+    initialSelector,
+    jumpNonce,
+    jumpToSelector,
+    measureColumns,
+    streaming,
+    triggerTurnVisual,
+  ]);
 
   // Fonts finishing load can shift line breaks slightly; remeasure once ready
   useEffect(() => {
@@ -509,10 +556,13 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
 
   // Notify parent of page & anchor changes
   useEffect(() => {
-    if (!onPageChange || box.w <= 0) return;
+    const stage = stageRef.current;
+    if (!onPageChange || !stage || stage.clientWidth <= 0 || box.w <= 0 || box.h <= 0) return;
+    const { w, h } = readStageInnerBox(stage);
+    if (w <= 0 || h <= 0) return;
     const id = findVisibleAnchor("data-node-id") ?? findVisibleAnchor("data-para-index");
     onPageChange(page, totalPages, id);
-  }, [box.w, findVisibleAnchor, onPageChange, page, totalPages]);
+  }, [box.h, box.w, findVisibleAnchor, onPageChange, page, totalPages]);
 
   const isOverlayOrInputActive = () => {
     const active = document.activeElement as HTMLElement | null;
@@ -533,6 +583,10 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
     if (!keyboard) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+      const stage = stageRef.current;
+      if (!stage || stage.clientWidth <= 0) return;
+      const { w, h } = readStageInnerBox(stage);
+      if (w <= 0 || h <= 0) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
       if (isOverlayOrInputActive()) return;
@@ -558,6 +612,10 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
   useEffect(() => {
     if (!volumeKeys) return;
     const onVolumePage = (ev: Event) => {
+      const stage = stageRef.current;
+      if (!stage || stage.clientWidth <= 0) return;
+      const { w, h } = readStageInnerBox(stage);
+      if (w <= 0 || h <= 0) return;
       if (isOverlayOrInputActive()) return;
       const detail = (ev as CustomEvent<"prev" | "next">).detail;
       if (detail === "prev" || detail === "next") {

@@ -11,6 +11,7 @@ export interface ReaderRouteProps {
   worldId?: string;
   lineId?: string;
   initialSection?: number;
+  initialParagraph?: number;
   initialNodeId?: string;
   through?: number | null;
   fanfic?: boolean;

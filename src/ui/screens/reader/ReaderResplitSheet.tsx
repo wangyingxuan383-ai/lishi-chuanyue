@@ -1,15 +1,17 @@
 // TXT chapter re-splitter sheet for ReaderScreen (R36-T005).
 // Lets players switch between 5 chapter-matching presets, customize regex or fixed char count,
 // inspect live preview counts & sample headings, and atomically rebuild the book's TOC.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getBook } from "../../../engine/sources/library";
 import {
   RESPLIT_PRESETS,
   applyBookResplit,
-  previewBookResplit,
+  reconstructBookText,
+  splitTextWithRule,
   type ResplitPresetId,
-  type ResplitPreview,
   type ResplitRule,
 } from "../../../engine/sources/resplit";
+import type { BookSection } from "../../../engine/sources/types";
 import { useApp } from "../../app/context";
 import { Sheet } from "../../components/Sheet";
 
@@ -37,10 +39,30 @@ export function ReaderResplitSheet({
   const [preset, setPreset] = useState<ResplitPresetId>("standard");
   const [customPattern, setCustomPattern] = useState("^第[0-9一二三四五六七八九十百千]+话.*");
   const [fixedChars, setFixedChars] = useState(4000);
-  const [preview, setPreview] = useState<ResplitPreview | null>(null);
+  const [preview, setPreview] = useState<{
+    sectionCount: number;
+    sampleTitles: string[];
+    unchanged: boolean;
+  } | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [previewBusy, setPreviewBusy] = useState(true);
   const [applying, setApplying] = useState(false);
+  const [textLoadedTick, setTextLoadedTick] = useState(0);
+
+  const cachedFullTextRef = useRef<string | null>(null);
+  const previewSectionsRef = useRef<BookSection[] | null>(null);
+  const origSectionsMetaRef = useRef<{ title: string; len: number }[] | null>(null);
+  const applyAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      applyAbortRef.current?.abort();
+      applyAbortRef.current = null;
+      cachedFullTextRef.current = null;
+      previewSectionsRef.current = null;
+    },
+    [],
+  );
 
   const rule = useMemo<ResplitRule>(
     () => ({
@@ -51,44 +73,96 @@ export function ReaderResplitSheet({
     [customPattern, fixedChars, preset],
   );
 
+  // Load book text once per sheet mount in a ref so preset/regex edits preview without retaining MBs in React state
   useEffect(() => {
+    let live = true;
+    cachedFullTextRef.current = null;
+    previewSectionsRef.current = null;
+    origSectionsMetaRef.current = null;
+    setPreviewBusy(true);
+    setPreviewError("");
+    void getBook(game.repo, bookId)
+      .then((book) => {
+        if (!live) return;
+        if (!book) {
+          setPreviewError("找不到该书籍");
+          setPreviewBusy(false);
+          return;
+        }
+        origSectionsMetaRef.current = book.sections.map((s) => ({ title: s.title, len: s.text.length }));
+        cachedFullTextRef.current = reconstructBookText(book);
+        setTextLoadedTick((n) => n + 1);
+      })
+      .catch((err: unknown) => {
+        if (!live) return;
+        setPreviewError(err instanceof Error ? err.message : "读取书籍失败");
+        setPreviewBusy(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [bookId, game.repo]);
+
+  useEffect(() => {
+    const fullText = cachedFullTextRef.current;
+    if (fullText === null) return;
     let live = true;
     setPreviewBusy(true);
     setPreviewError("");
     const timer = setTimeout(() => {
-      void previewBookResplit(game.repo, bookId, rule)
-        .then((res) => {
-          if (!live) return;
-          setPreview(res);
-          setPreviewError(res.sectionCount === 0 ? "没有匹配到任何章节内容，请调整分章规则" : "");
-        })
-        .catch((err: unknown) => {
-          if (!live) return;
-          setPreview(null);
-          setPreviewError(err instanceof Error ? err.message : "预览分章失败，请换个规则试试");
-        })
-        .finally(() => {
-          if (live) setPreviewBusy(false);
+      try {
+        const sections = splitTextWithRule(fullText, rule);
+        if (!live) return;
+        previewSectionsRef.current = sections;
+        const orig = origSectionsMetaRef.current;
+        const unchanged =
+          !!orig &&
+          orig.length === sections.length &&
+          sections.every((s, idx) => s.title === orig[idx]!.title && s.text.length === orig[idx]!.len);
+        setPreview({
+          sectionCount: sections.length,
+          sampleTitles: sections.slice(0, 8).map((s) => s.title),
+          unchanged,
         });
-    }, 160);
+        setPreviewError(sections.length === 0 ? "没有匹配到任何章节内容，请调整分章规则" : "");
+      } catch (err: unknown) {
+        if (!live) return;
+        previewSectionsRef.current = null;
+        setPreview(null);
+        setPreviewError(err instanceof Error ? err.message : "预览分章失败，请换个规则试试");
+      } finally {
+        if (live) setPreviewBusy(false);
+      }
+    }, 120);
     return () => {
       live = false;
       clearTimeout(timer);
     };
-  }, [bookId, game.repo, rule]);
+  }, [rule, textLoadedTick]);
 
   const handleApply = async () => {
     if (applying || !preview || preview.sectionCount <= 0) return;
+    const ctrl = new AbortController();
+    applyAbortRef.current?.abort();
+    applyAbortRef.current = ctrl;
     setApplying(true);
     try {
-      const res = await applyBookResplit(game.repo, bookId, rule);
+      const res = await applyBookResplit(game.repo, bookId, rule, {
+        signal: ctrl.signal,
+        precomputedSections: previewSectionsRef.current ?? undefined,
+      });
+      if (ctrl.signal.aborted) return;
       await onApplied(res.sectionCount);
       toast(`已重建《${bookTitle}》目录，共 ${res.sectionCount} 章`);
       onClose();
     } catch (err: unknown) {
+      if (ctrl.signal.aborted) return;
       toast(err instanceof Error ? err.message : "重建目录失败，请重试");
     } finally {
-      setApplying(false);
+      if (applyAbortRef.current === ctrl) {
+        applyAbortRef.current = null;
+        setApplying(false);
+      }
     }
   };
 
@@ -174,7 +248,9 @@ export function ReaderResplitSheet({
             <div className="stack gap-2">
               <div className="row between center">
                 <b>预览结果：共 {preview.sectionCount} 章</b>
-                <small className="muted">前 {preview.sampleTitles.length} 章示例</small>
+                <small className="muted">
+                  {preview.unchanged ? "与当前目录一致" : `前 ${preview.sampleTitles.length} 章示例`}
+                </small>
               </div>
               <ol className="resplit-sample-list">
                 {preview.sampleTitles.map((title, idx) => (

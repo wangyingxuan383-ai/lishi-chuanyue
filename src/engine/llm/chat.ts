@@ -118,17 +118,96 @@ export class ChatError extends Error {
   }
 }
 
+const THINK_OPEN_RE = /<\s*think\s*>/gi;
+const THINK_CLOSE_RE = /<\s*\/\s*think\s*>/gi;
+const PARTIAL_THINK_OPEN_RE = /<\s*(?:t(?:h(?:i(?:n(?:k\s*)?)?)?)?)?$/i;
+
+/** Strips closed `<think>...</think>` and trailing unclosed `<think>...` blocks from raw model text. */
+export function stripInlineThink(raw: string): { visible: string; thinking: string } {
+  THINK_OPEN_RE.lastIndex = 0;
+  if (!THINK_OPEN_RE.test(raw)) return { visible: raw, thinking: "" };
+  let visible = "";
+  const thinkingParts: string[] = [];
+  let pos = 0;
+  while (pos < raw.length) {
+    THINK_OPEN_RE.lastIndex = pos;
+    const open = THINK_OPEN_RE.exec(raw);
+    if (!open) {
+      visible += raw.slice(pos);
+      break;
+    }
+    const before = raw.slice(pos, open.index);
+    if (visible.length > 0 || /[^ \t\r\n]/.test(before)) {
+      visible += before;
+    }
+    const innerStart = open.index + open[0].length;
+    THINK_CLOSE_RE.lastIndex = innerStart;
+    const close = THINK_CLOSE_RE.exec(raw);
+    if (!close) {
+      const inner = raw.slice(innerStart).trim();
+      if (inner) thinkingParts.push(inner);
+      break;
+    }
+    const inner = raw.slice(innerStart, close.index).trim();
+    if (inner) thinkingParts.push(inner);
+    pos = close.index + close[0].length;
+    if (visible.length === 0) {
+      while (pos < raw.length && (raw[pos] === " " || raw[pos] === "\t" || raw[pos] === "\r" || raw[pos] === "\n")) {
+        pos++;
+      }
+    }
+  }
+  return { visible, thinking: thinkingParts.join("\n") };
+}
+
+function hasUnclosedInlineThink(raw: string): boolean {
+  THINK_OPEN_RE.lastIndex = 0;
+  let pos = 0;
+  while (pos < raw.length) {
+    THINK_OPEN_RE.lastIndex = pos;
+    const open = THINK_OPEN_RE.exec(raw);
+    if (!open) return false;
+    THINK_CLOSE_RE.lastIndex = open.index + open[0].length;
+    const close = THINK_CLOSE_RE.exec(raw);
+    if (!close) return true;
+    pos = close.index + close[0].length;
+  }
+  return false;
+}
+
 export function outputWasTruncated(reason: string | null): boolean {
   return ["length", "max_tokens", "max_output_tokens"].includes(reason?.toLowerCase() ?? "");
 }
 
 // Keep these markers aligned with provider_context_rejected in crates/story-core/src/chat.rs.
 export const CONTEXT_WINDOW_MARKERS = ["context_length_exceeded", "maximum context length", "exceeds the context window", "prompt is too long", "上下文窗口"];
+export const MAX_TOKENS_MARKERS = ["max_tokens", "max_completion_tokens", "max_output_tokens", "maxoutputtokens", "maximum output", "maximum allowed completion"];
 
 export function isContextWindowError(error: unknown): boolean {
   return error instanceof ChatError && error.kind === "http" && !error.partial
     && (error.status === 413 || ([400, 422].includes(error.status ?? 0)
       && CONTEXT_WINDOW_MARKERS.some(marker => error.message.toLowerCase().includes(marker))));
+}
+
+export function isMaxCompletionTokensParamError(error: unknown): boolean {
+  if (!(error instanceof ChatError) || error.kind !== "http" || !!error.partial || ![400, 422].includes(error.status ?? 0)) {
+    return false;
+  }
+  const lower = error.message.toLowerCase();
+  return lower.includes("max_completion_tokens")
+    && (lower.includes("not supported") || lower.includes("unsupported") || lower.includes("unrecognized") || lower.includes("unknown") || lower.includes("extra_forbidden"));
+}
+
+export function isMaxTokensError(error: unknown): boolean {
+  if (!(error instanceof ChatError) || error.kind !== "http" || !!error.partial || ![400, 422].includes(error.status ?? 0)) {
+    return false;
+  }
+  if (isContextWindowError(error) || isMaxCompletionTokensParamError(error)) return false;
+  const lower = error.message.toLowerCase();
+  if (lower.includes("budget_tokens") || lower.includes("must be greater than") || (lower.includes("greater than") && !lower.includes("maximum") && !lower.includes("limit"))) {
+    return false;
+  }
+  return MAX_TOKENS_MARKERS.some(marker => lower.includes(marker));
 }
 
 export const CONTEXT_WINDOW_MESSAGE = "AI 服务报告模型上下文窗口不足。可缩小本次正文或资料范围，或改用输入窗口更大的模型。";
@@ -144,9 +223,20 @@ export function compactChatMessages(messages: ChatMessage[]): ChatMessage[] | nu
   return changed ? compact : null;
 }
 
-/** One retry shared by stream interruptions, context recovery and early transient failures. */
-export function retryDecision(error: unknown, attempt: number, messages: ChatMessage[]): { retry: boolean; messages: ChatMessage[] } {
-  if (attempt !== 1 || !(error instanceof ChatError)) return { retry: false, messages };
+/** Multi-step max_tokens step-down (8192 -> 4096 -> 2048 -> 1024) plus one retry for stream/context/transient failures. */
+export function retryDecision(
+  error: unknown,
+  attempt: number,
+  messages: ChatMessage[],
+  maxTokens?: number,
+): { retry: boolean; messages: ChatMessage[]; maxTokens?: number } {
+  if (!(error instanceof ChatError) || attempt < 1) return { retry: false, messages };
+  if (!error.partial && attempt <= 3 && isMaxTokensError(error) && (maxTokens ?? 0) > 1024) {
+    const cur = maxTokens!;
+    const nextMax = cur > 4096 ? 4096 : cur > 2048 ? 2048 : 1024;
+    return { retry: true, messages, maxTokens: nextMax };
+  }
+  if (attempt !== 1) return { retry: false, messages };
   if (error.kind === "stream") return { retry: true, messages };
   if (error.partial) return { retry: false, messages };
   const compact = isContextWindowError(error) ? compactChatMessages(messages) : null;
@@ -188,6 +278,7 @@ export interface ChatHandle {
 
 export function streamChat(platform: Platform, request: ChatRequest, callbacks: ChatCallbacks = {}): ChatHandle {
   const started = performance.now();
+  let rawText = "";
   let text = "";
   let finishReason: string | null = null;
   let usage: ChatUsage | null = null;
@@ -227,9 +318,21 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
         callbacks.onThinking?.();
       }
       if (chunk.content) {
-        firstTokenMs ??= performance.now() - started;
-        text += chunk.content;
-        callbacks.onText?.(chunk.content, text);
+        rawText += chunk.content;
+        const stripped = stripInlineThink(rawText);
+        if (!text && !thinking && (stripped.thinking || hasUnclosedInlineThink(rawText))) {
+          thinking = true;
+          callbacks.onThinking?.();
+        }
+        const partialMatch = PARTIAL_THINK_OPEN_RE.exec(stripped.visible);
+        const safeVisible = partialMatch ? stripped.visible.slice(0, partialMatch.index) : stripped.visible;
+        const readyToEmit = text.length > 0 || /[^ \t\r\n]/.test(safeVisible);
+        if (readyToEmit && safeVisible.length > text.length) {
+          firstTokenMs ??= performance.now() - started;
+          const delta = safeVisible.slice(text.length);
+          text = safeVisible;
+          callbacks.onText?.(delta, text);
+        }
       }
       for (const delta of chunk.toolCalls ?? []) {
         firstTokenMs ??= performance.now() - started;
@@ -246,6 +349,15 @@ export function streamChat(platform: Platform, request: ChatRequest, callbacks: 
       };
     } else if (event.type === "done") {
       ended = true;
+      if (rawText) {
+        const finalVisible = stripInlineThink(rawText).visible;
+        if (finalVisible.length > text.length) {
+          firstTokenMs ??= performance.now() - started;
+          const delta = finalVisible.slice(text.length);
+          text = finalVisible;
+          callbacks.onText?.(delta, text);
+        }
+      }
       const toolCalls = [...calls].sort(([a], [b]) => a - b).map(([, call]) => call);
       if (toolCalls.some((call) => !call.id || !call.function.name)) fail(new ChatError("empty", undefined, text, "工具调用不完整，请重试"));
       else if (!text && !toolCalls.length) fail(new ChatError("empty", undefined, "", finishReason ?? undefined));

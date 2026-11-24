@@ -9,6 +9,7 @@ import { simulatedUpdate } from "./webUpdate";
 const IDB_NAME = "chuanyue-dev";
 const IDB_STORE = "files";
 const DB_KEY = "game.sqlite";
+const MUTATING_SQL_RE = /^\s*(?:WITH\b[\s\S]*?\)\s*)?(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA\s+\w+\s*=)/i;
 
 function idb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -101,7 +102,10 @@ export async function createWebPlatform(): Promise<Platform> {
       resume: (id) => bridge<void>("host/resume", { id }),
     },
     sql: {
-      query: (sql, params = []) => bridge<Row[]>("host/sqlQuery", { sql, params }),
+      query: async (sql, params = []) => {
+        if (MUTATING_SQL_RE.test(sql)) assertSqlWritable();
+        return bridge<Row[]>("host/sqlQuery", { sql, params });
+      },
       batch: (statements) => {assertSqlWritable();return bridge<void>("host/sqlBatch", { statements });},
       backup: (label) => bridge<string>("host/sqlBackup", { label }),
       listBackups: () => bridge<BackupInfo[]>("host/sqlListBackups", {}),

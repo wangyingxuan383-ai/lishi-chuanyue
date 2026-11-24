@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BUILTIN_PERSONAS, getBuiltinPersona, type CompanionPersona } from "../../content/personas";
 import {
   compactCompanionSession,
@@ -47,7 +47,7 @@ import {
   type AgentSnapshot,
   type AgentTask,
 } from "../../engine/agent";
-import { getBook, listBooks } from "../../engine/sources/library";
+import { bookExists, getBookOutline, listBooks } from "../../engine/sources/library";
 import { newBinding, type SourceBinding, type SourceBook } from "../../engine/sources/types";
 import type { World } from "../../engine/types";
 import type { Json } from "../../platform";
@@ -148,6 +148,15 @@ const AGENT_STATUS_TEXT: Record<string, string> = {
 
 const isTaskInFlight = (status: string) =>
   ["running", "committing", "compacting", "stopping"].includes(status);
+
+const hasFinePointer = () =>
+  typeof window !== "undefined" ? (window.matchMedia?.("(pointer: fine)")?.matches ?? true) : true;
+
+const BookPreviewCompat = BookPreview as unknown as (props: {
+  bookId?: string;
+  book?: SourceBook;
+  through?: number | null;
+}) => ReturnType<typeof BookPreview>;
 
 function defaultStarters(
   persona: CompanionPersona,
@@ -272,6 +281,9 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   const [piSnapshots, setPiSnapshots] = useState<Record<string, AgentSnapshot>>({});
   const piSnapCache = useRef<Record<string, AgentSnapshot>>({});
   const piSnapVer = useRef<Record<string, string>>({});
+  const committedTaskIdsRef = useRef<Set<string>>(new Set());
+  const localStartedTaskIdsRef = useRef<Set<string>>(new Set());
+  const seededPiSessionRef = useRef<string | null>(null);
   const [recoveries, setRecoveries] = useState<{ id: string; createdAt: string }[] | null>(null);
 
   const [sheet, setSheet] = useState<
@@ -279,7 +291,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   >(null);
   const [menuSession, setMenuSession] = useState<CompanionSession | null>(null);
   const [previewBook, setPreviewBook] = useState<{
-    book: SourceBook;
+    bookId: string;
+    title: string;
     through?: number | null;
     quote?: string;
   } | null>(null);
@@ -293,6 +306,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(reading.autoScroll);
+  const stickBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
 
   const activePersona = useMemo(() => {
@@ -318,20 +332,10 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   }, [books, session?.boundBookId, boundWorldBrief]);
 
   const refreshReferenceLists = useCallback(async () => {
-    const [worldList, bookList] = await Promise.all([
-      game.repo.listWorlds(),
+    const [briefs, bookList] = await Promise.all([
+      game.repo.listWorldSourceBriefs(),
       listBooks(game.repo),
     ]);
-    const briefs: WorldBrief[] = [];
-    for (const w of worldList) {
-      const line = w.currentLineId ? await game.repo.getLine(w.currentLineId).catch(() => null) : null;
-      const state = line ? await game.repo.getState(line.nodeId).catch(() => null) : null;
-      briefs.push({
-        world: w,
-        lineId: line?.id ?? w.currentLineId ?? null,
-        source: state?.source ?? null,
-      });
-    }
     if (!aliveRef.current) return { briefs, bookList };
     setWorlds(briefs);
     setBooks(bookList.map((b) => ({ id: b.id, title: b.title, format: b.format })));
@@ -391,7 +395,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           }
         })
         .finally(async () => {
-          if (handleRef.current === handle) handleRef.current = null;
+          if (handleRef.current !== handle) return;
+          handleRef.current = null;
           if (attachedRunRef.current?.runId === runId) attachedRunRef.current = null;
           if (!aliveRef.current) return;
           setLiveStream((prev) => (prev?.sessionId === sid && prev.runId === runId ? null : prev));
@@ -410,6 +415,18 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       activeSessionRef.current = sessionId;
       const detail = await getSessionDetail(game, sessionId);
       if (!aliveRef.current || activeSessionRef.current !== sessionId || !detail) return null;
+      const nextPiId = detail.session.piSessionId ?? null;
+      if (nextPiId && seededPiSessionRef.current !== nextPiId) {
+        seededPiSessionRef.current = nextPiId;
+        committedTaskIdsRef.current = new Set(
+          (detail.piTasks ?? [])
+            .filter((t) => t.status === "committed" && !localStartedTaskIdsRef.current.has(t.id))
+            .map((t) => t.id),
+        );
+      } else if (!nextPiId) {
+        seededPiSessionRef.current = null;
+        committedTaskIdsRef.current.clear();
+      }
       setSession(detail.session);
       setMessages(detail.messages);
       setPiTaskSummaries(detail.piTasks ?? []);
@@ -434,8 +451,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         setBoundWorldMissing(false);
       }
       if (session?.boundBookId) {
-        const b = await getBook(game.repo, session.boundBookId).catch(() => null);
-        if (live) setBoundBookMissing(!b);
+        const exists = await bookExists(game.repo, session.boundBookId).catch(() => false);
+        if (live) setBoundBookMissing(!exists);
       } else if (live) {
         setBoundBookMissing(false);
       }
@@ -469,10 +486,21 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     void refreshMemoryCount(activePersona.id);
   }, [activePersona.id, refreshMemoryCount]);
 
-  // Boot once (guarded against StrictMode double-mount).
+  // Detach live stream subscription cleanly on unmount without aborting backend execution.
   useEffect(() => {
     aliveRef.current = true;
-    if (bootedRef.current) return () => { aliveRef.current = false; };
+    return () => {
+      aliveRef.current = false;
+      const activeHandle = handleRef.current;
+      handleRef.current = null;
+      attachedRunRef.current = null;
+      activeHandle?.detach();
+    };
+  }, []);
+
+  // Boot once (guarded against StrictMode double-mount).
+  useEffect(() => {
+    if (bootedRef.current) return;
     bootedRef.current = true;
 
     void (async () => {
@@ -589,11 +617,12 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         if (props.gear === "agent" && props.worldId) {
           setAgentBusy(true);
           try {
-            await escalateCompanionToAgent(game, {
+            const started = await escalateCompanionToAgent(game, {
               sessionId: targetId,
               text: props.prompt.trim(),
               policy: policyTouchedRef.current ? agentPolicy : inheritedPolicy,
             });
+            localStartedTaskIdsRef.current.add(started.taskId);
             await loadActiveSession(targetId);
           } catch (err) {
             if (aliveRef.current) toast(err instanceof Error ? err.message : "未能启动改档任务");
@@ -609,11 +638,45 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         }
       }
     })();
-
-    return () => {
-      aliveRef.current = false;
-    };
   }, []);
+
+  const syncCommittedPiTasks = useCallback(
+    (
+      worldId: string | null | undefined,
+      piSessionId: string,
+      tasks: AgentTask[],
+      snapsByRunId: Record<string, AgentSnapshot>,
+    ) => {
+      if (seededPiSessionRef.current !== piSessionId) {
+        seededPiSessionRef.current = piSessionId;
+        committedTaskIdsRef.current = new Set(
+          tasks
+            .filter((t) => {
+              const st = agentTaskStatus(t, snapsByRunId[t.runId]);
+              return st === "committed" && !localStartedTaskIdsRef.current.has(t.id);
+            })
+            .map((t) => t.id),
+        );
+      }
+      let newlyCommitted = false;
+      for (const t of tasks) {
+        const st = agentTaskStatus(t, snapsByRunId[t.runId]);
+        if (st === "committed") {
+          if (!committedTaskIdsRef.current.has(t.id)) {
+            committedTaskIdsRef.current.add(t.id);
+            localStartedTaskIdsRef.current.delete(t.id);
+            newlyCommitted = true;
+          }
+        } else {
+          committedTaskIdsRef.current.delete(t.id);
+        }
+      }
+      if (newlyCommitted && worldId) {
+        game.notifyAgentChange(worldId);
+      }
+    },
+    [game],
+  );
 
   // Poll native Agent session when bound to a world & piSessionId exists.
   useEffect(() => {
@@ -657,6 +720,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           }),
         );
         if (!live) return;
+        const nextSnapMap = { ...piSnapCache.current, ...Object.fromEntries(snaps) };
+        syncCommittedPiTasks(worldId, piId, next.tasks, nextSnapMap);
         setPiDetail((cur) => mergeAgentSessionPage(cur, next, "latest"));
         setPiSnapshots((cur) => ({ ...cur, ...Object.fromEntries(snaps) }));
         wasRunning = snaps.some(([, s]) =>
@@ -675,7 +740,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       live = false;
       clearInterval(timer);
     };
-  }, [agentClient, game, session?.id, session?.piSessionId, session?.boundWorldId]);
+  }, [agentClient, game, session?.id, session?.piSessionId, session?.boundWorldId, syncCommittedPiTasks]);
 
   const projectedPi = useMemo(
     () => (piDetail ? agentSessionProjection(piDetail, piSnapshots) : null),
@@ -699,9 +764,25 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     const el = scrollerRef.current;
     if (!el) return;
     const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 72;
+    stickBottomRef.current = bottom;
     followRef.current = reading.autoScroll && bottom;
     setAtBottom(bottom);
   };
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let prevHeight = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = el.clientHeight;
+      if (nextHeight < prevHeight && stickBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      prevHeight = nextHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useLayoutEffect(() => {
     if (reading.autoScroll && followRef.current) scrollBottom(false);
@@ -746,6 +827,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       push({ name: "setup", first: true });
       return;
     }
+    stickBottomRef.current = true;
     followRef.current = reading.autoScroll;
     const mode = sendInput.editMessageId
       ? "edit"
@@ -794,7 +876,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       })
       .finally(async () => {
         clearTimeout(syncTimer);
-        if (handleRef.current === handle) handleRef.current = null;
+        if (handleRef.current !== handle) return;
+        handleRef.current = null;
         if (attachedRunRef.current?.sessionId === sessionId) attachedRunRef.current = null;
         if (!aliveRef.current) return;
         setLiveStream((prev) => (prev?.sessionId === sessionId ? null : prev));
@@ -864,15 +947,18 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
               : "已同步给正在执行的改档任务，将在下一步处理",
           );
         } else {
-          await escalateCompanionToAgent(game, {
+          const started = await escalateCompanionToAgent(game, {
             sessionId: session.id,
             text,
             policy: policyTouchedRef.current ? agentPolicy : undefined,
           });
+          localStartedTaskIdsRef.current.add(started.taskId);
           await loadActiveSession(session.id);
+          await refreshPiSessionNow();
           await refreshSessions();
           setBudgetTick((n) => n + 1);
         }
+        stickBottomRef.current = true;
         followRef.current = true;
         requestAnimationFrame(() => scrollBottom(true));
       } catch (err) {
@@ -950,6 +1036,10 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
   const handleSelectPersona = async (persona: CompanionPersona & { boundLineId?: string | null }) => {
     if (!session) return;
+    if (isStreaming) {
+      toast("正在回复中，请先停止或等待回复完成再切换角色");
+      return;
+    }
     const personaLineId =
       persona.boundLineId ??
       (typeof persona.metadata?.boundLineId === "string" && persona.metadata.boundLineId.trim()
@@ -1012,8 +1102,10 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       setSheet(null);
       return;
     }
+    const prevHandle = handleRef.current;
     attachedRunRef.current = null;
     handleRef.current = null;
+    prevHandle?.detach();
     setLiveStream(null);
     setEditingMsgId(null);
     await loadActiveSession(target.id);
@@ -1161,15 +1253,15 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       return;
     }
     if (cite.kind === "book" && cite.bookId) {
-      const book = await getBook(game.repo, cite.bookId).catch(() => null);
-      if (book) {
+      const outline = await getBookOutline(game.repo, cite.bookId).catch(() => null);
+      if (outline) {
         const through =
           session?.bookScope?.mode === "through" && boundWorldBrief?.source
             ? (boundWorldBrief.source.through ?? boundWorldBrief.source.position)
             : session?.bookScope?.mode === "chapters"
               ? session.bookScope.to
               : null;
-        setPreviewBook({ book, through, quote: cite.quote });
+        setPreviewBook({ bookId: outline.id, title: outline.title, through, quote: cite.quote });
         return;
       }
       toast("这本参考书当前不在书库中");
@@ -1263,10 +1355,21 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     return map;
   }, [projectedPi]);
 
-  const legacyTurns = useMemo(() => {
-    if (!projectedPi || messages.length > 0) return [];
-    return agentConversationTurns(projectedPi.messages, projectedPi.tasks);
-  }, [projectedPi, messages.length]);
+  const linkedPiTaskIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of messages) {
+      if (m.piTaskId) ids.add(m.piTaskId);
+    }
+    return ids;
+  }, [messages]);
+
+  const unlinkedPiTurns = useMemo(() => {
+    if (!projectedPi) return [];
+    return agentConversationTurns(projectedPi.messages, projectedPi.tasks).filter((turn) => {
+      const taskId = turn.task?.id ?? (turn.id.startsWith("message:") ? null : turn.id);
+      return !taskId || !linkedPiTaskIds.has(taskId);
+    });
+  }, [projectedPi, linkedPiTaskIds]);
 
   const canSaveNote = Boolean(
     (session?.boundWorldId && !boundWorldMissing) ||
@@ -1401,9 +1504,11 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         return [t.runId, fresh] as const;
       }),
     ).catch(() => []);
+    const nextSnapMap = { ...piSnapCache.current, ...Object.fromEntries(snaps) };
+    syncCommittedPiTasks(session?.boundWorldId, piId, next.tasks, nextSnapMap);
     setPiDetail((cur) => mergeAgentSessionPage(cur, next, "latest"));
     if (snaps.length) setPiSnapshots((cur) => ({ ...cur, ...Object.fromEntries(snaps) }));
-  }, [agentClient, session?.piSessionId]);
+  }, [agentClient, session?.boundWorldId, session?.piSessionId, syncCommittedPiTasks]);
 
   const handleContinueAgentTask = async (task: AgentTask) => {
     if (agentBusy) return;
@@ -1698,7 +1803,53 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   );
 
   const isEmptyConversation =
-    messages.length === 0 && !showOptimisticPair && legacyTurns.length === 0;
+    messages.length === 0 && !showOptimisticPair && unlinkedPiTurns.length === 0;
+
+  const unlinkedTurnBuckets = useMemo(() => {
+    const beforeFirst: typeof unlinkedPiTurns = [];
+    const afterByIndex = new Map<number, typeof unlinkedPiTurns>();
+    if (!unlinkedPiTurns.length) return { beforeFirst, afterByIndex };
+    if (!messages.length) {
+      beforeFirst.push(...unlinkedPiTurns);
+      return { beforeFirst, afterByIndex };
+    }
+    const firstAt = messages[0].createdAt;
+    for (const turn of unlinkedPiTurns) {
+      const at = turn.task?.createdAt ?? turn.messages[0]?.createdAt ?? "";
+      if (!at || at <= firstAt) {
+        beforeFirst.push(turn);
+        continue;
+      }
+      let idx = messages.length - 1;
+      while (idx > 0 && messages[idx].createdAt > at) {
+        idx--;
+      }
+      const list = afterByIndex.get(idx) ?? [];
+      list.push(turn);
+      afterByIndex.set(idx, list);
+    }
+    return { beforeFirst, afterByIndex };
+  }, [messages, unlinkedPiTurns]);
+
+  const renderUnlinkedPiTurn = (turn: (typeof unlinkedPiTurns)[number]) => (
+    <div key={`pi-turn-${turn.id}`} className="stack gap-2">
+      {turn.messages.map((m) => (
+        <div
+          key={m.id}
+          className={`companion-msg ${m.role === "user" ? "user" : "assistant"}`}
+        >
+          {m.role === "user" ? (
+            <div className="companion-user-bubble">{m.displayContent ?? m.content}</div>
+          ) : (
+            <div className="companion-msg-prose">
+              <CompanionMarkdown text={m.displayContent ?? m.content} />
+            </div>
+          )}
+        </div>
+      ))}
+      {turn.task && renderAgentTaskCard(turn.task)}
+    </div>
+  );
 
   return (
     <div className={`companion-layout${isDesktop ? " is-desktop" : ""}`}>
@@ -1754,7 +1905,11 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
               type="button"
               className="companion-sidebar-persona"
               aria-label={`切换角色，当前 ${activePersona.name}`}
-              onClick={() => setSheet("persona")}
+              disabled={isStreaming}
+              onClick={() => {
+                if (isStreaming) return;
+                setSheet("persona");
+              }}
             >
               <span
                 className={`companion-avatar${activePersona.roleKind === "npc" ? " role-npc" : ""}`}
@@ -1811,7 +1966,11 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
             type="button"
             className="companion-persona-pill"
             aria-label={`当前角色：${activePersona.name}，点此切换`}
-            onClick={() => setSheet("persona")}
+            disabled={isStreaming}
+            onClick={() => {
+              if (isStreaming) return;
+              setSheet("persona");
+            }}
           >
             <span
               className={`companion-avatar mini${activePersona.roleKind === "npc" ? " role-npc" : ""}`}
@@ -1909,40 +2068,33 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                 </section>
               )}
 
-              {/* Legacy assistant-only sessions rendered seamlessly */}
-              {legacyTurns.map((turn) => (
-                <div key={turn.id} className="stack gap-2">
-                  {turn.messages.map((m) => (
-                    <div
-                      key={m.id}
-                      className={`companion-msg ${m.role === "user" ? "user" : "assistant"}`}
-                    >
-                      {m.role === "user" ? (
-                        <div className="companion-user-bubble">{m.displayContent ?? m.content}</div>
-                      ) : (
-                        <div className="companion-msg-prose">
-                          <CompanionMarkdown text={m.displayContent ?? m.content} />
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  {turn.task && renderAgentTaskCard(turn.task)}
-                </div>
-              ))}
+              {/* Unlinked Pi turns before companion messages (or standalone legacy sessions) */}
+              {unlinkedTurnBuckets.beforeFirst.map(renderUnlinkedPiTurn)}
 
-              {/* Main tree-projected CompanionMessages */}
-              {messages.map((msg) => {
+              {/* Main tree-projected CompanionMessages + interleaved unlinked Pi turns */}
+              {messages.map((msg, msgIdx) => {
+                const trailingPiTurns = unlinkedTurnBuckets.afterByIndex.get(msgIdx);
+                const renderWithTrailing = (node: ReturnType<typeof CompanionMarkdown>) =>
+                  trailingPiTurns?.length ? (
+                    <Fragment key={msg.id}>
+                      {node}
+                      {trailingPiTurns.map(renderUnlinkedPiTurn)}
+                    </Fragment>
+                  ) : (
+                    node
+                  );
+
                 if (msg.role === "system_note") {
-                  return (
+                  return renderWithTrailing(
                     <div key={msg.id} className="companion-msg system_note" data-message-id={msg.id}>
                       <span className="companion-note-pill">{msg.content}</span>
-                    </div>
+                    </div>,
                   );
                 }
 
                 if (msg.role === "user") {
                   const isEditingThis = editingMsgId === msg.id;
-                  return (
+                  return renderWithTrailing(
                     <div key={msg.id} className="companion-msg user" data-message-id={msg.id}>
                       {isEditingThis ? (
                         <div className="companion-inline-editor">
@@ -1956,7 +2108,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                                 e.key === "Enter" &&
                                 !e.shiftKey &&
                                 !e.nativeEvent.isComposing &&
-                                e.keyCode !== 229
+                                e.keyCode !== 229 &&
+                                hasFinePointer()
                               ) {
                                 e.preventDefault();
                                 handleEditResend(msg);
@@ -2019,7 +2172,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                           </div>
                         </>
                       )}
-                    </div>
+                    </div>,
                   );
                 }
 
@@ -2040,7 +2193,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                     : msg.citations;
                 const linkedTask = msg.piTaskId ? piTasksById.get(msg.piTaskId) : undefined;
 
-                return (
+                return renderWithTrailing(
                   <article key={msg.id} className="companion-msg assistant" data-message-id={msg.id}>
                     <div className="companion-msg-head">
                       <span
@@ -2156,7 +2309,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                         )}
                       </div>
                     )}
-                  </article>
+                  </article>,
                 );
               })}
 
@@ -2205,6 +2358,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
               className={`to-bottom${isStreaming ? " fresh" : ""}`}
               aria-label="回到底部"
               onClick={() => {
+                stickBottomRef.current = true;
                 followRef.current = reading.autoScroll;
                 scrollBottom(true);
               }}
@@ -2307,7 +2461,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                     e.key === "Enter" &&
                     !e.shiftKey &&
                     !e.nativeEvent.isComposing &&
-                    e.keyCode !== 229
+                    e.keyCode !== 229 &&
+                    hasFinePointer()
                   ) {
                     e.preventDefault();
                     void handleSend();
@@ -2416,7 +2571,14 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
             {
               label: "角色工坊",
               icon: "people",
-              onSelect: () => setSheet("persona"),
+              hidden: isStreaming,
+              onSelect: () => {
+                if (isStreaming) {
+                  toast("正在回复中，请先停止或等待回复完成再切换角色");
+                  return;
+                }
+                setSheet("persona");
+              },
             },
             {
               label: "记忆簿",
@@ -2537,7 +2699,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
       {/* ---------- Book Citation Preview Sheet ---------- */}
       {previewBook && (
-        <Sheet title={previewBook.book.title} onClose={() => setPreviewBook(null)}>
+        <Sheet title={previewBook.title} onClose={() => setPreviewBook(null)}>
           <div className="stack">
             {previewBook.quote && (
               <div className="notice">
@@ -2546,7 +2708,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                 </div>
               </div>
             )}
-            <BookPreview book={previewBook.book} through={previewBook.through} />
+            <BookPreviewCompat bookId={previewBook.bookId} through={previewBook.through} />
           </div>
         </Sheet>
       )}

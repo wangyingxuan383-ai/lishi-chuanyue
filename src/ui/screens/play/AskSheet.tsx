@@ -10,7 +10,7 @@ import { AUTO_SCOPE, type SourceScope } from "../../../engine/sources/scope";
 import type { SourceBinding } from "../../../engine/sources/types";
 
 /** 查一查 (R07-T001 / R31-P4): multi-turn questions about this world or the era; the story does not move. */
-export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: { worldId: string; bookId?: string; source?: SourceBinding | null; initialQuestion?: string; onClose: () => void }) {
+export function AskSheet({ worldId, bookId, source, initialQuestion, captureReading, onClose }: { worldId: string; bookId?: string; source?: SourceBinding | null; initialQuestion?: string; captureReading?: () => void; onClose: () => void }) {
   const { game, toast, push } = useApp();
   const [saved, setSaved] = useState<number[]>([]);
   const [question, setQuestion] = useState(initialQuestion ?? "");
@@ -78,6 +78,7 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, onClose }: 
                 .filter((x) => !x.pending && x.a && x.a !== "已停止。")
                 .map(({ q: tq, a: ta }) => ({ q: tq, a: ta }));
               const draftQuestion = question.trim();
+              captureReading?.();
               onClose();
               push({
                 name: "companion",

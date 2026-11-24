@@ -8,7 +8,8 @@ import { NoteEntry } from "./CanonNotes";
 import type { EraContext } from "../../engine/era";
 import { ERA_CARD_LIMIT } from "../../engine/memory/cards";
 import type { TurnRecord } from "../../engine/state/apply";
-import type { Card, CardKind, Place, WorldState } from "../../engine/types";
+import type { Card, CardKind, Place, StoryNode, WorldState } from "../../engine/types";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
 import { SourceScopeRow } from "./SourceScope";
 import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
 import { Sheet } from "./Sheet";
@@ -128,16 +129,17 @@ function Editor({ editing, state, worldId, headId, onClose, onSave }: { editing:
   );
 }
 
-export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, onOrganize }: {
-  worldId: string; headId: string; state: WorldState; era: EraContext; busy: boolean;
+export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenStory, onOrganize }: {
+  worldId: string; headId: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; state: WorldState; era: EraContext; busy: boolean;
   onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>;
   onOpenStory: () => void;
   /** Lets the AI organize the 设定集 from the premise; true when something was added. */
   onOrganize: (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => Promise<boolean>;
 }) {
-  const { ask, toast } = useApp();
+  const { game, ask, toast } = useApp();
   const [builtin, setBuiltin] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [expectedHeadId, setExpectedHeadId] = useState(headId);
   const [expanded, setExpanded] = useState(false);
   const [organizing, setOrganizing] = useState(false);
   const [organizeSource, setOrganizeSource] = useState(true);
@@ -150,20 +152,46 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
   const live = useRef({ state, active: true, busy });
   live.current = { state, active: true, busy };
   useEffect(() => () => { live.current.active = false; }, []);
-  useEffect(() => { setSelected([]); setSelecting(false); }, [state]);
-  const prevAnchor = useRef(`${worldId}:${headId}`);
+  const prevAnchor = useRef({ worldId, headId });
   useEffect(() => {
-    const key = `${worldId}:${headId}`;
-    if (prevAnchor.current === key) return;
-    prevAnchor.current = key;
-    setEditing(null);
-    setBuiltin(false);
-    setSelected([]);
-    setSelecting(false);
-  }, [worldId, headId]);
+    const prev = prevAnchor.current;
+    if (prev.worldId === worldId && prev.headId === headId) return;
+    prevAnchor.current = { worldId, headId };
+    const resetAll = () => {
+      setExpectedHeadId(headId);
+      setEditing(null);
+      setBuiltin(false);
+      setSelected([]);
+      setSelecting(false);
+    };
+    if (prev.worldId !== worldId) {
+      resetAll();
+      return;
+    }
+    if (path) {
+      if (headFollowsUpkeep(path, prev.headId, headId)) {
+        setExpectedHeadId(headId);
+      } else {
+        resetAll();
+      }
+      return;
+    }
+    let alive = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (!alive) return;
+      if (headFollowsUpkeep(loadedPath, prev.headId, headId)) {
+        setExpectedHeadId(headId);
+      } else {
+        resetAll();
+      }
+    }).catch(() => {
+      if (alive) resetAll();
+    });
+    return () => { alive = false; };
+  }, [game.repo, worldId, headId, path]);
   const eraCard = era.eraCard;
   const eraLabel = (state.era as { mode?: string }).mode === "free" ? "世界卡" : "时代卡";
-  const open = (next: Editing) => { if (!busy && !organizing) setEditing(next); };
+  const open = (next: Editing) => { if (!busy && !organizing) { setExpectedHeadId(headId); setEditing(next); } };
   const organize = async () => {
     const own = eraCard?.source === "玩家";
     if (own && !await ask({ title: `让 AI 重新整理${eraLabel}？`, message: `会按故事设定重写，换掉你写的${eraLabel}。之后可以撤销。`, confirm: "重新整理" })) return;
@@ -188,12 +216,14 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
   const removeSelected = async () => {
     if (deleting || busy || !selected.length) return;
     setDeleting(true);
-    const source = state;
+    const startHead = expectedHeadId;
     try {
       const names = selected.map((s) => items(s.kind).find((i) => i.id === s.id)?.name).filter(Boolean);
       if (!await ask({ title: `删除选中的 ${selected.length} 项设定？`, message: `${names.slice(0, 5).join("、")}${names.length > 5 ? "等" : ""}。删除后可以在“⋯”里撤销。`, confirm: "删除", danger: true })) return;
-      if (!live.current.active || live.current.state !== source || live.current.busy) { toast("故事已经变了，请重新选择要删除的设定"); return; }
-      const patch = deletionPatch(source, selected);
+      const curState = live.current.state;
+      const loadedPath = path ?? await game.repo.path(headId).catch(() => []);
+      if (!live.current.active || live.current.busy || !headFollowsUpkeep(loadedPath, startHead, headId)) { toast("故事已经变了，请重新选择要删除的设定"); return; }
+      const patch = deletionPatch(curState, selected);
       const count = (patch.cards?.length ?? 0) + (patch.places?.length ?? 0);
       if (!count) return;
       await onSave(patch, `批量删除 ${count} 项设定`, headId);
@@ -233,8 +263,8 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
         </section>;
       })()}
       <button className="ghost t-left" onClick={onOpenStory}>故事设定与要点 ›</button>
-      <button className="ghost t-left" disabled={busy || organizing || deleting} onClick={() => setBuiltin(true)}>内置资料与灵感 ›</button>
-      {builtin && <BuiltinContent state={state} headId={headId} busy={busy || organizing || deleting} onSave={onSave} onClose={() => setBuiltin(false)} />}
+      <button className="ghost t-left" disabled={busy || organizing || deleting} onClick={() => { setExpectedHeadId(headId); setBuiltin(true); }}>内置资料与灵感 ›</button>
+      {builtin && <BuiltinContent state={state} headId={headId} path={path} busy={busy || organizing || deleting} onSave={onSave} onClose={() => setBuiltin(false)} />}
       <div className="codex-tools">
         <input aria-label="搜索设定" placeholder="搜索名称、别名或内容" value={query} onChange={(e) => { setQuery(e.target.value); setSelected([]); }} />
         <button className="ghost" disabled={busy || organizing || deleting} onClick={() => { setSelecting(!selecting); setSelected([]); }}>
@@ -287,7 +317,7 @@ export function Codex({ worldId, state, era, headId, busy, onSave, onOpenStory, 
           <button className="danger-text" disabled={busy || deleting || !selected.length} onClick={() => void removeSelected()}>删除所选（{selected.length}）</button>
         </div>
       )}
-      {editing && <Editor editing={editing} state={state} worldId={worldId} headId={headId} onClose={() => setEditing(null)} onSave={onSave} />}
+      {editing && <Editor editing={editing} state={state} worldId={worldId} headId={expectedHeadId} onClose={() => setEditing(null)} onSave={onSave} />}
     </div>
   );
 }

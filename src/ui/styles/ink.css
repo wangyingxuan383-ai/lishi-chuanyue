@@ -2,7 +2,6 @@
    Scoped to :root[data-style="ink"]; base button rule uses :where() so list/row/banner
    buttons never pick up accidental elevation shadows. */
 
-:root[data-style="ink"] body { background-attachment: fixed; }
 :root[data-style="ink"] .muted { color: var(--muted); }
 :root[data-style="ink"] h1, :root[data-style="ink"] h2, :root[data-style="ink"] h3 { font-family: var(--font-title); }
 
@@ -56,7 +55,6 @@
 :root[data-style="ink"] .topbar h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.04em; }
 
 /* ---------- overlays ---------- */
-:root[data-style="ink"] .backdrop { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 :root[data-style="ink"] .sheet {
   border-top: none; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
   box-shadow: var(--elev-3);
@@ -112,13 +110,14 @@
 :root[data-style="ink"] .tool-btn { background: var(--surface); box-shadow: var(--elev-1); margin-left: 6px; }
 /* Preserve horizontal centering on wide/foldable viewports by setting block & inline padding separately */
 :root[data-style="ink"] .dock {
-  border-top: none; background: var(--dock); backdrop-filter: blur(20px) saturate(1.5); -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border-top: none; background: color-mix(in srgb, var(--surface) 95%, var(--bg));
   box-shadow: 0 -8px 24px color-mix(in srgb, var(--shadow) 60%, transparent);
   padding-block: 10px calc(12px + env(safe-area-inset-bottom));
   padding-inline: max(12px, env(safe-area-inset-left), calc((100% - 660px) / 2));
 }
 :root[data-style="ink"] .inputbar { align-items: center; gap: 6px; padding: 4px; border-radius: 28px; background: var(--dock-field); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 80%, transparent); }
-:root[data-style="ink"] .inputbar textarea { background: transparent; border: none; box-shadow: none; padding: 11px 6px; }
+:root[data-style="ink"] .inputbar .composer-field { border: none; background: transparent; box-shadow: none; }
+:root[data-style="ink"] .inputbar textarea { background: transparent; border: none; box-shadow: none; padding: 10px 8px; }
 :root[data-style="ink"] .inputbar textarea:focus-visible { box-shadow: none; background: transparent; }
 :root[data-style="ink"] .mode-btn { min-width: 44px; height: 40px; min-height: 40px; border-radius: 20px; font-family: var(--serif); font-weight: 700; background: var(--surface); }
 :root[data-style="ink"] .send-btn { height: 44px; min-height: 44px; border-radius: 22px; min-width: 84px; }
@@ -201,21 +200,20 @@
 }
 :root[data-style="ink"] body {
   background-image:
-    radial-gradient(70% 45% at -6% -6%, rgba(31, 29, 26, 0.10), transparent 70%),
-    radial-gradient(55% 40% at 106% 6%, rgba(181, 40, 28, 0.06), transparent 70%),
-    radial-gradient(60% 45% at 100% 106%, rgba(31, 29, 26, 0.08), transparent 72%),
-    var(--hills), url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.3 0 0 0 0 0.27 0 0 0 0 0.22 0 0 0 0.07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-position: 0 0, 0 0, 0 0, center bottom, 0 0;
-  background-size: auto, auto, auto, 100% 32vh, 180px 180px;
-  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, repeat;
-  background-attachment: fixed;
+    radial-gradient(70% 45% at -6% -6%, rgba(31, 29, 26, 0.08), transparent 70%),
+    radial-gradient(55% 40% at 106% 6%, rgba(181, 40, 28, 0.05), transparent 70%),
+    radial-gradient(60% 45% at 100% 106%, rgba(31, 29, 26, 0.06), transparent 72%),
+    var(--hills);
+  background-position: 0 0, 0 0, 0 0, center bottom;
+  background-size: auto, auto, auto, 100% 32vh;
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
 }
 :root[data-style="ink"][data-theme="night"] body {
   background-image:
-    radial-gradient(70% 45% at -6% -6%, rgba(140, 125, 105, 0.14), transparent 70%),
-    radial-gradient(55% 40% at 106% 6%, rgba(224, 80, 60, 0.08), transparent 70%),
-    radial-gradient(60% 45% at 100% 106%, rgba(217, 180, 106, 0.07), transparent 72%),
-    var(--hills), url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.3 0 0 0 0 0.27 0 0 0 0 0.22 0 0 0 0.07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    radial-gradient(70% 45% at -6% -6%, rgba(140, 125, 105, 0.12), transparent 70%),
+    radial-gradient(55% 40% at 106% 6%, rgba(224, 80, 60, 0.07), transparent 70%),
+    radial-gradient(60% 45% at 100% 106%, rgba(217, 180, 106, 0.06), transparent 72%),
+    var(--hills);
 }
 :root[data-style="ink"] :is(.card, .status-card, .settings-list, .whats-new, .next-choices) {
   background-image: var(--meander), var(--meander-br);
@@ -259,7 +257,7 @@
 :root[data-style="ink"] .codex-filters button { border-radius: var(--radius-pill); }
 :root[data-style="ink"] .codex-filters button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: transparent; }
 :root[data-style="ink"] .report-card { border-left: 3px solid var(--gilt); border-radius: 6px var(--radius-card) var(--radius-card) 6px; }
-:root[data-style="ink"] .composer-tools { background: linear-gradient(180deg, transparent, var(--dock-field) 35%); border-radius: 0 0 18px 18px; }
+:root[data-style="ink"] .composer-tools { background: transparent; padding: 0 4px 2px; }
 :root[data-style="ink"] .dock[data-tools]:not([data-tools="0"]) .inputbar { align-items: flex-end; border-radius: 22px; }
 @media (hover: hover) {
   :root[data-style="ink"] .choice:hover:not(:disabled) { background: var(--raised); }

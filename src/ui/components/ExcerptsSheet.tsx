@@ -93,22 +93,21 @@ export function ExcerptsSheet({ worldId, bookId, onJumpHighlight, onClose }: Exc
     (h.targetType === "world_novel" ? "本局故事" : "书库藏书");
 
   const jumpTo = (h: ReaderHighlight) => {
-    if (onJumpHighlight) {
+    const matchesOpenTarget =
+      (h.targetType === "book" && !!bookId && h.targetId === bookId) ||
+      (h.targetType === "world_novel" && !bookId && !!worldId && h.targetId === worldId);
+    if (onJumpHighlight && matchesOpenTarget) {
       onJumpHighlight(h);
       onClose();
       return;
     }
     onClose();
-    if (h.targetType === "book") {
-      push({ name: "reader", bookId: h.targetId, initialSection: h.sectionIndex });
-    } else {
-      push({
-        name: "reader",
-        worldId: h.targetId,
-        initialSection: h.sectionIndex,
-        initialNodeId: h.nodeId ?? undefined,
-      });
-    }
+    push({
+      name: "reader",
+      ...(h.targetType === "book" ? { bookId: h.targetId } : { worldId: h.targetId }),
+      initialSection: h.sectionIndex,
+      initialParagraph: h.paragraphIndex,
+    } as any);
   };
 
   const saveNote = async (id: string) => {

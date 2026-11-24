@@ -10,7 +10,8 @@ import { agoText } from "../../engine/calendar/clock";
 import type { EraContext } from "../../engine/era";
 import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
-import type { Attitude, Person, WorldState } from "../../engine/types";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
+import type { Attitude, Person, StoryNode, WorldState } from "../../engine/types";
 import { EmptyVignette } from "./ChineseArt";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
@@ -25,8 +26,8 @@ export function attitudeClass(a: Attitude): string {
   return a === "仇视" || a === "敌意" ? "att-hostile" : a === "冷淡" ? "att-cold" : a === "友善" ? "att-friendly" : a === "亲近" || a === "生死之交" ? "att-close" : "att-plain";
 }
 
-function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, headId, lineId, busy = false, onContinuitySaved }: {
-  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
+function Editor({ person, state, era, onClose, onClosePanel, captureReading, onSave, worldId, headId, lineId, busy = false, onContinuitySaved }: {
+  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; captureReading?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { game, push, ask, toast } = useApp();
   const noteEntry = useContext(NoteEntry);
@@ -75,6 +76,7 @@ function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, he
                   setSaving(true);
                   try {
                     const invited = await personaFromStoryPerson(game, worldId, person.id, lineId);
+                    captureReading?.();
                     onClose();
                     onClosePanel?.();
                     push({ name: "companion", worldId, lineId, personaId: invited.id, gear: "chat" });
@@ -115,6 +117,7 @@ function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, he
               setSaving(true);
               try {
                 const invited = await personaFromStoryPerson(game, worldId, person.id, lineId);
+                captureReading?.();
                 onClose();
                 onClosePanel?.();
                 push({ name: "companion", worldId, lineId, personaId: invited.id, gear: "chat" });
@@ -138,20 +141,57 @@ function Editor({ person, state, era, onClose, onClosePanel, onSave, worldId, he
   );
 }
 
-export function People({ state, era, busy, onSave, worldId, headId, lineId, onJumpNode, onContinuitySaved, onClosePanel }: {
-  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; onJumpNode?: (nodeId: string) => void; onContinuitySaved?: () => void | Promise<void>; onClosePanel?: () => void;
+export function People({ state, era, busy, onSave, worldId, headId, lineId, path, captureReading, onJumpNode, onContinuitySaved, onClosePanel }: {
+  state: WorldState; era: EraContext; busy: boolean; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; captureReading?: () => void; onJumpNode?: (nodeId: string) => void; onContinuitySaved?: () => void | Promise<void>; onClosePanel?: () => void;
 }) {
   const { game } = useApp();
   const [editing, setEditing] = useState<{ person: Person | null } | null>(null);
+  const [expectedHeadId, setExpectedHeadId] = useState(headId);
   const [view, setView] = useState<"list" | "atlas">("list");
   const [atlas, setAtlas] = useState<CharacterEntry[] | null>(null);
-  const prevAnchor = useRef<unknown>(headId ? `${worldId ?? ""}:${headId}` : state);
+  const prevAnchor = useRef<{ worldId?: string; headId?: string; state: WorldState }>({ worldId, headId, state });
   useEffect(() => {
-    const next = headId ? `${worldId ?? ""}:${headId}` : state;
-    if (prevAnchor.current === next) return;
-    prevAnchor.current = next;
-    setEditing(null);
-  }, [worldId, headId, state]);
+    const prev = prevAnchor.current;
+    if (!headId) {
+      if (prev.state !== state) {
+        prevAnchor.current = { worldId, headId, state };
+        setEditing(null);
+      }
+      return;
+    }
+    if (prev.worldId === worldId && prev.headId === headId) return;
+    prevAnchor.current = { worldId, headId, state };
+    if (prev.worldId !== worldId || !prev.headId) {
+      setExpectedHeadId(headId);
+      setEditing(null);
+      return;
+    }
+    if (path) {
+      if (headFollowsUpkeep(path, prev.headId, headId)) {
+        setExpectedHeadId(headId);
+      } else {
+        setExpectedHeadId(headId);
+        setEditing(null);
+      }
+      return;
+    }
+    let live = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (!live) return;
+      if (headFollowsUpkeep(loadedPath, prev.headId!, headId)) {
+        setExpectedHeadId(headId);
+      } else {
+        setExpectedHeadId(headId);
+        setEditing(null);
+      }
+    }).catch(() => {
+      if (live) {
+        setExpectedHeadId(headId);
+        setEditing(null);
+      }
+    });
+    return () => { live = false; };
+  }, [game.repo, worldId, headId, path, state]);
 
   useEffect(() => {
     if (view !== "atlas" || !worldId || !headId) return;
@@ -188,7 +228,7 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, onJu
     <div className="stack">
       <div className="row between">
         <b>人物{people.length ? ` ${people.length}` : ""}</b>
-        <button className="ghost" aria-label="添加人物" disabled={busy} onClick={() => setEditing({ person: null })}><Icon name="plus" size={18} />添加</button>
+        <button className="ghost" aria-label="添加人物" disabled={busy} onClick={() => { setExpectedHeadId(headId); setEditing({ person: null }); }}><Icon name="plus" size={18} />添加</button>
       </div>
       {people.length > 0 && worldId && headId && (
         <div className="segmented" role="group" aria-label="人物视图">
@@ -241,7 +281,7 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, onJu
                   </small>
                 )}
                 <div className="row wrap gap-1">
-                  <button type="button" className="ghost small" disabled={busy} onClick={() => setEditing({ person: entry.person })}>
+                  <button type="button" className="ghost small" disabled={busy} onClick={() => { setExpectedHeadId(headId); setEditing({ person: entry.person }); }}>
                     查看小传
                   </button>
                   {onJumpNode && entry.firstNodeId && (
@@ -261,7 +301,7 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, onJu
         </div>
       ) : (
         people.map((p) => (
-          <button key={p.id} className="item-row codex-item" disabled={busy} onClick={() => setEditing({ person: p })}>
+          <button key={p.id} className="item-row codex-item" disabled={busy} onClick={() => { setExpectedHeadId(headId); setEditing({ person: p }); }}>
             <PersonAvatar name={p.name} dead={!p.alive} />
             <div className="grow">
               <b>{p.name}</b>{!p.alive && <span className="muted">（已故）</span>}
@@ -275,7 +315,7 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, onJu
           </button>
         ))
       )}
-      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={headId} lineId={lineId} busy={busy} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
+      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={expectedHeadId} lineId={lineId} busy={busy} captureReading={captureReading} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
     </div>
   );
 }

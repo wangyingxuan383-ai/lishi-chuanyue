@@ -4,7 +4,7 @@
 // commits); the story's own reference settings never change. The native core
 // enforces it on every lookup.
 import type { Repo } from "../db/repo";
-import { matchWindow, passageLabel, queryTerms, referenceContext } from "./library";
+import { ensureSourceChunkIndex, matchWindow, passageLabel, queryTerms, referenceContext } from "./library";
 import { getNote, listNotes, listStoryNotes, noteBriefTitle, noteOffRoute, noteWithinScope, routeIds, type CanonNote, type NoteBrief } from "./notes";
 import type { ReferenceContext, ReferencePassage, ReferenceQuery, SourceBinding } from "./types";
 
@@ -150,9 +150,21 @@ export interface BookChapter { section: number; title: string; chars: number; ch
 
 /** The chapters the story may read (up to its 截至第几章), with their length. */
 export async function bookChapters(repo: Repo, binding: SourceBinding): Promise<BookChapter[]> {
-  const rows = await repo.platform.sql.query(`SELECT s.section, s.title, COALESCE(SUM(LENGTH(c.text)), 0) AS chars, COUNT(c.ordinal) AS chunks
-    FROM source_sections s LEFT JOIN source_chunks c ON c.book_id = s.book_id AND c.section = s.section
-    WHERE s.book_id = ? AND (? IS NULL OR s.section <= ?) GROUP BY s.section, s.title ORDER BY s.section`, [binding.bookId, binding.through, binding.through]);
+  await ensureSourceChunkIndex(repo.platform);
+  const rows = await repo.platform.sql.query(
+    `WITH chunk_stats AS (
+       SELECT section, SUM(LENGTH(text)) AS chars, COUNT(ordinal) AS chunks
+       FROM source_chunks
+       WHERE book_id = ? AND (? IS NULL OR section <= ?)
+       GROUP BY section
+     )
+     SELECT s.section, s.title, COALESCE(cs.chars, 0) AS chars, COALESCE(cs.chunks, 0) AS chunks
+     FROM source_sections s
+     LEFT JOIN chunk_stats cs ON cs.section = s.section
+     WHERE s.book_id = ? AND (? IS NULL OR s.section <= ?)
+     ORDER BY s.section`,
+    [binding.bookId, binding.through, binding.through, binding.bookId, binding.through, binding.through],
+  );
   return rows.map((r) => ({ section: Number(r.section), title: String(r.title), chars: Number(r.chars), chunks: Number(r.chunks) }));
 }
 export const rangeChars = (chapters: BookChapter[], range: ScopeRange) =>

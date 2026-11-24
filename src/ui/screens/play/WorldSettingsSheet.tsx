@@ -12,10 +12,11 @@ import { SourceSetup, SourceSummary, ReferenceSheet } from "../../components/Sou
 import { Switch } from "../../components/Switch";
 import type { WritingSettings } from "./types";
 
-export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot, onScript, onChallenge, onRules, onSourceSave, onClose }: {
+export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, onPilot, onScript, onChallenge, onRules, onSourceSave, captureReading, onClose }: {
   world: World; state: WorldState; busy: boolean; onChange: (p: Partial<WritingSettings>) => void; onPanelSave: (text: string) => Promise<void>;
   onPilot: (pilot: Pilot) => void; onScript: () => void; onChallenge: () => void; onRules: () => void; onClose: () => void;
   onSourceSave: (source: SourceBinding | null) => Promise<void>;
+  captureReading?: () => void;
 }) {
   const { game, toast } = useApp();
   const s = world.settings as WritingSettings;
@@ -86,7 +87,7 @@ export function WorldSettingsSheet({ world, state, busy, onChange, onPanelSave, 
         </div>
 
         <h3 className="settings-sub">记忆与整理</h3>
-        <details><summary><SourceSummary value={source} /></summary><div className="stack"><SourceSetup worldId={world.id} value={source} onChange={setSource} disabled={busy || savingSource} />
+        <details><summary><SourceSummary value={source} /></summary><div className="stack"><SourceSetup worldId={world.id} value={source} onChange={setSource} disabled={busy || savingSource} onCloseSheet={() => { captureReading?.(); onClose(); }} />
           <div className="row"><button disabled={busy || savingSource || !sourceDirty} onClick={() => { setSavingSource(true); void onSourceSave(source).then(() => toast("书籍用法已保存，可撤销")).catch((e) => toast(e.message ?? "没能保存")).finally(() => setSavingSource(false)); }}>保存书籍用法</button>{state.source && <button onClick={() => setReference(true)}>查看参考资料</button>}</div>
         </div></details>
         {reference && state.source && <ReferenceSheet worldId={world.id} binding={state.source} onClose={() => setReference(false)} />}

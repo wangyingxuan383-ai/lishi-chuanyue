@@ -99,9 +99,13 @@ pub(crate) fn complete_json(text: &str) -> Option<Value> {
 }
 
 fn decode_json(text: &str, repair_tail: bool) -> Option<Value> {
+    let stripped = crate::chat::strip_inline_think(text);
+    if stripped.trim().is_empty() {
+        return None;
+    }
     let body = Regex::new(r"(?i)<\s*/?\s*record\s*>|```(?:json)?")
         .unwrap()
-        .replace_all(text, "");
+        .replace_all(&stripped, "");
     let body = &body[body.find('{')?..];
     let mut candidates = Vec::new();
     if let Some(end) = body.rfind('}').filter(|n| *n > 0) {
@@ -394,5 +398,18 @@ mod tests {
             assert!(parsed["record"].get("currency").is_none(), "should reject currency in {bad}");
             assert!(parsed["issues"].as_array().unwrap().iter().any(|i| i.as_str().unwrap().starts_with("货币单位无效：")), "expected currency issue for {bad}: {parsed}");
         }
+    }
+
+    #[test]
+    fn decode_json_strips_inline_think_braces_and_rejects_unclosed_think() {
+        let raw = "<think >先算一下 {\"time\": 999, \"money\": -500} 合不合理</think >\n<record>{\"time\": 15, \"money\": -3, \"choices\": [\"问路\"]}</record>";
+        let parsed = parse_complete_record(raw);
+        assert_eq!(parsed["record"]["time"], 15);
+        assert_eq!(parsed["record"]["money"], -3);
+        assert_eq!(parsed["record"]["choices"], json!(["问路"]));
+
+        let unclosed = "<think>还没想完 {\"time\": 10, \"choices\": [\"走\"]}";
+        assert!(complete_json(unclosed).is_none());
+        assert!(lenient_json(unclosed).is_none());
     }
 }

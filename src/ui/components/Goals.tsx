@@ -7,7 +7,8 @@ import { nowOf } from "../../engine/calendar/clock";
 import { formatDate } from "../../engine/calendar/date";
 import type { EraContext } from "../../engine/era";
 import type { TurnRecord } from "../../engine/state/apply";
-import type { Goal, WorldState } from "../../engine/types";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
+import type { Goal, StoryNode, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
 import { EmptyVignette } from "./ChineseArt";
 import { Icon } from "./Icon";
@@ -77,27 +78,71 @@ function WishSheet({ goals, headId, onClose, onSave }: { goals: Goal[]; headId?:
   );
 }
 
-export function Goals({ state, era, headId, busy, onSave }: { state: WorldState; era: EraContext; headId?: string; busy: boolean; onSave: Save }) {
+export function Goals({ state, era, headId, path, busy, onSave }: { state: WorldState; era: EraContext; headId?: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; busy: boolean; onSave: Save }) {
+  const { game } = useApp();
   const [open, setOpen] = useState<Goal | null>(null);
   const [wish, setWish] = useState(false);
-  const prevAnchor = useRef<unknown>(headId ?? state);
+  const [expectedHeadId, setExpectedHeadId] = useState(headId);
+  const prevAnchor = useRef<{ headId?: string; state: WorldState }>({ headId, state });
   useEffect(() => {
-    const next = headId ?? state;
-    if (prevAnchor.current === next) return;
-    prevAnchor.current = next;
-    setOpen(null);
-    setWish(false);
-  }, [headId, state]);
+    const prev = prevAnchor.current;
+    if (!headId) {
+      if (prev.state !== state) {
+        prevAnchor.current = { headId, state };
+        setOpen(null);
+        setWish(false);
+      }
+      return;
+    }
+    if (prev.headId === headId) return;
+    prevAnchor.current = { headId, state };
+    if (!prev.headId) {
+      setExpectedHeadId(headId);
+      setOpen(null);
+      setWish(false);
+      return;
+    }
+    if (path) {
+      if (headFollowsUpkeep(path, prev.headId, headId)) {
+        setExpectedHeadId(headId);
+        setOpen((cur) => (cur ? state.goals.find((g) => g.id === cur.id) ?? cur : null));
+      } else {
+        setExpectedHeadId(headId);
+        setOpen(null);
+        setWish(false);
+      }
+      return;
+    }
+    let live = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (!live) return;
+      if (headFollowsUpkeep(loadedPath, prev.headId!, headId)) {
+        setExpectedHeadId(headId);
+        setOpen((cur) => (cur ? state.goals.find((g) => g.id === cur.id) ?? cur : null));
+      } else {
+        setExpectedHeadId(headId);
+        setOpen(null);
+        setWish(false);
+      }
+    }).catch(() => {
+      if (live) {
+        setExpectedHeadId(headId);
+        setOpen(null);
+        setWish(false);
+      }
+    });
+    return () => { live = false; };
+  }, [game.repo, headId, path, state]);
   const active = state.goals.filter((g) => g.status === "进行中").sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
   const ended = state.goals.filter((g) => g.status !== "进行中").reverse();
   return (
     <div className="stack">
       <div className="row between">
         <b>进行中{active.length ? ` ${active.length}` : ""}</b>
-        <button className="ghost" aria-label="添加心愿" disabled={busy} onClick={() => setWish(true)}><Icon name="plus" size={18} />我的心愿</button>
+        <button className="ghost" aria-label="添加心愿" disabled={busy} onClick={() => { setExpectedHeadId(headId); setWish(true); }}><Icon name="plus" size={18} />我的心愿</button>
       </div>
       {active.length ? active.map((g) => (
-        <button key={g.id} className="item-row codex-item" disabled={busy} onClick={() => setOpen(g)}>
+        <button key={g.id} className="item-row codex-item" disabled={busy} onClick={() => { setExpectedHeadId(headId); setOpen(g); }}>
           <div className="grow"><b>{g.name}</b>{g.progress && <small>{g.progress}</small>}</div>
           <span className="tag">{g.kind}</span>
         </button>
@@ -105,14 +150,14 @@ export function Goals({ state, era, headId, busy, onSave }: { state: WorldState;
       {ended.length > 0 && <details>
         <summary className="muted">已结束 {ended.length}</summary>
         {ended.map((g) => (
-          <button key={g.id} className="item-row codex-item" style={{ opacity: 0.75 }} disabled={busy} onClick={() => setOpen(g)}>
+          <button key={g.id} className="item-row codex-item" style={{ opacity: 0.75 }} disabled={busy} onClick={() => { setExpectedHeadId(headId); setOpen(g); }}>
             <div className="grow">{g.name}{g.progress && <small>{g.progress}</small>}</div>
             <span className="tag">{g.status}</span>
           </button>
         ))}
       </details>}
-      {open && <GoalSheet goal={open} era={era} headId={headId} onClose={() => setOpen(null)} onSave={onSave} />}
-      {wish && <WishSheet goals={state.goals} headId={headId} onClose={() => setWish(false)} onSave={onSave} />}
+      {open && <GoalSheet goal={open} era={era} headId={expectedHeadId} onClose={() => setOpen(null)} onSave={onSave} />}
+      {wish && <WishSheet goals={state.goals} headId={expectedHeadId} onClose={() => setWish(false)} onSave={onSave} />}
     </div>
   );
 }

@@ -11,7 +11,7 @@ import { packCards } from "./era/card";
 import { PlatformError, type ExecutionSnapshot, type Failure, type Platform, type SqlStatement } from "../platform";
 import { migrate } from "./db/migrate";
 import { Repo } from "./db/repo";
-import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, outputWasTruncated, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
+import { ChatError, compactChatMessages, DEFAULT_TIMEOUTS, isMaxTokensError, outputWasTruncated, retryDecision, streamChat, type ChatMessage, type ChatResult } from "./llm/chat";
 import { hasChinese, isRefusal, refusedFinish } from "./llm/refusal";
 import {
   assistMessages, buildTurnContext, writingContextTemplate, renderState, continueMessages, extractMessages, openingExtractMessages, openingMessages, PROMPT_VERSION,
@@ -35,9 +35,9 @@ import { challengeInputOf, newChallenge, newScript, scriptInputOf, type Challeng
 import { draftChallengeMessages, draftScriptMessages, parseChallengeDraft, parseScriptDraft, type DraftInput } from "./prompt/draft";
 import * as tree from "./tree";
 import { DEFAULT_SETTINGS, type ActionMode, type Chapter, type StoryNode, type WorldSettings, type WorldState } from "./types";
-import { analysisJobs, chunksOf, fitReference, getBook, newAnalysisJob, referenceBlock, referenceContext, referenceEvidenceBlock, referenceInstructionsBlock, saveJob, SOURCE_PROMPT_VERSION } from "./sources/library";
+import { analysisJobs, ensureSourceChunkIndex, fitReference, getBookHeader, getBookOutline, readBookSection, referenceBlock, referenceContext, referenceEvidenceBlock, referenceInstructionsBlock, saveJob, SOURCE_PROMPT_VERSION } from "./sources/library";
 import { sourceAnalysisMessages, sourceAnalysisResult } from "./sources/analysis";
-import { validBinding, type SourceBinding, type AnalysisJob } from "./sources/types";
+import { validBinding, type SourceBinding, type AnalysisJob, type SourceBook } from "./sources/types";
 import { asJson, startRun, type RunPlan } from "./execution";
 import { abilityCardName, assertWritingAnchor, isLatestPassage, resolveRevisionSource, CANON_WRITING_PROMPT_VERSION, canonCorrectionRules, canonStop, CanonStop, factSyncRules, parseFactSync, type FactSyncRequest, correctionRecordChanges, isOpeningSeed, recoverOpeningSeed, MISSING_OPENING_SEED, MISSING_OPENING_SEED_REVISE, MISSING_OPENING_SEED_SYNC, parsePlayerRevision, playerRevisionRules, WritingError, type CanonCorrectionRequest, type CanonCorrectionHandle, type CanonCorrectionPreview, type PlayerRevisionPreview, type PlayerRevisionRequest } from "./writing/assist";
 
@@ -344,6 +344,7 @@ export class Game {
   private chaptering = new Set<string>();
   private background = new Set<Promise<void>>();
   private listeners = new Set<(worldId: string) => void>();
+  private agentListeners = new Set<(worldId: string) => void>();
   private queuedAutoplayNotes = new Map<string, string>();
 
   /** 备用服务 (D179): answers what the main service could not for a passing reason; set from 设置 → AI 服务. */
@@ -484,8 +485,15 @@ export class Game {
     return () => { this.listeners.delete(fn); };
   }
 
+  /** Told when the independent assistant / companion committed canonical story data. */
+  onAgentChange(fn: (worldId: string) => void): () => void {
+    this.agentListeners.add(fn);
+    return () => { this.agentListeners.delete(fn); };
+  }
+
   /** The independent assistant committed canonical story data. */
   notifyAgentChange(worldId: string): void {
+    for (const fn of this.agentListeners) fn(worldId);
     for (const fn of this.listeners) fn(worldId);
   }
 
@@ -539,14 +547,16 @@ export class Game {
   ): Promise<ChatResult> {
     const llm = opts.configuration ?? this.requireLlm();
     const model = opts.aux ? llm.auxModel || llm.model : llm.model;
-    for (let attempt = 1; ; attempt++) {
+    let maxTokens = opts.outputTokens === undefined
+      ? llm.maxOutputTokens ?? llm.maxTokens ?? 8192
+      : Math.min(opts.outputTokens, llm.maxOutputTokens ?? llm.maxTokens ?? opts.outputTokens);
+    for (let attempt = 1; attempt <= 4; attempt++) {
       if (opts.signal?.aborted) throw new ChatError("cancelled");
       let partial = "";
       let received: ChatResult | null = null;
       const handle = streamChat(this.platform, {
         slot: llm.slot, url: llm.url, model, messages,
-         maxTokens: opts.outputTokens === undefined ? llm.maxOutputTokens ?? llm.maxTokens ?? 2048
-          : Math.min(opts.outputTokens, llm.maxOutputTokens ?? llm.maxTokens ?? opts.outputTokens),
+        maxTokens,
         includeUsage: llm.includeUsage, timeouts: opts.timeouts,
         extra: llm.extra as never,
       }, {
@@ -573,7 +583,7 @@ export class Game {
         // Which model answered: the backup's when it took over, so usage is logged under it.
         return { ...received, servedBy: model };
       } catch (error) {
-        const decision = retryDecision(error, attempt, messages);
+        const decision = attempt < 4 ? retryDecision(error, attempt, messages, maxTokens) : { retry: false, messages };
         // Callers retain their successful business usage rows. Every failed request
         // has its own unknown usage; local credential/binding refusals sent nothing.
         const unsent = error instanceof ChatError && (error.kind === "no_secret" || error.kind === "url_not_bound");
@@ -582,13 +592,18 @@ export class Game {
           await this.platform.sql.batch([this.usage(scope.worldId, scope.nodeId, scope.purpose, received,
             error instanceof ChatError && error.kind === "cancelled" ? "cancelled" : "failed", model)]);
         }
-        if (opts.usage.purpose !== "source" && !opts.signal?.aborted && decision.retry) { messages = decision.messages; continue; }
+        if ((opts.usage.purpose !== "source" || isMaxTokensError(error)) && !opts.signal?.aborted && decision.retry) {
+          messages = decision.messages;
+          if (decision.maxTokens !== undefined) maxTokens = decision.maxTokens;
+          continue;
+        }
         throw error;
       } finally {
         opts.signal?.removeEventListener("abort", cancel);
         void handle.streamId.then((id) => this.platform.llm.ack(id)).catch(() => {});
       }
     }
+    throw new ChatError("empty");
   }
 
   private usage(worldId: string | null, nodeId: string | null, purpose: string, result: ChatResult | null, outcome: string, model: string): SqlStatement {
@@ -764,8 +779,8 @@ export class Game {
   async createWorld(input: NewWorld, onEvent: (e: TurnEvent) => void): Promise<string | null> {
     this.requireExecution();
     if (input.source) {
-      const book = validBinding(input.source) ? await getBook(this.repo, input.source.bookId) : null;
-      if (!book || input.source.position >= book.sections.length || input.source.through !== null && (input.source.through >= book.sections.length || input.source.position > input.source.through)) { onEvent({ type: "failed", reason: "other", detail: "参考的原著位置无效，请重新选择", partialSaved: false }); return null; }
+      const header = validBinding(input.source) ? await getBookHeader(this.repo, input.source.bookId) : null;
+      if (!header || input.source.position >= header.sectionCount || input.source.through !== null && (input.source.through >= header.sectionCount || input.source.position > input.source.through)) { onEvent({ type: "failed", reason: "other", detail: "参考的原著位置无效，请重新选择", partialSaved: false }); return null; }
     }
     const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
     const free = settings.mode === "free";
@@ -967,8 +982,8 @@ export class Game {
   /** Player configuration only: external material can never set current facts through a model record. */
   async bindSource(worldId: string, source: SourceBinding | null): Promise<void> {
     if (source) {
-      const book = validBinding(source) ? await getBook(this.repo, source.bookId) : null;
-      if (!book || source.position >= book.sections.length || source.through !== null && (source.through >= book.sections.length || source.position > source.through)) throw new Error("参考书籍或用法无效，请重新选择");
+      const header = validBinding(source) ? await getBookHeader(this.repo, source.bookId) : null;
+      if (!header || source.position >= header.sectionCount || source.through !== null && (source.through >= header.sectionCount || source.position > source.through)) throw new Error("参考书籍或用法无效，请重新选择");
     }
     await this.editState(worldId, { sourceSet: source }, source ? "你修改了参考书籍用法" : "你解除了参考书籍绑定");
   }
@@ -1429,7 +1444,7 @@ export class Game {
       ];
       let result: ChatResult;
       try {
-        result = await this.call(messages, { signal: controller.signal, usage: { worldId: anchor.worldId, nodeId: anchor.nodeId, purpose: "revise-passage" }, timeouts: DEFAULT_TIMEOUTS, outputTokens: 4096,
+        result = await this.call(messages, { signal: controller.signal, usage: { worldId: anchor.worldId, nodeId: anchor.nodeId, purpose: "revise-passage" }, timeouts: DEFAULT_TIMEOUTS, outputTokens: 8192,
           onText: (full) => { const value = lenientJson(full) as { replacement?: string } | null; if (typeof value?.replacement === "string") onText(value.replacement); } });
       } catch (error) {
         if (error instanceof ChatError && error.kind === "cancelled") throw new WritingError("已取消，原文没有改动。");
@@ -1472,7 +1487,7 @@ export class Game {
       ];
       let result: ChatResult;
       try {
-        result = await this.call(messages, { signal: controller.signal, aux: true, usage: { worldId: anchor.worldId, nodeId: anchor.nodeId, purpose: "sync-facts" }, timeouts: DEFAULT_TIMEOUTS, outputTokens: 4096 });
+        result = await this.call(messages, { signal: controller.signal, aux: true, usage: { worldId: anchor.worldId, nodeId: anchor.nodeId, purpose: "sync-facts" }, timeouts: DEFAULT_TIMEOUTS, outputTokens: 8192 });
       } catch (error) {
         if (error instanceof ChatError && error.kind === "cancelled") throw new WritingError("已取消，正文没有改动。");
         throw error;
@@ -1631,24 +1646,76 @@ export class Game {
   private sourceRuns = new Map<string, AbortController>();
   pauseSourceAnalysis(jobId: string) { this.sourceRuns.get(jobId)?.abort(); }
   async analyzeSource(binding: SourceBinding, onProgress: (job: AnalysisJob) => void): Promise<AnalysisJob> {
-    const book = await getBook(this.repo, binding.bookId); if (!book) throw new Error("书籍不存在");
+    const outline = await getBookOutline(this.repo, binding.bookId);
+    if (!outline) throw new Error("书籍不存在");
+    await ensureSourceChunkIndex(this.platform);
+    const allChunkMeta = await this.platform.sql.query(
+      "SELECT ordinal, section FROM source_chunks WHERE book_id = ? ORDER BY ordinal ASC",
+      [outline.id],
+    );
+    const sectionChunkCounts = new Array<number>(outline.sections.length).fill(0);
+    const sectionFirstOrdinal = new Map<number, number>();
+    for (const row of allChunkMeta) {
+      const sec = Number(row.section);
+      const ord = Number(row.ordinal);
+      if (sec >= 0 && sec < sectionChunkCounts.length) sectionChunkCounts[sec]++;
+      if (!sectionFirstOrdinal.has(sec)) sectionFirstOrdinal.set(sec, ord);
+    }
+    const inScopeChunks = allChunkMeta
+      .map((r) => ({ ordinal: Number(r.ordinal), section: Number(r.section) }))
+      .filter((c) => binding.through === null || c.section <= binding.through);
     const configuration = structuredClone(this.requireLlm());
     const model = configuration.auxModel || configuration.model;
-    let job = (await analysisJobs(this.repo, book.id)).find((j) => j.id === binding.analysisId);
-    if (!job) job = newAnalysisJob(book, binding, model);
+    let job = (await analysisJobs(this.repo, outline.id)).find((j) => j.id === binding.analysisId);
+    if (!job) {
+      job = {
+        id: newId(),
+        bookId: outline.id,
+        instructions: binding.instructions,
+        through: binding.through,
+        status: "paused",
+        completed: 0,
+        total: inScopeChunks.length,
+        model,
+        promptVersion: SOURCE_PROMPT_VERSION,
+      };
+    }
     if (job.model !== model || job.instructions !== binding.instructions || job.through !== binding.through || job.promptVersion !== SOURCE_PROMPT_VERSION) throw new Error("用法、范围或整理模型已变化，请新建一次整理；旧结果仍保留");
     if (this.sourceRuns.has(job.id)) throw new Error("这份书籍正在整理");
     const controller = new AbortController(); this.sourceRuns.set(job.id, controller);
     let failure = "这一节没能整理，已完成的部分保留，可继续重试";
     try {
-      const chunks = chunksOf(book).filter((c) => job!.through === null || c.section <= job!.through!);
       const saved = await this.platform.sql.query("SELECT ordinal FROM source_analysis WHERE job_id=?", [job.id]);
       const completed = new Set(saved.map(({ ordinal }) => Number(ordinal)));
       job = { ...job, completed: completed.size, status: "running", error: undefined }; await saveJob(this.repo, job); onProgress({ ...job });
-      for (const chunk of chunks) {
+      let loadedSectionIdx = -1;
+      let loadedSectionText = "";
+      for (const meta of inScopeChunks) {
         if (controller.signal.aborted) break;
-        if (completed.has(chunk.ordinal)) continue;
-        const result = await this.call(sourceAnalysisMessages(book, chunk, job.instructions), { configuration, aux: true,
+        if (completed.has(meta.ordinal)) continue;
+        if (loadedSectionIdx !== meta.section) {
+          const secContent = await readBookSection(this.repo, outline.id, meta.section);
+          if (!secContent) throw new Error("书籍章节读取失败");
+          loadedSectionIdx = meta.section;
+          loadedSectionText = secContent.text;
+        }
+        const firstOrd = sectionFirstOrdinal.get(meta.section) ?? meta.ordinal;
+        const start = (meta.ordinal - firstOrd) * 2400;
+        const chunkText = loadedSectionText.slice(start, start + 2400);
+        const chunk = { section: meta.section, ordinal: meta.ordinal, text: chunkText };
+        // Lightweight per-chapter shell: earlier chapters carry only synthetic chunk-count length so O(1) memory is used.
+        const bookShell: SourceBook = {
+          id: outline.id,
+          title: outline.title,
+          format: outline.format,
+          createdAt: outline.createdAt,
+          sections: outline.sections.map((s, idx) => ({
+            title: s.title,
+            ...(s.page !== undefined ? { page: s.page } : {}),
+            text: idx === meta.section ? loadedSectionText : ({ length: sectionChunkCounts[idx] * 2400 } as unknown as string),
+          })),
+        };
+        const result = await this.call(sourceAnalysisMessages(bookShell, chunk, job.instructions), { configuration, aux: true,
           signal: controller.signal, usage: { worldId: null, nodeId: null, purpose: "source" }, timeouts: CODEX_TIMEOUT, outputTokens: NOTE_OUTPUT_TOKENS });
         if (controller.signal.aborted) { await this.platform.sql.batch([this.usage(null, null, "source", result, "cancelled", model)]); break; }
         const rejected = refusedFinish(result.finishReason);
@@ -1660,14 +1727,14 @@ export class Game {
           throw new Error(failure);
         }
         let parsed: ReturnType<typeof sourceAnalysisResult>;
-        try { parsed = sourceAnalysisResult(result.text, book, chunk, job, true); }
+        try { parsed = sourceAnalysisResult(result.text, bookShell, chunk, job, true); }
         catch {
           failure = "模型没有返回完整的整理格式，已整理的部分保留，可继续重试";
           await this.platform.sql.batch([this.usage(null, null, "source", result, "no_record", model)]);
           throw new Error(failure);
         }
         await this.platform.sql.batch([
-          { sql: "INSERT INTO source_analysis(job_id,book_id,ordinal,section,text) VALUES(?,?,?,?,?)", params: [job.id, book.id, chunk.ordinal, chunk.section, parsed.text] },
+          { sql: "INSERT INTO source_analysis(job_id,book_id,ordinal,section,text) VALUES(?,?,?,?,?)", params: [job.id, outline.id, chunk.ordinal, chunk.section, parsed.text] },
           ...parsed.statements,
           this.usage(null, null, "source", result, "ok", model),
         ]);

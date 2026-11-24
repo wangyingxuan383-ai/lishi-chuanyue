@@ -66,8 +66,8 @@ function Citations({ items }: { items: { detail: string; citations: { quote: str
   return <>{items.map((c, i) => <div key={i}><p>{c.detail}</p>{c.citations.map((cite, j) => <blockquote key={j}>{cite.quote}<small> — {cite.title}{cite.page ? ` · 第${cite.page}页` : ""}</small></blockquote>)}</div>)}</>;
 }
 
-export function WritingAssist({ draft, onClose, onAdopt }: {
-  draft: WritingDraft; onClose: () => void; onAdopt: (text: string, correction?: CanonCorrectionPreview, revision?: PlayerRevisionPreview) => Promise<void>;
+export function WritingAssist({ draft, onClose, onAdopt, captureReading }: {
+  draft: WritingDraft; onClose: () => void; onAdopt: (text: string, correction?: CanonCorrectionPreview, revision?: PlayerRevisionPreview) => Promise<void>; captureReading?: () => void;
 }) {
   const { game, push } = useApp();
   const rewrite = draft.kind === "rewrite";
@@ -147,13 +147,15 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
   };
   const outcome = correction ? correction.outcome ?? "changed" : null;
   const outcomeText = correction ? canonOutcomeText(correction, draft.source?.through) : "";
-  const previewDiff = useMemo(() => (ready && preview && preview !== original ? diffStats(diffText(original, preview)) : null), [ready, preview, original]);
+  const canAdoptEmpty = mode === "revise" && !!revision && ranges.length > 1 && !isWhole;
+  const hasPreview = Boolean(preview) || (mode === "revise" && ready && revision !== null);
+  const previewDiff = useMemo(() => (ready && hasPreview && preview !== original ? diffStats(diffText(original, preview)) : null), [ready, hasPreview, preview, original]);
   /** Something different to adopt: a change with its basis, a revision that changes text or facts, or any polish. */
   const adoptable = ready && (canon ? outcome === "changed" && !!correction?.corrections.length
     : mode === "revise" ? !!revision && (revision.replacement.trim() !== original.trim() || revision.recordChanges.length > 0 || !!revision.correctionPatch)
     : true);
   const adopt = async () => {
-    if (!ready || saving || !preview.trim()) return;
+    if (!ready || saving || (!preview.trim() && !canAdoptEmpty)) return;
     setSaving(true); setError("");
     try {
       // The head may have moved on by the AI's own tidy-up since the preview: adopt against today's.
@@ -181,7 +183,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {rewrite && (canon || mode === "revise") && <SourceScopeRow worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose={canon ? "correction" : "revise"} anchorPosition={targetPosition} disabled={pending || saving} onChange={(next) => { choose(range); setScope(next); }} />}
       <button className="ghost" disabled={pending || saving} onClick={() => setPresetsOpen(true)}>常用改稿要求</button>
       {presetsOpen && <MenuSheet title="常用改稿要求" onClose={() => setPresetsOpen(false)} items={WRITING_REQUIREMENT_PRESETS.filter(item => (item.mode === "polish" || rewrite) && (item.mode !== "canon" || !!draft.source)).map(item => ({ label: item.name, onSelect: () => { choose(range); setHint(item.hint); if (rewrite) setMode(item.mode); } }))} />}
-      {(preview || pending) && (
+      {(hasPreview || pending) && (
         <div className="stack gap-2">
           <div className="row between">
             <span className="field-label">{pending ? <span className="cursor-blink" role="status">正在改稿</span> : mode === "polish" ? "改稿（可以再改几个字）" : "改稿预览"}</span>
@@ -207,7 +209,7 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {correction && outcome === "changed" && correction.recordChanges && <RecordChanges changes={correction.recordChanges} patch={correction.correctionPatch} />}
       {correction?.unresolved?.map((t, i) => <p className="field-hint warn" key={`u${i}`}>待核对：{t}</p>)}
       {correction?.related?.map((t, i) => <p className="muted" key={`r${i}`}>关联问题：{t}</p>)}
-      {correction && ((correction.related?.length ?? 0) + (correction.unresolved?.length ?? 0) > 0) && <button disabled={pending || saving} onClick={() => { const paragraph = isWhole ? undefined : ranges.findIndex(r => r.start === range.start); onClose(); push({ name: "agent", worldId: draft.anchor.worldId, lineId: draft.anchor.lineId, skills: ["canon-reference"], target: { nodeId: draft.anchor.nodeId, ...(paragraph !== undefined ? { paragraph } : {}), evidence: correction.corrections.flatMap(c => c.citations) }, initialText: `继续核对局部改稿的关联问题，保留玩家主动分支：\n${[...correction.related ?? [], ...correction.unresolved ?? []].join("\n")}\n${hint}` }); }}>交给助手处理关联问题</button>}
+      {correction && ((correction.related?.length ?? 0) + (correction.unresolved?.length ?? 0) > 0) && <button disabled={pending || saving} onClick={() => { const paragraph = isWhole ? undefined : ranges.findIndex(r => r.start === range.start); captureReading?.(); onClose(); push({ name: "agent", worldId: draft.anchor.worldId, lineId: draft.anchor.lineId, skills: ["canon-reference"], target: { nodeId: draft.anchor.nodeId, ...(paragraph !== undefined ? { paragraph } : {}), evidence: correction.corrections.flatMap(c => c.citations) }, initialText: `继续核对局部改稿的关联问题，保留玩家主动分支：\n${[...correction.related ?? [], ...correction.unresolved ?? []].join("\n")}\n${hint}` }); }}>交给助手处理关联问题</button>}
       {error && <p role="alert" className="field-hint warn">{error}</p>}
       {!pending && since && <RecentUsageLine worldId={draft.anchor.worldId} purposes={["revise", "revise-passage", "段落改写", "行动润色", "correction", "writing", "tool"]} since={since} refreshKey={usageTick} />}
       {pausedRun && canon && !pending && <button className="primary" onClick={() => void generate(pausedRun)}>接着查</button>}
@@ -217,8 +219,8 @@ export function WritingAssist({ draft, onClose, onAdopt }: {
       {pickChaptersOpen && draft.source && <SourceScopeSheet worldId={draft.anchor.worldId} binding={draft.source} value={scope} purpose="correction" initialMode="chapters" anchorPosition={targetPosition} onClose={() => setPickChaptersOpen(false)} onChange={(next) => { setPickChaptersOpen(false); choose(range); setScope(next); void generate(undefined, next); }} />}
       <div className="writing-actions">
         {pending ? <button onClick={() => { stop(); setError("已取消，原文没有改动。"); }}>取消生成</button> : <button disabled={saving} onClick={close}>取消</button>}
-        {!pending && <button className={preview || correction ? "" : "primary"} disabled={saving || !original.trim() || (mode === "revise" && !hint.trim())} onClick={() => void generate()}>{canon ? (correction ? "再查一次" : "开始核对") : preview ? "再改一版" : "生成改稿"}</button>}
-        {adoptable && <button className="primary" disabled={saving || !preview.trim()} onClick={() => void adopt()}>{rewrite ? "采用改稿" : "采用到输入框"}</button>}
+        {!pending && <button className={hasPreview || correction ? "" : "primary"} disabled={saving || !original.trim() || (mode === "revise" && !hint.trim())} onClick={() => void generate()}>{canon ? (correction ? "再查一次" : "开始核对") : hasPreview ? "再改一版" : "生成改稿"}</button>}
+        {adoptable && <button className="primary" disabled={saving || (!preview.trim() && !canAdoptEmpty)} onClick={() => void adopt()}>{rewrite ? "采用改稿" : "采用到输入框"}</button>}
       </div>
     </div>
   </Sheet>;

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { newId } from "../../engine/db/repo";
 import {
   buildNovelBook,
   formatNovelMarkdown,
@@ -6,7 +7,9 @@ import {
   novelFileName,
   type NovelBook,
 } from "../../engine/novel";
+import { upsertReaderShelfMeta } from "../../engine/reader/shelf";
 import { saveBook } from "../../engine/sources/library";
+import type { SourceBook } from "../../engine/sources/types";
 import { useApp } from "../app/context";
 import { TitleCartouche } from "./ChineseArt";
 import { Icon } from "./Icon";
@@ -123,16 +126,49 @@ export function NovelExportSheet({ worldId, lineId, worldTitle, onClose }: Novel
     if (!book || busy) return;
     setBusy(true);
     try {
-      const [{ buildEpubBytes }, { parseBook }] = await Promise.all([
-        import("../../engine/epub"),
-        import("../../engine/sources/parse"),
-      ]);
-      const bytes = buildEpubBytes(book);
-      const parsed = await parseBook(
-        { name: novelFileName(book.title, "epub"), bytes },
-        game.platform,
-      );
-      await saveBook(game.repo, parsed);
+      const sections = book.sections
+        .map((sec, idx) => {
+          const body = sec.paragraphs
+            .map((p) => {
+              if (p.kind === "divider") {
+                return p.text === "◇" ? "◇" : `◇ ${p.text} ◇`;
+              }
+              if (p.kind === "action") {
+                return `◇ ${p.text}`;
+              }
+              return p.text;
+            })
+            .join("\n\n");
+          const withStatus =
+            idx === book.sections.length - 1 && book.statusLine && !body.includes(book.statusLine)
+              ? body
+                ? `${body}\n\n${book.statusLine}`
+                : book.statusLine
+              : body;
+          return {
+            title: sec.subtitle ? `${sec.title} · ${sec.subtitle}` : sec.title,
+            text: withStatus,
+          };
+        })
+        .filter((s) => s.text.trim().length > 0);
+      if (!sections.length) {
+        throw new Error("这部故事还没有可存入书库的正文段落");
+      }
+      const saved: SourceBook = {
+        id: newId(),
+        title: book.title,
+        format: "epub",
+        createdAt: new Date().toISOString(),
+        sections,
+      };
+      await saveBook(game.repo, saved);
+      await upsertReaderShelfMeta(game.repo, saved.id, {
+        author: book.author ? `${book.author} · 穿越成书` : "穿越成书",
+        origin: "novel-export",
+      });
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("lishi:library-changed", { detail: { bookId: saved.id } }));
+      }
       toast(`已将《${book.title}》存入参考书库`);
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : "存入书库失败，请稍后再试");

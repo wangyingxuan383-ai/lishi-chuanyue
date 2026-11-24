@@ -19,8 +19,14 @@ export function completeJson(text: string): unknown {
   return parseObject(text, false);
 }
 
+function stripThinkBlocks(text: string): string {
+  return text
+    .replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, "")
+    .replace(/<\s*think\s*>[\s\S]*$/i, "");
+}
+
 function parseObject(text: string, repairTruncation: boolean): unknown {
-  let body = text.replace(/<\s*\/?\s*record\s*>/gi, "").replace(/```(?:json)?/gi, "");
+  let body = stripThinkBlocks(text).replace(/<\s*\/?\s*record\s*>/gi, "").replace(/```(?:json)?/gi, "");
   const start = body.indexOf("{");
   if (start < 0) return null;
   body = body.slice(start);

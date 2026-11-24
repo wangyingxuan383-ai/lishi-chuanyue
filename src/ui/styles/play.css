@@ -1,6 +1,6 @@
 /* The play screen: story stream, turns, dock. */
 /* ---------- play ---------- */
-.play { height: 100%; display: flex; flex-direction: column; position: relative; isolation: isolate; min-width: 0; }
+.play { height: 100%; display: flex; flex-direction: column; position: relative; isolation: isolate; min-width: 0; overflow: clip; }
 .play::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; opacity: 0; transition: opacity 1.6s ease; }
 .play[data-daypart="dusk"]::before { opacity: 1; background: linear-gradient(180deg, rgba(214, 138, 58, 0.10), rgba(214, 138, 58, 0.03) 75%); }
 .play[data-daypart="night"]::before { opacity: 1; background: linear-gradient(180deg, rgba(70, 92, 140, 0.06), rgba(70, 92, 140, 0.02) 75%); }
@@ -9,9 +9,10 @@
 :root[data-motion="off"] .play::before { display: none; }
 .play-layout[data-paper-tone="oled"] .play::before { display: none; }
 @media (prefers-reduced-motion: reduce) { .play::before { display: none; } }
-.play-layout { height: 100%; height: 100dvh; background-color: var(--bg); background-image: var(--glow), var(--grain); color: var(--fg); }
-.preserved-play { height: 100%; height: 100dvh; }
-.preserved-play[data-inactive="true"] { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
+.play-layout { width: 100%; max-width: 100%; height: 100%; height: 100dvh; overflow-x: clip; background-color: var(--bg); background-image: var(--glow), var(--grain); color: var(--fg); }
+.preserved-play { width: 100%; max-width: 100%; height: 100%; height: 100dvh; overflow-x: clip; }
+.preserved-play[data-inactive="true"] { position: fixed; inset: 0; overflow: hidden; visibility: hidden; pointer-events: none; content-visibility: hidden; }
+.preserved-play[data-inactive="true"] *, .preserved-play[data-inactive="true"] *::before, .preserved-play[data-inactive="true"] *::after { animation-play-state: paused !important; }
 
 /* Wide windows (>= 1000px): story on the left, character panel docked on the right */
 .play-layout.wide { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
@@ -206,16 +207,25 @@ button.turn-changes {
 .dock textarea, .dock input { background: var(--dock-field); }
 .inputbar { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
 .mode-btn { flex-shrink: 0; min-width: 52px; padding: 0 10px; font-size: 15px; font-family: var(--serif); }
-.composer-field { position: relative; flex: 1; min-width: 0; display: flex; align-items: flex-end; }
-.composer-field textarea { min-height: 44px; max-height: 30dvh; padding: 10px 12px; }
-.dock[data-tools]:not([data-tools="0"]) .composer-field textarea { padding-bottom: 36px; }
-.composer-tools {
-  position: absolute; left: 4px; right: 4px; bottom: 2px; display: flex; justify-content: flex-end; align-items: center; gap: 2px;
-  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
-  background: linear-gradient(180deg, transparent, var(--dock-field) 32%);
-  pointer-events: none; animation: fade 0.18s ease-out both;
+.composer-field {
+  position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: stretch;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--dock-field);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-.composer-tools .icon-btn { pointer-events: auto; min-width: 36px; min-height: 34px; padding: 0 7px; color: var(--muted); }
+.composer-field:focus-within { border-color: var(--accent-text); }
+.composer-field textarea {
+  min-height: 42px; max-height: 30dvh; padding: 9px 12px;
+  border: none; background: transparent; box-shadow: none;
+}
+.composer-field textarea:focus-visible { outline: none; border-color: transparent; box-shadow: none; }
+.dock[data-tools]:not([data-tools="0"]) .composer-field textarea { padding-bottom: 4px; }
+.composer-tools {
+  display: flex; justify-content: flex-end; align-items: center; gap: 2px;
+  padding: 0 4px 3px;
+  background: transparent;
+  animation: fade 0.16s ease-out both;
+}
+.composer-tools .icon-btn { min-width: 34px; min-height: 30px; height: 30px; padding: 0 6px; color: var(--muted); }
 .send-btn { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 76px; padding: 0 14px; white-space: nowrap; }
 .send-btn.stop { color: var(--loss); border-color: color-mix(in srgb, var(--loss) 50%, transparent); }
 .send-label { font-size: 15px; }
@@ -249,8 +259,9 @@ button.turn-changes {
 .partial-prose {
   margin: 12px 0 -4px; padding: 10px 14px; border-radius: var(--radius);
   border: 1px dashed var(--line); background: color-mix(in srgb, var(--surface) 70%, transparent);
-  color: var(--muted); max-height: 240px; overflow-y: auto; animation: fade-up 0.25s var(--ease-out) both;
+  color: var(--muted); max-height: 260px; overflow-y: auto; animation: fade-up 0.25s var(--ease-out) both;
 }
+.partial-prose.expanded { max-height: none; overflow-y: visible; }
 .partial-prose-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
 .partial-prose-head button { min-height: 28px; padding: 2px 10px; font-size: 12px; }
 .partial-prose .story-text { opacity: 0.82; user-select: text; -webkit-user-select: text; }

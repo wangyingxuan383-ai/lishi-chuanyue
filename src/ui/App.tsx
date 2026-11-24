@@ -5,7 +5,7 @@ import { installRipples, markNavigation, nameForTransition, withViewTransition }
 import { getPlatform, type Platform } from "../platform";
 import { Game, type LlmConfig } from "../engine/game";
 import { chatCompletionsUrl, listProfiles, type Profile } from "../engine/llm/providers";
-import { AppProvider, DEFAULT_READING, STYLE_KEY, THEME_KEY, normalizeReading, resolvedTheme, useToast, type AppValue, type Reading, type Route } from "./app/context";
+import { AppProvider, DEFAULT_READING, PAPER_TONES, STYLE_KEY, THEME_KEY, normalizeReading, resolvedTheme, useToast, type AppValue, type Reading, type Route } from "./app/context";
 import { Dialog, type DialogRequest } from "./components/Dialog";
 import { BootSplash as RawBootSplash } from "./components/BootSplash";
 import { archiveProblems, importWorld } from "../engine/archive";
@@ -36,7 +36,17 @@ function applyReading(r: Reading) {
   const theme = resolvedTheme(r.theme);
   root.dataset.theme = theme;
   root.dataset.style = r.style;
-  void getPlatform().then((p) => p.system.setSystemBars(BAR_COLORS[r.style][theme], theme === "night")).catch(() => {});
+  const customTone = root.dataset.readerTone
+    ? PAPER_TONES.find((t) => t.id === root.dataset.readerTone && t.bg)
+    : undefined;
+  void getPlatform()
+    .then((p) =>
+      p.system.setSystemBars(
+        customTone ? customTone.bg : BAR_COLORS[r.style][theme],
+        customTone ? customTone.dark : theme === "night",
+      ),
+    )
+    .catch(() => {});
   root.dataset.font = r.fontFamily;
   root.dataset.motion = r.motion;
   root.dataset.indent = r.indent ? "on" : "off";
@@ -124,6 +134,7 @@ export default function App() {
   }, [reading]);
   const [dialog, setDialog] = useState<DialogRequest | null>(null);
   const exitArmed = useRef(false);
+  const mountedPlayWorldIdRef = useRef<string | null>(null);
 
   // Startup runs once. React's dev double-run would otherwise boot twice in parallel:
   // the second boot could read the "welcomed" mark the first-run page had just
@@ -247,9 +258,18 @@ export default function App() {
     }, 3500);
 
     let live = true;
+    let pollTimer = 0;
     const trackedHeads = new Map<string, string | null>();
     const notifiedNodes = new Set<string>();
+    const schedulePoll = (ms: number) => {
+      window.clearTimeout(pollTimer);
+      if (live) pollTimer = window.setTimeout(() => void syncRunning(), ms);
+    };
     const syncRunning = async (changedWorldId?: string) => {
+      if (!changedWorldId && typeof document !== "undefined" && document.visibilityState === "hidden") {
+        schedulePoll(15000);
+        return;
+      }
       try {
         const rows = await platform.sql
           .query("SELECT DISTINCT world_id FROM execution_runs WHERE status IN ('running','committing')")
@@ -283,18 +303,21 @@ export default function App() {
             });
           }
         }
+        schedulePoll(trackedHeads.size > 0 ? 2500 : 15000);
       } catch {
-        // Ignore transient SQL reads during restore/shutdown
+        schedulePoll(15000);
       }
     };
+    const onVisible = () => { if (document.visibilityState === "visible") void syncRunning(); };
     void syncRunning();
-    const poll = window.setInterval(() => void syncRunning(), 2500);
     const off = game.subscribe((wid) => void syncRunning(wid));
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       live = false;
       window.clearTimeout(idleTimer);
-      window.clearInterval(poll);
+      window.clearTimeout(pollTimer);
       off();
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [boot, push, toast]);
   // Each request gets its own id as the dialog's key, so re-renders keep what was typed;
@@ -366,6 +389,7 @@ export default function App() {
   }, mouse && !!value && here !== "play");
 
   if (error) {
+    mountedPlayWorldIdRef.current = null;
     return (
       <div className="screen-body stack">
         <p>启动失败：{error}</p>
@@ -375,24 +399,19 @@ export default function App() {
   }
   const route = value?.route ?? null;
   // Keep the player's ordinary draft, loaded passages and viewport alive
-  // while the separate assistant, companion, or reader page is open.
-  const underlyingPlay = value ? [...stack].reverse().find((item) => item.name === "play") : undefined;
-  const assistantRoute = value
-    ? [...stack].reverse().find(
-        (item) =>
-          item.name === "agent" ||
-          (item.name === "companion" && !!item.worldId) ||
-          (item.name === "reader" && (!!item.worldId || !!underlyingPlay)),
-      )
+  // while the separate assistant, companion, or reader page is open on top of Play.
+  const underlyingPlay = value
+    ? [...stack].reverse().find((item): item is Extract<Route, { name: "play" }> => item.name === "play")
     : undefined;
+  const canPreservePlay =
+    route?.name === "agent" || route?.name === "companion" || route?.name === "reader";
   const storyId =
     route?.name === "play"
       ? route.worldId
-      : assistantRoute
-        ? ("worldId" in assistantRoute && assistantRoute.worldId
-            ? assistantRoute.worldId
-            : underlyingPlay?.worldId ?? null)
+      : canPreservePlay && underlyingPlay && mountedPlayWorldIdRef.current === underlyingPlay.worldId
+        ? underlyingPlay.worldId
         : null;
+  mountedPlayWorldIdRef.current = storyId;
   return (
     <>
       {value && route && (

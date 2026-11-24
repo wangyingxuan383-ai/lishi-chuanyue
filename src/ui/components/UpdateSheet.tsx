@@ -3,11 +3,11 @@
 // while cleanly showing release notes when only an Android .apk is published.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { PlatformError, type UpdatePackageStatus } from "../../platform";
+import { type UpdatePackageStatus } from "../../platform";
 import { useApp } from "../app/context";
 import { androidPackage, expectedHash, openLink, plainNotes, windowsPackage, type ReleaseInfo } from "../app/update";
 import { updateStore } from "../app/updateStore";
-import { installUpdate, pauseDownload, snapshot, startDownload, stepFor, subscribe, type FailReason } from "../app/updateFlow";
+import { hydrateReadyPackage, installUpdate, pauseDownload, resumePermissionInstall, snapshot, startDownload, stepFor, subscribe, type FailReason } from "../app/updateFlow";
 import { Sheet } from "./Sheet";
 import "./update.css";
 
@@ -51,7 +51,6 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
   const asset = inApp ? androidPackage(release) : null;
   const desktopAsset = !inApp && platform.name === "windows" ? windowsPackage(release) : null;
   const [hydrated, setHydrated] = useState<(UpdatePackageStatus & { sha256: string }) | null>(null);
-  const [directStep, setDirectStep] = useState<"none" | "permission" | "installing" | "missing" | "corrupt" | "install">("none");
   const [autoUpdate, setAutoUpdate] = useState(false);
 
   useEffect(() => {
@@ -70,8 +69,11 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
           const pkg = await platform.update.packageStatus({ version: release.version, sha256 });
           if (!alive) return;
           setHydrated({ ...pkg, sha256 });
+          if (pkg.downloaded && pkg.verified) {
+            hydrateReadyPackage({ version: release.version, size: asset.size, sha256 });
+          }
           if (pkg.canInstall) {
-            setDirectStep((prev) => (prev === "permission" ? "none" : prev));
+            void resumePermissionInstall(platform);
           }
           void store.refreshStatus().catch(() => {});
         } else if (platform.update?.canInstall) {
@@ -79,7 +81,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
           if (!alive) return;
           setHydrated((prev) => (prev ? { ...prev, canInstall: allowed } : null));
           if (allowed) {
-            setDirectStep((prev) => (prev === "permission" ? "none" : prev));
+            void resumePermissionInstall(platform);
           }
         }
       } catch {
@@ -107,29 +109,23 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
   const browser = () => void openLink(platform, toast, release.url);
   const downloadDesktop = () => void openLink(platform, toast, desktopAsset ? desktopAsset.url : release.url);
   const download = () => {
-    setDirectStep("none");
     if (asset) void startDownload(platform, release, asset);
   };
   const install = async () => {
-    if (rawState.step === "idle" && hydrated?.downloaded && hydrated.verified && asset && platform.update) {
-      try {
-        const status = await platform.update.install({ version: release.version, size: asset.size, sha256: hydrated.sha256 });
-        if (status === "permission") {
-          setDirectStep("permission");
-        } else if (status === "started") {
-          setDirectStep("installing");
-        } else {
-          toast(platform.name === "web-dev" ? "开发台只模拟下载，安装请在手机上试" : "这里不能直接安装，请用浏览器下载");
-        }
-      } catch (error) {
-        const code = error instanceof PlatformError ? error.code : "";
-        setHydrated(null);
-        setDirectStep(code === "update_missing" ? "missing" : code === "update_hash" ? "corrupt" : "install");
-      }
-      return;
+    const pkg =
+      asset && (hydrated?.sha256 || (flow.version === release.version ? flow.sha256 : null))
+        ? {
+            version: release.version,
+            size: asset.size,
+            sha256: (hydrated?.sha256 ?? flow.sha256)!,
+          }
+        : undefined;
+    const status = await installUpdate(platform, pkg);
+    if (status === "failed") {
+      setHydrated(null);
+    } else if (status === "unsupported") {
+      toast(platform.name === "web-dev" ? "开发台只模拟下载，安装请在手机上试" : "这里不能直接安装，请用浏览器下载");
     }
-    const status = await installUpdate(platform);
-    if (status === "unsupported") toast(platform.name === "web-dev" ? "开发台只模拟下载，安装请在手机上试" : "这里不能直接安装，请用浏览器下载");
   };
 
   // Derive effective step: recognize hydrated verified package when flow is idle, and clear permission prompt once canInstall is granted.
@@ -138,11 +134,6 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
       return { step: "ready" as const };
     }
     if (rawState.step === "idle") {
-      if (directStep === "permission") return { step: "permission" as const };
-      if (directStep === "installing") return { step: "installing" as const };
-      if (directStep === "missing" || directStep === "corrupt" || directStep === "install") {
-        return { step: "failed" as const, reason: directStep, received: 0, total: asset?.size ?? 0 };
-      }
       if (hydrated?.downloaded && hydrated.verified) {
         return { step: "ready" as const };
       }

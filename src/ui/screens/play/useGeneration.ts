@@ -222,7 +222,9 @@ export function useGeneration(d: GenerationDeps) {
       deps.current.onDone(e.node);
     } else if (e.type === "failed") {
       const partialText = streamedText.current.trim() || undefined;
-      const proseSaved = reachedOrganizing.current;
+      const postWriteStage = e.failure?.stage === "record" || e.failure?.stage === "review" || e.failure?.stage === "commit"
+        || e.reason === "review" || e.reason === "settle";
+      const proseSaved = reachedOrganizing.current || postWriteStage;
       const keptRestore = hasRestoreWords(restore)
         ? restore
         : (e.runId ? savedActions.current.get(e.runId) ?? null : null);
@@ -321,14 +323,18 @@ export function useGeneration(d: GenerationDeps) {
     recoveryNoticeVersion.current++;
     const kind = savedKinds.current.get(id);
     const kept = savedActions.current.get(id) ?? null;
+    const prevSavedProse = !!notice && notice.runId === id && !!notice.proseSaved;
+    const prevPartial = notice && notice.runId === id ? notice.partialText ?? "" : "";
     if (kept) deps.current.clearRestoredDraft?.(kept);
     start({
       action: kept?.text.trim() ? { mode: kept.mode, text: kept.text } : null,
+      text: prevSavedProse ? prevPartial : "",
       variant: kind === "variant",
       restore: kept,
       retry: () => retryExecution(id),
       run: (on) => deps.current.game.retryRun(id, on),
     });
+    if (prevSavedProse) reachedOrganizing.current = true;
   };
   /** Reopening the story after a stop: the same notice the failure gave, never a request by itself. */
   const showSavedExecution = (run: SavedRun) => {
@@ -444,9 +450,19 @@ function noticeText(reason: FailReason, status?: number, saved?: SavedRun, prose
           ? "已停止，正文写到一半断开；上方保留了已收到的内容供参考，续跑会重新生成本段。"
           : "已停止，已查到的资料与进度已保留。")
     : explainFailure(reason, status);
-  const stageHint = reason !== "cancelled" && reason !== "busy" && reason !== "stale" && reason !== "auth" && reason !== "setup"
-    ? (proseSaved ? " 正文已保留，续跑会直接补记。" : hasPartial ? " 正文写到一半断开，续跑会重新生成本段。" : "")
-    : "";
-  if (saved?.kind === "autoplay" && reason !== "busy") return `${base}${stageHint} 连播已完成 ${saved.steps ?? 0}/${saved.total ?? 0} 段。`;
+  const skipStageHint = reason === "cancelled" || reason === "busy" || reason === "stale" || reason === "auth" || reason === "setup";
+  const postWriteReason = reason === "review" || reason === "settle" || reason === "refused" || reason === "empty";
+  const stageHint = skipStageHint
+    ? ""
+    : proseSaved
+      ? (base.includes("正文写好了") || base.includes("正文已保留")
+          ? "已写好的正文已保留，重试这一步不会重写正文。"
+          : "正文已保留，续跑会直接补记。")
+      : hasPartial && !postWriteReason && reason !== "format"
+        ? (base.includes("写到一半断开")
+            ? "续跑会重新生成本段。"
+            : "正文写到一半断开，续跑会重新生成本段。")
+        : "";
+  if (saved?.kind === "autoplay" && reason !== "busy") return `${base}${stageHint}连播已完成 ${saved.steps ?? 0}/${saved.total ?? 0} 段。`;
   return `${base}${stageHint}`;
 }

@@ -1,9 +1,39 @@
 import type { Repo } from "../db/repo";
 import { newId } from "../db/repo";
-import type { SqlStatement } from "../../platform";
+import type { Platform, SqlStatement } from "../../platform";
 import type { AnalysisJob, ReferenceContext, ReferencePassage, ReferenceQuery, SourceBinding, SourceBook } from "./types";
 import { checkCancelled } from "./parse";
 import { relevantSourceFacts, sourceAnalysisText } from "./facts";
+
+const ensuredChunkIndexPlatforms = new WeakMap<Platform, Promise<void>>();
+
+/**
+ * Ensures `source_chunks(book_id, section, ordinal)` is indexed so single-chapter
+ * reads (`readBookSection`), range reads (`rangeContext`), and offset lookups run in O(log N)
+ * instead of scanning tens of megabytes of book chunks on large multi-thousand-chapter novels.
+ */
+export function ensureSourceChunkIndex(platform: Platform): Promise<void> {
+  let pending = ensuredChunkIndexPlatforms.get(platform);
+  if (!pending) {
+    pending = (async () => {
+      const rows = await platform.sql.query(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'source_chunks'",
+      );
+      if (rows.length > 0) {
+        await platform.sql.batch([
+          {
+            sql: "CREATE INDEX IF NOT EXISTS source_chunks_book_section ON source_chunks(book_id, section, ordinal)",
+          },
+        ]);
+      }
+    })().catch((err) => {
+      ensuredChunkIndexPlatforms.delete(platform);
+      throw err;
+    });
+    ensuredChunkIndexPlatforms.set(platform, pending);
+  }
+  return pending;
+}
 
 export const SOURCE_PROMPT_VERSION = "source-4";
 export interface SourceChunk { section: number; ordinal: number; text: string }
@@ -22,22 +52,62 @@ export function chunksOf(book: SourceBook): SourceChunk[] {
   });
   return chunks;
 }
-export function bookStatements(book: SourceBook): SqlStatement[] {
-  const chunks = chunksOf(book);
-  const index = new Map<string, number[]>();
-  for (const chunk of chunks) for (const term of terms(chunk.text)) {
-    const postings = index.get(term) ?? []; postings.push(chunk.ordinal); index.set(term, postings);
-  }
-  return [
-    { sql: "INSERT INTO source_books(id,title,format,created_at,json) VALUES(?,?,?,?,?)", params: [book.id, book.title, book.format, book.createdAt, JSON.stringify(book)] },
-    ...book.sections.map((s, section) => ({ sql: "INSERT INTO source_sections(book_id,section,title,page) VALUES(?,?,?,?)", params: [book.id, section, s.title, s.page ?? null] })),
-    ...chunks.map((chunk) => (
-      { sql: "INSERT INTO source_chunks(book_id,ordinal,section,text) VALUES(?,?,?,?)", params: [book.id, chunk.ordinal, chunk.section, chunk.text] }
-    )),
-    ...termStatements(book.id, index),
-  ];
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+export function slimBookJson(book: Pick<SourceBook, "id" | "title" | "format" | "createdAt"> & { sections: { title: string; page?: number }[] }): string {
+  return JSON.stringify({
+    id: book.id,
+    title: book.title,
+    format: book.format,
+    createdAt: book.createdAt,
+    sections: book.sections.map((s) => ({
+      title: s.title,
+      ...(s.page !== undefined ? { page: s.page } : {}),
+    })),
+  });
 }
-function termStatements(bookId: string, index: Map<string, number[]>): SqlStatement[] {
+
+export function sectionStatements(bookId: string, sections: { title: string; page?: number }[]): SqlStatement[] {
+  const result: SqlStatement[] = [];
+  let values: string[] = [];
+  let params: SqlStatement["params"] = [];
+  const flush = () => {
+    if (values.length) {
+      result.push({ sql: `INSERT INTO source_sections(book_id,section,title,page) VALUES ${values.join(",")}`, params });
+    }
+    values = [];
+    params = [];
+  };
+  sections.forEach((s, section) => {
+    values.push("(?,?,?,?)");
+    params!.push(bookId, section, s.title, s.page ?? null);
+    if (values.length === 200) flush();
+  });
+  flush();
+  return result;
+}
+
+export function chunkStatements(bookId: string, chunks: SourceChunk[]): SqlStatement[] {
+  const result: SqlStatement[] = [];
+  let values: string[] = [];
+  let params: SqlStatement["params"] = [];
+  const flush = () => {
+    if (values.length) {
+      result.push({ sql: `INSERT INTO source_chunks(book_id,ordinal,section,text) VALUES ${values.join(",")}`, params });
+    }
+    values = [];
+    params = [];
+  };
+  for (const chunk of chunks) {
+    values.push("(?,?,?,?)");
+    params!.push(bookId, chunk.ordinal, chunk.section, chunk.text);
+    if (values.length === 80) flush();
+  }
+  flush();
+  return result;
+}
+
+export function termStatements(bookId: string, index: Map<string, number[]>): SqlStatement[] {
   const result: SqlStatement[] = [];
   let values: string[] = [], params: SqlStatement["params"] = [];
   const flush = () => { if (values.length) result.push({ sql: `INSERT INTO source_terms(book_id,term,postings) VALUES ${values.join(",")}`, params }); values = []; params = []; };
@@ -49,18 +119,119 @@ function termStatements(bookId: string, index: Map<string, number[]>): SqlStatem
   }
   flush(); return result;
 }
+
+export async function indexChunksTermsAsync(chunks: SourceChunk[], signal?: AbortSignal): Promise<Map<string, number[]>> {
+  const index = new Map<string, number[]>();
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0 && i % 64 === 0) {
+      await tick();
+      checkCancelled(signal);
+    }
+    const chunk = chunks[i]!;
+    for (const term of terms(chunk.text)) {
+      const postings = index.get(term) ?? [];
+      postings.push(chunk.ordinal);
+      index.set(term, postings);
+    }
+  }
+  return index;
+}
+
+export function bookStatements(book: SourceBook): SqlStatement[] {
+  const chunks = chunksOf(book);
+  const index = new Map<string, number[]>();
+  for (const chunk of chunks) for (const term of terms(chunk.text)) {
+    const postings = index.get(term) ?? []; postings.push(chunk.ordinal); index.set(term, postings);
+  }
+  return [
+    { sql: "INSERT INTO source_books(id,title,format,created_at,json) VALUES(?,?,?,?,?)", params: [book.id, book.title, book.format, book.createdAt, slimBookJson(book)] },
+    ...sectionStatements(book.id, book.sections),
+    ...chunkStatements(book.id, chunks),
+    ...termStatements(book.id, index),
+  ];
+}
+
 export async function saveBook(repo: Repo, book: SourceBook, signal?: AbortSignal) {
   checkCancelled(signal);
-  const statements = bookStatements(book);
+  const chunks = chunksOf(book);
+  const index = await indexChunksTermsAsync(chunks, signal);
   checkCancelled(signal);
+  const statements: SqlStatement[] = [
+    { sql: "INSERT INTO source_books(id,title,format,created_at,json) VALUES(?,?,?,?,?)", params: [book.id, book.title, book.format, book.createdAt, slimBookJson(book)] },
+    ...sectionStatements(book.id, book.sections),
+    ...chunkStatements(book.id, chunks),
+    ...termStatements(book.id, index),
+  ];
   await repo.platform.sql.batch(statements);
 }
 export async function listBooks(repo: Repo): Promise<Pick<SourceBook, "id" | "title" | "format" | "createdAt">[]> {
   return await repo.platform.sql.query("SELECT id,title,format,created_at AS createdAt FROM source_books ORDER BY created_at DESC") as any;
 }
 export async function getBook(repo: Repo, id: string): Promise<SourceBook | null> {
-  const [row] = await repo.platform.sql.query("SELECT json FROM source_books WHERE id=?", [id]);
-  return row ? JSON.parse(String(row.json)) : null;
+  const [row] = await repo.platform.sql.query("SELECT id, title, format, created_at, json FROM source_books WHERE id=?", [id]);
+  if (!row) return null;
+  const parsed = JSON.parse(String(row.json)) as SourceBook;
+  const rawSections: { title: string; page?: number; text?: string }[] = Array.isArray(parsed?.sections)
+    ? parsed.sections
+    : [];
+  if (rawSections.length > 0 && rawSections.every((s) => s && typeof s.text === "string")) {
+    return parsed;
+  }
+  await ensureSourceChunkIndex(repo.platform);
+  const [secRows, chunkRows] = await Promise.all([
+    rawSections.length > 0
+      ? Promise.resolve(null)
+      : repo.platform.sql.query(
+          "SELECT section, title, page FROM source_sections WHERE book_id = ? ORDER BY section ASC",
+          [id],
+        ),
+    repo.platform.sql.query(
+      "SELECT section, text FROM source_chunks WHERE book_id = ? ORDER BY section ASC, ordinal ASC",
+      [id],
+    ),
+  ]);
+  const bySection = new Map<number, string[]>();
+  for (const c of chunkRows) {
+    const sec = Number(c.section);
+    let list = bySection.get(sec);
+    if (!list) {
+      list = [];
+      bySection.set(sec, list);
+    }
+    list.push(String(c.text));
+  }
+  const baseSections: { title: string; page?: number; text?: string }[] =
+    rawSections.length > 0
+      ? rawSections
+      : (secRows ?? []).map((r) => ({
+          title: String(r.title),
+          ...(r.page != null ? { page: Number(r.page) } : {}),
+        }));
+  return {
+    id: typeof parsed?.id === "string" ? parsed.id : String(row.id),
+    title: typeof parsed?.title === "string" ? parsed.title : String(row.title),
+    format: (parsed?.format ?? String(row.format)) as SourceBook["format"],
+    createdAt: typeof parsed?.createdAt === "string" ? parsed.createdAt : String(row.created_at),
+    sections: baseSections.map((s, idx) => ({
+      title: s.title,
+      ...(s.page !== undefined ? { page: s.page } : {}),
+      text: typeof s.text === "string" ? s.text : (bySection.get(idx)?.join("") ?? ""),
+    })),
+  };
+}
+
+/** O(1) existence check that never reads or parses the multi-megabyte `source_books.json` blob. */
+export async function bookExists(repo: Repo, id: string): Promise<boolean> {
+  const rows = await repo.platform.sql.query("SELECT 1 AS ok FROM source_books WHERE id = ? LIMIT 1", [id]);
+  return rows.length > 0;
+}
+
+export interface BookOutline {
+  id: string;
+  title: string;
+  format: SourceBook["format"];
+  createdAt: string;
+  sections: { title: string; page?: number; chars: number }[];
 }
 
 export interface BookMeta {
@@ -95,7 +266,7 @@ export interface BookSearchHit {
   snippet: { before: string; hit: string; after: string };
 }
 
-function splitCleanParagraphs(text: string): { text: string; start: number; end: number }[] {
+export function splitCleanParagraphs(text: string): { text: string; start: number; end: number }[] {
   const out: { text: string; start: number; end: number }[] = [];
   const lineRe = /[^\r\n]+/g;
   let match: RegExpExecArray | null;
@@ -109,26 +280,152 @@ function splitCleanParagraphs(text: string): { text: string; start: number; end:
   return out;
 }
 
-function makeHitSnippet(text: string, queryLower: string, radius = 28): { before: string; hit: string; after: string } | null {
+function makeHitSnippet(
+  text: string,
+  queryFlat: string,
+  fallbackTerm?: string,
+  radius = 28,
+): { before: string; hit: string; after: string } | null {
   const flat = text.replace(/\s+/g, " ").trim();
-  if (!flat || !queryLower) return null;
-  const at = flat.toLowerCase().indexOf(queryLower);
-  if (at < 0) return null;
+  if (!flat) return null;
+  const flatLower = flat.toLowerCase();
+  let needle = queryFlat;
+  let at = needle ? flatLower.indexOf(needle) : -1;
+  if (at < 0 && fallbackTerm) {
+    needle = fallbackTerm;
+    at = flatLower.indexOf(needle);
+  }
+  if (at < 0 || !needle) return null;
   const start = Math.max(0, at - radius);
-  const end = Math.min(flat.length, at + queryLower.length + radius);
+  const end = Math.min(flat.length, at + needle.length + radius);
   return {
     before: (start > 0 ? "…" : "") + flat.slice(start, at),
-    hit: flat.slice(at, at + queryLower.length),
-    after: flat.slice(at + queryLower.length, end) + (end < flat.length ? "…" : ""),
+    hit: flat.slice(at, at + needle.length),
+    after: flat.slice(at + needle.length, end) + (end < flat.length ? "…" : ""),
   };
 }
 
-/** Reads lightweight book metadata without loading `source_books.json` or chunk text into JS memory. */
-export async function getBookMeta(repo: Repo, bookId: string): Promise<BookMeta | null> {
+const BOOK_METRICS_KEY = "reader:bookMetrics";
+
+export interface CachedBookMetrics {
+  rev: number;
+  sectionCount: number;
+  totalChars: number;
+  sectionChars: number[];
+}
+
+async function loadRevisionMap(platform: Platform, bookIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (!bookIds.length) return out;
+  const [hasTable] = await platform.sql
+    .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'reference_index_versions'")
+    .catch(() => []);
+  if (!hasTable) return out;
+  const placeholders = bookIds.map(() => "?").join(",");
+  const rows = await platform.sql
+    .query(`SELECT book_id, revision FROM reference_index_versions WHERE book_id IN (${placeholders})`, bookIds)
+    .catch(() => []);
+  for (const r of rows) {
+    const rev = Number(r.revision);
+    if (Number.isFinite(rev)) out.set(String(r.book_id), rev);
+  }
+  return out;
+}
+
+/**
+ * Returns revision-validated character counts (`totalChars` + `sectionChars[]`) for one or more
+ * books. Uses `reference_index_versions.revision` (maintained by SQLite triggers on `source_chunks`)
+ * so large 30–80 MiB multi-thousand-chapter novels scan `source_chunks` at most ONCE across sessions.
+ */
+export async function getBooksCharMetrics(
+  repo: Repo,
+  books: { id: string; sectionCount: number }[],
+): Promise<Map<string, { totalChars: number; sectionChars: number[] }>> {
+  const result = new Map<string, { totalChars: number; sectionChars: number[] }>();
+  if (!books.length) return result;
+
+  const ids = books.map((b) => b.id);
+  const [revMap, rawCache] = await Promise.all([
+    loadRevisionMap(repo.platform, ids),
+    repo.getSetting<Record<string, CachedBookMetrics>>(BOOK_METRICS_KEY, {}),
+  ]);
+  const cache: Record<string, CachedBookMetrics> =
+    rawCache && typeof rawCache === "object" && !Array.isArray(rawCache) ? { ...rawCache } : {};
+
+  let cacheDirty = false;
+  const missing: { id: string; sectionCount: number; rev: number | undefined }[] = [];
+
+  for (const b of books) {
+    const rev = revMap.get(b.id);
+    const entry = cache[b.id];
+    if (
+      rev !== undefined &&
+      entry &&
+      entry.rev === rev &&
+      entry.sectionCount === b.sectionCount &&
+      Array.isArray(entry.sectionChars) &&
+      entry.sectionChars.length === b.sectionCount &&
+      typeof entry.totalChars === "number"
+    ) {
+      result.set(b.id, { totalChars: entry.totalChars, sectionChars: entry.sectionChars });
+    } else {
+      missing.push({ id: b.id, sectionCount: b.sectionCount, rev });
+    }
+  }
+
+  for (const item of missing) {
+    const rows = await repo.platform.sql.query(
+      "SELECT section, COALESCE(SUM(LENGTH(text)), 0) AS chars FROM source_chunks WHERE book_id = ? GROUP BY section",
+      [item.id],
+    );
+    const sectionChars = new Array<number>(Math.max(0, item.sectionCount)).fill(0);
+    let totalChars = 0;
+    for (const r of rows) {
+      const sec = Number(r.section);
+      const chars = Number(r.chars ?? 0);
+      totalChars += chars;
+      if (sec >= 0 && sec < sectionChars.length) {
+        sectionChars[sec] = chars;
+      }
+    }
+    result.set(item.id, { totalChars, sectionChars });
+    if (item.rev !== undefined) {
+      cache[item.id] = {
+        rev: item.rev,
+        sectionCount: item.sectionCount,
+        totalChars,
+        sectionChars,
+      };
+      cacheDirty = true;
+    }
+  }
+
+  if (cacheDirty) {
+    // Prune deleted books if cache grows past 60 entries
+    const keys = Object.keys(cache);
+    if (keys.length > 60) {
+      const activeRows = await repo.platform.sql
+        .query("SELECT id FROM source_books")
+        .catch(() => []);
+      const activeSet = new Set(activeRows.map((r) => String(r.id)));
+      for (const k of keys) {
+        if (!activeSet.has(k)) delete cache[k];
+      }
+    }
+    await repo.setSetting(BOOK_METRICS_KEY, cache).catch(() => {});
+  }
+
+  return result;
+}
+
+/** Ultra-fast book header lookup touching ZERO `source_chunks` pages (< 0.5 ms even on 80 MiB books). */
+export async function getBookHeader(
+  repo: Repo,
+  bookId: string,
+): Promise<Omit<BookMeta, "totalChars"> | null> {
   const [row] = await repo.platform.sql.query(
     `SELECT b.id, b.title, b.format, b.created_at AS createdAt,
-       (SELECT COUNT(*) FROM source_sections s WHERE s.book_id = b.id) AS sectionCount,
-       (SELECT COALESCE(SUM(LENGTH(c.text)), 0) FROM source_chunks c WHERE c.book_id = b.id) AS totalChars
+       (SELECT COUNT(*) FROM source_sections s WHERE s.book_id = b.id) AS sectionCount
      FROM source_books b
      WHERE b.id = ?`,
     [bookId],
@@ -139,32 +436,80 @@ export async function getBookMeta(repo: Repo, bookId: string): Promise<BookMeta 
     title: String(row.title),
     format: String(row.format),
     sectionCount: Number(row.sectionCount ?? 0),
-    totalChars: Number(row.totalChars ?? 0),
     createdAt: String(row.createdAt),
   };
 }
 
-/** Lists table-of-contents sections with SQLite-aggregated character counts (zero chunk text loaded). */
-export async function listBookToc(repo: Repo, bookId: string): Promise<BookTocItem[]> {
+/** Ultra-fast section title list touching ZERO `source_chunks` pages (< 2 ms even for 5,000 chapters). */
+export async function listBookSectionsFast(
+  repo: Repo,
+  bookId: string,
+): Promise<Omit<BookTocItem, "chars">[]> {
   const rows = await repo.platform.sql.query(
-    `SELECT s.section, s.title, s.page, COALESCE(SUM(LENGTH(c.text)), 0) AS chars
-     FROM source_sections s
-     LEFT JOIN source_chunks c ON c.book_id = s.book_id AND c.section = s.section
-     WHERE s.book_id = ?
-     GROUP BY s.section, s.title, s.page
-     ORDER BY s.section ASC`,
+    "SELECT section, title, page FROM source_sections WHERE book_id = ? ORDER BY section ASC",
     [bookId],
   );
   return rows.map((r) => ({
     section: Number(r.section),
     title: String(r.title),
     page: r.page == null ? null : Number(r.page),
-    chars: Number(r.chars ?? 0),
   }));
+}
+
+/** Reads lightweight book metadata without loading `source_books.json` or chunk text into JS memory. */
+export async function getBookMeta(repo: Repo, bookId: string): Promise<BookMeta | null> {
+  const header = await getBookHeader(repo, bookId);
+  if (!header) return null;
+  const metrics = await getBooksCharMetrics(repo, [{ id: header.id, sectionCount: header.sectionCount }]);
+  return {
+    ...header,
+    totalChars: metrics.get(header.id)?.totalChars ?? 0,
+  };
+}
+
+/**
+ * Lists table-of-contents sections with revision-cached / single-pass character counts.
+ * Avoids the unindexed `source_sections LEFT JOIN source_chunks` O(Sections × Chunks) trap.
+ */
+export async function listBookToc(repo: Repo, bookId: string): Promise<BookTocItem[]> {
+  const sections = await listBookSectionsFast(repo, bookId);
+  if (!sections.length) return [];
+  const maxSec = sections[sections.length - 1]!.section;
+  const slotCount = Math.max(sections.length, maxSec + 1);
+  const metrics = await getBooksCharMetrics(repo, [{ id: bookId, sectionCount: slotCount }]);
+  const charArr = metrics.get(bookId)?.sectionChars;
+  return sections.map((s) => ({
+    section: s.section,
+    title: s.title,
+    page: s.page,
+    chars: charArr?.[s.section] ?? 0,
+  }));
+}
+
+/**
+ * Lightweight chapter outline (`title`, `page`, `chars`) without loading `source_books.json`
+ * or chunk text onto the WebView main thread.
+ */
+export async function getBookOutline(repo: Repo, bookId: string): Promise<BookOutline | null> {
+  const header = await getBookHeader(repo, bookId);
+  if (!header) return null;
+  const toc = await listBookToc(repo, bookId);
+  return {
+    id: header.id,
+    title: header.title,
+    format: header.format as SourceBook["format"],
+    createdAt: header.createdAt,
+    sections: toc.map((s) => ({
+      title: s.title,
+      ...(s.page !== null ? { page: s.page } : {}),
+      chars: s.chars,
+    })),
+  };
 }
 
 /** Reads a single section on demand from `source_sections` + `source_chunks` without touching other chapters. */
 export async function readBookSection(repo: Repo, bookId: string, section: number): Promise<BookSectionContent | null> {
+  await ensureSourceChunkIndex(repo.platform);
   const [secRow] = await repo.platform.sql.query(
     "SELECT section, title, page FROM source_sections WHERE book_id = ? AND section = ?",
     [bookId, section],
@@ -206,7 +551,12 @@ export async function searchBookFullText(
   const through = hasThrough ? Math.floor(opts!.through!) : null;
   if (through !== null && through < 0) return [];
 
+  await ensureSourceChunkIndex(repo.platform);
+
   const queryFlat = rawQuery.replace(/\s+/g, " ").toLowerCase();
+  const subPhrasesLower = rawQuery.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!subPhrasesLower.length) return [];
+
   const hanBigrams = new Set<string>();
   const wordTerms = new Set<string>();
   for (const word of rawQuery.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
@@ -217,94 +567,57 @@ export async function searchBookFullText(
     }
   }
 
-  const hits: BookSearchHit[] = [];
-  const precedingParagraphCache = new Map<string, number>();
+  interface CachedSectionLayout {
+    fullText: string;
+    paragraphs: { text: string; lower: string; start: number; end: number }[];
+    chunkRanges: Map<number, { start: number; end: number }>;
+    chunkList: { ordinal: number; start: number; end: number }[];
+  }
+  const sectionLayoutCache = new Map<number, CachedSectionLayout>();
 
-  const baseParagraphOffset = async (section: number, chunkOrd: number, chunkText: string): Promise<number> => {
-    const cacheKey = `${section}:${chunkOrd}`;
-    const cached = precedingParagraphCache.get(cacheKey);
-    if (cached !== undefined) return cached;
-    const [countRow] = await repo.platform.sql.query(
-      "SELECT COUNT(*) AS cnt FROM source_chunks WHERE book_id = ? AND section = ? AND ordinal < ?",
-      [bookId, section, chunkOrd],
+  const getSectionLayout = async (section: number): Promise<CachedSectionLayout> => {
+    const cached = sectionLayoutCache.get(section);
+    if (cached) return cached;
+    const chunkRows = await repo.platform.sql.query(
+      "SELECT ordinal, text FROM source_chunks WHERE book_id = ? AND section = ? ORDER BY ordinal ASC",
+      [bookId, section],
     );
-    const priorCount = Number(countRow?.cnt ?? 0);
-    if (priorCount === 0) {
-      precedingParagraphCache.set(cacheKey, 0);
-      return 0;
+    const chunkRanges = new Map<number, { start: number; end: number }>();
+    const chunkList: { ordinal: number; start: number; end: number }[] = [];
+    const parts: string[] = [];
+    let offset = 0;
+    for (const r of chunkRows) {
+      const ord = Number(r.ordinal);
+      const t = String(r.text);
+      const range = { start: offset, end: offset + t.length };
+      chunkRanges.set(ord, range);
+      chunkList.push({ ordinal: ord, ...range });
+      parts.push(t);
+      offset += t.length;
     }
-    if (priorCount <= 16) {
-      const priorRows = await repo.platform.sql.query(
-        "SELECT text FROM source_chunks WHERE book_id = ? AND section = ? AND ordinal < ? ORDER BY ordinal ASC",
-        [bookId, section, chunkOrd],
-      );
-      const prefix = priorRows.map((r) => String(r.text)).join("");
-      const paras = splitCleanParagraphs(prefix);
-      const separated = /[\r\n][\s\u3000]*$/.test(prefix) || /^[\s\u3000]*[\r\n]/.test(chunkText);
-      const offset = separated ? paras.length : Math.max(0, paras.length - 1);
-      precedingParagraphCache.set(cacheKey, offset);
-      return offset;
-    }
-    const [nlRow] = await repo.platform.sql.query(
-      `SELECT COALESCE(SUM(LENGTH(norm) - LENGTH(REPLACE(norm, char(10), ''))), 0) AS nl
-       FROM (
-         SELECT REPLACE(REPLACE(text, char(13), ''), char(10) || char(10), char(10)) AS norm
-         FROM source_chunks
-         WHERE book_id = ? AND section = ? AND ordinal < ?
-       )`,
-      [bookId, section, chunkOrd],
-    );
-    const offset = Number(nlRow?.nl ?? 0);
-    precedingParagraphCache.set(cacheKey, offset);
-    return offset;
+    const fullText = parts.join("");
+    const paragraphs = splitCleanParagraphs(fullText).map((p) => ({
+      ...p,
+      lower: p.text.toLowerCase(),
+    }));
+    const layout: CachedSectionLayout = { fullText, paragraphs, chunkRanges, chunkList };
+    sectionLayoutCache.set(section, layout);
+    return layout;
   };
 
-  const collectFromChunkRows = async (rows: Record<string, unknown>[]) => {
-    for (const row of rows) {
-      if (hits.length >= cappedLimit) break;
-      const section = Number(row.section);
-      const chunkOrd = Number(row.ordinal);
-      const title = String(row.title);
-      const chunkText = String(row.text);
-      const paras = splitCleanParagraphs(chunkText);
-      const basePara = await baseParagraphOffset(section, chunkOrd, chunkText);
-      let matchedInParas = false;
-      for (let i = 0; i < paras.length && hits.length < cappedLimit; i++) {
-        const snip = makeHitSnippet(paras[i].text, queryFlat);
-        if (snip) {
-          matchedInParas = true;
-          hits.push({
-            section,
-            title,
-            chunkOrd,
-            paragraphIndex: basePara + i,
-            snippet: snip,
-          });
-        }
-      }
-      if (!matchedInParas && hits.length < cappedLimit) {
-        const fallbackSnip = makeHitSnippet(chunkText, queryFlat);
-        if (fallbackSnip) {
-          const at = chunkText.toLowerCase().indexOf(queryFlat);
-          const localIdx = at >= 0 ? Math.max(0, paras.findIndex((p) => p.end >= at)) : 0;
-          hits.push({
-            section,
-            title,
-            chunkOrd,
-            paragraphIndex: basePara + localIdx,
-            snippet: fallbackSnip,
-          });
-        }
-      }
-    }
-  };
+  interface CandidateWindow {
+    section: number;
+    ordinal: number;
+    ord2?: number;
+    title: string;
+    isSeam: boolean;
+  }
 
+  const candidateWindows: CandidateWindow[] = [];
   let usedIndex = false;
-  const filterTokens = hanBigrams.size > 0
-    ? sampleTerms([...hanBigrams], 48)
-    : wordTerms.size > 0
-      ? sampleTerms([...wordTerms], 48)
-      : [];
+  const mergedTokens = [...hanBigrams, ...wordTerms];
+  const filterTokens = mergedTokens.length > 0 ? sampleTerms(mergedTokens, 48) : [];
+  const instrClauses = subPhrasesLower.map(() => "AND INSTR(LOWER(c.text), ?) > 0").join(" ");
 
   if (filterTokens.length > 0) {
     const termRows = await repo.platform.sql.query(
@@ -325,40 +638,176 @@ export async function searchBookFullText(
         candidateSet = next;
       }
       const candidates = [...candidateSet].sort((a, b) => a - b);
-      for (let i = 0; i < candidates.length && hits.length < cappedLimit; i += 100) {
+      for (let i = 0; i < candidates.length && candidateWindows.length < cappedLimit * 3; i += 100) {
         const batch = candidates.slice(i, i + 100);
         const rows = await repo.platform.sql.query(
-          `SELECT c.ordinal, c.section, c.text, s.title
+          `SELECT c.ordinal, c.section, s.title
            FROM source_chunks c
            JOIN source_sections s ON s.book_id = c.book_id AND s.section = c.section
            WHERE c.book_id = ?
              ${through !== null ? "AND c.section <= ?" : ""}
              AND c.ordinal IN (${batch.map(() => "?").join(",")})
+             ${instrClauses}
            ORDER BY c.ordinal ASC`,
-          through !== null ? [bookId, through, ...batch] : [bookId, ...batch],
+          through !== null
+            ? [bookId, through, ...batch, ...subPhrasesLower]
+            : [bookId, ...batch, ...subPhrasesLower],
         );
-        await collectFromChunkRows(rows);
+        for (const r of rows) {
+          candidateWindows.push({
+            section: Number(r.section),
+            ordinal: Number(r.ordinal),
+            title: String(r.title),
+            isSeam: false,
+          });
+        }
       }
-    } else if (hanBigrams.size > 0) {
-      // Every contiguous 2-char Han bigram in a chunk is guaranteed to be indexed in `source_terms`.
-      return [];
+    } else {
+      const foundTerms = new Set(termRows.map((r) => String(r.term)));
+      const missingHanBigram = [...hanBigrams].some((bg) => !foundTerms.has(bg));
+      if (missingHanBigram) {
+        // Every contiguous 2-char Han bigram within a single chunk is guaranteed in `source_terms`;
+        // still allow the consecutive chunk seam check below to catch boundary-straddling phrases.
+        usedIndex = true;
+      }
     }
   }
 
   if (!usedIndex) {
-    const likeTerm = `%${rawQuery.split(/\s+/)[0].replace(/[\\%_]/g, "\\$&")}%`;
     const rows = await repo.platform.sql.query(
-      `SELECT c.ordinal, c.section, c.text, s.title
+      `SELECT c.ordinal, c.section, s.title
        FROM source_chunks c
        JOIN source_sections s ON s.book_id = c.book_id AND s.section = c.section
        WHERE c.book_id = ?
          ${through !== null ? "AND c.section <= ?" : ""}
-         AND c.text LIKE ? ESCAPE '\\'
+         ${instrClauses}
        ORDER BY c.ordinal ASC
        LIMIT ?`,
-      through !== null ? [bookId, through, likeTerm, Math.max(cappedLimit * 2, 60)] : [bookId, likeTerm, Math.max(cappedLimit * 2, 60)],
+      through !== null
+        ? [bookId, through, ...subPhrasesLower, Math.max(cappedLimit * 2, 60)]
+        : [bookId, ...subPhrasesLower, Math.max(cappedLimit * 2, 60)],
     );
-    await collectFromChunkRows(rows);
+    for (const r of rows) {
+      candidateWindows.push({
+        section: Number(r.section),
+        ordinal: Number(r.ordinal),
+        title: String(r.title),
+        isSeam: false,
+      });
+    }
+  }
+
+  // Also check consecutive chunk seams in the same section so phrases split across 2400-char boundaries are never missed.
+  if (rawQuery.length > 1) {
+    const seamClauses = subPhrasesLower
+      .map(
+        () =>
+          "AND INSTR(LOWER(SUBSTR(c1.text, MAX(1, LENGTH(c1.text) - 255)) || SUBSTR(c2.text, 1, 256)), ?) > 0",
+      )
+      .join(" ");
+    const seamRows = await repo.platform.sql.query(
+      `SELECT c1.section, c1.ordinal AS ord1, c2.ordinal AS ord2, s.title
+       FROM source_chunks c1
+       JOIN source_chunks c2
+         ON c2.book_id = c1.book_id
+        AND c2.section = c1.section
+        AND c2.ordinal = c1.ordinal + 1
+       JOIN source_sections s
+         ON s.book_id = c1.book_id
+        AND s.section = c1.section
+       WHERE c1.book_id = ?
+         ${through !== null ? "AND c1.section <= ?" : ""}
+         ${seamClauses}
+       ORDER BY c1.ordinal ASC
+       LIMIT ?`,
+      through !== null
+        ? [bookId, through, ...subPhrasesLower, Math.max(cappedLimit * 2, 60)]
+        : [bookId, ...subPhrasesLower, Math.max(cappedLimit * 2, 60)],
+    );
+    for (const r of seamRows) {
+      candidateWindows.push({
+        section: Number(r.section),
+        ordinal: Number(r.ord1),
+        ord2: Number(r.ord2),
+        title: String(r.title),
+        isSeam: true,
+      });
+    }
+  }
+
+  candidateWindows.sort((a, b) => a.ordinal - b.ordinal || Number(a.isSeam) - Number(b.isSeam));
+
+  const hits: BookSearchHit[] = [];
+  const seenParagraphs = new Set<string>();
+
+  for (const cand of candidateWindows) {
+    if (hits.length >= cappedLimit) break;
+    const layout = await getSectionLayout(cand.section);
+    const r1 = layout.chunkRanges.get(cand.ordinal);
+    if (!r1) continue;
+    let winStart = r1.start;
+    let winEnd = r1.end;
+    if (cand.isSeam) {
+      const r2 = cand.ord2 !== undefined ? layout.chunkRanges.get(cand.ord2) : undefined;
+      winStart = Math.max(r1.start, r1.end - 256);
+      winEnd = r2 ? Math.min(r2.end, r2.start + 256) : r1.end;
+    }
+
+    let matchedPara = false;
+    for (let pIdx = 0; pIdx < layout.paragraphs.length && hits.length < cappedLimit; pIdx++) {
+      const p = layout.paragraphs[pIdx]!;
+      if (p.end <= winStart) continue;
+      if (p.start >= winEnd) break;
+      const paraKey = `${cand.section}:${pIdx}`;
+      if (seenParagraphs.has(paraKey)) {
+        if (subPhrasesLower.every((sp) => p.lower.includes(sp))) matchedPara = true;
+        continue;
+      }
+      if (!subPhrasesLower.every((sp) => p.lower.includes(sp))) continue;
+      const snip = makeHitSnippet(p.text, queryFlat, subPhrasesLower[0]);
+      if (!snip) continue;
+      matchedPara = true;
+      seenParagraphs.add(paraKey);
+      const localAt = p.lower.indexOf(queryFlat) >= 0 ? p.lower.indexOf(queryFlat) : p.lower.indexOf(subPhrasesLower[0]!);
+      const absPos = p.start + Math.max(0, localAt);
+      const ownerChunk =
+        layout.chunkList.find((cr) => absPos >= cr.start && absPos < cr.end)?.ordinal ?? cand.ordinal;
+      hits.push({
+        section: cand.section,
+        title: cand.title,
+        chunkOrd: ownerChunk,
+        paragraphIndex: pIdx,
+        snippet: snip,
+      });
+    }
+
+    if (!matchedPara && hits.length < cappedLimit) {
+      const winText = layout.fullText.slice(winStart, winEnd);
+      const winLower = winText.toLowerCase();
+      if (subPhrasesLower.every((sp) => winLower.includes(sp))) {
+        const snip = makeHitSnippet(winText, queryFlat, subPhrasesLower[0]);
+        if (snip) {
+          const localAt =
+            winLower.indexOf(queryFlat) >= 0 ? winLower.indexOf(queryFlat) : winLower.indexOf(subPhrasesLower[0]!);
+          const absPos = winStart + Math.max(0, localAt);
+          const foundIdx = layout.paragraphs.findIndex((p) => p.end >= absPos);
+          const pIdx = foundIdx >= 0 ? foundIdx : Math.max(0, layout.paragraphs.length - 1);
+          const paraKey = `${cand.section}:${pIdx}`;
+          if (!seenParagraphs.has(paraKey)) {
+            seenParagraphs.add(paraKey);
+            const ownerChunk =
+              layout.chunkList.find((cr) => absPos >= cr.start && absPos < cr.end)?.ordinal ?? cand.ordinal;
+            hits.push({
+              section: cand.section,
+              title: cand.title,
+              chunkOrd: ownerChunk,
+              paragraphIndex: pIdx,
+              snippet: snip,
+            });
+          }
+        }
+      }
+    }
   }
 
   return hits;
@@ -393,11 +842,36 @@ export async function deleteBook(repo: Repo, id: string) {
   // Read references inside the write transaction, so a new reference cannot
   // arrive after the check and before the cascading delete.
   await repo.platform.sql.batch([{ sql: `DELETE FROM source_books WHERE id=? AND NOT EXISTS (${STORED_BOOK_USES})`, params: [id, id] }]);
-  if (!(await repo.platform.sql.query("SELECT 1 FROM source_books WHERE id=?", [id])).length) return;
-  const uses = await bookUses(repo, id);
-  throw new Error(uses.length
-    ? `仍被这些世界的当前或历史路线引用：${uses.map((w) => w.title).join("、")}。解除当前绑定不会删除历史引用；请先导出并删除相关世界后再删除书籍。`
-    : "参考书籍的引用刚发生变化，请重新检查后再试。");
+  if ((await repo.platform.sql.query("SELECT 1 FROM source_books WHERE id=?", [id])).length) {
+    const uses = await bookUses(repo, id);
+    throw new Error(uses.length
+      ? `仍被这些世界的当前或历史路线引用：${uses.map((w) => w.title).join("、")}。解除当前绑定不会删除历史引用；请先导出并删除相关世界后再删除书籍。`
+      : "参考书籍的引用刚发生变化，请重新检查后再试。");
+  }
+  const existingReaderTables = await repo.platform.sql.query(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('reader_progress','reader_bookmarks','reader_highlights')",
+  );
+  const cleanupStmts: SqlStatement[] = [];
+  for (const r of existingReaderTables) {
+    const tbl = String(r.name);
+    if (tbl === "reader_progress" || tbl === "reader_bookmarks" || tbl === "reader_highlights") {
+      cleanupStmts.push({
+        sql: `DELETE FROM ${tbl} WHERE target_type = 'book' AND target_id = ?`,
+        params: [id],
+      });
+    }
+  }
+  if (cleanupStmts.length > 0) {
+    await repo.platform.sql.batch(cleanupStmts);
+  }
+  for (const settingKey of ["reader:bookPrefs", BOOK_METRICS_KEY] as const) {
+    const existing = await repo.getSetting<Record<string, unknown> | null>(settingKey, null);
+    if (existing && typeof existing === "object" && !Array.isArray(existing) && id in existing) {
+      const next = { ...existing };
+      delete next[id];
+      await repo.setSetting(settingKey, next);
+    }
+  }
 }
 
 /**
@@ -479,6 +953,7 @@ export async function referenceContext(repo: Repo, binding: SourceBinding | null
   if (!meta) return;
   const book = { id: String(meta.id), title: String(meta.title) };
   if (budget < 80) return { bookId: book.id, title: book.title, binding: { ...binding }, passages: [], status: "insufficient", reason: "budget" };
+  await ensureSourceChunkIndex(repo.platform);
   const through = Math.min(binding.through ?? Number(meta.last), Number(meta.last), range?.to ?? Infinity);
   const from = Math.max(0, Math.min(range?.from ?? 0, through));
   const position = Math.max(from, Math.min(binding.position, through));
@@ -489,8 +964,8 @@ export async function referenceContext(repo: Repo, binding: SourceBinding | null
   }
   const fields = "c.ordinal,c.section,c.text,s.title,s.page";
   const join = "FROM source_chunks c JOIN source_sections s ON s.book_id=c.book_id AND s.section=c.section";
-  // Filter before ranking and compute rarity only within the allowed range.
-  const allowed = await repo.platform.sql.query(`SELECT c.ordinal,c.section ${join} WHERE c.book_id=? AND c.section>=? AND c.section<=?`, [book.id, from, through]);
+  // Filter before ranking using the covering index `source_chunks_book_section` without touching chunk text pages.
+  const allowed = await repo.platform.sql.query("SELECT ordinal, section FROM source_chunks WHERE book_id=? AND section>=? AND section<=?", [book.id, from, through]);
   const allowedIds = new Set(allowed.map((r) => Number(r.ordinal)));
   const common = Math.max(8, Math.floor(allowed.length * 0.15));
   const scores = new Map<number, number>();

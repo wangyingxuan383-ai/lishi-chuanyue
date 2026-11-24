@@ -1,10 +1,11 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { GENRE_PACKS, type GenrePack } from "../../content/genrePacks";
 import { HISTORY_LIFE_PACKS } from "../../content/eras/lifeNotes";
 import { BUILTIN_AGENT_SKILLS } from "../../engine/agent";
 import { contentCardPatch, editableContentCards, type ContentCardDraft } from "../../engine/writing/contentPacks";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
 import type { TurnRecord } from "../../engine/state/apply";
-import type { WorldState } from "../../engine/types";
+import type { StoryNode, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
 import { useApp } from "../app/context";
 
@@ -16,22 +17,38 @@ const PACKS = [
 type Pack = (typeof PACKS)[number];
 const namesFrom = (value: string) => [...new Set(value.split(/[、，,\n]+/).map(word => word.trim()).filter(Boolean))];
 
-function CardPreview({ pack, state, headId, busy, onSave, onBack, onClose, onDirty }: {
-  pack: Pack; state: WorldState; headId: string; busy: boolean;
+function CardPreview({ pack, state, headId, path, busy, onSave, onBack, onClose, onDirty }: {
+  pack: Pack; state: WorldState; headId: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; busy: boolean;
   onSave(patch: TurnRecord, summary: string, expectedHeadId?: string): Promise<void>;
   onBack(): void; onClose(): void; onDirty(): void;
 }) {
   const { game, toast } = useApp();
-  const [baseHead] = useState(headId), [cards, setCards] = useState(() => editableContentCards(pack));
+  const [expectedHead, setExpectedHead] = useState(headId), [cards, setCards] = useState(() => editableContentCards(pack));
   const [saving, setSaving] = useState(false), [error, setError] = useState("");
-  const stale = headId !== baseHead;
+  const syncUpkeep = !!path && headFollowsUpkeep(path, expectedHead, headId);
+  useEffect(() => {
+    if (headId === expectedHead) return;
+    if (path) {
+      if (headFollowsUpkeep(path, expectedHead, headId)) setExpectedHead(headId);
+      return;
+    }
+    let live = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (live && headFollowsUpkeep(loadedPath, expectedHead, headId)) {
+        setExpectedHead(headId);
+      }
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [game.repo, headId, expectedHead, path]);
+  const effectiveHead = syncUpkeep ? headId : expectedHead;
+  const stale = headId !== effectiveHead;
   const change = (id: string, patch: Partial<ContentCardDraft>) => { onDirty(); setCards(list => list.map(card => card.id === id ? { ...card, ...patch } : card)); };
   const save = async () => {
     if (busy || saving || stale) return;
     setError(""); setSaving(true);
     try {
       const patch = contentCardPatch(state, cards);
-      await onSave({ cards: patch }, `选用${pack.title}资料`, baseHead);
+      await onSave({ cards: patch }, `选用${pack.title}资料`, effectiveHead);
       toast(`已加入 ${patch.length} 项，可在设定集修改、删除或撤销`); onClose();
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setSaving(false); }
@@ -58,8 +75,8 @@ function CardPreview({ pack, state, headId, busy, onSave, onBack, onClose, onDir
   </div>;
 }
 
-export function BuiltinContent({ state, headId, busy, onSave, onClose }: {
-  state: WorldState; headId: string; busy: boolean; onSave(patch: TurnRecord, summary: string, expectedHeadId?: string): Promise<void>; onClose(): void;
+export function BuiltinContent({ state, headId, path, busy, onSave, onClose }: {
+  state: WorldState; headId: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; busy: boolean; onSave(patch: TurnRecord, summary: string, expectedHeadId?: string): Promise<void>; onClose(): void;
 }) {
   const { ask } = useApp();
   const [pack, setPack] = useState<Pack | null>(null), [dirty, setDirty] = useState(false);
@@ -70,7 +87,7 @@ export function BuiltinContent({ state, headId, busy, onSave, onClose }: {
     setPack(null); setDirty(false);
   };
   return <Sheet title="内置资料与灵感" dirty={dirty} onClose={onClose}><div ref={body}>
-    {pack ? <CardPreview key={pack.id} pack={pack} state={state} headId={headId} busy={busy} onSave={onSave} onBack={() => void back()} onDirty={() => setDirty(true)} onClose={onClose} /> : <div className="stack">
+    {pack ? <CardPreview key={pack.id} pack={pack} state={state} headId={headId} path={path} busy={busy} onSave={onSave} onBack={() => void back()} onDirty={() => setDirty(true)} onClose={onClose} /> : <div className="stack">
       <p className="muted m-0">只提供可编辑的背景资料，不预设剧情或结局。预览与取消都不改本局。</p>
       {["原创题材", "历史资料"].map(category => <section className="stack" key={category}><b>{category}</b>{PACKS.filter(pack => pack.category === category).map(pack => <button className="item-row" key={pack.id} onClick={() => setPack(pack)}><span><b>{pack.title}</b><small>{pack.scope}</small></span></button>)}</section>)}
     </div>}</div>

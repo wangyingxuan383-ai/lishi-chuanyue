@@ -151,6 +151,84 @@ export class Repo {
     return (await this.q("SELECT * FROM worlds WHERE archived = 0 ORDER BY played_at DESC")).map(toWorld);
   }
 
+  /**
+   * Single-query world shelf summary: extracts only protagonist name, time and era inside SQLite
+   * plus route turn count and latest narrative, avoiding 3N IPC round-trips and full `state_json` parses.
+   */
+  async listWorldCardInputs(): Promise<{
+    world: World;
+    protagonistName: string;
+    time: WorldState["time"];
+    era: WorldState["era"];
+    turns: number;
+    last: string;
+  }[]> {
+    const rows = await this.q(
+      `WITH heads AS (
+         SELECT w.*, l.node_id AS head_node_id,
+                json_extract(s.state_json, '$.protagonist.name') AS protagonist_name,
+                json_extract(s.state_json, '$.time') AS time_json,
+                json_extract(s.state_json, '$.era') AS era_json
+         FROM worlds w
+         JOIN lines l ON l.id = w.current_line_id AND l.world_id = w.id
+         JOIN states s ON s.node_id = l.node_id
+         WHERE w.archived = 0
+       ),
+       up(world_id, id, depth) AS (
+         SELECT id, head_node_id, 0 FROM heads
+         UNION ALL
+         SELECT up.world_id, n.parent_id, up.depth + 1
+         FROM nodes n JOIN up ON n.id = up.id
+         WHERE n.parent_id IS NOT NULL
+       ),
+       stats AS (
+         SELECT up.world_id,
+                SUM(CASE WHEN n.kind IN ('turn', 'fastforward') THEN 1 ELSE 0 END) AS turns
+         FROM up JOIN nodes n ON n.id = up.id
+         GROUP BY up.world_id
+       ),
+       latest_prose AS (
+         SELECT world_id, narrative FROM (
+           SELECT up.world_id, n.narrative,
+                  ROW_NUMBER() OVER (PARTITION BY up.world_id ORDER BY up.depth ASC) AS rn
+           FROM up JOIN nodes n ON n.id = up.id
+           WHERE n.kind <> 'edit'
+         ) WHERE rn = 1
+       )
+       SELECT h.*, COALESCE(st.turns, 0) AS turns, COALESCE(lp.narrative, '') AS last_narrative
+       FROM heads h
+       LEFT JOIN stats st ON st.world_id = h.id
+       LEFT JOIN latest_prose lp ON lp.world_id = h.id
+       ORDER BY h.played_at DESC`,
+    );
+    return rows.map((r) => ({
+      world: toWorld(r),
+      protagonistName: typeof r.protagonist_name === "string" ? r.protagonist_name : "",
+      time: parse<WorldState["time"]>(r.time_json ?? null, { start: "", elapsedMinutes: 0 }),
+      era: parse<WorldState["era"]>(r.era_json ?? null, { packId: null }),
+      turns: Number(r.turns ?? 0),
+      last: typeof r.last_narrative === "string" ? r.last_narrative : "",
+    }));
+  }
+
+  /** Single-query world + active line + bound source lookup for CompanionScreen without parsing full `state_json`. */
+  async listWorldSourceBriefs(): Promise<{ world: World; lineId: string | null; source: NonNullable<WorldState["source"]> | null }[]> {
+    const rows = await this.q(
+      `SELECT w.*, l.id AS active_line_id,
+              CASE WHEN s.node_id IS NOT NULL THEN json_extract(s.state_json, '$.source') ELSE NULL END AS source_json
+       FROM worlds w
+       LEFT JOIN lines l ON l.id = w.current_line_id AND l.world_id = w.id
+       LEFT JOIN states s ON s.node_id = l.node_id
+       WHERE w.archived = 0
+       ORDER BY w.played_at DESC`,
+    );
+    return rows.map((r) => ({
+      world: toWorld(r),
+      lineId: typeof r.active_line_id === "string" ? r.active_line_id : (typeof r.current_line_id === "string" ? r.current_line_id : null),
+      source: parse<NonNullable<WorldState["source"]> | null>(r.source_json ?? null, null) ?? null,
+    }));
+  }
+
   async getWorld(id: string): Promise<World | null> {
     const rows = await this.q("SELECT * FROM worlds WHERE id = ?", [id]);
     return rows[0] ? toWorld(rows[0]) : null;

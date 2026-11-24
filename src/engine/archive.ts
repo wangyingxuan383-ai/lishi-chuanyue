@@ -8,7 +8,7 @@ import { cleanReadablePi, cleanSource } from "./pi-readable";
 import type { Json, Row, SqlStatement } from "../platform";
 import { newId, type Repo } from "./db/repo";
 import { checkChallenge, checkScript } from "./modes";
-import { bookStatements, chunksOf } from "./sources/library";
+import { bookStatements, chunksOf, getBook } from "./sources/library";
 import { validBinding, type SourceBook, type AnalysisJob } from "./sources/types";
 import { sourceAnalysisResult, structuredSourceAnalysis } from "./sources/facts";
 import { listNotes, listStoryNotes, type CanonNote } from "./sources/notes";
@@ -185,9 +185,9 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
   for(const correction of factCorrections)findBooks(JSON.parse(String(correction.json)));
   const books: BookBundle[] = [];
   for (const id of bookIds) {
-    const [row] = await repo.platform.sql.query("SELECT json FROM source_books WHERE id=?", [id]);
-    if (!row) throw new Error("参考书籍缺失，无法导出完整世界");
-    books.push({ book: JSON.parse(String(row.json)), jobs: (await repo.platform.sql.query("SELECT json FROM source_jobs WHERE book_id=?", [id])).map((r) => JSON.parse(String(r.json))),
+    const book = await getBook(repo, id);
+    if (!book) throw new Error("参考书籍缺失，无法导出完整世界");
+    books.push({ book, jobs: (await repo.platform.sql.query("SELECT json FROM source_jobs WHERE book_id=?", [id])).map((r) => JSON.parse(String(r.json))),
       analysis: (await repo.platform.sql.query("SELECT job_id AS jobId,ordinal,section,text FROM source_analysis WHERE book_id=?", [id])) as any,
       notes: (await listNotes(repo,id,worldId)).map((n)=>({...n,status:n.status==="running"?"paused":n.status})) });
   }

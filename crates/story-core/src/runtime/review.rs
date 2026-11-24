@@ -1,5 +1,5 @@
 //! 原著核对: the deep tier's checked rewrite and the standard tier's lite check
-//! (reference-review-3 and reference-review-lite-5, D161, D162).
+//! (reference-review-4 and reference-review-lite-5, D161, D162).
 use super::*;
 
 impl Engine {
@@ -27,9 +27,23 @@ impl Engine {
             Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-5","status":"skipped","reason":error.to_string()}))),
         };
         // Do not repair truncated JSON into an executable record patch.
-        let text=result.text.trim();
-        let body=text.strip_prefix("```json").or_else(||text.strip_prefix("```")).and_then(|s|s.strip_suffix("```")).unwrap_or(text).trim();
-        let raw_issues=serde_json::from_str::<Value>(body).map(|v|v["issues"].clone()).unwrap_or(Value::Null);
+        let stripped = chat::strip_inline_think(&result.text);
+        let text = stripped.trim();
+        let raw_issues = if text.is_empty() || output_cut_short(&result) {
+            Value::Null
+        } else {
+            let body = text
+                .strip_prefix("```json")
+                .or_else(|| text.strip_prefix("```"))
+                .and_then(|s| s.strip_suffix("```"))
+                .unwrap_or(text)
+                .trim();
+            serde_json::from_str::<Value>(body)
+                .ok()
+                .or_else(|| rules::record::complete_json(text))
+                .map(|v| v["issues"].clone())
+                .unwrap_or(Value::Null)
+        };
         let Some(raw_list) = raw_issues.as_array() else {
             return Ok((narrative.to_owned(), record.clone(), json!({
                 "version":"reference-review-lite-5","status":"skipped","issues":[],"skipped":0,
@@ -57,45 +71,130 @@ impl Engine {
         }
         Ok((revised,revised_record,json!({"version":"reference-review-lite-5","status":if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
     }
+    /// Deep-tier canon review (`reference-review-4`): at most one optional read-tool
+    /// round plus a compact sentence-patch reply over the passage as a whole.
+    /// Like `review_reference_lite`, any non-cancellation / non-stale problem keeps
+    /// the already-written passage and record intact instead of blocking the turn.
     pub(super) async fn review_reference(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
-        let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
-        let parts=crate::stage_context::parts(narrative,(cap/6).clamp(256,2400));
-        let mut body=String::new();let mut current=record.clone();let mut findings=vec![];let mut unresolved=vec![];
-        for (index,part) in parts.iter().enumerate(){
-            self.check(shared)?;
-            let reviewed=self.review_reference_part(shared,plan,mcp,tools,part,&current,index).await?;
-            body.push_str(reviewed["narrative"].as_str().unwrap_or(part));current=reviewed["record"].clone();
-            findings.extend(reviewed["report"]["findings"].as_array().cloned().unwrap_or_default());
-            unresolved.extend(reviewed["report"]["unresolved"].as_array().cloned().unwrap_or_default());
+        match self.review_reference_inner(shared, plan, mcp, tools, narrative, record).await {
+            Ok(value) => Ok(value),
+            Err(error @ (Error::Cancelled | Error::Stale)) => Err(error),
+            Err(error) => {
+                let note = match &error {
+                    Error::Limit(_) => "原著核对达到单步额度上限，已保留本段原稿；需要深查可点本段用“按原著纠错”。".to_owned(),
+                    Error::Refused(_) => "AI 服务跳过了本次原著自动核对，已保留本段原稿。".to_owned(),
+                    _ => "原著自动核对未完成，已保留本段原稿；需要深查可点本段用“按原著纠错”。".to_owned(),
+                };
+                Ok(json!({
+                    "narrative": narrative,
+                    "record": record,
+                    "report": {
+                        "version": "reference-review-4",
+                        "parts": 1,
+                        "findings": [],
+                        "issues": [],
+                        "unresolved": [note],
+                        "reason": error.to_string(),
+                        "status": "skipped"
+                    }
+                }))
+            }
         }
-        Ok(json!({"narrative":body,"record":current,"report":{"version":"reference-review-3","parts":parts.len(),"findings":findings,"unresolved":unresolved,"status":if unresolved.is_empty(){"reviewed"}else{"partial"}}}))
     }
-    async fn review_reference_part(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value,part:usize)->Result<Value>{
+
+    async fn review_reference_inner(self:&Arc<Self>, shared:&Shared, plan:&RunPlan, mcp:&BuiltinMcp, tools:&[Value], narrative:&str, record:&Value)->Result<Value>{
         self.emit_run_event(plan,json!({"type":"organizing","phase":"reference-review"}))?;
-        let compact=crate::stage_context::state(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/10).min(1500)).to_string();
-        let mut reference=plan.reference.clone().unwrap_or(Value::Null);
-        let mut left=(plan.meta["budgetChars"].as_u64().unwrap_or(12000)/4) as usize;
-        let mut evidence=vec![];
-        for p in reference["passages"].as_array().into_iter().flatten().filter(|p|p["kind"]=="original") {let cost=p.to_string().encode_utf16().count();if cost<=left{left-=cost;evidence.push(p.clone());}}
-        reference["passages"]=evidence.into();
-        let mut messages=vec![json!({"role":"system","content":r#"核对尚未保存草稿中新引入的关键身份、关系、称谓、能力、物品、时间和事件。保留玩家明确分支，AI自行写错不算玩家改写。先用已提供原文，需要时批量定位具体主张，再read_original读原文与邻文，不扫描整本书。只纠正有依据的细节，不替玩家作决定，不补回已经改变的命运。缺少原文依据的具体值保留不确定性；确实影响当前关键情节且必须玩家决定时填写needsPlayer。最后只返回JSON：{"replacement":"完整核对后的本段正文","recordPatch":{仅受改稿影响的记录字段},"findings":[{"claim":"具体主张","status":"supported/branch/uncertain","playerFactId":"branch时对应的玩家事实ID","playerQuote":"当前是玩家写入正文时也可引用其准确原句；来源不明的旧事实标uncertain","citations":[{"section":0,"chunk":0,"quote":"实际读到的原句"}]}],"unresolved":["资料不足"],"needsPlayer":"必要问题，可省略"}。没有新关键事实时findings可为空；核对说明不进入正文。"#}),json!({"role":"user","content":format!("【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【已提供原文】{}\n【待核对正文】{}\n【原回合记录】{}",plan.action,plan.reading_source(),compact,crate::stage_context::facts(&plan.state,narrative,(plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize/12).min(1400)),reference,narrative,record)})];
-        for round in 0..2 {
-            let final_round=round==1;
-            messages.push(json!({"role":"system","content":if final_round {"这是本段核对的收尾请求，不再调用工具。根据实际已读材料输出完整JSON，保留玩家分支；不能核实的项目标uncertain并写入unresolved，不能把候选或推测当原著。确实必须玩家决定的关键矛盾填needsPlayer。不延长检索，不把无法核实说成已核实。".to_owned()} else {format!("本段核对第{}轮，最多再有{}轮查证，然后必须返回JSON结论。只检查草稿新引入的具体细节；复用当前已有原句，候选够用后read_original，不再次用相同人物名泛搜；互不依赖的问题同批查证。",round+1,1-round)}}));
-            let review_tools=if final_round{vec![]}else{tools.iter().filter(|t|["read_original","prepare_reference_check","read_canon_facts","read_history","read_characters"].contains(&t["function"]["name"].as_str().unwrap_or(""))).cloned().collect()};
-            let result=self.complete(shared,&format!("reference-review:{part}:{round}"),messages.clone(),review_tools,false).await?;
-            if !result.tool_calls.is_empty(){
+        let cap=plan.meta["budgetChars"].as_u64().unwrap_or(12000) as usize;
+        let extra_passages = shared.lock().map_err(|_| Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
+        let review_tools: Vec<Value> = tools
+            .iter()
+            .filter(|t| ["read_original","prepare_reference_check","read_canon_facts","read_history","read_characters"].contains(&t["function"]["name"].as_str().unwrap_or("")))
+            .cloned()
+            .collect();
+        let initial_passages = collect_review_passages(plan, &extra_passages);
+        if initial_passages.is_empty() {
+            return Ok(json!({
+                "narrative": narrative,
+                "record": record,
+                "report": {
+                    "version": "reference-review-4",
+                    "parts": 1,
+                    "findings": [],
+                    "issues": [],
+                    "unresolved": [],
+                    "reason": "no_passages",
+                    "status": "skipped"
+                }
+            }));
+        }
+        let compact=crate::stage_context::state(&plan.state,narrative,(cap/10).min(1500)).to_string();
+        let mut left=(cap/4).clamp(1200, 3600);
+        let mut evidence_text = String::new();
+        for p in &initial_passages {
+            let line = lite_evidence_line(p);
+            let cost = line.encode_utf16().count();
+            if cost <= left {
+                left -= cost;
+                evidence_text.push_str(&line);
+            }
+        }
+        let notes=plan.reference.as_ref()
+            .and_then(|r| r["bookNotes"].as_str().or_else(|| r["notes"].as_str()))
+            .unwrap_or("");
+        let position = plan.reading_source()["position"].as_u64().unwrap_or(0);
+        let pos_title = plan
+            .reference
+            .as_ref()
+            .and_then(|r| r["positionTitle"].as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("");
+        let pos_label = if pos_title.is_empty() {
+            format!("原著第{}节前后", position + 1)
+        } else {
+            format!("原著第{}节（{pos_title}）前后", position + 1)
+        };
+        let mut messages=vec![
+            json!({"role":"system","content":r#"你是深度档原著校对。故事现在大约在【当前位置】，那之后的情节尚未发生。
+规则：
+- 只核对本段草稿中新引入、且在当前位置就已成立的原著具体细节（人名、称谓、身份、关系、能力设定、器物、地点、事件规则）。
+- 保留玩家自创能力、金手指、玩家行动及本局既有分支；资料里没有、属于玩家分支或拿不准的内容一律不改（不要把自创设定当错改掉，也不要拿后文剧透纠正现在）。
+- 若下方【已提供原文】已足够判断，直接输出 JSON，不要调用工具！只有草稿出现了明显可疑的原著专有设定且下方原文未覆盖时，才在同一批里精简查证一次并 read_original，绝不泛搜整本书。
+- 只针对确有原文依据的错误给出最小原句替换（最多 5 条），严禁重写或抄录整段无错正文！每个更正必须附实际读到的原文引文（section 和 chunk 用原文标题显示的数字，quote 逐字照抄原文片段），recordPatch 只填受该句更正影响的回合记录字段（无影响留 {}）。
+- 没有需要改的硬伤时直接返回 {"issues":[],"findings":[],"unresolved":[]}。只返回纯 JSON 对象，不加代码块：
+{"issues":[{"quote":"正文中有错的原句，逐字照抄","problem":"与原著哪里不符","fix":"改正后的这句","citations":[{"section":1,"chunk":1,"quote":"对应原著片段原句"}],"recordPatch":{}}],"findings":[],"unresolved":[]}"#}),
+            json!({"role":"user","content":format!("【当前位置】{pos_label}\n【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【原著札记】{}\n【已提供原文】{}\n【待核对正文】\n{narrative}\n【原回合记录】\n{record}",
+                plan.action,
+                plan.reading_source(),
+                compact,
+                crate::stage_context::facts(&plan.state,narrative,(cap/12).min(1400)),
+                if notes.is_empty(){"（无）"}else{notes},
+                if evidence_text.is_empty(){"（暂无预取原文片段；若仅为玩家自创行动或本局延续且无明显原著矛盾，直接返回空 issues）"}else{&evidence_text}
+            )})
+        ];
+        let max_rounds = if review_tools.is_empty() { 1usize } else { 2usize };
+        for round in 0..max_rounds {
+            self.check(shared)?;
+            let final_round = round + 1 == max_rounds;
+            if final_round && round > 0 {
+                messages.push(json!({"role":"system","content":"查证到此为止，不再调用工具。请直接输出纯 JSON 校对结果；无法核实或属玩家分支的细节不改，可记入 unresolved。"}));
+            }
+            let offered = if final_round { vec![] } else { review_tools.clone() };
+            let result = self.complete_with(shared, &format!("reference-review:0:{round}"), messages.clone(), offered, false, final_round && !review_tools.is_empty()).await?;
+            if !result.tool_calls.is_empty() && !final_round {
                 messages.push(chat::assistant_message(&result));
                 for call in &result.tool_calls {
                     let name=call["function"]["name"].as_str().unwrap_or("");
-                    if !is_read_tool(name){return Err(Error::fail(crate::failure::FailKind::Review,"原著核对只允许读取与预演"));}
-                    let args:Value=serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}"))
-                        .map_err(|_| Error::fail(crate::failure::FailKind::Review, "原著核对的查阅参数不完整"))?;
-                    let key=format!("reference-tool:{part}:{round}:{}",call["id"].as_str().unwrap_or(""));
+                    if !is_read_tool(name){
+                        messages.push(json!({"role":"tool","tool_call_id":call["id"],"content":json!({"isError":true,"message":"原著核对只允许只读查阅"}).to_string()}));
+                        continue;
+                    }
+                    let args:Value=serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or_else(|_| json!({}));
+                    let key=format!("reference-tool:0:{round}:{}",call["id"].as_str().unwrap_or(""));
                     let cached=self.store.lock()?.query_row("SELECT output_json FROM execution_steps WHERE run_id=? AND step_key=? AND status='done' AND kind=? AND input_json=?",params![plan.id,key,name,args.to_string()],|r|r.get::<_,String>(0)).optional()?;
                     let value=if let Some(cached)=cached {serde_json::from_str(&cached)?} else {
                         shared.lock().map_err(|_|Error::Cancelled)?.charge_tool()?; self.checkpoint(shared)?;
-                        let output=mcp.call(name,&args).await?;
+                        let _ = self.emit_run_event(plan, json!({"type":"tool","tool":name}));
+                        let output=mcp.call(name,&args).await.unwrap_or_else(|e| json!({"isError":true,"message":e.to_string()}));
                         self.store.owned(plan, |tx| {
                             tx.execute("INSERT OR REPLACE INTO execution_steps(run_id,step_key,kind,status,input_json,output_json) VALUES(?,?,?,'done',?,?)",params![plan.id,key,name,args.to_string(),output.to_string()])?;
                             Ok(())
@@ -104,41 +203,206 @@ impl Engine {
                     };
                     messages.push(json!({"role":"tool","tool_call_id":call["id"],"content":value.to_string()}));
                 }
+                // Record any newly read original excerpts so citation verification sees them.
+                self.note_reading(shared, &messages)?;
                 continue;
             }
-            let mut report=match rules::record::complete_json(&result.text){Some(report)=>report,None=>{
-                if refused(&result,&result.text,false){return Err(Error::Refused("AI服务拒绝了这次原著核对，正文草稿已保留，原路线未改动。请检查服务提示或换用可用模型后继续。".into()));}
-                if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":"请按要求返回完整JSON核对结果；资料不足标uncertain，不再展开查证。"}));continue;}
-                return Err(Error::fail(crate::failure::FailKind::Review,"原著核对未返回完整结果，正文草稿已保留，可继续重试"));
-            }};
-            let provided=shared.lock().map_err(|_|Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
-            if let Err(error)=crate::writing_context::validate_findings(&report,&provided,&plan.state,plan.reading_source(),&plan.action){
-                if !final_round{messages.push(json!({"role":"assistant","content":result.text}));messages.push(json!({"role":"user","content":format!("核对格式或依据未通过：{}。保留有效结果，补查或标明uncertain；不要把不明来源旧状态当玩家分支。",error)}));continue;}
-                // Unverified evidence does not become a protected branch or a
-                // verified correction. Keep the untouched draft and surface each
-                // missing basis; a local correction can perform deeper checking.
-                if !report["findings"].is_array(){return Err(check_reply_error(error));}
-                let mut unresolved=report["unresolved"].as_array().cloned().unwrap_or_default();
-                for finding in report["findings"].as_array_mut().unwrap(){
-                    if crate::writing_context::validate_findings(&json!({"findings":[finding.clone()]}),&provided,&plan.state,plan.reading_source(),&plan.action).is_err(){
-                        unresolved.push(format!("{}：尚未取得有效原文或玩家分支依据",finding["claim"].as_str().unwrap_or("关键细节")).into());
-                        finding["status"]="uncertain".into();finding["citations"]=json!([]);
+
+            let Some(report) = rules::record::complete_json(&result.text) else {
+                return Ok(json!({
+                    "narrative": narrative,
+                    "record": record,
+                    "report": {
+                        "version": "reference-review-4",
+                        "parts": 1,
+                        "findings": [],
+                        "issues": [],
+                        "unresolved": ["原著核对未返回完整 JSON，已保留本段原稿。"],
+                        "status": "skipped"
+                    }
+                }));
+            };
+
+            let latest_extra = shared.lock().map_err(|_| Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
+            let all_passages = collect_review_passages(plan, &latest_extra);
+            let passage_refs: Vec<&Value> = all_passages.iter().collect();
+            let mut unresolved: Vec<Value> = report["unresolved"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(Value::from))
+                .collect();
+            if let Some(question) = report["needsPlayer"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                unresolved.push(format!("待你确认的细节：{question}").into());
+            }
+
+            // Path A: Compact sentence-level `issues` (preferred fast path).
+            if let Some(raw_list) = report["issues"].as_array() {
+                let mut verified_issues = Vec::new();
+                let mut unverified = 0usize;
+                for issue in raw_list.iter().take(5) {
+                    if has_review_evidence(plan, &passage_refs, issue) {
+                        verified_issues.push(issue.clone());
+                    } else {
+                        unverified += 1;
                     }
                 }
-                report["unresolved"]=unresolved.into();report["replacement"]=narrative.into();report["recordPatch"]=json!({});
+                let (revised, revised_record, applied, apply_skipped) =
+                    apply_lite_review(narrative, record, &Value::Array(verified_issues));
+                let skipped = unverified + apply_skipped;
+                if unverified > 0 {
+                    unresolved.push("部分更正没有对应到实际读到的原著原句，已跳过未核实条目。".into());
+                }
+                if apply_skipped > 0 {
+                    unresolved.push("部分更正未能同时校准正文与回合记录，已跳过冲突条目。".into());
+                }
+                let findings = report["findings"].as_array().cloned().unwrap_or_default();
+                let final_record = if turn_record_problem(plan, &revised_record).is_none() {
+                    revised_record
+                } else {
+                    record.clone()
+                };
+                let final_narrative = if turn_record_problem(plan, &final_record).is_none() {
+                    revised
+                } else {
+                    narrative.to_owned()
+                };
+                return Ok(json!({
+                    "narrative": final_narrative,
+                    "record": final_record,
+                    "report": {
+                        "version": "reference-review-4",
+                        "parts": 1,
+                        "issues": applied,
+                        "findings": findings,
+                        "skipped": skipped,
+                        "unresolved": unresolved,
+                        "status": if skipped > 0 || !unresolved.is_empty() { "partial" } else { "reviewed" }
+                    }
+                }));
             }
-            shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report.clone(); self.checkpoint(shared)?;
-            if let Some(question)=report["needsPlayer"].as_str().filter(|s|!s.trim().is_empty()){return Err(Error::fail(crate::failure::FailKind::Review,format!("这段关键情节还需确认：{question}")));}
-            let mut local=plan.clone();local.meta["anchor"]=json!({"original":narrative});local.meta["correctionRange"]=json!({"start":0,"end":narrative.encode_utf16().count()});local.meta["originalRecord"]=record.clone();
-            let revised=crate::writing_context::local_correction(&local,&report).map_err(check_reply_error)?;
-            let mut issues=vec![];let record=rules::record::normalize_record(&revised["record"],&mut issues).ok_or_else(||Error::fail(crate::failure::FailKind::Review,"核对后的回合记录无效，草稿已保留"))?;
-            if let Some(problem) = turn_record_problem(plan, &record) {
-                return Err(Error::fail(crate::failure::FailKind::Review, format!("核对后的记录不完整：{problem}")));
+
+            // Path B: Legacy `replacement` + `findings` compatibility.
+            if report["replacement"].is_string() {
+                let findings_ok = report["findings"].is_array()
+                    && crate::writing_context::validate_findings(
+                        &report,
+                        &all_passages,
+                        &plan.state,
+                        plan.reading_source(),
+                        &plan.action,
+                    )
+                    .is_ok();
+                if findings_ok {
+                    let mut local = plan.clone();
+                    local.meta["anchor"] = json!({"original": narrative});
+                    local.meta["correctionRange"] = json!({"start": 0, "end": narrative.encode_utf16().count()});
+                    local.meta["originalRecord"] = record.clone();
+                    if let Ok(revised) = crate::writing_context::local_correction(&local, &report) {
+                        let mut issues = vec![];
+                        if let Some(norm_rec) = rules::record::normalize_record(&revised["record"], &mut issues) {
+                            if turn_record_problem(plan, &norm_rec).is_none() {
+                                return Ok(json!({
+                                    "narrative": revised["narrative"].as_str().unwrap_or(narrative),
+                                    "record": norm_rec,
+                                    "report": {
+                                        "version": "reference-review-4",
+                                        "parts": 1,
+                                        "findings": report["findings"],
+                                        "unresolved": unresolved,
+                                        "status": if unresolved.is_empty() { "reviewed" } else { "partial" }
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                } else {
+                    unresolved.push("核对结果缺少可验证的原著引文，已保留本段原稿。".into());
+                }
             }
-            return Ok(json!({"narrative":revised["narrative"],"record":record,"report":{"version":"reference-review-3","findings":report["findings"],"unresolved":report["unresolved"],"status":if report["unresolved"].as_array().is_some_and(|a|!a.is_empty()){"partial"}else{"reviewed"}}}));
+
+            return Ok(json!({
+                "narrative": narrative,
+                "record": record,
+                "report": {
+                    "version": "reference-review-4",
+                    "parts": 1,
+                    "findings": report["findings"].as_array().cloned().unwrap_or_default(),
+                    "issues": [],
+                    "unresolved": unresolved,
+                    "status": if unresolved.is_empty() { "reviewed" } else { "partial" }
+                }
+            }));
         }
-        Err(Error::fail(crate::failure::FailKind::Review,"关键细节仍需补查，草稿已保留；请缩小待查问题或补充必要线索"))
+
+        Ok(json!({
+            "narrative": narrative,
+            "record": record,
+            "report": {
+                "version": "reference-review-4",
+                "parts": 1,
+                "findings": [],
+                "issues": [],
+                "unresolved": ["原著核对已达查证轮数上限，已保留本段原稿。"],
+                "status": "partial"
+            }
+        }))
     }
+}
+
+fn collect_review_passages(plan: &RunPlan, extra: &[Value]) -> Vec<Value> {
+    let through = plan.reading_source()["through"].as_u64().unwrap_or(u64::MAX);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let pre = plan
+        .reference
+        .as_ref()
+        .and_then(|r| r["passages"].as_array())
+        .into_iter()
+        .flatten();
+    for p in extra.iter().rev().chain(pre) {
+        if p["kind"] != "original" {
+            continue;
+        }
+        let Some(sec) = p["section"].as_u64() else { continue };
+        let Some(chk) = p["chunk"].as_u64() else { continue };
+        let Some(txt) = p["text"].as_str().filter(|t| !t.trim().is_empty()) else { continue };
+        if sec > through {
+            continue;
+        }
+        if seen.insert((sec, chk, txt.to_owned())) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
+
+/// Accepts both 1-based labels (`[第N节·片段M]`) and 0-based tool coordinates (`section`, `chunk`).
+fn has_review_evidence(plan: &RunPlan, passages: &[&Value], issue: &Value) -> bool {
+    if has_lite_evidence(plan, passages, issue) {
+        return true;
+    }
+    issue["citations"].as_array().is_some_and(|citations| {
+        !citations.is_empty()
+            && citations.iter().all(|cite| {
+                let Some(section) = cite["section"].as_u64() else { return false };
+                let Some(chunk) = cite["chunk"].as_u64() else { return false };
+                cite["quote"].as_str().is_some_and(|quote| {
+                    let norm_quote = normalize_quote_for_match(quote);
+                    !quote.trim().is_empty()
+                        && passages.iter().any(|p| {
+                            p["section"].as_u64() == Some(section)
+                                && p["chunk"].as_u64() == Some(chunk)
+                                && p.get("bookId").is_none_or(|id| id == &plan.reading_source()["bookId"])
+                                && p["text"].as_str().is_some_and(|text| {
+                                    text.contains(quote)
+                                        || (norm_quote.chars().count() >= 4
+                                            && normalize_quote_for_match(text).contains(&norm_quote))
+                                })
+                        })
+                })
+            })
+    })
 }
 
 /// The lite check's request: the passage, what the player asked, and the

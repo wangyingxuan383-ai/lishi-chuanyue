@@ -15,7 +15,7 @@ export const DEPTH_NOTE: Record<Depth, string> = {
   deep: "可以多次翻原著原文，写完逐段核对。最贴原著，也最慢、最费。",
 };
 export const REFERENCE_REVIEW_LITE = "reference-review-lite-5";
-export const REFERENCE_REVIEW_FULL = "reference-review-3";
+export const REFERENCE_REVIEW_FULL = "reference-review-4";
 
 /** A world saved before tiers plays at 标准. */
 export function depthOf(settings: Pick<WorldSettings, "depth">): Depth {

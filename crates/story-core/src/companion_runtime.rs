@@ -21,7 +21,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -81,6 +81,8 @@ struct ActiveCompanionRun {
     gear: String,
     world_id: Option<String>,
     model_name: String,
+    started: Instant,
+    totals: Mutex<UsageTotals>,
     cancel: CancellationToken,
     live: Mutex<LiveState>,
     notify: Notify,
@@ -121,7 +123,19 @@ pub struct CompanionRuntime {
     pub store: CompanionStore,
     pub(crate) model: Arc<dyn Model>,
     active: Mutex<HashMap<String, Arc<ActiveCompanionRun>>>,
+    compacting: Mutex<HashSet<String>>,
     lease: LeaseFactory,
+}
+
+struct CompactGuard<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    session_id: String,
+}
+
+impl Drop for CompactGuard<'_> {
+    fn drop(&mut self) {
+        lock_unpoison(self.set).remove(&self.session_id);
+    }
 }
 
 struct PreparedRun {
@@ -140,7 +154,7 @@ struct PreparedRun {
     assistant_message: Value,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct UsageTotals {
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
@@ -204,6 +218,50 @@ fn extract_completion_thinking(reply: &Completion) -> Option<String> {
         }
     }
     None
+}
+
+fn merge_thinking_parts(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn output_was_truncated(reply: &Completion) -> bool {
+    matches!(
+        reply.finish_reason.as_deref().unwrap_or("").to_ascii_lowercase().as_str(),
+        "length" | "max_tokens" | "max_output_tokens"
+    )
+}
+
+fn detect_refusal(reply: &Completion, visible_text: &str) -> bool {
+    if matches!(
+        reply.finish_reason.as_deref().unwrap_or("").to_ascii_lowercase().as_str(),
+        "content_filter" | "safety" | "prohibited_content" | "recitation" | "refusal"
+    ) {
+        return true;
+    }
+    let trimmed = visible_text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("the prompt could not be submitted")
+        || lower.starts_with("the prompt contains sensitive words")
+        || (trimmed.chars().count() < 80
+            && [
+                "抱歉，我无法提供",
+                "抱歉，我无法生成",
+                "抱歉，我不能提供",
+                "抱歉，我不能生成",
+                "抱歉，我无法协助",
+                "抱歉，我不能协助",
+                "i can't assist with",
+                "i cannot assist with",
+                "i'm sorry, but i can't assist",
+                "i am sorry, but i cannot assist",
+            ]
+            .iter()
+            .any(|phrase| lower.starts_with(phrase)))
 }
 
 fn read_world_snapshot_db(
@@ -402,7 +460,7 @@ fn build_wire_messages(
         .filter(|m| {
             matches!(m["role"].as_str(), Some("user" | "assistant"))
                 && !m["content"].as_str().unwrap_or("").trim().is_empty()
-                && m["status"].as_str() != Some("streaming")
+                && m["status"].as_str() == Some("done")
         })
         .collect();
 
@@ -825,6 +883,13 @@ fn execute_book_tool_db(
             }
         }
     }
+    let valid_sections: HashSet<i64> = {
+        let book_id = plan.state["source"]["bookId"].as_str().unwrap_or("");
+        let mut stmt = db.prepare("SELECT section FROM source_sections WHERE book_id=?1")?;
+        let rows = stmt.query_map([book_id], |r| r.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let through_ceiling = plan.state["source"]["through"].as_i64();
     let mut cites = Vec::new();
     let summary = match name {
         "list_sections" => {
@@ -838,7 +903,12 @@ fn execute_book_tool_db(
         "search_original" | "read_original" => {
             let excerpts = output["excerpts"].as_array().cloned().unwrap_or_default();
             for ex in &excerpts {
-                if ex["kind"] == "original" && ex["match"] != "nearby" {
+                let sec_ok = ex["section"].as_i64().is_some_and(|sec| {
+                    sec >= 0
+                        && valid_sections.contains(&sec)
+                        && through_ceiling.is_none_or(|c| sec <= c)
+                });
+                if ex["kind"] == "original" && ex["match"] != "nearby" && sec_ok {
                     cites.push(json!({
                         "kind": "book",
                         "bookId": ex["bookId"],
@@ -988,6 +1058,7 @@ impl CompanionRuntime {
             store: CompanionStore(store),
             model,
             active: Mutex::new(HashMap::new()),
+            compacting: Mutex::new(HashSet::new()),
             lease,
         }
     }
@@ -1056,6 +1127,8 @@ impl CompanionRuntime {
             gear: prep.gear.clone(),
             world_id: prep.bound_world_id.clone(),
             model_name: prep.model.model.clone(),
+            started: Instant::now(),
+            totals: Mutex::new(UsageTotals::default()),
             cancel: CancellationToken::new(),
             live: Mutex::new(LiveState {
                 seq: 1,
@@ -1108,7 +1181,10 @@ impl CompanionRuntime {
         let session_id = ensure_materialized_session_tx(&tx, raw_session_id)?;
         {
             let active = lock_unpoison(&self.active);
-            if active.values().any(|r| r.session_id == session_id) {
+            let compacting = lock_unpoison(&self.compacting);
+            if active.values().any(|r| r.session_id == session_id)
+                || compacting.contains(&session_id)
+            {
                 return Err(Error::Busy {
                     holder: "companion".into(),
                     until_ms: 0,
@@ -1379,7 +1455,6 @@ impl CompanionRuntime {
     }
 
     async fn execute_run(&self, mut prep: PreparedRun, run: Arc<ActiveCompanionRun>) {
-        let started = Instant::now();
         let mut totals = UsageTotals::default();
         let outcome = if prep.gear == "research" {
             self.run_research_loop(&mut prep, &run, &mut totals).await
@@ -1421,7 +1496,11 @@ impl CompanionRuntime {
             }
         }
 
-        let _ = settle_run_db(&self.store.0, &run, &totals, started.elapsed().as_millis() as u64);
+        {
+            *lock_unpoison(&run.totals) = totals.clone();
+        }
+        let elapsed_ms = run.started.elapsed().as_millis() as u64;
+        let _ = settle_run_db(&self.store.0, &run, &totals, elapsed_ms);
         lock_unpoison(&self.active).remove(&run.run_id);
         run.notify.notify_waiters();
     }
@@ -1437,6 +1516,8 @@ impl CompanionRuntime {
         totals: &mut UsageTotals,
     ) -> Result<Completion> {
         let mut tried_fallback = false;
+        let mut max_tokens_steps = 0u8;
+        let mut swapped_max_completion = false;
         loop {
             if run.cancel.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -1448,6 +1529,7 @@ impl CompanionRuntime {
                     .map(|m| m["content"].as_str().map(|s| s.chars().count()).unwrap_or(0))
                     .sum::<usize>(),
             );
+            *lock_unpoison(&run.totals) = totals.clone();
             let run_sink = Arc::clone(run);
             let base_thinking = {
                 let live = lock_unpoison(&run.live);
@@ -1456,6 +1538,8 @@ impl CompanionRuntime {
             let base_thinking_in = base_thinking.clone();
             let round_thinking = Arc::new(Mutex::new(String::new()));
             let round_thinking_in = Arc::clone(&round_thinking);
+            let round_inline_thinking = Arc::new(Mutex::new(String::new()));
+            let round_inline_thinking_in = Arc::clone(&round_inline_thinking);
 
             let sink: TextSink = Arc::new(move |frame: String| {
                 if frame == "\0phase:thinking" {
@@ -1474,24 +1558,41 @@ impl CompanionRuntime {
                         } else {
                             rt.push_str(rest);
                         }
-                        if base_thinking_in.is_empty() {
-                            rt.clone()
-                        } else {
-                            format!("{base_thinking_in}\n\n{}", rt.as_str())
-                        }
+                        let inline = lock_unpoison(&round_inline_thinking_in).clone();
+                        merge_thinking_parts(&[&base_thinking_in, rt.as_str(), &inline])
                     };
                     run_sink.bump(|live| {
-                        live.phase = "thinking".into();
+                        if live.content.is_empty() {
+                            live.phase = "thinking".into();
+                        }
                         live.thinking = combined;
                     });
                     return;
                 }
-                if frame.starts_with('\0') || !stream_visible_text {
+                if frame.starts_with('\0') {
+                    return;
+                }
+                let (visible, inline_think) = chat::split_inline_think(&frame);
+                let combined_thinking = {
+                    *lock_unpoison(&round_inline_thinking_in) = inline_think.clone();
+                    let proto = lock_unpoison(&round_thinking_in).clone();
+                    merge_thinking_parts(&[&base_thinking_in, &proto, &inline_think])
+                };
+                if !stream_visible_text && combined_thinking.is_empty() {
                     return;
                 }
                 run_sink.bump(|live| {
-                    live.phase = "writing".into();
-                    live.content = frame;
+                    if !combined_thinking.is_empty() {
+                        live.thinking = combined_thinking;
+                    }
+                    if stream_visible_text {
+                        if !visible.is_empty() {
+                            live.phase = "writing".into();
+                            live.content = visible;
+                        } else if !inline_think.is_empty() && live.content.is_empty() {
+                            live.phase = "thinking".into();
+                        }
+                    }
                 });
             });
 
@@ -1505,20 +1606,61 @@ impl CompanionRuntime {
             };
 
             match res {
-                Ok(reply) => {
+                Ok(mut reply) => {
                     totals.absorb(&reply);
-                    if let Some(done_thinking) = extract_completion_thinking(&reply) {
+                    *lock_unpoison(&run.totals) = totals.clone();
+                    let (clean_text, inline_thinking) = chat::split_inline_think(&reply.text);
+                    let proto_thinking = extract_completion_thinking(&reply)
+                        .unwrap_or_else(|| lock_unpoison(&round_thinking).clone());
+                    let done_thinking =
+                        merge_thinking_parts(&[&base_thinking, &proto_thinking, &inline_thinking]);
+                    if !done_thinking.is_empty() {
                         run.bump(|live| {
-                            live.thinking = if base_thinking.is_empty() {
-                                done_thinking
-                            } else {
-                                format!("{base_thinking}\n\n{done_thinking}")
-                            };
+                            live.thinking = done_thinking;
                         });
                     }
+                    reply.text = clean_text;
                     return Ok(reply);
                 }
                 Err(err) => {
+                    if let Error::Provider {
+                        kind,
+                        status,
+                        message,
+                        partial: false,
+                    } = &err
+                    {
+                        if kind == "http" {
+                            if !swapped_max_completion
+                                && !prep.model.extra.contains_key("max_completion_tokens")
+                                && chat::provider_wants_max_completion_tokens(*status, message)
+                            {
+                                let limit = prep.model.max_output_tokens();
+                                prep.model
+                                    .extra
+                                    .insert("max_completion_tokens".into(), limit.into());
+                                swapped_max_completion = true;
+                                continue;
+                            }
+                            if max_tokens_steps < 4
+                                && chat::provider_max_tokens_rejected(*status, message)
+                            {
+                                if let Some(next_max) =
+                                    chat::next_max_tokens_stepdown(prep.model.max_output_tokens())
+                                {
+                                    prep.model.extra.remove("maxOutputTokens");
+                                    prep.model.max_tokens = Some(next_max);
+                                    if prep.model.extra.contains_key("max_completion_tokens") {
+                                        prep.model
+                                            .extra
+                                            .insert("max_completion_tokens".into(), next_max.into());
+                                    }
+                                    max_tokens_steps += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if !tried_fallback && crate::failure::fallback_eligible(&err) {
                         if let Some(backup) = prep
                             .fallback_model
@@ -1526,6 +1668,8 @@ impl CompanionRuntime {
                             .filter(|b| !b.same_service(&prep.model))
                         {
                             tried_fallback = true;
+                            max_tokens_steps = 0;
+                            swapped_max_completion = false;
                             prep.model = backup;
                             continue;
                         }
@@ -1546,17 +1690,18 @@ impl CompanionRuntime {
         let reply = self
             .call_model_streaming(prep, run, &msgs, &[], false, true, totals)
             .await?;
-        if matches!(
-            reply.finish_reason.as_deref(),
-            Some("content_filter" | "safety" | "prohibited_content" | "recitation" | "refusal")
-        ) && reply.text.trim().is_empty()
-        {
+        let clean = chat::strip_inline_think(&reply.text);
+        if detect_refusal(&reply, &clean) {
             return Err(Error::Refused("AI 服务拒绝了这次回复，请换个说法或切换模型".into()));
         }
+        if clean.trim().is_empty() {
+            return Err(Error::fail(
+                crate::failure::FailKind::Empty,
+                "AI 没有返回有效回复，请重试或切换模型",
+            ));
+        }
         run.bump(|live| {
-            if !reply.text.is_empty() {
-                live.content = reply.text;
-            }
+            live.content = clean;
         });
         Ok(())
     }
@@ -1594,10 +1739,18 @@ impl CompanionRuntime {
                 .await?;
 
             if reply.tool_calls.is_empty() || force_final {
+                let clean = chat::strip_inline_think(&reply.text);
+                if detect_refusal(&reply, &clean) {
+                    return Err(Error::Refused("AI 服务拒绝了这次回复，请换个说法或切换模型".into()));
+                }
+                if clean.trim().is_empty() {
+                    return Err(Error::fail(
+                        crate::failure::FailKind::Empty,
+                        "AI 没有返回有效回复，请重试或切换模型",
+                    ));
+                }
                 run.bump(|live| {
-                    if !reply.text.is_empty() {
-                        live.content = reply.text;
-                    }
+                    live.content = clean;
                 });
                 return Ok(());
             }
@@ -1865,32 +2018,35 @@ impl CompanionRuntime {
             }));
         };
 
-        let notified = run.notify.notified();
-        tokio::pin!(notified);
+        let mut notified = Box::pin(run.notify.notified());
         notified.as_mut().enable();
         run.cancel.cancel();
 
-        let settled = {
-            let live = lock_unpoison(&run.live);
-            live.settled_in_db
-        };
-        if !settled {
-            let _ = tokio::time::timeout(Duration::from_millis(1500), async {
-                loop {
-                    if lock_unpoison(&run.live).settled_in_db {
-                        break;
-                    }
-                    run.notify.notified().await;
+        let _ = tokio::time::timeout(Duration::from_millis(1500), async {
+            loop {
+                if lock_unpoison(&run.live).settled_in_db {
+                    break;
                 }
-            })
-            .await;
-        }
+                notified.await;
+                notified = Box::pin(run.notify.notified());
+                notified.as_mut().enable();
+            }
+        })
+        .await;
         if !lock_unpoison(&run.live).settled_in_db {
             run.bump(|live| {
                 live.status = "cancelled".into();
                 live.phase = "done".into();
+                for step in &mut live.steps {
+                    if step["status"] == "running" {
+                        step["status"] = "failed".into();
+                        step["summary"] = "已停止".into();
+                    }
+                }
             });
-            let _ = settle_run_db(&self.store.0, &run, &UsageTotals::default(), 0);
+            let saved_totals = lock_unpoison(&run.totals).clone();
+            let elapsed_ms = run.started.elapsed().as_millis() as u64;
+            let _ = settle_run_db(&self.store.0, &run, &saved_totals, elapsed_ms);
         }
 
         let snap = run.snapshot_json();
@@ -1909,7 +2065,7 @@ impl CompanionRuntime {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| invalid("缺少会话标识"))?
             .to_owned();
-        let model: ModelConfig = serde_json::from_value(request["model"].clone())
+        let mut model: ModelConfig = serde_json::from_value(request["model"].clone())
             .map_err(|_| invalid("请先配置可用的 AI 服务与模型"))?;
         let keep_recent = request["keepRecent"].as_u64().unwrap_or(6).clamp(2, 12) as usize;
 
@@ -1919,6 +2075,20 @@ impl CompanionRuntime {
             let session =
                 get_session_db(&db, &session_id)?.ok_or_else(|| invalid("找不到这段伴聊会话"))?;
             let real_id = session["id"].as_str().unwrap_or(&session_id).to_owned();
+            {
+                let active = lock_unpoison(&self.active);
+                let mut compacting = lock_unpoison(&self.compacting);
+                if active
+                    .values()
+                    .any(|r| r.session_id == real_id || r.session_id == session_id)
+                    || !compacting.insert(real_id.clone())
+                {
+                    return Err(Error::Busy {
+                        holder: "companion".into(),
+                        until_ms: 0,
+                    });
+                }
+            }
             let all = load_session_messages_db(&db, &real_id)?;
             let (_, branch) = project_active_branch(&all, session["activeLeafId"].as_str());
             let done_msgs: Vec<Value> = branch
@@ -1930,6 +2100,7 @@ impl CompanionRuntime {
                 })
                 .collect();
             if done_msgs.len() <= keep_recent {
+                lock_unpoison(&self.compacting).remove(&real_id);
                 return Err(invalid("当前对话还不长，无需压缩摘要"));
             }
             let split_at = done_msgs.len() - keep_recent;
@@ -1955,6 +2126,7 @@ impl CompanionRuntime {
             };
             let slice = done_msgs[slice_start..split_at].to_vec();
             if slice.is_empty() {
+                lock_unpoison(&self.compacting).remove(&real_id);
                 return Ok(json!({
                     "session": session,
                     "summaryText": session["summaryText"],
@@ -1968,6 +2140,10 @@ impl CompanionRuntime {
                 slice,
                 up_to,
             )
+        };
+        let _compact_guard = CompactGuard {
+            set: &self.compacting,
+            session_id: real_id.clone(),
         };
 
         let transcript = to_summarize
@@ -1990,17 +2166,75 @@ impl CompanionRuntime {
             }),
             json!({ "role": "user", "content": user_body }),
         ];
-        let body = chat::request(&model, &wire, &[], true);
-        let reply = self
-            .model
-            .complete(
-                model.clone(),
-                body,
-                CancellationToken::new(),
-                Arc::new(|_| {}),
-            )
-            .await?;
-        let summary_text = reply.text.trim().to_owned();
+        let mut max_tokens_steps = 0u8;
+        let mut swapped_max_completion = false;
+        let reply = loop {
+            let body = chat::request(&model, &wire, &[], true);
+            match self
+                .model
+                .complete(
+                    model.clone(),
+                    body,
+                    CancellationToken::new(),
+                    Arc::new(|_| {}),
+                )
+                .await
+            {
+                Ok(reply) => break reply,
+                Err(err) => {
+                    if let Error::Provider {
+                        kind,
+                        status,
+                        message,
+                        partial: false,
+                    } = &err
+                    {
+                        if kind == "http" {
+                            if !swapped_max_completion
+                                && !model.extra.contains_key("max_completion_tokens")
+                                && chat::provider_wants_max_completion_tokens(*status, message)
+                            {
+                                let limit = model.max_output_tokens();
+                                model
+                                    .extra
+                                    .insert("max_completion_tokens".into(), limit.into());
+                                swapped_max_completion = true;
+                                continue;
+                            }
+                            if max_tokens_steps < 4
+                                && chat::provider_max_tokens_rejected(*status, message)
+                            {
+                                if let Some(next_max) =
+                                    chat::next_max_tokens_stepdown(model.max_output_tokens())
+                                {
+                                    model.extra.remove("maxOutputTokens");
+                                    model.max_tokens = Some(next_max);
+                                    if model.extra.contains_key("max_completion_tokens") {
+                                        model
+                                            .extra
+                                            .insert("max_completion_tokens".into(), next_max.into());
+                                    }
+                                    max_tokens_steps += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    return Err(err);
+                }
+            }
+        };
+        let (clean_summary, inline_thinking) = chat::split_inline_think(&reply.text);
+        let summary_text = clean_summary.trim().to_owned();
+        if detect_refusal(&reply, &summary_text) {
+            return Err(Error::Refused("AI 服务拒绝了本次摘要整理，原会话摘要未改动".into()));
+        }
+        if output_was_truncated(&reply) {
+            return Err(Error::fail(
+                crate::failure::FailKind::Format,
+                "摘要输出被长度上限截断，原会话摘要未改动",
+            ));
+        }
         if summary_text.is_empty() {
             return Err(invalid("摘要模型未返回有效内容"));
         }
@@ -2013,8 +2247,10 @@ impl CompanionRuntime {
             ..Default::default()
         };
         totals.absorb(&reply);
+        let proto_thinking = extract_completion_thinking(&reply).unwrap_or_default();
+        let all_thinking = merge_thinking_parts(&[&proto_thinking, &inline_thinking]);
         let (_, prompt_tokens, completion_tokens, estimated) =
-            totals.json_with_fallback(&summary_text, "", reply.total_ms);
+            totals.json_with_fallback(&summary_text, &all_thinking, reply.total_ms);
 
         {
             let mut db = self.store.0.lock()?;

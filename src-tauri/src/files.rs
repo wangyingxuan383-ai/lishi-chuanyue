@@ -60,6 +60,12 @@ pub struct BookFile {
     data: String,
 }
 static BOOK_IMPORTS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+static LAST_IMPORTED_PDF: Mutex<Option<(String, Arc<Vec<u8>>)>> = Mutex::new(None);
+
+fn is_pdf_header(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(8192)];
+    head.windows(5).any(|w| w == b"%PDF-")
+}
 
 #[tauri::command]
 pub async fn file_grant_agent(app:AppHandle,store:tauri::State<'_,Arc<crate::sql::SqlStore>>,directory:bool,writable:bool)->Result<Option<serde_json::Value>> {
@@ -147,6 +153,7 @@ pub async fn file_import_book(
     request_id: String,
     on_progress: tauri::ipc::Channel<u64>,
 ) -> Result<Option<BookFile>> {
+    let request_id_clone = request_id.clone();
     let operation = BookImport::new(request_id);
     #[cfg(target_os = "android")]
     let selected = crate::document_picker::pick_import(&app)
@@ -187,6 +194,11 @@ pub async fn file_import_book(
             let _ = on_progress.send(bytes.len() as u64);
         }
         operation.check()?;
+        if is_pdf_header(&bytes) {
+            if let Ok(mut slot) = LAST_IMPORTED_PDF.lock() {
+                *slot = Some((request_id_clone, Arc::new(bytes.clone())));
+            }
+        }
         Ok(Some(BookFile {
             name,
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -196,17 +208,46 @@ pub async fn file_import_book(
 }
 
 #[tauri::command]
-pub async fn file_extract_pdf(data: String, request_id: String) -> Result<book_pdf::PdfText> {
+pub async fn file_extract_pdf(
+    data: String,
+    request_id: String,
+    cached_request_id: Option<String>,
+) -> Result<book_pdf::PdfText> {
     let operation = BookImport::new(request_id);
     blocking(move || {
         operation.check()?;
-        if data.len() > 90 * 1024 * 1024 {
-            return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|_| io_error())?;
-        let pages = book_pdf::extract_with_cancel(&bytes, || operation.cancelled.load(Ordering::Relaxed));
+        let cached = if data.is_empty() {
+            let wanted = cached_request_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match wanted {
+                Some(id) => {
+                    let found = LAST_IMPORTED_PDF.lock().ok().and_then(|slot| {
+                        slot.as_ref()
+                            .filter(|(k, _)| k == id)
+                            .map(|(_, b)| Arc::clone(b))
+                    });
+                    Some(found.ok_or_else(|| PlatformError::new("pdf_cache_miss", "未命中导入缓存"))?)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let decoded;
+        let bytes: &[u8] = if let Some(ref arc_bytes) = cached {
+            arc_bytes.as_slice()
+        } else {
+            if data.len() > 90 * 1024 * 1024 {
+                return Err(PlatformError::new("file_too_large", "文件超过 64 MiB"));
+            }
+            decoded = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|_| io_error())?;
+            decoded.as_slice()
+        };
+        let pages = book_pdf::extract_with_cancel(bytes, || operation.cancelled.load(Ordering::Relaxed));
         operation.check()?;
         pages.map_err(|message| PlatformError::new("pdf_extract", message))
     })

@@ -50,7 +50,12 @@ export function stepFor(current: UpdateFlow, version: string): UpdateStep {
 }
 
 /** Tests only. */
-export function resetUpdateFlow() { flow = IDLE; listeners.clear(); }
+export function resetUpdateFlow() {
+  flow = IDLE;
+  waitingPermission = false;
+  clearReturnWatch?.();
+  listeners.clear();
+}
 
 const codeOf = (error: unknown) =>
   error instanceof PlatformError ? error.code : error && typeof error === "object" && "code" in error ? String(error.code) : "";
@@ -62,12 +67,25 @@ const REASONS: Record<string, FailReason> = {
 
 const running = (state: UpdateStep) => state.step === "preparing" || state.step === "downloading" || state.step === "verifying";
 
+/** Hydrates an already-downloaded and SHA-256-verified APK on disk without clobbering active download/permission/install steps. */
+export function hydrateReadyPackage(pkg: { version: string; size: number; sha256: string }) {
+  if (!pkg.version || !pkg.sha256) return;
+  if (flow.version === pkg.version) {
+    if (running(flow.state) || flow.state.step === "permission" || flow.state.step === "installing" || flow.state.step === "ready") {
+      return;
+    }
+  }
+  set({ version: pkg.version, size: pkg.size, sha256: pkg.sha256, state: { step: "ready" } });
+}
+
 /** Downloads (or resumes) the package; `ready` once its SHA-256 matches. */
 export async function startDownload(platform: Platform, release: ReleaseInfo, asset: ReleaseAsset): Promise<void> {
   const update = platform.update;
   if (!update) return;
   const same = flow.version === release.version;
   if (same && running(flow.state)) return;
+  waitingPermission = false;
+  clearReturnWatch?.();
   const before = same && "received" in flow.state ? flow.state.received : 0;
   set({ version: release.version, size: asset.size, sha256: same ? flow.sha256 : null, state: { step: "preparing" } });
   let sha256 = flow.sha256;
@@ -120,36 +138,84 @@ export async function pauseDownload(platform: Platform) {
 }
 
 let watching = false;
+let waitingPermission = false;
+let clearReturnWatch: (() => void) | null = null;
+
+export const isWaitingPermission = (): boolean => waitingPermission && flow.state.step === "permission";
+
+/** If waiting for 安装未知应用 and permission is now granted, resumes installation automatically. */
+export async function resumePermissionInstall(platform: Platform): Promise<boolean> {
+  if (!waitingPermission || flow.state.step !== "permission") return false;
+  const allowed = await platform.update?.canInstall().catch(() => false);
+  if (!allowed || !waitingPermission || flow.state.step !== "permission") return false;
+  waitingPermission = false;
+  clearReturnWatch?.();
+  await installUpdate(platform);
+  return true;
+}
 
 /** After the player comes back from the 安装未知应用 switch, continue by itself when it is on now. */
 function continueOnReturn(platform: Platform) {
-  if (watching || typeof document === "undefined") return;
+  if (watching) return;
+  const hasDoc = typeof document !== "undefined";
+  const hasWin = typeof window !== "undefined";
+  if (!hasDoc && !hasWin) return;
   watching = true;
-  const onVisible = () => {
-    if (document.visibilityState !== "visible") return;
-    document.removeEventListener("visibilitychange", onVisible);
+  const cleanup = () => {
+    if (!watching) return;
     watching = false;
-    if (flow.state.step !== "permission") return;
-    void platform.update?.canInstall().then((allowed) => {
-      if (allowed && flow.state.step === "permission") void installUpdate(platform);
-    }, () => {});
+    clearReturnWatch = null;
+    if (hasDoc) document.removeEventListener("visibilitychange", onReturn);
+    if (hasWin) {
+      window.removeEventListener("lishi:app-resume", onReturn);
+      window.removeEventListener("focus", onReturn);
+    }
   };
-  document.addEventListener("visibilitychange", onVisible);
+  const onReturn = () => {
+    if (hasDoc && document.visibilityState !== "visible") return;
+    cleanup();
+    void resumePermissionInstall(platform);
+  };
+  clearReturnWatch = cleanup;
+  if (hasDoc) document.addEventListener("visibilitychange", onReturn);
+  if (hasWin) {
+    window.addEventListener("lishi:app-resume", onReturn);
+    window.addEventListener("focus", onReturn);
+  }
 }
 
 /** Hands the verified package to the system installer. */
-export async function installUpdate(platform: Platform): Promise<"started" | "permission" | "unsupported" | "failed"> {
+export async function installUpdate(
+  platform: Platform,
+  pkg?: { version: string; size: number; sha256: string },
+): Promise<"started" | "permission" | "unsupported" | "failed"> {
   const update = platform.update;
+  if (pkg && pkg.version && pkg.sha256 && (flow.version !== pkg.version || !flow.sha256 || flow.state.step === "idle")) {
+    set({ version: pkg.version, size: pkg.size, sha256: pkg.sha256, state: { step: "ready" } });
+  }
   const { version, size, sha256 } = flow;
   if (!update || !version || !sha256) return "failed";
   try {
-    const status = await update.install({ version, size, sha256 });
+    const rawStatus = await update.install({ version, size, sha256 });
+    const status = (rawStatus as string) === "needs_permission" ? "permission" : rawStatus;
     if (flow.version !== version) return status;
-    if (status === "permission") { set({ state: { step: "permission" } }); continueOnReturn(platform); }
-    else if (status === "started") set({ state: { step: "installing" } });
-    else set({ state: { step: "ready" } });
+    if (status === "permission") {
+      waitingPermission = true;
+      set({ state: { step: "permission" } });
+      continueOnReturn(platform);
+    } else if (status === "started") {
+      waitingPermission = false;
+      clearReturnWatch?.();
+      set({ state: { step: "installing" } });
+    } else {
+      waitingPermission = false;
+      clearReturnWatch?.();
+      set({ state: { step: "ready" } });
+    }
     return status;
   } catch (error) {
+    waitingPermission = false;
+    clearReturnWatch?.();
     if (flow.version === version) {
       const code = codeOf(error);
       const reason: FailReason = code === "update_hash" ? "corrupt" : code === "update_missing" ? "missing" : "install";

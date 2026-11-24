@@ -3,7 +3,7 @@
 // suggested choices moved into the story, under the latest passage, so the
 // bar never takes reading space at rest. Class names .dock / .inputbar /
 // .mode-btn / .send-btn stay for the UI checks.
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { StoryNode, WorldState } from "../../../engine/types";
 import { Icon } from "../../components/Icon";
 import type { MODES } from "./constants";
@@ -67,6 +67,37 @@ export function Composer(p: ComposerProps) {
   const icon = ({ wait: "hourglass", stop: "stop", send: "send", continue: "play" } as const)[kind];
   const showTools = !dead && (typing || typed);
   const toolCount = showTools ? ((!watch ? 1 : 0) + 1 + (typed ? 1 : 0)) : 0;
+  const fieldRef = useRef<HTMLDivElement>(null);
+
+  const syncTextareaHeight = useCallback(() => {
+    const el = inputBox.current;
+    if (!el) return;
+    if (!input) {
+      el.style.height = "";
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input, inputBox]);
+
+  useLayoutEffect(() => {
+    syncTextareaHeight();
+  }, [syncTextareaHeight, showTools, roomy]);
+
+  useEffect(() => {
+    const host = fieldRef.current;
+    if (!host || typeof ResizeObserver === "undefined") return;
+    let lastWidth = host.clientWidth;
+    const ro = new ResizeObserver(() => {
+      const nextWidth = host.clientWidth;
+      if (nextWidth !== lastWidth) {
+        lastWidth = nextWidth;
+        syncTextareaHeight();
+      }
+    });
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, [syncTextareaHeight]);
   const submitAutoplayNote = async () => {
     const clean = autoDraft.trim();
     if (!clean || !p.onQueueAutoplayNote || queueing) return;
@@ -130,7 +161,7 @@ export function Composer(p: ComposerProps) {
       )}
       <div className="inputbar">
         <button className="mode-btn" aria-label={`输入方式：${mode.label}`} onClick={p.onModes} disabled={!!gen || !!auto}>{mode.label}</button>
-        <div className="composer-field">
+        <div className="composer-field" ref={fieldRef}>
           <textarea
             ref={inputBox}
             rows={1}
@@ -151,12 +182,12 @@ export function Composer(p: ComposerProps) {
               e.target.style.height = `${e.target.scrollHeight}px`;
             }}
           />
-          {/* The writing tools come up with the keyboard or with words in the box. */}
-          {!dead && (typing || typed) && (
+          {/* The writing tools sit cleanly below the text in normal flow so multi-line prompts are never covered. */}
+          {showTools && (
             <span className="composer-tools">
-              {!watch && <button className="icon-btn" aria-label="润色行动" title="润色行动" disabled={busy || !typed} onPointerDown={(e) => e.preventDefault()} onClick={p.onPolish}><Icon name="sparkle" size={20} /></button>}
-              <button className="icon-btn" aria-label="展开输入" title="展开输入" disabled={busy} onPointerDown={(e) => e.preventDefault()} onClick={p.onDesk}><Icon name="expand" size={20} /></button>
-              {typed && <button className="icon-btn" aria-label="清空输入" title="清空输入" disabled={busy} onPointerDown={(e) => e.preventDefault()} onClick={() => { p.setInput(""); if (inputBox.current) { inputBox.current.style.height = "auto"; inputBox.current.focus(); } }}><Icon name="close" size={20} /></button>}
+              {!watch && <button className="icon-btn" aria-label="润色行动" title="润色行动" disabled={busy || !typed} onPointerDown={(e) => e.preventDefault()} onClick={p.onPolish}><Icon name="sparkle" size={19} /></button>}
+              <button className="icon-btn" aria-label="展开输入" title="展开输入" disabled={busy} onPointerDown={(e) => e.preventDefault()} onClick={p.onDesk}><Icon name="expand" size={19} /></button>
+              {typed && <button className="icon-btn" aria-label="清空输入" title="清空输入" disabled={busy} onPointerDown={(e) => e.preventDefault()} onClick={() => { p.setInput(""); if (inputBox.current) { inputBox.current.style.height = ""; inputBox.current.focus(); } }}><Icon name="close" size={19} /></button>}
             </span>
           )}
         </div>

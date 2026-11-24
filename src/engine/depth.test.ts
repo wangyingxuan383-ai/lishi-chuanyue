@@ -19,7 +19,7 @@ describe("generation tiers (D161)", () => {
     expect(depthBudget(20_000, "deep")).toBe(20_000);
   });
   it("checks the original fully at 深度, lightly for 同人 at 标准, never at 快速", () => {
-    expect(referenceReview("deep", book)).toBe("reference-review-3");
+    expect(referenceReview("deep", book)).toBe("reference-review-4");
     expect(referenceReview("standard", book)).toBe("reference-review-lite-5");
     expect(referenceReview("standard", { ...book, fanfic: false })).toBeUndefined();
     expect(referenceReview("fast", book)).toBeUndefined();

@@ -118,13 +118,34 @@ export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvas
   const W = 1080;
   const plain = layout === "简洁";
   const pad = plain ? 96 : 120;
+  const maxTextW = W - pad * 2;
+  const titleSize = 30;
+  const titleLead = 44;
+  const headingSize = 56;
+  const headingLead = 76;
   const bodySize = 40;
   const lead = bodySize * 1.9;
+
+  ctx.font = `${titleSize}px ${font}`;
+  const spacedTitle = spaced(content.title);
+  const titleSource = ctx.measureText(spacedTitle).width <= maxTextW ? spacedTitle : content.title;
+  const titleLines = wrap((s) => ctx.measureText(s).width, titleSource, maxTextW);
+
+  let headingLines: string[] = [];
+  if (content.heading) {
+    ctx.font = `700 ${headingSize}px ${font}`;
+    const spacedHeading = spaced(content.heading);
+    const headingSource = ctx.measureText(spacedHeading).width <= maxTextW ? spacedHeading : content.heading;
+    headingLines = wrap((s) => ctx.measureText(s).width, headingSource, maxTextW);
+  }
+
   ctx.font = `${bodySize}px ${font}`;
   const indent = plain ? "" : "　　";
   const body = content.body.split("\n").map((p) => (p === SEPARATOR ? p : indent + p)).join("\n");
-  const lines = wrap((s) => ctx.measureText(s).width, body, W - pad * 2);
-  const headH = (content.heading ? 150 : 0) + 120;
+  const lines = wrap((s) => ctx.measureText(s).width, body, maxTextW);
+  const titleBlockH = Math.max(1, titleLines.length) * titleLead + 36;
+  const headingBlockH = headingLines.length > 0 ? headingLines.length * headingLead + 74 : 0;
+  const headH = titleBlockH + headingBlockH + 40;
   const footH = 220;
   // At least 4:5, so a short passage is still a card and not a strip; then its text sits a little above the middle.
   const needed = pad + headH + lines.length * lead + footH + pad;
@@ -151,14 +172,20 @@ export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvas
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = PAPER.muted;
   ctx.textAlign = "center";
-  ctx.font = `30px ${font}`;
-  ctx.fillText(spaced(content.title), W / 2, y + 20);
-  y += 80;
-  if (content.heading) {
+  ctx.font = `${titleSize}px ${font}`;
+  for (const tl of titleLines) {
+    ctx.fillText(tl, W / 2, y + 20);
+    y += titleLead;
+  }
+  y += 36;
+  if (headingLines.length > 0) {
     ctx.fillStyle = PAPER.ink;
-    ctx.font = `700 56px ${font}`;
-    ctx.fillText(spaced(content.heading), W / 2, y + 60);
-    y += 150;
+    ctx.font = `700 ${headingSize}px ${font}`;
+    for (const hl of headingLines) {
+      ctx.fillText(hl, W / 2, y + 60);
+      y += headingLead;
+    }
+    y += 74;
   }
   // A short rule under the title.
   ctx.strokeStyle = PAPER.seal;
@@ -218,8 +245,28 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
     }
     cols.push(col);
   }
-  const titleCols = content.heading ? 2 : 1;
-  const footCols = footer(content).length;
+  const maxCharsForPx = (px: number) => Math.max(1, Math.floor((H - top * 2) / (px * 1.12)));
+  const wrapVertical = (text: string, px: number): string[][] => {
+    const limit = maxCharsForPx(px);
+    const out: string[][] = [];
+    for (const line of text.split("\n")) {
+      let col: string[] = [];
+      for (const ch of [...line]) {
+        if (col.length >= limit && !NO_LINE_START.includes(ch)) {
+          out.push(col);
+          col = [];
+        }
+        col.push(ch);
+      }
+      if (col.length) out.push(col);
+    }
+    return out.length ? out : [[""]];
+  };
+  const titleVertCols = wrapVertical(content.title, 30);
+  const headingVertCols = content.heading ? wrapVertical(content.heading, 48) : [];
+  const footVertCols = footer(content).flatMap((t) => wrapVertical(t, 28));
+  const titleCols = titleVertCols.length + headingVertCols.length;
+  const footCols = footVertCols.length;
   const W = Math.max(1080, 140 * 2 + (titleCols + cols.length) * colW + footCols * 52 + 260);
   checkCardSize(W, H);
   canvas.width = W;
@@ -247,13 +294,12 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
     });
   };
   let x = W - 140 - colW / 2;
-  column(x, content.title, 30, PAPER.muted);
-  x -= colW;
-  if (content.heading) { column(x, content.heading, 48, PAPER.ink, "700 "); x -= colW; }
+  for (const tc of titleVertCols) { column(x, tc, 30, PAPER.muted); x -= colW; }
+  for (const hc of headingVertCols) { column(x, hc, 48, PAPER.ink, "700 "); x -= colW; }
   x -= colW * 0.3;
   for (const col of cols) { column(x, col, size, PAPER.ink); x -= colW; }
   x -= 30;
-  for (const t of footer(content)) { column(x, t, 28, PAPER.muted); x -= 52; }
+  for (const fc of footVertCols) { column(x, fc, 28, PAPER.muted); x -= 52; }
   drawSeal(ctx, Math.max(100, x - 100), H - 150 - 112, 112, seal, font);
   return canvas;
 }

@@ -187,16 +187,70 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
       let includeUsage = existing?.includeUsage ?? true;
       let line = "";
       if (!skipTest) {
-        const run = (usage: boolean) => streamChat(platform, {
-          slot, url: chatCompletionsUrl(cleanUrl), model: model.trim(), includeUsage: usage, maxTokens: 16,
-          messages: [{ role: "user", content: "只回复两个字：你好" }],
-        }).result;
+        let sawThinking = false;
+        let useCompletionTokens = false;
+        includeUsage = true;
+        const run = () =>
+          streamChat(
+            platform,
+            {
+              slot,
+              url: chatCompletionsUrl(cleanUrl),
+              model: model.trim(),
+              includeUsage,
+              maxTokens: useCompletionTokens ? undefined : 512,
+              ...(useCompletionTokens ? { extra: { max_completion_tokens: 512 } } : {}),
+              messages: [{ role: "user", content: "只回复两个字：你好" }],
+            },
+            {
+              onThinking: () => {
+                sawThinking = true;
+              },
+            },
+          ).result;
         const started = performance.now();
-        let reply;
-        try { reply = await run(true); includeUsage = true; } catch (e) {
-          if (e instanceof ChatError && e.kind === "http" && e.status === 400) { includeUsage = false; reply = await run(false); } else throw e;
+        let reply: Awaited<ReturnType<typeof run>> | null = null;
+        for (;;) {
+          try {
+            reply = await run();
+            break;
+          } catch (e) {
+            if (
+              !useCompletionTokens &&
+              e instanceof ChatError &&
+              e.kind === "http" &&
+              (e.status === 400 || e.status === 422) &&
+              /max_completion_tokens/i.test(e.message)
+            ) {
+              useCompletionTokens = true;
+              continue;
+            }
+            if (
+              includeUsage &&
+              e instanceof ChatError &&
+              e.kind === "http" &&
+              e.status === 400
+            ) {
+              includeUsage = false;
+              continue;
+            }
+            if (e instanceof ChatError && e.kind === "empty" && sawThinking) {
+              reply = null;
+              break;
+            }
+            throw e;
+          }
         }
-        line = `${model.trim()} 回了一句“${reply.text.trim().slice(0, 12) || "（空）"}”，用时 ${((performance.now() - started) / 1000).toFixed(1)} 秒。`;
+        const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+        if (!reply) {
+          line = `${model.trim()} 已连通（思考模型响应正常），用时 ${elapsed} 秒。`;
+        } else {
+          const visibleText = reply.text.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").trim();
+          line =
+            !visibleText && (sawThinking || /<think>/i.test(reply.text))
+              ? `${model.trim()} 已连通（思考模型响应正常），用时 ${elapsed} 秒。`
+              : `${model.trim()} 回了一句“${visibleText.slice(0, 12) || "（空）"}”，用时 ${elapsed} 秒。`;
+        }
       }
       const keySlot = existing?.keySlot ?? `profile-${newId().slice(0, 12)}`;
       const profile = await saveProfile(game.repo, {
@@ -231,7 +285,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   };
 
   return (
-    <div className="screen">
+    <div className="screen setup">
       <div className="topbar">
         <button className="icon-btn" aria-label="返回" onClick={first ? skip : pop}><Icon name="back" /></button>
         <div className="title"><h1>{first ? "连接 AI 服务" : existing ? "修改 AI 服务" : "添加 AI 服务"}</h1></div>

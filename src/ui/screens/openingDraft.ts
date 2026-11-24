@@ -237,10 +237,21 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
   const script = (raw.script && typeof raw.script === "object" ? raw.script : {}) as Record<string, unknown>;
   const beats = Array.isArray(script.beats) ? script.beats.filter((b): b is string => typeof b === "string").slice(0, MAX_BEATS) : [];
   const challenge = (raw.challenge && typeof raw.challenge === "object" ? raw.challenge : {}) as Record<string, unknown>;
+  const rawSource = raw.source !== undefined ? (validBinding(raw.source) ? raw.source : null) : undefined;
+  const fanfic =
+    raw.fanfic !== undefined
+      ? raw.fanfic === true
+      : rawSource
+        ? rawSource.fanfic === true
+        : undefined;
+  const source =
+    rawSource && fanfic !== undefined && rawSource.fanfic !== fanfic
+      ? { ...rawSource, fanfic }
+      : rawSource;
   return {
     templateId: null,
-    ...(raw.source !== undefined ? { source: validBinding(raw.source) ? raw.source : null } : {}),
-    ...(raw.fanfic !== undefined ? { fanfic: raw.fanfic === true } : {}),
+    ...(source !== undefined ? { source } : {}),
+    ...(fanfic !== undefined ? { fanfic } : {}),
     challengeId: null,
     play: oneOf(raw.play, ["plain", "script", "challenge", "watch"] as const, "plain"),
     aiPilot: raw.aiPilot === true,

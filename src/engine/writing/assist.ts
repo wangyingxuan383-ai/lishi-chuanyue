@@ -2,13 +2,13 @@
 import type { SourceScope } from "../sources/scope";
 import { remapContinuity, validateContinuity } from "../continuity";
 import type { Game } from "../game";
-import { ChatError, DEFAULT_TIMEOUTS, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, outputWasTruncated, streamChat, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
+import { ChatError, DEFAULT_TIMEOUTS, retryDecision, CONTEXT_WINDOW_MESSAGE, isContextWindowError, outputWasTruncated, streamChat, stripInlineThink, type ChatHandle, type ChatMessage, type ChatResult } from "../llm/chat";
 import { isRefusal } from "../llm/refusal";
 import * as tree from "../tree";
 import type { ActionMode, FactCitation, StoryNode, World, WorldState, WorldSettings } from "../types";
 import { openingExtra, recordFields } from "../prompt/turn";
 import { validBinding, type ReferenceContext } from "../sources/types";
-import { chunksOf, getBook } from "../sources/library";
+import { getBookOutline } from "../sources/library";
 import { applyRecord, type TurnRecord } from "../state/apply";
 import { eraContext, eraPack } from "../era";
 import { formatDate, readDate } from "../calendar/date";
@@ -162,8 +162,24 @@ export function paragraphs(text: string): TextRange[] {
   return [...text.matchAll(/[^\r\n]+/g)].filter((m) => m[0].trim()).map((m) => ({ start: m.index!, end: m.index! + m[0].length }));
 }
 export function replaceRange(original: string, range: TextRange, replacement: string): string {
-  if (range.start < 0 || range.end > original.length || range.start >= range.end || !replacement.trim()) throw new WritingError("先选一段文字。" );
-  return original.slice(0, range.start) + replacement.trim() + original.slice(range.end);
+  const clean = replacement.trim();
+  const canDeleteSingleParagraph = !clean
+    && paragraphs(original).length > 1
+    && (range.start > 0 || range.end < original.length);
+  if (range.start < 0 || range.end > original.length || range.start >= range.end || (!clean && !canDeleteSingleParagraph)) {
+    throw new WritingError("先选一段文字。");
+  }
+  if (!clean) {
+    const before = original.slice(0, range.start);
+    const after = original.slice(range.end);
+    const joined = !before ? after.replace(/^(?:\r?\n)+/, "")
+      : !after ? before.replace(/(?:\r?\n)+$/, "")
+      : /(?:\r?\n)$/.test(before) && /^(?:\r?\n)/.test(after) ? before + after.replace(/^(?:\r?\n)+/, "")
+      : before + after;
+    if (!joined.trim()) throw new WritingError("先选一段文字。");
+    return joined;
+  }
+  return original.slice(0, range.start) + clean + original.slice(range.end);
 }
 
 export const isUpkeepEdit = (node: Pick<StoryNode, "kind" | "meta">): boolean =>
@@ -195,7 +211,7 @@ export function writingMessages(kind: "rewrite" | "polish", text: string, hint: 
   const task = kind === "rewrite"
     ? "只做文风润色，按玩家要求调整所选文字的措辞、节奏和描写，与前后文语气衔接自然，不重复前后文已有的句子。不改变已经发生的事实、人物决定、钱物数量、生死、时间与地点；保持原有叙事人称与说话人归属；要求涉及改事实时仍保留原事实。只输出替换这段的正文，不续写后续剧情，不加代码块或额外说明。"
     : `润色玩家还没发送的输入（方式：${({ do: "行动", say: "说话", write: "亲手写剧情", direct: "幕后要求", skip: "过些日子", continue: "继续" })[mode]}）。保持原意与人称，不替玩家添加决定，也不写行动结果。只输出润色后的输入，不加多余引号或额外说明。`;
-  const required = `【要处理的文字】\n${text}\n\n【玩家要求】\n${hint.trim() || "让表达更自然流畅"}`;
+  const required = `【要处理的文字】\n${text}\n\n【玩家要求】\n${(hint ?? "").trim() || "让表达更自然流畅"}`;
   // The selected text already appears in the required part. Keep just the
   // neighbouring text as optional context.
   const offset = range && context.slice(range.start, range.end) === text ? range.start : context.indexOf(text);
@@ -210,7 +226,7 @@ export function writingMessages(kind: "rewrite" | "polish", text: string, hint: 
 export interface WritingRequest { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; hint: string; mode: ActionMode; range?: TextRange }
 
 /** A model that answers in the turn format may append a <record> block; it never belongs in a rewrite. */
-export const withoutRecord = (text: string) => text.replace(/<record[\s\S]*$/i, "").trimEnd();
+export const withoutRecord = (text: string) => stripInlineThink(text).visible.replace(/<record[\s\S]*$/i, "").trimEnd();
 /** Uses the same stream transport, auxiliary model, usage table and cancel protocol as Game. */
 export function startWriting(game: Game, request: WritingRequest, onText: (text: string) => void) {
   let handle: ChatHandle | null = null;
@@ -226,8 +242,9 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
     if (!llm) throw new WritingError("先在设置里连接 AI 服务。");
     const model = llm.auxModel || llm.model;
     let messages = writingMessages(request.kind, request.text, request.hint, request.anchor.original, request.mode, request.range);
+    let maxTokens = llm.maxOutputTokens ?? llm.maxTokens ?? 8192;
     // Each actual attempt has its own usage row, including failed or cancelled attempts.
-    for (let attempt = 1; ; attempt++) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
       if (cancelled) throw new ChatError("cancelled");
       handle = null;
       let result: ChatResult | null = null;
@@ -235,7 +252,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
       const began = performance.now();
       try {
         handle = streamChat(game.platform, {
-          slot: llm.slot, url: llm.url, model, messages, maxTokens: llm.maxTokens ?? 2048,
+          slot: llm.slot, url: llm.url, model, messages, maxTokens,
           includeUsage: llm.includeUsage, extra: llm.extra as never,
           timeouts: DEFAULT_TIMEOUTS,
         }, { onText: (_delta, full) => { if (!cancelled) onText(withoutRecord(full)); } });
@@ -254,9 +271,10 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
       } catch (error) {
         if (cancelled || (error instanceof ChatError && error.kind === "cancelled")) outcome = "cancelled";
         else if (error instanceof WritingError && error.message === STALE_WRITING) outcome = "stale";
-        const decision = retryDecision(error, attempt, messages);
+        const decision = attempt < 4 ? retryDecision(error, attempt, messages, maxTokens) : { retry: false, messages };
         if (cancelled || !decision.retry) throw error;
         messages = decision.messages;
+        if (decision.maxTokens !== undefined) maxTokens = decision.maxTokens;
       } finally {
         const finished = handle;
         const streamId = finished ? await finished.streamId.catch(() => null) : null;
@@ -272,6 +290,7 @@ export function startWriting(game: Game, request: WritingRequest, onText: (text:
         }
       }
     }
+    throw new ChatError("empty");
   })();
   return {
     done,
@@ -552,16 +571,26 @@ export function parseFactSync(text: string, request: FactSyncRequest, original: 
   };
 }
 
-/** The model's answer as a preview; null when it gave no replacement. Cards it corrects stay the AI's to keep up. */
+/** The model's answer as a preview; null when it gave no usable replacement. Cards it corrects stay the AI's to keep up. */
 export function parsePlayerRevision(text: string, request: PlayerRevisionRequest, original: TurnRecord | null): PlayerRevisionPreview | null {
   const value = completeJson(text) as Record<string, unknown> | null;
-  const replacement = typeof value?.replacement === "string" ? value.replacement.trim() : "";
-  if (!value || !replacement) return null;
+  if (!value || typeof value.replacement !== "string") return null;
+  const replacement = value.replacement.trim();
+  const canDelete = paragraphs(request.anchor.original).length > 1
+    && (request.range.start > 0 || request.range.end < request.anchor.original.length);
+  if (!replacement && !canDelete) return null;
+  let narrative: string;
+  try {
+    narrative = replaceRange(request.anchor.original, request.range, replacement);
+  } catch {
+    return null;
+  }
+  if (!narrative.trim()) return null;
   const record = mergeRecordPatch(original, value.recordPatch);
   const { kept: correctionPatch, dropped } = filterCorrectionPatch(value.correctionPatch);
   return {
     anchor: request.anchor, range: request.range, hint: request.hint, replacement,
-    narrative: replaceRange(request.anchor.original, request.range, replacement), record,
+    narrative, record,
     recordChanges: correctionRecordChanges(original, record), ...(correctionPatch ? { correctionPatch } : {}), ...(dropped.length ? { droppedCorrections: dropped } : {}),
     note: typeof value.note === "string" ? value.note.trim().slice(0, 200) : "", writingVersion: REVISION_PROMPT_VERSION,
   };
@@ -637,17 +666,25 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
     || reference.binding.bookId !== binding.bookId || reference.binding.instructions !== binding.instructions
     || reference.binding.through !== binding.through || reference.binding.plot !== binding.plot || reference.binding.fanfic !== binding.fanfic
     || reference.binding.method !== binding.method || reference.binding.analysisId !== binding.analysisId) throw new WritingError("改稿引用的书籍用法无效，请重新生成。");
-  const book = await getBook(game.repo, binding.bookId);
+  const outline = await getBookOutline(game.repo, binding.bookId);
   if ((preview.outcome ?? "changed") !== "changed") throw new WritingError("这次核对没有要改的地方，不用采用。");
-  if (!book || !Array.isArray(preview.corrections) || !preview.corrections.length) throw new WritingError("还没有查到可以采用的原著依据。");
-  if (reference.binding.position >= book.sections.length || reference.binding.through !== null && reference.binding.position > reference.binding.through) throw new WritingError("原著位置超出了参考范围。");
-  const chunks = chunksOf(book);
+  if (!outline || !Array.isArray(preview.corrections) || !preview.corrections.length) throw new WritingError("还没有查到可以采用的原著依据。");
+  if (reference.binding.position >= outline.sections.length || reference.binding.through !== null && reference.binding.position > reference.binding.through) throw new WritingError("原著位置超出了参考范围。");
+  const citedOrdinals = [...new Set(preview.corrections.flatMap((c) => c.citations.map((cite) => cite.chunk)).filter((ord) => Number.isInteger(ord) && ord >= 0))];
+  const chunkRows = citedOrdinals.length
+    ? await game.platform.sql.query(
+        `SELECT ordinal, section, text FROM source_chunks WHERE book_id = ? AND ordinal IN (${citedOrdinals.map(() => "?").join(",")})`,
+        [binding.bookId, ...citedOrdinals],
+      )
+    : [];
+  const chunksByOrdinal = new Map(chunkRows.map((r) => [Number(r.ordinal), { section: Number(r.section), text: String(r.text) }]));
   for (const correction of preview.corrections) {
     if (!correction.detail.trim() || !correction.citations.length) throw new WritingError("每项更正都需要原著出处。");
     for (const citation of correction.citations) {
-      const chunk = chunks[citation.chunk];
-      if (citation.bookId !== binding.bookId || !chunk || chunk.section !== citation.section || !citation.quote.trim()
-        || citation.title !== book.sections[citation.section].title || citation.page !== book.sections[citation.section].page
+      const chunk = chunksByOrdinal.get(citation.chunk);
+      const sec = outline.sections[citation.section];
+      if (citation.bookId !== binding.bookId || !chunk || !sec || chunk.section !== citation.section || !citation.quote.trim()
+        || citation.title !== sec.title || citation.page !== sec.page
         || binding.through !== null && citation.section > binding.through || !chunk.text.includes(citation.quote)
         || (citation.start !== undefined || citation.end !== undefined) && (!Number.isInteger(citation.start) || !Number.isInteger(citation.end) || citation.start! < 0 || citation.end! <= citation.start! || chunk.text.slice(citation.start, citation.end) !== citation.quote)
         || !reference.passages.some((p) => p.kind === "original" && p.chunk === citation.chunk && p.section === citation.section && p.text.includes(citation.quote))) {

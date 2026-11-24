@@ -6,7 +6,7 @@
 // deep tier still checks the original text.
 import type { Repo } from "../db/repo";
 import { newId } from "../db/repo";
-import { ChatError, isContextWindowError, outputWasTruncated, type ChatMessage, type ChatResult } from "../llm/chat";
+import { ChatError, isContextWindowError, outputWasTruncated, stripInlineThink, type ChatMessage, type ChatResult } from "../llm/chat";
 import { explainFailure } from "../llm/providers";
 import { refusedFinish } from "../llm/refusal";
 import { sourceAnalysisText } from "./facts";
@@ -674,7 +674,7 @@ class NoteReplyError extends Error {
 
 export function noteReplyProblem(result: Pick<ChatResult, "text" | "finishReason">): NoteReplyError | null {
   const finish = result.finishReason?.toLowerCase();
-  const content = result.text.trim();
+  const content = stripInlineThink(result.text).visible.trim();
   if (refusedFinish(finish ?? null)) {
     return new NoteReplyError("refused", "AI 服务拒绝了这段资料。可以换个整理模型后接着做。");
   }
@@ -777,7 +777,7 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   const call = async (messages: ChatMessage[]) => {
     signal.throwIfAborted();
     try {
-      const text = (await Promise.race([runner.call(messages, signal), stopped])).trim();
+      const text = stripInlineThink(await Promise.race([runner.call(messages, signal), stopped])).visible.trim();
       signal.throwIfAborted();
       if (!text) throw new NoteReplyError("empty", "模型没有写出札记正文。");
       return text;
@@ -803,7 +803,7 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     catch (error) { if (!blockedReply(error) || signal.aborted) throw error; }
     if (runner.fallback) {
       try {
-        const text = (await Promise.race([runner.fallback(messages, signal), stopped])).trim();
+        const text = stripInlineThink(await Promise.race([runner.fallback(messages, signal), stopped])).visible.trim();
         signal.throwIfAborted();
         if (text) return text;
       } catch (error) {

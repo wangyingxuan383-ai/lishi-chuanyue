@@ -2,6 +2,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -26,7 +27,8 @@ import {
   type ReaderTargetType,
 } from "../../engine/reader/store";
 import {
-  getBookMeta,
+  getBookHeader,
+  listBookSectionsFast,
   listBookToc,
   readBookSection,
   searchBookFullText,
@@ -258,9 +260,10 @@ export default function ReaderScreen({
   worldId,
   lineId,
   initialSection,
+  initialParagraph,
   initialNodeId,
   through: propThrough,
-}: ReaderRouteProps) {
+}: ReaderRouteProps & { initialParagraph?: number }) {
   const { game, pop, push, reading, setReading, toast, ask } = useApp();
   const targetType: ReaderTargetType = bookId ? "book" : "world_novel";
   const targetId = bookId ?? worldId ?? "";
@@ -270,12 +273,19 @@ export default function ReaderScreen({
   const [toc, setToc] = useState<UnifiedTocItem[]>([]);
   const [novelBook, setNovelBook] = useState<NovelBook | null>(null);
   const [sectionIndex, setSectionIndex] = useState(initialSection ?? 0);
+  const [jumpNonce, setJumpNonce] = useState(0);
   const [entryPage, setEntryPage] = useState<number | "last">(0);
   const [entrySelector, setEntrySelector] = useState<string | null>(
-    initialNodeId ? `[data-node-id="${CSS.escape(initialNodeId)}"]` : null,
+    initialParagraph !== undefined
+      ? `[data-para-index="${initialParagraph}"]`
+      : initialNodeId
+        ? `[data-node-id="${CSS.escape(initialNodeId)}"]`
+        : null,
   );
   const [pendingScrollRatio, setPendingScrollRatio] = useState<number | null>(null);
-  const [pendingFlashPara, setPendingFlashPara] = useState<number | null>(null);
+  const [pendingFlashPara, setPendingFlashPara] = useState<number | null>(
+    initialParagraph !== undefined ? initialParagraph : null,
+  );
   const [bookSection, setBookSection] = useState<BookSectionContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -287,6 +297,7 @@ export default function ReaderScreen({
   const [hudHidden, setHudHidden] = useState(true);
   const [drawerTab, setDrawerTab] = useState<"toc" | "bookmarks" | "search" | null>(null);
   const [tocFilter, setTocFilter] = useState("");
+  const [tocRange, setTocRange] = useState<{ start: number; end: number }>({ start: 0, end: 160 });
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<SearchResultRow[]>([]);
   const [searching, setSearching] = useState(false);
@@ -331,21 +342,37 @@ export default function ReaderScreen({
   const proseRef = useRef<HTMLDivElement>(null);
   const paginatorRef = useRef<PaginatorHandle>(null);
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingProgressRef = useRef<Parameters<typeof saveReaderProgress>[1] | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const jumpUndoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const brightnessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sliderPointerDownRef = useRef(false);
   const lastReportedPageRef = useRef<{ section: number; page: number } | null>(null);
+  const lastVisibleParaRef = useRef(initialParagraph ?? 0);
+  const prevPageModeRef = useRef(reading.pageMode);
+  const modeSwitchRestoreRef = useRef(false);
   const programmaticScrollUntilRef = useRef(0);
   const lastScrollTopRef = useRef(0);
   const mouse = useMouse();
   const readingRef = useRef(reading);
   readingRef.current = reading;
+  const tocRef = useRef(toc);
+  tocRef.current = toc;
 
   useBack(() => {
     if (selection) {
       window.getSelection?.()?.removeAllRanges();
       setSelection(null);
+      return true;
+    }
+    if (ttsTimerOpen) {
+      setTtsTimerOpen(false);
+      return true;
+    }
+    if (autoRead.active) {
+      setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+      setAutoReadProgress(null);
       return true;
     }
     if (!hudHidden) {
@@ -478,7 +505,34 @@ export default function ReaderScreen({
     setHighlights(hls);
   }, [game.repo, targetId, targetType]);
 
-  // Initial load of book / world novel + saved reading progress
+  // On-demand LRU chapter fetch for imported books (at most 5 sections in RAM)
+  const fetchSectionCached = useCallback(
+    async (sec: number): Promise<BookSectionContent | null> => {
+      if (!bookId) return null;
+      const cache = sectionCache.current;
+      const hit = cache.get(sec);
+      if (hit) {
+        cache.delete(sec);
+        cache.set(sec, hit);
+        return hit;
+      }
+      const loaded = await readBookSection(game.repo, bookId, sec);
+      if (loaded) {
+        cache.set(sec, loaded);
+        while (cache.size > SECTION_CACHE_LIMIT) {
+          const oldest = cache.keys().next().value;
+          if (oldest === undefined) break;
+          cache.delete(oldest);
+        }
+      }
+      return loaded;
+    },
+    [bookId, game.repo],
+  );
+
+  // Initial load of book / world novel + saved reading progress.
+  // Stage 1 loads ONLY lightweight headers + the single active chapter so multi-thousand-chapter
+  // novels paint in <15ms; Stage 2 hydrates per-chapter char weights & annotations in background.
   useEffect(() => {
     let live = true;
     sectionCache.current.clear();
@@ -496,41 +550,71 @@ export default function ReaderScreen({
               effectiveThrough = st.source.through;
             }
           }
-          const [meta, rawToc, saved] = await Promise.all([
-            getBookMeta(game.repo, bookId),
-            listBookToc(game.repo, bookId),
-            initialSection === undefined ? getReaderProgress(game.repo, "book", bookId) : Promise.resolve(null),
+          const [header, fastSecs, saved] = await Promise.all([
+            getBookHeader(game.repo, bookId),
+            listBookSectionsFast(game.repo, bookId),
+            initialSection === undefined && initialParagraph === undefined
+              ? getReaderProgress(game.repo, "book", bookId)
+              : Promise.resolve(null),
           ]);
           if (!live) return;
-          if (!meta || !rawToc.length) {
+          if (!header || !fastSecs.length) {
             setError("这本书暂时无法打开，可能已被移除。");
             setLoading(false);
             return;
           }
-          setSpoilerCeiling(effectiveThrough);
-          setBookTitle(meta.title);
-          setBookFormat(meta.format.toLowerCase());
-          setToc(
-            rawToc.map((item: BookTocItem) => ({
-              index: item.section,
-              title: item.title || `第 ${item.section + 1} 节`,
-              chars: item.chars,
-              locked: effectiveThrough != null && item.section > effectiveThrough,
-            })),
-          );
-          const maxInitial = effectiveThrough != null ? Math.min(rawToc.length - 1, effectiveThrough) : rawToc.length - 1;
+          const maxInitial =
+            effectiveThrough != null ? Math.min(fastSecs.length - 1, effectiveThrough) : fastSecs.length - 1;
           const startSec = Math.max(
             0,
             Math.min(
-              rawToc.length - 1,
+              fastSecs.length - 1,
               initialSection ?? Math.min(saved?.sectionIndex ?? 0, maxInitial),
             ),
           );
+          const firstChapter = await fetchSectionCached(startSec);
+          if (!live) return;
+          setSpoilerCeiling(effectiveThrough);
+          setBookTitle(header.title);
+          setBookFormat(header.format.toLowerCase());
+          setToc(
+            fastSecs.map((item) => ({
+              index: item.section,
+              title: item.title || `第 ${item.section + 1} 节`,
+              chars: firstChapter && item.section === startSec ? firstChapter.text.length : 0,
+              locked: effectiveThrough != null && item.section > effectiveThrough,
+            })),
+          );
           setSectionIndex(startSec);
-          if (saved && initialSection === undefined && saved.sectionIndex === startSec) {
+          setBookSection(firstChapter);
+          if (initialParagraph !== undefined) {
+            setEntryPage(0);
+            setEntrySelector(`[data-para-index="${initialParagraph}"]`);
+            setPendingFlashPara(initialParagraph);
+            setPendingScrollRatio(null);
+            setJumpNonce((n) => n + 1);
+          } else if (saved && initialSection === undefined && saved.sectionIndex === startSec) {
             setEntryPage(saved.pageIndex);
             setPendingScrollRatio(saved.scrollRatio);
           }
+          setLoading(false);
+
+          // Stage 2: non-blocking background hydration of char counts & annotations
+          void Promise.all([
+            listBookToc(game.repo, bookId).then((fullToc: BookTocItem[]) => {
+              if (!live || !fullToc.length) return;
+              setToc(
+                fullToc.map((item) => ({
+                  index: item.section,
+                  title: item.title || `第 ${item.section + 1} 节`,
+                  chars: item.chars,
+                  locked: effectiveThrough != null && item.section > effectiveThrough,
+                })),
+              );
+            }),
+            refreshAnnotations(),
+          ]).catch(() => {});
+          return;
         } else if (worldId) {
           const [built, saved] = await Promise.all([
             buildNovelBook(game.repo, worldId, {
@@ -539,7 +623,7 @@ export default function ReaderScreen({
               includeChronicle: true,
               includeActions: false,
             }),
-            initialSection === undefined && !initialNodeId
+            initialSection === undefined && initialParagraph === undefined && !initialNodeId
               ? getReaderProgress(game.repo, "world_novel", worldId)
               : Promise.resolve(null),
           ]);
@@ -572,12 +656,21 @@ export default function ReaderScreen({
           }
           startSec = Math.max(0, Math.min(built.sections.length - 1, startSec));
           setSectionIndex(startSec);
-          if (saved && initialSection === undefined && !initialNodeId && saved.sectionIndex === startSec) {
+          if (initialParagraph !== undefined) {
+            setEntryPage(0);
+            setEntrySelector(`[data-para-index="${initialParagraph}"]`);
+            setPendingFlashPara(initialParagraph);
+            setPendingScrollRatio(null);
+            setJumpNonce((n) => n + 1);
+          } else if (initialNodeId) {
+            setEntrySelector(`[data-node-id="${CSS.escape(initialNodeId)}"]`);
+            setJumpNonce((n) => n + 1);
+          } else if (saved && initialSection === undefined && saved.sectionIndex === startSec) {
             setEntryPage(saved.pageIndex);
             setPendingScrollRatio(saved.scrollRatio);
           }
+          await refreshAnnotations();
         }
-        await refreshAnnotations();
       } catch (e: unknown) {
         if (live) setError(e instanceof Error ? e.message : "读取书卷失败");
       } finally {
@@ -587,32 +680,18 @@ export default function ReaderScreen({
     return () => {
       live = false;
     };
-  }, [bookId, game.repo, initialNodeId, initialSection, lineId, propThrough, refreshAnnotations, worldId]);
-
-  // On-demand LRU chapter fetch for imported books (at most 5 sections in RAM)
-  const fetchSectionCached = useCallback(
-    async (sec: number): Promise<BookSectionContent | null> => {
-      if (!bookId) return null;
-      const cache = sectionCache.current;
-      const hit = cache.get(sec);
-      if (hit) {
-        cache.delete(sec);
-        cache.set(sec, hit);
-        return hit;
-      }
-      const loaded = await readBookSection(game.repo, bookId, sec);
-      if (loaded) {
-        cache.set(sec, loaded);
-        while (cache.size > SECTION_CACHE_LIMIT) {
-          const oldest = cache.keys().next().value;
-          if (oldest === undefined) break;
-          cache.delete(oldest);
-        }
-      }
-      return loaded;
-    },
-    [bookId, game.repo],
-  );
+  }, [
+    bookId,
+    fetchSectionCached,
+    game.repo,
+    initialNodeId,
+    initialParagraph,
+    initialSection,
+    lineId,
+    propThrough,
+    refreshAnnotations,
+    worldId,
+  ]);
 
   useEffect(() => {
     if (!bookId || !toc.length) return;
@@ -634,7 +713,11 @@ export default function ReaderScreen({
     if (!bookId) return;
     setJumpUndo(null);
     sectionCache.current.clear();
-    const rawToc = await listBookToc(game.repo, bookId);
+    const [rawToc, prog] = await Promise.all([
+      listBookToc(game.repo, bookId),
+      getReaderProgress(game.repo, "book", bookId).catch(() => null),
+    ]);
+    await refreshAnnotations();
     if (!rawToc.length) return;
     setToc(
       rawToc.map((item) => ({
@@ -644,13 +727,16 @@ export default function ReaderScreen({
         locked: spoilerCeiling != null && item.section > spoilerCeiling,
       })),
     );
-    const clampedSec = Math.max(0, Math.min(rawToc.length - 1, sectionIndex));
+    const targetSec = prog ? prog.sectionIndex : sectionIndex;
+    const clampedSec = Math.max(0, Math.min(rawToc.length - 1, targetSec));
+    setEntrySelector(null);
     setEntryPage(0);
-    setPendingScrollRatio(0);
+    setPendingScrollRatio(prog && prog.sectionIndex === clampedSec ? prog.scrollRatio : 0);
+    setJumpNonce((n) => n + 1);
     setSectionIndex(clampedSec);
     const fresh = await fetchSectionCached(clampedSec);
     setBookSection(fresh);
-  }, [bookId, fetchSectionCached, game.repo, sectionIndex, spoilerCeiling]);
+  }, [bookId, fetchSectionCached, game.repo, refreshAnnotations, sectionIndex, spoilerCeiling]);
 
   const currentSection = useMemo(() => {
     if (bookId) {
@@ -731,34 +817,141 @@ export default function ReaderScreen({
     [intraProgressRatio, sectionIndex, toc],
   );
 
+  const currentSectionRef = useRef(currentSection);
+  currentSectionRef.current = currentSection;
+
+  const getCurrentParagraphIndex = useCallback((): number => {
+    if (readingRef.current.pageMode === "paged") {
+      const raw = paginatorRef.current?.currentAnchorId("data-para-index");
+      const parsed = raw != null ? Number(raw) : NaN;
+      if (Number.isFinite(parsed) && parsed >= 0) return Math.trunc(parsed);
+      return lastVisibleParaRef.current;
+    }
+    const scroller = scrollerRef.current;
+    if (!scroller) return lastVisibleParaRef.current;
+    const scrollerRect = scroller.getBoundingClientRect();
+    if (scrollerRect.height <= 0) return lastVisibleParaRef.current;
+    const probeY = scrollerRect.top + Math.min(96, Math.max(24, scrollerRect.height * 0.18));
+    const paras = scroller.querySelectorAll<HTMLElement>("[data-para-index]");
+    if (!paras.length) return 0;
+    let lo = 0;
+    let hi = paras.length - 1;
+    let ans = paras.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const r = paras[mid]!.getBoundingClientRect();
+      if (r.bottom >= probeY) {
+        ans = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    const rawIdx = Number(paras[ans]!.dataset.paraIndex ?? 0);
+    return Number.isFinite(rawIdx) && rawIdx >= 0 ? Math.trunc(rawIdx) : 0;
+  }, []);
+
+  // Restore reading position when switching between `paged` and `scroll` modes
+  useLayoutEffect(() => {
+    if (prevPageModeRef.current === reading.pageMode) return;
+    prevPageModeRef.current = reading.pageMode;
+    const pIdx = lastVisibleParaRef.current;
+    modeSwitchRestoreRef.current = true;
+    setEntrySelector(`[data-para-index="${pIdx}"]`);
+    if (reading.pageMode === "paged") {
+      setJumpNonce((n) => n + 1);
+    } else {
+      setPendingScrollRatio(scrollRatio);
+    }
+  }, [reading.pageMode, scrollRatio]);
+
+  // Dismiss selection popover on outside pointerdown
+  useEffect(() => {
+    if (!selection) return;
+    const onOutsidePointerDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest(".reader-selection-bar")) return;
+      setSelection(null);
+    };
+    document.addEventListener("pointerdown", onOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+  }, [selection]);
+
+  // Flash jumped paragraph in paged mode
+  useEffect(() => {
+    if (reading.pageMode !== "paged" || !currentSection || pendingFlashPara === null) return;
+    const raf = requestAnimationFrame(() => {
+      const el = proseRef.current?.querySelector<HTMLElement>(`[data-para-index="${pendingFlashPara}"]`);
+      if (el) {
+        el.classList.add("toc-flash");
+        setTimeout(() => el.classList.remove("toc-flash"), 1600);
+      }
+      setPendingFlashPara(null);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [currentSection, jumpNonce, pendingFlashPara, reading.pageMode]);
+
+  const resolveAnchorText = useCallback((nextSection: number, preferredParaIdx?: number): string => {
+    const cur = currentSectionRef.current;
+    if (cur && cur.index === nextSection) {
+      const candidate =
+        (preferredParaIdx !== undefined ? cur.paragraphs[preferredParaIdx] : undefined) ??
+        cur.paragraphs.find((p) => p.kind !== "divider" && p.text.trim()) ??
+        cur.paragraphs[0];
+      if (candidate?.text) return candidate.text.slice(0, 36);
+    }
+    return tocRef.current[nextSection]?.title ?? "";
+  }, []);
+
   const scheduleSaveProgress = useCallback(
-    (nextSection: number, pageIndex: number, ratio: number, nodeId: string | null = null) => {
+    (
+      nextSection: number,
+      pageIndex: number,
+      ratio: number,
+      nodeId: string | null = null,
+      preferredParaIdx?: number,
+    ) => {
       if (!targetId) return;
+      const payload: Parameters<typeof saveReaderProgress>[1] = {
+        targetType,
+        targetId,
+        sectionIndex: nextSection,
+        pageIndex,
+        scrollRatio: ratio,
+        anchorText: resolveAnchorText(nextSection, preferredParaIdx),
+        nodeId,
+      };
+      pendingProgressRef.current = payload;
       if (progressTimer.current) clearTimeout(progressTimer.current);
       progressTimer.current = setTimeout(() => {
-        const snippet = currentSection?.paragraphs[0]?.text.slice(0, 36) ?? "";
-        void saveReaderProgress(game.repo, {
-          targetType,
-          targetId,
-          sectionIndex: nextSection,
-          pageIndex,
-          scrollRatio: ratio,
-          anchorText: snippet,
-          nodeId,
-        }).catch(() => {});
+        progressTimer.current = null;
+        const latest = pendingProgressRef.current;
+        if (!latest) return;
+        pendingProgressRef.current = null;
+        const freshAnchor = resolveAnchorText(latest.sectionIndex, preferredParaIdx) || latest.anchorText;
+        void saveReaderProgress(game.repo, { ...latest, anchorText: freshAnchor }).catch(() => {});
       }, 360);
     },
-    [currentSection, game.repo, targetId, targetType],
+    [game.repo, resolveAnchorText, targetId, targetType],
   );
 
   useEffect(
     () => () => {
-      if (progressTimer.current) clearTimeout(progressTimer.current);
+      if (progressTimer.current) {
+        clearTimeout(progressTimer.current);
+        progressTimer.current = null;
+      }
+      if (pendingProgressRef.current) {
+        const pending = pendingProgressRef.current;
+        pendingProgressRef.current = null;
+        const freshAnchor = resolveAnchorText(pending.sectionIndex) || pending.anchorText;
+        void saveReaderProgress(game.repo, { ...pending, anchorText: freshAnchor }).catch(() => {});
+      }
       if (longPressTimer.current) clearTimeout(longPressTimer.current);
       if (jumpUndoTimerRef.current) clearTimeout(jumpUndoTimerRef.current);
       if (brightnessTimerRef.current) clearTimeout(brightnessTimerRef.current);
     },
-    [],
+    [game.repo, resolveAnchorText],
   );
 
   const armJumpUndo = useCallback(() => {
@@ -795,11 +988,15 @@ export default function ReaderScreen({
         return;
       }
       if (entrySelector) {
+        const isModeRestore = modeSwitchRestoreRef.current;
+        modeSwitchRestoreRef.current = false;
         const el = scroller.querySelector<HTMLElement>(entrySelector);
         if (el) {
-          el.scrollIntoView({ block: "center" });
-          el.classList.add("toc-flash");
-          setTimeout(() => el.classList.remove("toc-flash"), 1600);
+          el.scrollIntoView({ block: isModeRestore ? "start" : "center" });
+          if (!isModeRestore) {
+            el.classList.add("toc-flash");
+            setTimeout(() => el.classList.remove("toc-flash"), 1600);
+          }
         }
         lastScrollTopRef.current = scroller.scrollTop;
         setEntrySelector(null);
@@ -822,8 +1019,8 @@ export default function ReaderScreen({
     async (
       targetSec: number,
       opts?: { page?: number | "last"; paraIndex?: number; selector?: string; scrollRatio?: number; recordUndo?: boolean },
-    ) => {
-      if (!toc.length) return;
+    ): Promise<boolean> => {
+      if (!toc.length || targetSec < 0 || targetSec >= toc.length) return false;
       const clamped = Math.max(0, Math.min(toc.length - 1, targetSec));
       if (bookId && spoilerCeiling != null && clamped > spoilerCeiling && !spoilerUnlocked) {
         const ok = await ask({
@@ -831,7 +1028,7 @@ export default function ReaderScreen({
           message: `本局当前设定的参考范围截至第 ${spoilerCeiling + 1} 节。提前翻阅第 ${clamped + 1} 节可能会看到后续原著剧情，确定要先看吗？`,
           confirm: "继续翻阅",
         });
-        if (!ok) return;
+        if (!ok) return false;
         setSpoilerUnlocked(true);
       }
       if (opts?.recordUndo && (clamped !== sectionIndex || opts.paraIndex !== undefined)) {
@@ -847,10 +1044,19 @@ export default function ReaderScreen({
         opts?.selector ??
           (opts?.paraIndex !== undefined ? `[data-para-index="${opts.paraIndex}"]` : null),
       );
+      lastVisibleParaRef.current = opts?.paraIndex ?? 0;
       if (opts?.paraIndex !== undefined) setPendingFlashPara(opts.paraIndex);
       setPendingScrollRatio(opts?.scrollRatio ?? null);
+      setJumpNonce((n) => n + 1);
       setSectionIndex(clamped);
-      scheduleSaveProgress(clamped, typeof opts?.page === "number" ? opts.page : 0, opts?.scrollRatio ?? 0);
+      scheduleSaveProgress(
+        clamped,
+        typeof opts?.page === "number" ? opts.page : 0,
+        opts?.scrollRatio ?? 0,
+        null,
+        opts?.paraIndex,
+      );
+      return true;
     },
     [armJumpUndo, ask, bookId, scheduleSaveProgress, sectionIndex, spoilerCeiling, spoilerUnlocked, toc.length],
   );
@@ -917,11 +1123,10 @@ export default function ReaderScreen({
     onParagraphFocus: focusSpokenParagraph,
     onSectionEnd: async () => {
       if (sectionIndex < toc.length - 1) {
-        await goSection(sectionIndex + 1, { page: 0 });
-      } else {
-        tts.stop();
-        toast("整本书已朗读完毕");
+        return await goSection(sectionIndex + 1, { page: 0 });
       }
+      toast("整本书已朗读完毕");
+      return false;
     },
     toast,
   });
@@ -952,10 +1157,20 @@ export default function ReaderScreen({
           setAutoReadProgress(0);
           const p = paginatorRef.current;
           if (!p) return;
-          if (p.page >= p.totalPages - 1 && sectionIndex >= toc.length - 1) {
-            setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
-            setAutoReadProgress(null);
-            toast("已自动读完全书");
+          if (p.page >= p.totalPages - 1) {
+            if (sectionIndex >= toc.length - 1) {
+              setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+              setAutoReadProgress(null);
+              toast("已自动读完全书");
+              return;
+            }
+            if (bookId && !spoilerUnlocked && spoilerCeiling != null && sectionIndex + 1 > spoilerCeiling) {
+              setAutoRead((prev) => ({ ...prev, paused: true }));
+              setAutoReadProgress(null);
+              toast(`已读至防剧透范围上限（第 ${spoilerCeiling + 1} 节），自动阅读已暂停`);
+              return;
+            }
+            void goSection(sectionIndex + 1, { page: 0 });
             return;
           }
           p.stepBy(1);
@@ -969,10 +1184,12 @@ export default function ReaderScreen({
       };
     }
 
-    // Smooth rAF auto-scroll in scroll mode
+    // Smooth rAF auto-scroll in scroll mode with minimum chapter dwell time & spoilerCeiling guard
     const pxPerSec = AUTO_READ_SCROLL_PX_PER_SEC[autoRead.speed - 1];
+    const minDwellMs = Math.max(2600, Math.round(AUTO_READ_PAGE_MS[autoRead.speed - 1] * 0.55));
+    const chapterEnteredAt = performance.now();
     let rafId = 0;
-    let lastTs = performance.now();
+    let lastTs = chapterEnteredAt;
     let subPixelCarry = 0;
     let advancing = false;
 
@@ -982,13 +1199,19 @@ export default function ReaderScreen({
       const el = scrollerRef.current;
       if (el && !advancing) {
         if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) {
-          advancing = true;
-          if (sectionIndex < toc.length - 1) {
+          if (ts - chapterEnteredAt >= minDwellMs) {
+            if (sectionIndex >= toc.length - 1) {
+              setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+              toast("已自动读完全书");
+              return;
+            }
+            if (bookId && !spoilerUnlocked && spoilerCeiling != null && sectionIndex + 1 > spoilerCeiling) {
+              setAutoRead((prev) => ({ ...prev, paused: true }));
+              toast(`已读至防剧透范围上限（第 ${spoilerCeiling + 1} 节），自动阅读已暂停`);
+              return;
+            }
+            advancing = true;
             void goSection(sectionIndex + 1, { scrollRatio: 0 });
-          } else {
-            setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
-            toast("已自动读完全书");
-            return;
           }
         } else {
           subPixelCarry += pxPerSec * dt;
@@ -1007,12 +1230,15 @@ export default function ReaderScreen({
     autoRead.active,
     autoRead.paused,
     autoRead.speed,
+    bookId,
     currentSection,
     docVisible,
     goSection,
     hasOverlayOpen,
     reading.pageMode,
     sectionIndex,
+    spoilerCeiling,
+    spoilerUnlocked,
     toast,
     toc.length,
   ]);
@@ -1106,11 +1332,37 @@ export default function ReaderScreen({
         ? range.startContainer.closest<HTMLElement>("[data-para-index]")
         : range.startContainer.parentElement?.closest<HTMLElement>("[data-para-index]");
     if (!startEl) return;
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
     const pIdx = Number(startEl.dataset.paraIndex ?? 0);
     const fullText = currentSection?.paragraphs[pIdx]?.text ?? startEl.textContent ?? "";
-    const pos = fullText.indexOf(raw);
-    const charStart = pos >= 0 ? pos : 0;
-    const charEnd = pos >= 0 ? pos + raw.length : raw.length;
+    let charStart = 0;
+    let charEnd = fullText.length;
+    try {
+      const preRange = document.createRange();
+      preRange.selectNodeContents(startEl);
+      preRange.setEnd(range.startContainer, range.startOffset);
+      charStart = Math.max(0, Math.min(fullText.length, preRange.toString().length));
+      if (startEl.contains(range.endContainer)) {
+        const endRange = document.createRange();
+        endRange.selectNodeContents(startEl);
+        endRange.setEnd(range.endContainer, range.endOffset);
+        charEnd = Math.max(charStart, Math.min(fullText.length, endRange.toString().length));
+      } else {
+        charEnd = fullText.length;
+      }
+      while (charStart < charEnd && /\s/.test(fullText[charStart] ?? "")) charStart++;
+      while (charEnd > charStart && /\s/.test(fullText[charEnd - 1] ?? "")) charEnd--;
+    } catch {
+      charEnd = charStart;
+    }
+    if (charEnd <= charStart) {
+      const pos = fullText.indexOf(raw);
+      charStart = pos >= 0 ? pos : 0;
+      charEnd = pos >= 0 ? pos + raw.length : Math.min(fullText.length, raw.length);
+    }
     const anchorRect = measureSelectionAnchor(startEl, range.getBoundingClientRect());
     setSelection({
       paragraphIndex: pIdx,
@@ -1168,7 +1420,7 @@ export default function ReaderScreen({
       toast("已移除本章书签");
       return;
     }
-    const paraIdx = Number(paginatorRef.current?.currentAnchorId("data-para-index") ?? 0) || 0;
+    const paraIdx = getCurrentParagraphIndex();
     const para = currentSection.paragraphs[paraIdx] ?? currentSection.paragraphs[0];
     await addReaderBookmark(game.repo, {
       targetType,
@@ -1329,12 +1581,14 @@ export default function ReaderScreen({
                 if (longPressTimer.current) clearTimeout(longPressTimer.current);
                 const paraEl = e.currentTarget;
                 const touch = e.touches[0];
-                const pt = touch ? { x: touch.clientX, y: touch.clientY } : undefined;
+                const pt = touch ? { x: touch.clientX, y: touch.clientY } : null;
+                touchStartPosRef.current = pt;
                 longPressTimer.current = setTimeout(() => {
+                  longPressTimer.current = null;
                   const existingSel = window.getSelection?.()?.toString().trim();
                   if (existingSel) return;
                   buzz(game.platform);
-                  const anchorRect = measureSelectionAnchor(paraEl, null, pt);
+                  const anchorRect = measureSelectionAnchor(paraEl, null, pt ?? undefined);
                   setSelection({
                     paragraphIndex: pIdx,
                     charStart: 0,
@@ -1345,11 +1599,28 @@ export default function ReaderScreen({
                   });
                 }, 520);
               }}
-              onTouchMove={() => {
-                if (longPressTimer.current) clearTimeout(longPressTimer.current);
+              onTouchMove={(e) => {
+                if (!longPressTimer.current) return;
+                const touch = e.touches[0];
+                const start = touchStartPosRef.current;
+                if (!touch || !start || Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10) {
+                  clearTimeout(longPressTimer.current);
+                  longPressTimer.current = null;
+                }
               }}
               onTouchEnd={() => {
-                if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                if (longPressTimer.current) {
+                  clearTimeout(longPressTimer.current);
+                  longPressTimer.current = null;
+                }
+                touchStartPosRef.current = null;
+              }}
+              onTouchCancel={() => {
+                if (longPressTimer.current) {
+                  clearTimeout(longPressTimer.current);
+                  longPressTimer.current = null;
+                }
+                touchStartPosRef.current = null;
               }}
             >
               {renderHighlightedText(para.text, paraHighlights, (h) => {
@@ -1460,14 +1731,27 @@ export default function ReaderScreen({
     !hasOverlayOpen && !loading && !error,
   );
 
+  useEffect(() => {
+    if (drawerTab !== "toc") return;
+    const start = Math.max(0, sectionIndex - 60);
+    const end = Math.min(toc.length, Math.max(start + 160, sectionIndex + 100));
+    setTocRange({ start, end });
+    const raf = requestAnimationFrame(() => {
+      document.querySelector(".sheet [aria-current='true']")?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [drawerTab, sectionIndex, toc.length]);
+
   const previewSec = scrubSection ?? sectionIndex;
   const scrubPct =
     scrubSection !== null ? computeBookProgressPct(toc, scrubSection, 0) : null;
   const sleepCountdownText = formatSleepRemaining(tts.sleepRemainingSec);
+  const forceHudOpen = loading || !!error || !currentSection;
+  const effectiveHudHidden = hudHidden && !forceHudOpen;
 
   return (
     <div
-      className={`reader-screen${hudHidden ? " hud-hidden" : ""}`}
+      className={`reader-screen${effectiveHudHidden ? " hud-hidden" : ""}`}
       data-paper-tone={reading.paperTone === "default" ? undefined : reading.paperTone}
       data-focus-mode={reading.focusMode ? "on" : undefined}
       style={screenVars}
@@ -1605,6 +1889,7 @@ export default function ReaderScreen({
             key={`${targetId}:${sectionIndex}`}
             ref={paginatorRef}
             contentKey={paginatorKey}
+            jumpNonce={jumpNonce}
             initialPage={entryPage}
             initialSelector={entrySelector}
             headerTitle={bookTitle}
@@ -1650,10 +1935,16 @@ export default function ReaderScreen({
                 }
               }
               lastReportedPageRef.current = { section: sectionIndex, page: p };
+              const rawPara = paginatorRef.current?.currentAnchorId("data-para-index");
+              const pIdx = rawPara != null && Number.isFinite(Number(rawPara)) ? Math.max(0, Math.trunc(Number(rawPara))) : 0;
+              lastVisibleParaRef.current = pIdx;
+              const proportionalRatio = p + 1 <= total ? p / Math.max(1, total - 1) : 0;
+              setScrollRatio(proportionalRatio);
               setPageStats((old) =>
                 old.page === p && old.totalPages === total ? old : { page: p, totalPages: total },
               );
-              scheduleSaveProgress(sectionIndex, p, 0, anchorNodeId);
+              const nodeId = targetType === "world_novel" ? anchorNodeId : null;
+              scheduleSaveProgress(sectionIndex, p, proportionalRatio, nodeId, pIdx);
             }}
           >
             {proseBody}
@@ -1686,15 +1977,21 @@ export default function ReaderScreen({
               if (!el) return;
               const max = Math.max(1, el.scrollHeight - el.clientHeight);
               const ratio = Math.min(1, Math.max(0, el.scrollTop / max));
+              const pIdx = getCurrentParagraphIndex();
+              lastVisibleParaRef.current = pIdx;
               if (
                 performance.now() > programmaticScrollUntilRef.current &&
                 Math.abs(el.scrollTop - lastScrollTopRef.current) > 8
               ) {
                 lastScrollTopRef.current = el.scrollTop;
                 setHudHidden(true);
+                if (selection) {
+                  window.getSelection?.()?.removeAllRanges();
+                  setSelection(null);
+                }
               }
               setScrollRatio(ratio);
-              scheduleSaveProgress(sectionIndex, 0, ratio);
+              scheduleSaveProgress(sectionIndex, 0, ratio, null, pIdx);
             }}
           >
             {proseBody}
@@ -2009,13 +2306,18 @@ export default function ReaderScreen({
       )}
 
       <div className="reader-dock">
-        {scrubSection !== null && toc[scrubSection] && (
-          <div className="reader-scrub-bubble" role="status" aria-live="polite">
-            <b>第 {scrubSection + 1} 节</b>
-            <span className="scrub-title">{toc[scrubSection]!.title}</span>
-            {scrubPct !== null && <span className="scrub-pct">{scrubPct.toFixed(1)}%</span>}
-          </div>
-        )}
+        {scrubSection !== null && toc[scrubSection] && (() => {
+          const scrubLocked = !spoilerUnlocked && spoilerCeiling != null && scrubSection > spoilerCeiling;
+          return (
+            <div className="reader-scrub-bubble" role="status" aria-live="polite">
+              <b>第 {scrubSection + 1} 节</b>
+              <span className="scrub-title">
+                {scrubLocked ? `第 ${scrubSection + 1} 章（未解锁）` : toc[scrubSection]!.title}
+              </span>
+              {scrubPct !== null && <span className="scrub-pct">{scrubPct.toFixed(1)}%</span>}
+            </div>
+          );
+        })()}
         {toc.length > 1 && (
           <div className="reader-progress-row">
             <button
@@ -2097,7 +2399,7 @@ export default function ReaderScreen({
                 setTtsOpen(true);
                 setHudHidden(true);
                 if (tts.status === "idle") {
-                  const pIdx = Number(paginatorRef.current?.currentAnchorId("data-para-index") ?? 0) || 0;
+                  const pIdx = getCurrentParagraphIndex();
                   tts.play(pIdx);
                 }
               } else {
@@ -2215,7 +2517,21 @@ export default function ReaderScreen({
               <EmptyVignette kind="mist-search" title="没有匹配的章节" compact />
             ) : (
               <div className="stack gap-1">
-                {filteredToc.map((item) => {
+                {!tocFilter.trim() && tocRange.start > 0 && (
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={() =>
+                      setTocRange((r) => ({ ...r, start: Math.max(0, r.start - 240) }))
+                    }
+                  >
+                    ↑ 展开更早章节（前 {tocRange.start} 节）
+                  </button>
+                )}
+                {(tocFilter.trim()
+                  ? filteredToc.slice(0, 200)
+                  : filteredToc.slice(tocRange.start, tocRange.end)
+                ).map((item) => {
                   const active = item.index === sectionIndex;
                   const locked = !spoilerUnlocked && spoilerCeiling != null && item.index > spoilerCeiling;
                   return (
@@ -2230,21 +2546,40 @@ export default function ReaderScreen({
                       }}
                     >
                       <div className="grow">
-                        <b>{item.title}</b>
-                        {item.subtitle && <small>{item.subtitle}</small>}
+                        <b>{locked ? `第 ${item.index + 1} 章（未解锁）` : item.title}</b>
+                        {!locked && item.subtitle && <small>{item.subtitle}</small>}
                       </div>
                       <span className="person-side">
                         {locked ? (
                           <span className="tag">未解锁</span>
                         ) : active ? (
                           <span className="tag">在读</span>
-                        ) : (
+                        ) : item.chars > 0 ? (
                           <small>{item.chars.toLocaleString()} 字</small>
-                        )}
+                        ) : null}
                       </span>
                     </button>
                   );
                 })}
+                {!tocFilter.trim() && tocRange.end < filteredToc.length && (
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={() =>
+                      setTocRange((r) => ({
+                        ...r,
+                        end: Math.min(filteredToc.length, r.end + 240),
+                      }))
+                    }
+                  >
+                    ↓ 展开后续章节（余 {filteredToc.length - tocRange.end} 节）
+                  </button>
+                )}
+                {tocFilter.trim() !== "" && filteredToc.length > 200 && (
+                  <small className="muted t-center">
+                    共命中 {filteredToc.length} 节，已展示前 200 节；继续输入可进一步缩小范围。
+                  </small>
+                )}
               </div>
             )}
           </div>
@@ -2585,7 +2920,11 @@ export default function ReaderScreen({
           sectionTitle={currentSection.title}
           selectedText={askSheetState.selectedText}
           contextParagraphs={askSheetState.contextParagraphs}
-          onOpenFullCompanion={(prompt) => {
+          onOpenFullCompanion={({ prompt, asked, draftQuestion }) => {
+            const effectiveCeiling =
+              !spoilerUnlocked && spoilerCeiling != null
+                ? Math.max(0, Math.min(sectionIndex, spoilerCeiling))
+                : Math.max(0, sectionIndex);
             push({
               name: "companion",
               worldId,
@@ -2594,6 +2933,11 @@ export default function ReaderScreen({
               gear: "research",
               prompt,
               autoSend: false,
+              handoff: {
+                asked,
+                draftQuestion,
+                ...(bookId ? { sourceScope: { mode: "chapters", from: 0, to: effectiveCeiling } } : {}),
+              },
             });
           }}
           onClose={() => setAskSheetState(null)}

@@ -74,7 +74,7 @@
   min-height: 160px;
   width: 100%;
   padding-block: 4px;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .paged-columns {
@@ -110,6 +110,11 @@
 .paginator.is-dragging .paged-columns {
   transition: none !important;
   animation: none !important;
+}
+
+.paginator.is-dragging .reader-prose {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 @keyframes page-fade-in {

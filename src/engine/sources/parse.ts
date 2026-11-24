@@ -49,6 +49,56 @@ function withVolume(volume: string, heading: string): string {
   return `${cleanVolume} · ${cleanHeading}`;
 }
 
+function safeDecodeUri(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw.replace(/(?:%[0-9a-fA-F]{2})+/g, (seq) => {
+      try {
+        return decodeURIComponent(seq);
+      } catch {
+        return seq.replace(/%[0-7][0-9a-fA-F]/g, (ascii) => decodeURIComponent(ascii));
+      }
+    });
+  }
+}
+
+function splitOversizedBlock(block: string): string[] {
+  if (block.length <= 12_000) return [block];
+  const lines = block.split("\n").map((s) => s.trim()).filter(Boolean);
+  const pieces: string[] = [];
+  for (const ln of lines) {
+    if (ln.length <= 12_000) {
+      pieces.push(ln);
+      continue;
+    }
+    let start = 0;
+    while (start < ln.length) {
+      if (ln.length - start <= 6_000) {
+        const tail = ln.slice(start).trim();
+        if (tail) pieces.push(tail);
+        break;
+      }
+      let cut = start + 6_000;
+      const searchEnd = Math.min(ln.length, start + 6_500);
+      const searchStart = start + 3_000;
+      let best = -1;
+      for (let j = searchEnd - 1; j >= searchStart; j--) {
+        if ("。！？；.!?".includes(ln[j]!)) {
+          best = j + 1;
+          while (best < ln.length && "”’」』）)".includes(ln[best]!)) best++;
+          break;
+        }
+      }
+      if (best > start) cut = best;
+      const seg = ln.slice(start, cut).trim();
+      if (seg) pieces.push(seg);
+      start = cut;
+    }
+  }
+  return pieces;
+}
+
 export async function textSections(text: string, signal?: AbortSignal): Promise<BookSection[]> {
   const sections: BookSection[] = [];
   let title = "正文", volume = "", lines: string[] = [];
@@ -69,6 +119,31 @@ export async function textSections(text: string, signal?: AbortSignal): Promise<
     } else lines.push(line);
   }
   flush();
+  if (sections.length === 1 && sections[0].title === "正文" && sections[0].text.length > 24_000) {
+    const rawBlocks = sections[0].text.split("\n\n").map((b) => b.trim()).filter(Boolean);
+    const expanded: string[] = [];
+    for (const blk of rawBlocks) {
+      for (const piece of splitOversizedBlock(blk)) expanded.push(piece);
+    }
+    const autoSections: BookSection[] = [];
+    let buf: string[] = [];
+    let bufLen = 0;
+    const flushAuto = () => {
+      if (!buf.length) return;
+      autoSections.push({ title: `第 ${autoSections.length + 1} 节`, text: buf.join("\n\n") });
+      buf = [];
+      bufLen = 0;
+    };
+    for (let k = 0; k < expanded.length; k++) {
+      if (k > 0 && k % 500 === 0) { await tick(); checkCancelled(signal); }
+      const item = expanded[k]!;
+      if (bufLen > 0 && bufLen + item.length > 6_000) flushAuto();
+      buf.push(item);
+      bufLen += item.length;
+    }
+    flushAuto();
+    if (autoSections.length > 1) return autoSections;
+  }
   return sections;
 }
 
@@ -147,13 +222,13 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         if (/<!ENTITY|<!DOCTYPE[^>]*\[/i.test(value)) throw new Error("书籍包含不支持的 XML 声明");
       }
       const safe = value.replace(/<!DOCTYPE[^>]*>/gi, "");
-      if (XMLValidator.validate(safe) !== true) throw new Error("书籍文档已损坏");
+      if (XMLValidator.validate(safe, { allowBooleanAttributes: true }) !== true) throw new Error("书籍文档已损坏");
       return safe;
     };
-    const parser = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false });
+    const parser = new XMLParser({ ignoreAttributes: false, allowBooleanAttributes: true, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false });
     const list = <T,>(x: T | T[] | undefined): T[] => x === undefined ? [] : Array.isArray(x) ? x : [x];
     const textOf = (value: string, docx = false) => {
-      const ordered = new XMLParser({ preserveOrder: true, ignoreAttributes: false, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false }).parse(value) as any[];
+      const ordered = new XMLParser({ preserveOrder: true, ignoreAttributes: false, allowBooleanAttributes: true, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false }).parse(value) as any[];
       const walk = (rows: any[]): string => rows.map((row) => Object.entries(row).map(([key, content]) => {
         if (key === ":@" || key === "script" || key === "style" || key === "head") return "";
         if (key === "#text") return String(content);
@@ -206,7 +281,7 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         if (/^[a-z]+:/i.test(href)) throw new Error("书籍含有外部正文地址");
         const base = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
         const path: string[] = [];
-        for (const part of (base + decodeURIComponent(href.split("#")[0])).split("/")) { if (part === "..") path.pop(); else if (part !== "." && part) path.push(part); }
+        for (const part of (base + safeDecodeUri(href.split("#")[0])).split("/")) { if (part === "..") path.pop(); else if (part !== "." && part) path.push(part); }
         return path.join("/");
       };
       const toc = new Map<string, string>();
@@ -222,7 +297,7 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
         }
         const hashIdx = href.indexOf("#");
         if (hashIdx >= 0 && !isVolumeHeading(cleanLabel)) {
-          const anchor = decodeURIComponent(href.slice(hashIdx + 1)).trim();
+          const anchor = safeDecodeUri(href.slice(hashIdx + 1)).trim();
           if (anchor) {
             const list = tocAnchors.get(path) ?? [];
             if (!list.some((x) => x.anchor === anchor)) list.push({ anchor, label: fullLabel });
@@ -233,40 +308,62 @@ async function readBook(file: { name: string; bytes: Uint8Array }, platform: Pla
       const nav = [...manifest.values()].find((item) => String(item["@_properties"] ?? "").split(/\s+/).includes("nav"));
       if (nav) {
         const navPath = resolvePath(nav["@_href"]), value = xml(navPath);
-        const navOrdered = new XMLParser({ preserveOrder: true, ignoreAttributes: false, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false }).parse(value) as any[];
+        const navOrdered = new XMLParser({ preserveOrder: true, ignoreAttributes: false, allowBooleanAttributes: true, removeNSPrefix: true, processEntities: true, htmlEntities: true, parseTagValue: false }).parse(value) as any[];
         const inlineText = (nodes: any[]): string => clean(nodes.map((row) => Object.entries(row).map(([k, v]) => {
-          if (k === ":@" || k === "ol" || k === "ul" || k === "script" || k === "style") return "";
+          if (k === ":@" || k === "ol" || k === "ul" || k === "li" || k === "script" || k === "style") return "";
           if (k === "#text") return String(v);
           return Array.isArray(v) ? inlineText(v) : "";
         }).join("")).join(""));
-        const walkNav = (nodes: any[], parentVolume = "") => {
+        const collectLiLinks = (items: any[], out: { href: string; label: string }[] = []) => {
+          for (const item of items) {
+            for (const [k, v] of Object.entries(item)) {
+              if (k === ":@" || k === "ol" || k === "ul" || k === "li" || !Array.isArray(v)) continue;
+              if (k === "a") {
+                const attrs = item[":@"] ?? {};
+                const h = typeof attrs["@_href"] === "string" ? attrs["@_href"] : null;
+                const l = inlineText(v);
+                if (h && l) out.push({ href: h, label: l });
+              } else {
+                collectLiLinks(v, out);
+              }
+            }
+          }
+          return out;
+        };
+        const walkNav = (nodes: any[], parentVolume = "", insideLi = false): string => {
+          let currentVolume = parentVolume;
           for (const node of nodes) {
             for (const [tag, children] of Object.entries(node)) {
               if (tag === ":@" || !Array.isArray(children)) continue;
               if (tag === "li") {
-                let href: string | null = null;
-                let label = "";
-                const findDirectLinkOrLabel = (items: any[]) => {
-                  for (const child of items) {
-                    if ("a" in child && Array.isArray(child.a)) {
-                      const attrs = child[":@"] ?? {};
-                      href = typeof attrs["@_href"] === "string" ? attrs["@_href"] : null;
-                      label = inlineText(child.a);
-                      return;
-                    }
+                const links = collectLiLinks(children);
+                const primaryLabel = links[0]?.label || inlineText(children);
+                const inlineVol = primaryLabel ? extractInlineVolume(primaryLabel) : null;
+                const nextVolume = primaryLabel && isVolumeHeading(primaryLabel) ? primaryLabel : inlineVol ?? currentVolume;
+                for (const lnk of links) {
+                  recordToc(lnk.href, navPath, lnk.label, currentVolume);
+                }
+                walkNav(children, nextVolume, true);
+              } else if (tag === "ol" || tag === "ul") {
+                walkNav(children, currentVolume, false);
+              } else if (tag === "a") {
+                if (!insideLi) {
+                  const attrs = node[":@"] ?? {};
+                  const href = typeof attrs["@_href"] === "string" ? attrs["@_href"] : null;
+                  const label = inlineText(children);
+                  if (href && label) {
+                    recordToc(href, navPath, label, currentVolume);
+                    const inlineVol = extractInlineVolume(label);
+                    if (isVolumeHeading(label)) currentVolume = label;
+                    else if (inlineVol) currentVolume = inlineVol;
                   }
-                  label = inlineText(items);
-                };
-                findDirectLinkOrLabel(children);
-                const inlineVol = label ? extractInlineVolume(label) : null;
-                const nextVolume = label && isVolumeHeading(label) ? label : inlineVol ?? parentVolume;
-                if (href && label) recordToc(href, navPath, label, parentVolume);
-                walkNav(children, nextVolume);
+                }
               } else {
-                walkNav(children, parentVolume);
+                currentVolume = walkNav(children, currentVolume, insideLi);
               }
             }
           }
+          return currentVolume;
         };
         const collectNavRoots = (nodes: any[]): any[][] => {
           const tocNavs: any[][] = [], allNavs: any[][] = [];

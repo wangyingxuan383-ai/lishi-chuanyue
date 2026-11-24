@@ -15,6 +15,12 @@ const QUICK_CHIPS = [
   "赏析这段的伏笔与写法",
 ] as const;
 
+export interface ReaderAskHandoff {
+  prompt: string;
+  asked: { q: string; a: string }[];
+  draftQuestion: string;
+}
+
 export interface ReaderAskSheetProps {
   bookId?: string;
   worldId?: string;
@@ -23,7 +29,7 @@ export interface ReaderAskSheetProps {
   sectionTitle: string;
   selectedText: string;
   contextParagraphs: string[];
-  onOpenFullCompanion: (prompt: string) => void;
+  onOpenFullCompanion: (payload: ReaderAskHandoff) => void;
   onClose: () => void;
 }
 
@@ -87,10 +93,21 @@ export function ReaderAskSheet({
     setTurns((prev) => prev.map((item, idx) => (idx === prev.length - 1 ? { ...item, ...patch } : item)));
   };
 
-  const buildCompanionHandoffPrompt = (customQ?: string) => {
+  const buildCompanionHandoff = (customQ?: string): ReaderAskHandoff => {
     const q = (customQ ?? question.trim()) || "请结合这段原文帮我解读";
     const excerpt = selectedText.slice(0, 320);
-    return `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}），请勿剧透后续章节。\n\n原文摘录：\n> ${excerpt}\n\n想聊的问题：${q}`;
+    const prompt = `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}），请勿剧透后续章节。\n\n原文摘录：\n> ${excerpt}\n\n想聊的问题：${q}`;
+    const asked = turns
+      .filter((t) => !t.pending && t.a.trim())
+      .map((t, idx) => ({
+        q:
+          idx === 0
+            ? `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}），请勿剧透后续章节。\n\n原文摘录：\n> ${excerpt}\n\n${t.q}`
+            : t.q,
+        a: t.a,
+      }));
+    const draftQuestion = asked.length > 0 ? question.trim() : prompt;
+    return { prompt, asked, draftQuestion };
   };
 
   const askQuestion = async (rawQ?: string) => {
@@ -217,9 +234,9 @@ export function ReaderAskSheet({
                 type="button"
                 className="ghost"
                 onClick={() => {
-                  const p = buildCompanionHandoffPrompt();
+                  const payload = buildCompanionHandoff();
                   onClose();
-                  onOpenFullCompanion(p);
+                  onOpenFullCompanion(payload);
                 }}
               >
                 打开伴聊
@@ -277,9 +294,9 @@ export function ReaderAskSheet({
                 className="ghost small"
                 onClick={() => {
                   stopStream();
-                  const p = buildCompanionHandoffPrompt(turns.at(-1)?.q);
+                  const payload = buildCompanionHandoff(turns.at(-1)?.q);
                   onClose();
-                  onOpenFullCompanion(p);
+                  onOpenFullCompanion(payload);
                 }}
               >
                 <span>转到伴聊深聊</span>

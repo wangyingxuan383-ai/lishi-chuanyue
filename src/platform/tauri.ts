@@ -21,6 +21,15 @@ import { orderedKeepAwake, setBrowserKeepAwake } from "./screenAwake";
 import { cancellable } from "./bookFiles";
 
 const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
+const MUTATING_SQL_RE = /^\s*(?:WITH\b[\s\S]*?\)\s*)?(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA\s+\w+\s*=)/i;
+const importedBookRequestIds = new WeakMap<Uint8Array, string>();
+
+function decodeBase64Bytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 function encodeBase64Chunked(bytes: Uint8Array): string {
   const chunks: string[] = [];
@@ -28,6 +37,42 @@ function encodeBase64Chunked(bytes: Uint8Array): string {
     chunks.push(String.fromCharCode(...bytes.subarray(i, i + 32768)));
   }
   return btoa(chunks.join(""));
+}
+
+function coalescedSystemBars(send: (background: string, dark: boolean) => Promise<void>) {
+  let inFlight = false;
+  let nextArgs: { background: string; dark: boolean } | null = null;
+  let drainPromise: Promise<void> | null = null;
+
+  return (background: string, dark: boolean): Promise<void> => {
+    nextArgs = { background, dark };
+    if (drainPromise) return drainPromise;
+    drainPromise = (async () => {
+      if (inFlight) return;
+      inFlight = true;
+      let lastError: unknown;
+      let hasError = false;
+      try {
+        while (nextArgs) {
+          const current = nextArgs;
+          nextArgs = null;
+          try {
+            await send(current.background, current.dark);
+            hasError = false;
+            lastError = undefined;
+          } catch (err) {
+            hasError = true;
+            lastError = err;
+          }
+        }
+      } finally {
+        inFlight = false;
+        drainPromise = null;
+      }
+      if (hasError) throw lastError;
+    })();
+    return drainPromise;
+  };
 }
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -45,6 +90,9 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 // Back handlers form a stack: the most recently opened layer closes first.
 const backHandlers: Array<() => boolean> = [];
 const setNativeKeepAwake = orderedKeepAwake((enabled) => call<void>("plugin:notifications|set_keep_awake", { enabled }));
+const setNativeSystemBars = coalescedSystemBars((background, dark) =>
+  call<void>("plugin:notifications|set_system_bars", { background, dark }),
+);
 let backListening = false;
 let escapeListening = false;
 
@@ -105,7 +153,10 @@ export async function createTauriPlatform(): Promise<Platform> {
       },
     },
     sql: {
-      query: (sql, params = []) => call("sql_query", { sql, params }),
+      query: async (sql, params = []) => {
+        if (MUTATING_SQL_RE.test(sql)) assertSqlWritable();
+        return call("sql_query", { sql, params });
+      },
       batch: (statements) => {assertSqlWritable();return call("sql_batch", { statements: statements.map((s) => ({ sql: s.sql, params: s.params ?? [] })) });},
       backup: (label) => call("sql_backup", { label }),
       listBackups: () => call("sql_list_backups"),
@@ -146,7 +197,7 @@ export async function createTauriPlatform(): Promise<Platform> {
       importText: () => call("file_import_text"),
       importSkillPackage: async () => {
         const file = await call<{ name: string; data: string } | null>("file_import_skill");
-        return file && { name: file.name, bytes: Array.from(atob(file.data), (c) => c.charCodeAt(0)) };
+        return file && { name: file.name, bytes: Array.from(decodeBase64Bytes(file.data)) };
       },
       importBook: async (signal, onProgress) => {
         if (signal?.aborted) throw new DOMException("已取消", "AbortError");
@@ -156,17 +207,36 @@ export async function createTauriPlatform(): Promise<Platform> {
         signal?.addEventListener("abort", abort, { once: true });
         try {
           const file = await cancellable(call<{ name: string; data: string } | null>("file_import_book", { requestId, onProgress: channel }), signal);
-          return file && { name: file.name, bytes: Uint8Array.from(atob(file.data), (c) => c.charCodeAt(0)) };
+          if (!file) return null;
+          const bytes = decodeBase64Bytes(file.data);
+          importedBookRequestIds.set(bytes, requestId);
+          return { name: file.name, bytes };
         } finally { signal?.removeEventListener("abort", abort); }
       },
       extractPdf: async (bytes, signal) => {
         if (signal?.aborted) throw new DOMException("已取消", "AbortError");
-        const requestId = crypto.randomUUID();
+        let requestId = crypto.randomUUID();
         const abort = () => { void call("file_cancel_book", { requestId }).catch(() => {}); };
-        const data = encodeBase64Chunked(bytes);
+        const cachedRequestId = importedBookRequestIds.get(bytes);
         signal?.addEventListener("abort", abort, { once: true });
-        try { return await cancellable(call<PdfText>("file_extract_pdf", { data, requestId }), signal); }
-        finally { signal?.removeEventListener("abort", abort); }
+        try {
+          if (cachedRequestId) {
+            try {
+              return await cancellable(
+                call<PdfText>("file_extract_pdf", { data: "", requestId, cachedRequestId }),
+                signal,
+              );
+            } catch (err) {
+              importedBookRequestIds.delete(bytes);
+              if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+                throw err;
+              }
+              requestId = crypto.randomUUID();
+            }
+          }
+          const data = encodeBase64Chunked(bytes);
+          return await cancellable(call<PdfText>("file_extract_pdf", { data, requestId }), signal);
+        } finally { signal?.removeEventListener("abort", abort); }
       },
     },
     update: {
@@ -212,7 +282,7 @@ export async function createTauriPlatform(): Promise<Platform> {
         ttsStop: () => call<void>("plugin:notifications|tts_stop").catch(() => {}),
       } : {}),
       setSystemBars: (background, dark) =>
-        name === "android" ? call("plugin:notifications|set_system_bars", { background, dark }) : Promise.resolve(),
+        name === "android" ? setNativeSystemBars(background, dark) : Promise.resolve(),
       haptic: () =>
         name === "android"
           ? call<boolean>("plugin:notifications|haptic")

@@ -31,7 +31,7 @@
   --backdrop: rgba(20, 14, 8, 0.38);
   --toast-bg: rgba(42, 32, 25, 0.92); --toast-fg: #f6eedc;
   --dock: var(--surface); --dock-line: var(--line); --dock-field: var(--raised);
-  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .32 0 0 0 0 .18 0 0 0 .075 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  --grain: none;
   --glow: radial-gradient(140% 70% at 50% 0%, rgba(255, 250, 238, 0.55), transparent 70%);
   --divider: "◇";
   --story-size: 18px;

@@ -183,20 +183,34 @@ export async function listProfiles(repo: Repo): Promise<Profile[]> {
   });
 }
 
+function isBareGeminiHost(cleaned: string): boolean {
+  try {
+    const parsed = new URL(cleaned);
+    return parsed.hostname.toLowerCase() === "generativelanguage.googleapis.com"
+      && !parsed.pathname.replace(/\/+$/, "");
+  } catch {
+    return false;
+  }
+}
+
 export async function saveProfile(repo: Repo, p: Omit<Profile, "id" | "keySlot"> & { id?: string; keySlot?: string }, key: string | null): Promise<Profile> {
   const id = p.id ?? newId();
   const keySlot = p.keySlot ?? `profile-${id.slice(0, 12)}`;
-  if (key) await repo.platform.secrets.set(keySlot, key, serviceBase(p.baseUrl));
+  const cleaned = cleanBaseUrl(p.baseUrl);
+  const baseUrl = /\/v1beta$/i.test(cleaned) || isBareGeminiHost(cleaned)
+    ? geminiOpenAiUrl(cleaned)
+    : (cleaned || p.baseUrl);
+  if (key) await repo.platform.secrets.set(keySlot, key, serviceBase(baseUrl));
   await repo.platform.sql.query(
     `INSERT INTO profiles (id, name, provider, base_url, main_model, aux_model, params_json, key_slot, capabilities_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET name = excluded.name, provider = excluded.provider, base_url = excluded.base_url,
        main_model = excluded.main_model, aux_model = excluded.aux_model, params_json = excluded.params_json,
        capabilities_json = excluded.capabilities_json`,
-    [id, p.name, p.provider, p.baseUrl, p.mainModel, p.auxModel, JSON.stringify({ allowHttp: p.allowHttp, ...(p.contextTokens ? { contextTokens: p.contextTokens } : {}) }), keySlot,
+    [id, p.name, p.provider, baseUrl, p.mainModel, p.auxModel, JSON.stringify({ allowHttp: p.allowHttp, ...(p.contextTokens ? { contextTokens: p.contextTokens } : {}) }), keySlot,
       JSON.stringify({ includeUsage: p.includeUsage }), new Date().toISOString()],
   );
-  return { ...p, id, keySlot };
+  return { ...p, baseUrl, id, keySlot };
 }
 
 export async function deleteProfile(repo: Repo, profile: Profile): Promise<void> {
@@ -206,7 +220,9 @@ export async function deleteProfile(repo: Repo, profile: Profile): Promise<void>
 
 export async function fetchModels(platform: Platform, slot: string, baseUrl: string): Promise<string[]> {
   const cleaned = cleanBaseUrl(baseUrl);
-  const openAiBase = /\/v1beta$/i.test(cleaned) ? geminiOpenAiUrl(cleaned) : serviceBase(baseUrl);
+  const openAiBase = /\/v1beta$/i.test(cleaned) || isBareGeminiHost(cleaned)
+    ? geminiOpenAiUrl(cleaned)
+    : serviceBase(baseUrl);
   const isGeminiEndpoint = /\/v1beta(?:\/openai)?$/i.test(openAiBase);
   const response = await platform.llm.get({ slot, url: `${openAiBase}/models`, timeoutMs: 15_000 });
   if (response.status < 200 || response.status >= 300) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status, body: response.body });
@@ -253,14 +269,8 @@ export function explainFailure(kind: string, status?: number): string {
 
 export function chatCompletionsUrl(base: string): string {
   const cleaned = cleanBaseUrl(base);
-  if (/\/v1beta$/i.test(cleaned)) return `${geminiOpenAiUrl(cleaned)}/chat/completions`;
-  try {
-    const parsed = new URL(cleaned);
-    if (parsed.hostname.toLowerCase() === "generativelanguage.googleapis.com" && !parsed.pathname.replace(/\/+$/, "")) {
-      return `${parsed.origin}/v1beta/openai/chat/completions`;
-    }
-  } catch {
-    /* fall through */
+  if (/\/v1beta$/i.test(cleaned) || isBareGeminiHost(cleaned)) {
+    return `${geminiOpenAiUrl(cleaned)}/chat/completions`;
   }
   return rawChatCompletionsUrl(cleaned || base);
 }
@@ -268,6 +278,7 @@ export function chatCompletionsUrl(base: string): string {
 export function serviceBase(base: string): string {
   const cleaned = cleanBaseUrl(base);
   if (/\/v1beta$/i.test(cleaned)) return cleaned;
+  if (isBareGeminiHost(cleaned)) return geminiOpenAiUrl(cleaned);
   return rawServiceBase(cleaned || base);
 }
 

@@ -7,7 +7,8 @@ import { nowOf } from "../../engine/calendar/clock";
 import { formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
 import { matchName } from "../../engine/state/names";
-import type { Item, WorldSettings, WorldState } from "../../engine/types";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
+import type { Item, StoryNode, WorldSettings, WorldState } from "../../engine/types";
 import { useApp, useBack } from "../app/context";
 import { EXIT_MS, motionOn } from "../app/motion";
 import { Codex } from "./Codex";
@@ -237,18 +238,21 @@ function StatusTidySheet({ worldId, headId, onClose, onSave }: { worldId: string
   );
 }
 
-export function Panel({ worldId, headId, lineId, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, onJumpNode, busy, docked = false, initialTab, initialTabNonce }: {
-  worldId: string; headId: string; lineId?: string; chapterEvery: number;
+export function Panel({ worldId, headId, lineId, path, chapterEvery, state, settings, era, onClose, onSave, onOpenStory, onOrganize, onContinuitySaved, onJumpNode, captureReading, busy, docked = false, active = true, initialTab, initialTabNonce }: {
+  worldId: string; headId: string; lineId?: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; chapterEvery: number;
   onContinuitySaved?: () => void | Promise<void>;
   onJumpNode?: (nodeId: string) => void;
+  captureReading?: () => void;
   settings?: WorldSettings;
   /** Shown beside the story on wide windows instead of over it (R10-T001). */
   docked?: boolean;
+  active?: boolean;
   initialTab?: Tab;
   initialTabNonce?: number;
   state: WorldState; era: EraContext; onClose: () => void; onSave: Save;
   onOpenStory: () => void; onOrganize: (replaceOwnEra: boolean, useSource?: boolean, scope?: SourceScope) => Promise<boolean>; busy: boolean;
 }) {
+  const { game } = useApp();
   const [tab, setTab] = useState<Tab>(initialTab ?? "我");
   const [draft, setDraft] = useState<WorldState | null>(null);
   const [statusDrafts, setStatusDrafts] = useState<StatusDraft[]>([]);
@@ -265,20 +269,47 @@ export function Panel({ worldId, headId, lineId, chapterEvery, state, settings, 
   const editingRef = useRef(false);
   editingRef.current = editing;
   useEffect(() => { if (initialTab && !editingRef.current) setTab(initialTab); }, [initialTab, initialTabNonce]);
-  // Reset open drafts/sub-editors if the world or head changes externally (line switch, undo/redo, turn commit).
-  const prevAnchor = useRef(`${worldId}:${headId}`);
+  // Reset open drafts/sub-editors if the world or head changes externally (line switch, undo/redo, turn commit),
+  // while preserving open edits across background AI upkeep on the same path.
+  const prevAnchor = useRef({ worldId, headId });
   useEffect(() => {
-    const key = `${worldId}:${headId}`;
-    if (prevAnchor.current === key) return;
-    prevAnchor.current = key;
-    setDraft(null);
-    setBase(null);
-    setStatusDrafts([]);
-    setProblem(null);
-    setBio(false);
-    setItem(null);
-    setTidy(false);
-  }, [worldId, headId]);
+    const prev = prevAnchor.current;
+    if (prev.worldId === worldId && prev.headId === headId) return;
+    prevAnchor.current = { worldId, headId };
+    const resetAll = () => {
+      setDraft(null);
+      setBase(null);
+      setStatusDrafts([]);
+      setProblem(null);
+      setBio(false);
+      setItem(null);
+      setTidy(false);
+    };
+    if (prev.worldId !== worldId) {
+      resetAll();
+      return;
+    }
+    if (path) {
+      if (headFollowsUpkeep(path, prev.headId, headId)) {
+        setDraftHeadId(headId);
+      } else {
+        resetAll();
+      }
+      return;
+    }
+    let live = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (!live) return;
+      if (headFollowsUpkeep(loadedPath, prev.headId, headId)) {
+        setDraftHeadId(headId);
+      } else {
+        resetAll();
+      }
+    }).catch(() => {
+      if (live) resetAll();
+    });
+    return () => { live = false; };
+  }, [game.repo, worldId, headId, path]);
   const startEdit = () => {
     setProblem(null);
     setBase(state);
@@ -310,12 +341,12 @@ export function Panel({ worldId, headId, lineId, chapterEvery, state, settings, 
     if (docked) return false;
     close();
     return true;
-  });
+  }, !docked && active);
   const shown = draft ?? state;
   const me = shown.protagonist;
   const now = nowOf(era.clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name;
-  const active = state.goals.filter((g) => g.status === "进行中");
+  const activeGoals = state.goals.filter((g) => g.status === "进行中");
 
   const save = async () => {
     if (!draft) return;
@@ -396,7 +427,7 @@ export function Panel({ worldId, headId, lineId, chapterEvery, state, settings, 
         {!editing && !OWN_EDITOR.includes(tab) && <button className="ghost" disabled={busy} onClick={startEdit}>修改</button>}
       </div>
       <div className="tabs" role="tablist">
-        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && t !== "我"} onClick={() => setTab(t)}>{t}{t === "目标" && active.length ? ` ${active.length}` : ""}</button>)}
+        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} disabled={editing && t !== "我"} onClick={() => setTab(t)}>{t}{t === "目标" && activeGoals.length ? ` ${activeGoals.length}` : ""}</button>)}
       </div>
       <div className="panel-body" style={saving ? { pointerEvents: "none" } : undefined}>
         {tab === "我" && (
@@ -480,10 +511,10 @@ export function Panel({ worldId, headId, lineId, chapterEvery, state, settings, 
           <button disabled={busy} onClick={() => setItem({ item: null })}><Icon name="plus" size={18} />添加物品</button>
         </div>}
         {tab === "我" && <KnowledgeRecords worldId={worldId} headId={headId} person={{ id: "protagonist", name: me.name, aliases: me.aliases }} busy={busy} onSaved={onContinuitySaved} />}
-        {tab === "人物" && <People worldId={worldId} headId={headId} lineId={lineId} onJumpNode={onJumpNode} onContinuitySaved={onContinuitySaved} onClosePanel={!docked ? onClose : undefined} state={state} era={era} busy={busy} onSave={onSave} />}
-        {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} lineId={lineId} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
-        {tab === "设定" && <Codex worldId={worldId} state={state} era={era} headId={headId} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
-        {tab === "目标" && <Goals state={state} era={era} headId={headId} busy={busy} onSave={onSave} />}
+        {tab === "人物" && <People worldId={worldId} headId={headId} lineId={lineId} path={path} captureReading={captureReading} onJumpNode={onJumpNode} onContinuitySaved={onContinuitySaved} onClosePanel={!docked ? onClose : undefined} state={state} era={era} busy={busy} onSave={onSave} />}
+        {tab === "记事" && <Journal onContinuitySaved={onContinuitySaved} worldId={worldId} headId={headId} lineId={lineId} path={path} captureReading={captureReading} chapterEvery={chapterEvery} busy={busy} state={state} era={era} onSave={onSave} />}
+        {tab === "设定" && <Codex worldId={worldId} state={state} era={era} headId={headId} path={path} busy={busy} onSave={onSave} onOpenStory={onOpenStory} onOrganize={onOrganize} />}
+        {tab === "目标" && <Goals state={state} era={era} headId={headId} path={path} busy={busy} onSave={onSave} />}
       </div>
       {editing && <div className="dock row between">
         <button disabled={saving} onClick={cancelEdit}>取消</button>

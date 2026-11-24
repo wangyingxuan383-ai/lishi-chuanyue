@@ -104,14 +104,106 @@ fn copy_fields(source: &Value, target: &mut Value, keys: &[&str]) {
         }
     }
 }
+fn demote_non_leading_system(messages: Vec<Value>) -> Vec<Value> {
+    let mut saw_non_system = false;
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            let role = text(&msg["role"]);
+            if matches!(role, "user" | "assistant" | "tool") {
+                saw_non_system = true;
+            } else if saw_non_system && role == "system" {
+                msg["role"] = "user".into();
+            }
+            msg
+        })
+        .collect()
+}
+fn is_openai_o_series(url: &str, model: &str) -> bool {
+    let on_openai = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.eq_ignore_ascii_case("api.openai.com")))
+        .unwrap_or(false);
+    if !on_openai {
+        return false;
+    }
+    let m = model.trim().to_ascii_lowercase();
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+fn resolve_gemini_url(mut url: Url, chosen_model: Option<&str>) -> Result<Url> {
+    let Some(raw_model) = chosen_model.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(url);
+    };
+    let model = raw_model.strip_prefix("models/").unwrap_or(raw_model).trim();
+    if model.is_empty() || model.contains(['/', '?', '#', '\\']) {
+        return Err(invalid("模型名称格式无效"));
+    }
+    let path = url.path().to_owned();
+    if let Some(idx) = path.find("/models/") {
+        let after = &path[idx + "/models/".len()..];
+        if let Some(colon) = after.find(':') {
+            if !after[..colon].contains('/') {
+                let next_path = format!("{}/models/{}{}", &path[..idx], model, &after[colon..]);
+                url.set_path(&next_path);
+                return Ok(url);
+            }
+        } else if !after.trim_end_matches('/').contains('/') {
+            let next_path = format!("{}/models/{}:streamGenerateContent", &path[..idx], model);
+            url.set_path(&next_path);
+            let has_alt = url.query_pairs().any(|(k, _)| k == "alt");
+            if !has_alt {
+                url.query_pairs_mut().append_pair("alt", "sse");
+            }
+            return Ok(url);
+        }
+    }
+    let trimmed = path.trim_end_matches('/');
+    let next_path = if trimmed.ends_with("/models") {
+        Some(format!("{trimmed}/{model}:streamGenerateContent"))
+    } else if trimmed.is_empty() {
+        Some(format!("/v1beta/models/{model}:streamGenerateContent"))
+    } else if trimmed.ends_with("/v1beta")
+        || trimmed.ends_with("/v1")
+        || trimmed.ends_with("/v1alpha")
+    {
+        Some(format!("{trimmed}/models/{model}:streamGenerateContent"))
+    } else {
+        None
+    };
+    if let Some(next_path) = next_path {
+        url.set_path(&next_path);
+        let has_alt = url.query_pairs().any(|(k, _)| k == "alt");
+        if !has_alt {
+            url.query_pairs_mut().append_pair("alt", "sse");
+        }
+    }
+    Ok(url)
+}
 fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
     if p == Protocol::Chat {
-        return Ok(chat::wire_chat_body(body.clone()));
+        let mut wired = chat::wire_chat_body(body.clone());
+        if let Some(msgs) = wired["messages"].as_array().cloned() {
+            wired["messages"] = Value::Array(demote_non_leading_system(msgs));
+        }
+        let model = wired["model"].as_str().unwrap_or(&config.model).to_owned();
+        if wired.get("max_completion_tokens").is_some() {
+            if let Some(obj) = wired.as_object_mut() {
+                obj.remove("max_tokens");
+            }
+        } else if is_openai_o_series(&config.url, &model) {
+            if let Some(mt) = wired.as_object_mut().and_then(|o| o.remove("max_tokens")) {
+                wired["max_completion_tokens"] = mt;
+            }
+        }
+        return Ok(wired);
     }
     let raw_messages = body["messages"]
         .as_array()
         .ok_or_else(|| invalid("模型消息列表无效"))?;
-    let projected = chat::project_supplied_skills(raw_messages);
+    let mut projected = chat::project_supplied_skills(raw_messages);
+    if matches!(p, Protocol::Anthropic | Protocol::Gemini) {
+        projected = demote_non_leading_system(projected);
+    }
     let messages = projected.as_slice();
     let ids = call_ids(messages, p);
     let tools: Vec<_> = items(&body["tools"])
@@ -121,6 +213,7 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
     let model = body["model"].as_str().unwrap_or(&config.model);
     let limit = body["max_tokens"]
         .as_u64()
+        .or_else(|| body["max_completion_tokens"].as_u64())
         .unwrap_or(config.max_output_tokens() as u64);
     if limit == 0 {
         return Err(invalid("模型输出上限须大于零"));
@@ -256,6 +349,17 @@ fn prepare(config: &ModelConfig, body: &Value, p: Protocol) -> Result<Value> {
                     "service_tier",
                 ],
             );
+            if body["thinking"]["type"] == "enabled" {
+                if let Some(budget) = body["thinking"]["budget_tokens"].as_u64() {
+                    result["max_tokens"] = limit.max(budget.saturating_add(2048)).into();
+                }
+                if let Some(obj) = result.as_object_mut() {
+                    obj.remove("top_k");
+                    if obj.get("temperature").is_some_and(|t| t.as_f64() != Some(1.0)) {
+                        obj.remove("temperature");
+                    }
+                }
+            }
             if !tools.is_empty() {
                 let mut wire_tools: Vec<Value> = tools
                     .iter()
@@ -846,6 +950,12 @@ pub async fn complete(
     if key.is_empty() {
         return Err(invalid("尚未配置模型凭据"));
     }
+    let chosen_model = body["model"].as_str().map(str::to_owned);
+    let url = if p == Protocol::Gemini {
+        resolve_gemini_url(url, chosen_model.as_deref())?
+    } else {
+        url
+    };
     let tools=body["tools"].as_array().cloned().unwrap_or_default();
     let body = prepare(&config, &body, p)?;
     let mut request = client
@@ -1414,5 +1524,55 @@ mod tests {
         .unwrap();
         server.join().unwrap();
         assert_eq!(result.text, "你好世界");
+    }
+
+    #[test]
+    fn protocol_params_gemini_urls_and_non_leading_system_messages_normalize_cleanly() {
+        // 1. OpenAI Chat: o1/o3/o4 on api.openai.com auto-maps max_tokens -> max_completion_tokens,
+        //    explicit max_completion_tokens omits max_tokens, and non-leading system becomes user.
+        let mut o3_cfg = config("chat-completions");
+        o3_cfg.url = "https://api.openai.com/v1/chat/completions".into();
+        o3_cfg.model = "o3-mini".into();
+        let msgs = vec![
+            json!({"role":"system","content":"前缀规则"}),
+            json!({"role":"user","content":"开始"}),
+            json!({"role":"system","content":"【查阅到此为止】直接写正文"}),
+        ];
+        let o3_wire = prepare(&o3_cfg, &chat::request(&o3_cfg, &msgs, &[], false), Protocol::Chat).unwrap();
+        assert!(o3_wire.get("max_tokens").is_none());
+        assert_eq!(o3_wire["max_completion_tokens"], 500);
+        assert_eq!(o3_wire["messages"][0]["role"], "system");
+        assert_eq!(o3_wire["messages"][1]["role"], "user");
+        assert_eq!(o3_wire["messages"][2]["role"], "user");
+
+        // 2. Anthropic: thinking enabled with budget_tokens bumps max_tokens >= budget + 2048,
+        //    omits temperature != 1.0 and top_k, and keeps trailing system out of top-level system.
+        let anthropic_cfg = config("anthropic");
+        let mut anth_req = chat::request(&anthropic_cfg, &msgs, &[], false);
+        anth_req["thinking"] = json!({"type":"enabled","budget_tokens":4096});
+        anth_req["temperature"] = json!(0.7);
+        anth_req["top_k"] = json!(40);
+        let anth_wire = prepare(&anthropic_cfg, &anth_req, Protocol::Anthropic).unwrap();
+        assert_eq!(anth_wire["max_tokens"], 4096 + 2048);
+        assert!(anth_wire.get("temperature").is_none());
+        assert!(anth_wire.get("top_k").is_none());
+        assert_eq!(anth_wire["system"].as_array().unwrap().len(), 1);
+        assert_eq!(anth_wire["messages"][0]["content"].as_array().unwrap().len(), 2);
+
+        // 3. Gemini: rewrites /models/{old}:... for aux_model and expands bare /v1beta URLs.
+        let bare = Url::parse("https://generativelanguage.googleapis.com/v1beta").unwrap();
+        assert_eq!(
+            resolve_gemini_url(bare, Some("gemini-2.5-flash")).unwrap().as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+        let pinned = Url::parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse").unwrap();
+        assert_eq!(
+            resolve_gemini_url(pinned, Some("gemini-2.5-flash")).unwrap().as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+        let gemini_cfg = config("gemini");
+        let gem_wire = prepare(&gemini_cfg, &chat::request(&gemini_cfg, &msgs, &[], false), Protocol::Gemini).unwrap();
+        assert_eq!(gem_wire["systemInstruction"]["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(gem_wire["contents"][0]["parts"].as_array().unwrap().len(), 2);
     }
 }

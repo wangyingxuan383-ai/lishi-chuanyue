@@ -1,7 +1,7 @@
 // Display calibration and currency are ordinary reversible player edits.
 import { SourceScopeRow } from "./SourceScope";
 import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ceYearOf, LUNAR_MONTHS, maxValidDay } from "../../engine/calendar/date";
 import { nowOf } from "../../engine/calendar/clock";
 import { applyDisplayClock, validClockDate, type ClockDisplayChange } from "../../engine/calendar/clockEdit";
@@ -9,22 +9,42 @@ import type { EraContext } from "../../engine/era";
 import { rejectedReason } from "../../engine/game";
 import { currencyIssues, formatMoney } from "../../engine/money";
 import type { TurnRecord } from "../../engine/state/apply";
-import type { WorldState } from "../../engine/types";
+import { headFollowsUpkeep } from "../../engine/writing/assist";
+import type { StoryNode, WorldState } from "../../engine/types";
 import { Sheet } from "./Sheet";
 import { Icon } from "./Icon";
 import { Switch } from "./Switch";
 import { useApp } from "../app/context";
 import type { ReviseRules } from "../../engine/prompt/revise";
 
-export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, busy, onSave, onClose, onCorrectDuration }: {
-  worldId?: string; state: WorldState; era: EraContext; headId: string; busy: boolean;
+export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, path, busy, onSave, onClose, onCorrectDuration }: {
+  worldId?: string; state: WorldState; era: EraContext; headId: string; path?: Pick<StoryNode, "id" | "kind" | "meta">[]; busy: boolean;
   onSave: (patch: TurnRecord, summary: string, expectedHeadId: string) => Promise<void>;
   onClose: () => void;
   onCorrectDuration?: () => void;
 }) {
+  const { game, toast } = useApp();
   const [opened] = useState(() => ({ state: structuredClone(liveState), era: structuredClone(liveEra), headId }));
   const { state, era } = opened;
-  const stale = headId !== opened.headId || JSON.stringify(liveState.time) !== JSON.stringify(state.time) || JSON.stringify(liveState.era) !== JSON.stringify(state.era);
+  const [expectedHeadId, setExpectedHeadId] = useState(opened.headId);
+  const rulesChanged = JSON.stringify(liveState.time) !== JSON.stringify(state.time) || JSON.stringify(liveState.era) !== JSON.stringify(state.era);
+  const syncUpkeep = !rulesChanged && !!path && headFollowsUpkeep(path, expectedHeadId, headId);
+  useEffect(() => {
+    if (headId === expectedHeadId || rulesChanged) return;
+    if (path) {
+      if (headFollowsUpkeep(path, expectedHeadId, headId)) setExpectedHeadId(headId);
+      return;
+    }
+    let live = true;
+    void game.repo.path(headId).then((loadedPath) => {
+      if (live && headFollowsUpkeep(loadedPath, expectedHeadId, headId)) {
+        setExpectedHeadId(headId);
+      }
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [game.repo, headId, expectedHeadId, path, rulesChanged]);
+  const effectiveHeadId = syncUpkeep ? headId : expectedHeadId;
+  const stale = headId !== effectiveHeadId || rulesChanged;
   const current = nowOf(era.clock, state.time.elapsedMinutes);
   const eraDisplay = nowOf({ ...era.clock, clockStyle: "era" }, state.time.elapsedMinutes);
   const date = current.date ?? eraDisplay.date;
@@ -47,7 +67,6 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
     setProblem(null);
   };
   // 让 AI 改 (R29-T005): the answer fills this form; the preview below shows it before 保存.
-  const { game, toast } = useApp();
   const [instruction, setInstruction] = useState(""), [useSource, setUseSource] = useState(!!state.source), [revising, setRevising] = useState(false), [aiNote, setAiNote] = useState("");
   const [scope, setScope] = useState<SourceScope>(AUTO_SCOPE);
   const revise = async () => {
@@ -119,7 +138,7 @@ export function RulesSheet({ worldId, state: liveState, era: liveEra, headId, bu
       ...(timeDirty ? { clock: clockChange } : {}), ...(currencyChanged ? { currency: parsedUnits } : {}),
     };
     const summary = [timeDirty ? `时间显示校准为${preview}` : "", currencyChanged ? `货币改为${parsedUnits.map(u => u.name).join("、")}` : ""].filter(Boolean).join("；");
-    try { await onSave({ rules }, summary, opened.headId); onClose(); } catch (error) { setProblem(rejectedReason(error)); } finally { setSaving(false); }
+    try { await onSave({ rules }, summary, effectiveHeadId); onClose(); } catch (error) { setProblem(rejectedReason(error)); } finally { setSaving(false); }
   };
 
   return <Sheet title="时间与货币" onClose={onClose} dirty={dirty}>

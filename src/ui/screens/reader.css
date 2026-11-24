@@ -73,6 +73,13 @@
   word-break: break-word;
   overflow-wrap: anywhere;
   hanging-punctuation: allow-end;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.paginator.is-dragging .reader-prose {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Minimalist fill-free muted-gold hairline cartouche in deep-night smoke/OLED paper tones */
