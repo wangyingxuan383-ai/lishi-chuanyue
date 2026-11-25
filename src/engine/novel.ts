@@ -10,6 +10,7 @@ import type { Repo } from "./db/repo";
 import { eraContext, worldClock } from "./era";
 import { dateText, lifeSeal, lifeSummary, type LifeSeal } from "./life";
 import type { TurnRecord } from "./state/apply";
+import { parseNovelProseBlocks } from "./text/proseClean";
 import type { Chapter, Person, StoryNode, World, WorldState } from "./types";
 
 export interface NovelOptions {
@@ -88,11 +89,17 @@ function firstSentence(text: string, max = 96): string {
 }
 
 function splitProseLines(text: string, nodeId?: string | null): NovelParagraph[] {
-  return text
-    .split(/\r?\n+/)
-    .map((line) => line.replace(/^[\s\u3000]+|[\s\u3000]+$/g, ""))
-    .filter(Boolean)
-    .map((clean) => ({ kind: "prose" as const, text: clean, ...(nodeId !== undefined ? { nodeId } : {}) }));
+  return parseNovelProseBlocks(text)
+    .map((b) =>
+      b.kind === "divider"
+        ? { kind: "divider" as const, text: "◇", ...(nodeId !== undefined ? { nodeId } : {}) }
+        : {
+            kind: "prose" as const,
+            text: b.text.replace(/^[\s\u3000]+|[\s\u3000]+$/g, ""),
+            ...(nodeId !== undefined ? { nodeId } : {}),
+          },
+    )
+    .filter((p) => Boolean(p.text));
 }
 
 function stripChapterPrefix(rawTitle: string): string {

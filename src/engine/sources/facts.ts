@@ -74,7 +74,7 @@ export async function relevantSourceFacts(repo: Repo, binding: SourceBinding, ke
   const exists = await repo.platform.sql.query("SELECT 1 FROM canon_facts WHERE book_id=? LIMIT 1", [binding.bookId]);
   if (!exists.length) return [];
   const patterns = [...keys.keys()].slice(0, 240).map((key) => `%${key}%`);
-  const timeClause = opts.ignorePosition ? "" : "AND COALESCE(f.valid_from,f.section)<=? AND (f.valid_through IS NULL OR f.valid_through>=?)";
+  const timeClause = opts.ignorePosition ? "" : "AND (f.valid_from IS NULL OR f.valid_from<=?) AND (f.valid_through IS NULL OR f.valid_through>=?)";
   const rows = await repo.platform.sql.query(`SELECT f.*,c.text AS original FROM canon_facts f
 JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section
 JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id
@@ -93,7 +93,7 @@ AND (${patterns.map(() => "(f.subject LIKE ? OR f.aliases_json LIKE ? OR f.state
       ...(row.valid_from !== null ? { validFrom: Number(row.valid_from) } : {}), ...(row.valid_through !== null ? { validThrough: Number(row.valid_through) } : {}) };
     const identity = [fact.subject, ...aliases].join("\n").toLowerCase(), statement = fact.statement.toLowerCase();
     const baseScore = [...keys].reduce((n, [key, weight]) => n + (identity.includes(key) ? weight * 4 : statement.includes(key) ? weight : 0), 0);
-    const score = opts.ignorePosition ? baseScore : baseScore * (1 + 0.8 / (1 + Math.abs(fact.section - position) / 6));
+    const score = opts.ignorePosition ? baseScore : baseScore * (1 + 0.3 / (1 + Math.abs(fact.section - position) / 12));
     const fingerprint = JSON.stringify([fact.section, fact.chunk, kind, fact.subject, fact.statement, quote]);
     if (!baseScore || seen.has(fingerprint)) continue;
     seen.add(fingerprint); scored.push({ fact, score });

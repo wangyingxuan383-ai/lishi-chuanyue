@@ -39,6 +39,11 @@ internal fun resolveBinaryExportMime(name: String, explicitMime: String?): Strin
  */
 @TauriPlugin
 class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
+    companion object {
+        @Volatile
+        internal var activeExportCount: Int = 0
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val requests = DocumentPickerRequestSlot<PendingExport>()
@@ -53,6 +58,12 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         @Volatile
         var callbackReceived: Boolean = false
         lateinit var timeout: Runnable
+    }
+
+    private fun releaseSlot(current: PendingExport) {
+        if (requests.release(current)) {
+            activeExportCount = (activeExportCount - 1).coerceAtLeast(0)
+        }
     }
 
     private fun cleanupSource(path: String?) {
@@ -71,7 +82,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     private fun finish(current: PendingExport, value: JSObject) {
         if (pending !== current) return
         mainHandler.removeCallbacks(current.timeout)
-        requests.release(current)
+        releaseSlot(current)
         current.gate.finish(value)
     }
 
@@ -115,6 +126,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
                 invoke.resolve(documentPickerFailure("file_busy"))
                 return@post
             }
+            activeExportCount += 1
             if (!mainHandler.postDelayed(current.timeout, DOCUMENT_PICK_TIMEOUT_MS)) {
                 cleanupSource(sourcePath)
                 finish(current, documentPickerFailure("file_unavailable"))
@@ -205,12 +217,13 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         if (activity !== ownerActivity) return
         val current = pending ?: return
         if (!current.gate.hasPaused) return
+        if (activity.isInMultiWindowMode || !activity.hasWindowFocus()) return
         mainHandler.postDelayed({
-            if (pending === current && !current.callbackReceived) {
+            if (pending === current && !current.callbackReceived && !activity.isInMultiWindowMode && activity.hasWindowFocus()) {
                 cleanupSource(current.sourcePath)
                 current.gate.returnedWithoutCallback()
                 mainHandler.removeCallbacks(current.timeout)
-                requests.release(current)
+                releaseSlot(current)
             }
         }, 1_000L)
     }

@@ -18,6 +18,7 @@ export interface ComposerProps {
   setInput: (text: string) => void; setModeIndex: (index: number) => void;
   setNote: (note: string) => void; setNoteOpen: (open: boolean) => void; setTyping: (typing: boolean) => void;
   onModes: () => void; onDesk: () => void; onPolish: () => void; onAutoplay: () => void;
+  onOpenAsk?: () => void;
   onQueueAutoplayNote?: (note: string) => Promise<void>;
   onSend: () => void; onStopOrSend: () => void;
 }
@@ -150,6 +151,9 @@ export function Composer(p: ComposerProps) {
             <button key={m.mode} type="button" className="mode-chip" aria-pressed={i === modeIndex}
               onPointerDown={(e) => e.preventDefault()} onClick={() => p.setModeIndex(i)}>{m.label}</button>
           ))}
+          {p.onOpenAsk && (
+            <button type="button" className="mode-chip" onPointerDown={(e) => e.preventDefault()} onClick={p.onOpenAsk}>查一查 ›</button>
+          )}
         </div>
       )}
       {noteOpen && !watch && mode.mode !== "direct" && (

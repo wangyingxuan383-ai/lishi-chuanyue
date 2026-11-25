@@ -193,12 +193,18 @@ fn model_reference(saved: &Value, request: &Value) -> Value {
     // Only saved endpoint locators survive task persistence. A UI address is
     // transient and is checked against native settings by the resolver.
     if ["profileId","slot","protocol"].iter().any(|key|saved.get(*key).is_some()&&result.get(*key)!=saved.get(*key)) {result.remove("endpointRef");}
-    if let Some(url)=request.get("modelUrl") {
-        result.remove("endpointRef");
-        if let Some(trimmed) = url.as_str().map(str::trim).filter(|v| !v.is_empty()) {
-            result.insert("modelUrl".into(), trimmed.into());
-        } else {
-            result.remove("modelUrl");
+    match request.get("modelUrl") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                result.remove("endpointRef");
+                result.insert("modelUrl".into(), trimmed.into());
+            }
+        }
+        Some(other) => {
+            result.remove("endpointRef");
+            result.insert("modelUrl".into(), other.clone());
         }
     }
     // Single-endpoint custom modelUrl grants bind one exact model endpoint;
@@ -263,9 +269,16 @@ mod reference_tests {
         assert!(cleared["auxModel"].is_null());
         assert!(cleared["contextWindowTokens"].is_null());
         assert!(cleared["endpointRef"].is_null());
-        // Trims auxModel and drops auxModel when custom modelUrl is active
+        // Trims auxModel and drops auxModel when custom modelUrl is active,
+        // but ignores empty/whitespace modelUrl without dropping auxModel or endpointRef!
         let trimmed = model_reference(&json!({}), &json!({"model":{"slot":"s","model":"m","auxModel":"  mini-m  "}}));
         assert_eq!(trimmed["auxModel"], "mini-m");
+        let blank_url = model_reference(&json!({"endpointRef":"abcd"}), &json!({"model":{"slot":"s","model":"m","auxModel":"mini-m","endpointRef":"abcd"},"modelUrl":"   "}));
+        assert!(blank_url.get("modelUrl").is_none());
+        assert_eq!(blank_url["endpointRef"], "abcd");
+        let blank_url_no_ref = model_reference(&json!({}), &json!({"model":{"slot":"s","model":"m","auxModel":"mini-m"},"modelUrl":"   "}));
+        assert!(blank_url_no_ref.get("modelUrl").is_none());
+        assert_eq!(blank_url_no_ref["auxModel"], "mini-m");
         let custom_ep = model_reference(&json!({}), &json!({"model":{"slot":"s","model":"m","auxModel":"mini-m"},"modelUrl":"https://custom.invalid/v1/chat/completions"}));
         assert!(custom_ep["auxModel"].is_null());
     }
@@ -608,7 +621,7 @@ impl AgentHostService {
                     params![title, chrono::Utc::now().to_rfc3339(), id],
                 )?;
                 if changed == 0 {
-                    return Err(invalid("这项Pi会话不存在，旧会话不能继续执行"));
+                    return Err(invalid("这项改档会话不存在，旧会话不能继续执行"));
                 }
                 self.session_summary(id)
             }
@@ -636,7 +649,7 @@ impl AgentHostService {
                 (self.0.committed)(text(&result, "worldId").into());
                 Ok(result)
             }
-            _ => Err(invalid("该助手操作尚未接入Pi服务；不会转交旧执行引擎")),
+            _ => Err(invalid("该助手操作尚未接入改档服务；不会转交旧执行引擎")),
         }
     }
 
@@ -661,9 +674,9 @@ impl AgentHostService {
         let entry={let db=self.0.gateway.0.0.lock()?;crate::pi_forks::anchor(&db,source,message)?};
         let id=uuid::Uuid::new_v4().to_string();
         let target=self.0.session_root.join(&id);
-        let made=self.0.connection.request("fork_session",json!({"sourceFile":file,"targetDirectory":target,"entryId":entry})).await.map_err(|_|invalid("Pi未能建立完整对话分支；原会话与故事未变"))?;
+        let made=self.0.connection.request("fork_session",json!({"sourceFile":file,"targetDirectory":target,"entryId":entry})).await.map_err(|_|invalid("未能建立完整对话分支；原会话与故事未变"))?;
         if let Some(path)=made["sessionFile"].as_str(){crate::pi_runtime::require_owned_path(&target,std::path::Path::new(path))?;}
-        if !made["sessionFile"].is_null()&&!made["sessionFile"].is_string(){return Err(invalid("Pi分支位置无效"));}
+        if !made["sessionFile"].is_null()&&!made["sessionFile"].is_string(){return Err(invalid("对话分支位置无效"));}
         let mut messages={let db=self.0.gateway.0.0.lock()?;crate::pi_forks::inherited(&db,source)?};
         let tasks={let db=self.0.gateway.0.0.lock()?;crate::agent_workspace::rows(&db,"SELECT id FROM pi_tasks WHERE session_id=? ORDER BY created_at,id",&[&source])?};
         for task in tasks {
@@ -885,7 +898,7 @@ impl AgentHostService {
                 return None;
             }
             let Some(incoming) = slot.incoming.take() else {
-                let _ = reply.send(Err(Error::Tool{code:"host_unavailable",field:"taskId",message:"Pi连接不可复用，尚未建立新的执行批次".into(),next:json!({"safeToReconnectBeforeStart":true})}));
+                let _ = reply.send(Err(Error::Tool{code:"host_unavailable",field:"taskId",message:"改档服务连接不可复用，尚未建立新的执行批次".into(),next:json!({"safeToReconnectBeforeStart":true})}));
                 return None;
             };
             slot.busy = true;
@@ -1135,7 +1148,7 @@ impl AgentHostService {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
         {
-            return Err(invalid("Pi会话目录标识无效"));
+            return Err(invalid("改档会话目录标识无效"));
         }
         Ok(())
     }
@@ -1163,7 +1176,7 @@ impl AgentHostService {
                 self.return_receiver(Some(incoming));
             }
             Err(_) => {
-                let _=self.0.gateway.0.event(task_id,&json!({"type":"service_error","code":"session_detach_failed","message":"Pi会话未能移交，需重新建立原生服务"}));
+                let _=self.0.gateway.0.event(task_id,&json!({"type":"service_error","code":"session_detach_failed","message":"改档会话未能移交，需重新建立原生服务"}));
                 self.0.closing.store(true,Ordering::Release);
                 self.0.connection.close_transport().await;
                 (self.0.activity)(false);

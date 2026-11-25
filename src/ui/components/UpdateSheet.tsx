@@ -217,7 +217,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
     case "permission":
       body = <Panel>
         <p className="update-status">需要允许本应用“安装未知应用”</p>
-        <p className="update-hint">打开开关后回到这里，状态会自动刷新，再点“安装”即可。</p>
+        <p className="update-hint">打开开关后返回这里，会自动拉起系统安装界面；若未弹出，再点“安装”即可。</p>
         <div className="update-actions"><button className="primary" onClick={() => void install()}>安装</button></div>
       </Panel>;
       break;

@@ -87,8 +87,8 @@ fn host_error(error: HostError) -> Error {
     // persist them as diagnostics. The UI can use Pi's bounded budget details.
     match error {
         HostError::Host { code, .. } if code == "model_context_window" => Error::ContextWindow,
-        HostError::Host { code, .. } => invalid(&format!("Pi宿主未完成请求（{code}）")),
-        _ => invalid("Pi宿主连接已结束，任务进度已保留"),
+        HostError::Host { code, .. } => invalid(&format!("改档引擎未完成请求（{code}）")),
+        _ => invalid("改档引擎连接已结束，任务进度已保留"),
     }
 }
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -240,7 +240,7 @@ impl PiTaskHost {
             let _ = self
                 .0
                 .gateway
-                .interrupt(&self.0.permit, "Pi会话未能建立，任务要求与草稿已保留");
+                .interrupt(&self.0.permit, "改档会话未能建立，任务要求与草稿已保留");
             self.0.connection.close_transport().await;
             let _ = self.0.gateway.release_host(&self.0.permit);
         }
@@ -313,10 +313,10 @@ impl PiTaskHost {
         let pi_session = inspected["sessionId"]
             .as_str()
             .filter(|id| !id.is_empty())
-            .ok_or_else(|| invalid("Pi宿主未返回会话标识"))?;
+            .ok_or_else(|| invalid("改档引擎未返回会话标识"))?;
         let file = inspected["sessionFile"]
             .as_str()
-            .ok_or_else(|| invalid("Pi宿主未返回会话位置"))?;
+            .ok_or_else(|| invalid("改档引擎未返回会话位置"))?;
         require_owned_path(&config.directory, Path::new(file))?;
         *state.pi_session.lock().map_err(|_| Error::Cancelled)? = Some(pi_session.into());
         *state.directory.lock().map_err(|_| Error::Cancelled)? = Some(config.directory);
@@ -452,7 +452,7 @@ impl PiTaskHost {
             if outcome.is_err() && !state.prompt_cancel.is_cancelled() {
                 let _ = state
                     .gateway
-                    .interrupt(&state.permit, "Pi执行中断，任务要求与草稿已保留");
+                    .interrupt(&state.permit, "改档任务执行中断，任务要求与草稿已保留");
                 let _ = state.gateway.release_host(&state.permit);
             }
             state.prompt_active.store(false, Ordering::Release);
@@ -651,13 +651,13 @@ impl PiTaskHost {
             self.0.input_send.clone().lock_owned(),
         )
         .await
-        .map_err(|_| invalid("补充输入仍在投递，尚未移交Pi会话"))?;
+        .map_err(|_| invalid("补充输入仍在投递，尚未移交改档会话"))?;
         tokio::time::timeout(
             Duration::from_secs(15),
             self.0.connection.request("close", json!({})),
         )
         .await
-        .map_err(|_| invalid("Pi会话关闭尚未确认，未切换到其他任务"))?
+        .map_err(|_| invalid("改档会话关闭尚未确认，未切换到其他任务"))?
         .map_err(host_error)?;
         self.0.detached.store(true, Ordering::Release);
         self.0.cancel.cancel();
@@ -670,7 +670,7 @@ impl PiTaskHost {
             .ok_or_else(|| invalid("当前助手会话已经移交"))?;
         let incoming = receive
             .await
-            .map_err(|_| invalid("Pi会话事件通道未能移交"))?;
+            .map_err(|_| invalid("改档会话事件通道未能移交"))?;
         loop {
             let notified = self.0.done_notify.notified();
             tokio::pin!(notified);
@@ -682,7 +682,7 @@ impl PiTaskHost {
         }
         self.0.gateway.release_host(&self.0.permit)?;
         if self.0.connection.is_closed() {
-            return Err(invalid("Pi连接已关闭，不能复用运行环境"));
+            return Err(invalid("改档引擎连接已关闭，不能复用运行环境"));
         }
         Ok(incoming)
     }
@@ -710,7 +710,7 @@ async fn run_prompt(state: &Arc<State>, value: &str, resume: bool) -> Result<Val
         Err(error) => {
             let _ = state
                 .gateway
-                .interrupt(&state.permit, "Pi执行中断，已保留任务进度");
+                .interrupt(&state.permit, "改档任务执行中断，已保留任务进度");
             let _ = state.gateway.release_host(&state.permit);
             return Err(host_error(error));
         }
@@ -723,7 +723,7 @@ async fn run_prompt(state: &Arc<State>, value: &str, resume: bool) -> Result<Val
     if !finished_by_reply && active(text(&state.gateway.0.task(&state.permit.task_id)?, "status")) {
         state.gateway.interrupt(
             &state.permit,
-            "Pi已结束本次输出，尚无正式完成回执，草稿与要求已保留",
+            "改档引擎已结束本次输出，尚无正式完成回执，草稿与要求已保留",
         )?;
     }
     state.gateway.release_host(&state.permit)?;
@@ -740,7 +740,7 @@ pub(crate) fn require_owned_path(directory: &Path, file: &Path) -> Result<()> {
             .components()
             .any(|part| matches!(part, Component::ParentDir))
     {
-        return Err(invalid("Pi会话位置不属于当前原生会话目录"));
+        return Err(invalid("改档会话位置不属于当前原生会话目录"));
     }
     Ok(())
 }
@@ -824,7 +824,7 @@ async fn consume(state: Arc<State>, mut incoming: IncomingReceiver) {
                     if let Some(value)=result { match state.connection.tool_result(&id,value).await { Ok(())|Err(HostError::ToolCancelled)=>{},Err(error)=>return Err(host_error(error)) } }
                 }
                 message=incoming.recv()=>{
-                    let Some(message)=message else {return Err(invalid("Pi宿主已断开，进度已保留"));};
+                    let Some(message)=message else {return Err(invalid("改档引擎已断开，进度已保留"));};
                     match message {
                         Incoming::Event(record)=>{
                             validate_envelope(&state,&record)?;
@@ -842,11 +842,11 @@ async fn consume(state: Arc<State>, mut incoming: IncomingReceiver) {
                             state.gateway.0.event(&state.permit.task_id,&json!({"type":"native_tool_cancel","requestId":request_id}))?;
                             if let Some(token)=cancels.get(&request_id) {token.cancel();}
                         }
-                        Incoming::Notice(_)=>{state.gateway.0.event(&state.permit.task_id,&json!({"type":"host_notice","message":"Pi控制请求未完成，详细要求和草稿已保留"}))?;}
+                        Incoming::Notice(_)=>{state.gateway.0.event(&state.permit.task_id,&json!({"type":"host_notice","message":"改档控制请求未完成，详细要求和草稿已保留"}))?;}
                         Incoming::ToolRequest(request)=>{
                             let session=state.pi_session.lock().map_err(|_|Error::Cancelled)?.clone();
                             if request.task_id.as_deref()!=Some(state.permit.task_id.as_str()) || session.as_deref()!=Some(request.session_id.as_str()) {
-                                return Err(invalid("Pi工具调用的任务或会话归属不符"));
+                                return Err(invalid("改档工具调用的任务或会话归属不符"));
                             }
                             let id=request.request_id.clone();
                             let token=state.prompt_cancel.child_token(); cancels.insert(id.clone(),token.clone());
@@ -875,9 +875,9 @@ async fn consume(state: Arc<State>, mut incoming: IncomingReceiver) {
     if result.is_err() {
         let _ = state
             .gateway
-            .interrupt(&state.permit, "Pi宿主连接中断，进度已保留");
+            .interrupt(&state.permit, "改档引擎连接中断，进度已保留");
         *state.failure.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some("Pi宿主连接中断，进度已保留".into());
+            Some("改档引擎连接中断，进度已保留".into());
         state.connection.close_transport().await;
     }
     for token in cancels.values() {
@@ -995,7 +995,7 @@ fn validate_envelope(state: &State, record: &Value) -> Result<()> {
         .as_str()
         .is_some_and(|id| id != state.permit.task_id)
     {
-        return Err(invalid("Pi事件不属于当前任务"));
+        return Err(invalid("改档事件不属于当前任务"));
     }
     if let Some(id)=record["childId"].as_str() {
         let children=state.children.lock().map_err(|_|Error::Cancelled)?;
@@ -1009,7 +1009,7 @@ fn validate_envelope(state: &State, record: &Value) -> Result<()> {
         .as_deref()
     {
         if record["sessionId"].as_str() != Some(expected) {
-            return Err(invalid("Pi事件不属于当前会话"));
+            return Err(invalid("改档事件不属于当前会话"));
         }
     }
     Ok(())

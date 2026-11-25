@@ -23,7 +23,7 @@ pub fn check(store:&Store, request:&Value)->Result<Value> {
     if !["interrupted","cancelled","paused","failed","blocked","running","stale"].contains(&ws::text(&task,"status")) {
         reason="task_not_resumable";message="这项任务当前不能继续，请先完成正在等待的操作".into();
     }
-    if meta["restoreContextMissing"]==true {reason="restore_context_missing";message="这份旧备份没有匹配的Pi会话文件；要求、回答和草稿已保留，请另起对话重新核对，不能接上较新的会话内容".into();}
+    if meta["restoreContextMissing"]==true {reason="restore_context_missing";message="这份旧备份没有匹配的改档会话文件；要求、回答和草稿已保留，请另起对话重新核对，不能接上较新的会话内容".into();}
     if let Some(live)=lease::current(&db,ws::text(&task,"world_id"))? {
         if !live.ticket.owner_id.is_empty() && live.expires_at_ms>lease::now_ms(){reason="execution_active";message="原执行尚未停止，请等待收尾后继续".into();}
     }

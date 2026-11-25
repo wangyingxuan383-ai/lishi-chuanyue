@@ -49,6 +49,12 @@ function formatClockNow(d = new Date()): string {
   return `${hh}:${mm}`;
 }
 
+function escapeSelectorAttr(id: string): string {
+  return typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(id)
+    : id.replace(/["\\]/g, "\\$&");
+}
+
 function readStageInnerBox(stage: HTMLElement): { w: number; h: number } {
   const cs = typeof getComputedStyle === "function" ? getComputedStyle(stage) : null;
   const padX = cs ? (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) : 0;
@@ -82,6 +88,8 @@ export interface PaginatorHandle {
 
 export interface PaginatorProps {
   children: ReactNode;
+  /** Optional chapter/section identity so chapter switches never restore the previous chapter's anchor. */
+  sectionKey?: string | number;
   /** Bumped when content changes so columns remeasure immediately. */
   contentKey?: string | number;
   /** Bumped on explicit jumps (including same-chapter jumps) to re-apply initialSelector/initialPage. */
@@ -138,6 +146,7 @@ export interface PaginatorProps {
 export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Paginator(
   {
     children,
+    sectionKey,
     contentKey,
     jumpNonce,
     initialPage = 0,
@@ -193,6 +202,9 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
   const followTailRef = useRef(initialPage === "last" || autoFollow);
   const initializedRef = useRef(false);
   const appliedJumpNonceRef = useRef<number | undefined>(jumpNonce);
+  const prevSectionKeyRef = useRef<string | number | undefined>(sectionKey);
+  const prevContentKeyRef = useRef<string | number | undefined>(contentKey);
+  const lastSettledAnchorRef = useRef<string | null>(null);
   const anchorBeforeResizeRef = useRef<string | null>(null);
   const turnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -346,6 +358,16 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
     [box.w],
   );
 
+  const updateSettledAnchor = useCallback(
+    (targetPage = pageRef.current) => {
+      const id = findVisibleAnchor("data-node-id", targetPage) ?? findVisibleAnchor("data-para-index", targetPage);
+      if (id !== null) {
+        lastSettledAnchorRef.current = id;
+      }
+    },
+    [findVisibleAnchor],
+  );
+
   const measureColumns = useCallback(() => {
     const stage = stageRef.current;
     const cols = columnsRef.current;
@@ -353,8 +375,11 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
     const { w, h } = readStageInnerBox(stage);
     if (w <= 0 || h <= 0) return totalRef.current;
     if (w !== box.w || h !== box.h) {
-      if (!anchorBeforeResizeRef.current) {
-        anchorBeforeResizeRef.current = findVisibleAnchor("data-node-id") ?? findVisibleAnchor("data-para-index");
+      if (initializedRef.current && !anchorBeforeResizeRef.current) {
+        anchorBeforeResizeRef.current =
+          lastSettledAnchorRef.current ??
+          findVisibleAnchor("data-node-id") ??
+          findVisibleAnchor("data-para-index");
       }
       setBox({ w, h });
       return totalRef.current;
@@ -374,13 +399,14 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
       followTailRef.current = clamped >= maxPage && autoFollow;
       pageRef.current = clamped;
       setPage(clamped);
+      updateSettledAnchor(clamped);
       triggerTurnVisual(prev, clamped);
     },
-    [autoFollow, triggerTurnVisual],
+    [autoFollow, triggerTurnVisual, updateSettledAnchor],
   );
 
   const jumpToSelector = useCallback(
-    (selector: string): boolean => {
+    (selector: string, animate = true): boolean => {
       const cols = columnsRef.current;
       if (!cols) return false;
       const target = cols.querySelector(selector);
@@ -391,10 +417,11 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
       followTailRef.current = false;
       pageRef.current = clamped;
       setPage(clamped);
-      triggerTurnVisual(prev, clamped);
+      updateSettledAnchor(clamped);
+      if (animate) triggerTurnVisual(prev, clamped);
       return true;
     },
-    [pageOfElement, triggerTurnVisual],
+    [pageOfElement, triggerTurnVisual, updateSettledAnchor],
   );
 
   const stepBy = useCallback(
@@ -430,16 +457,17 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
         followTailRef.current = true;
         pageRef.current = last;
         setPage(last);
+        updateSettledAnchor(last);
         triggerTurnVisual(prev, last);
       },
       stepBy,
-      jumpToSelector,
+      jumpToSelector: (selector: string) => jumpToSelector(selector, true),
       currentAnchorId: (attr = "data-node-id") => findVisibleAnchor(attr),
       remeasure: () => {
         measureColumns();
       },
     }),
-    [findVisibleAnchor, goToPage, jumpToSelector, measureColumns, page, stepBy, totalPages, triggerTurnVisual],
+    [findVisibleAnchor, goToPage, jumpToSelector, measureColumns, page, stepBy, totalPages, triggerTurnVisual, updateSettledAnchor],
   );
 
   // Observe stage size & content mutations cleanly
@@ -464,39 +492,64 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
 
   // Re-measure whenever content, typography variables, jumpNonce, or box dimensions change
   useLayoutEffect(() => {
+    if (sectionKey !== prevSectionKeyRef.current) {
+      prevSectionKeyRef.current = sectionKey;
+      prevContentKeyRef.current = contentKey;
+      initializedRef.current = false;
+      anchorBeforeResizeRef.current = null;
+      lastSettledAnchorRef.current = null;
+    } else if (contentKey !== prevContentKeyRef.current) {
+      prevContentKeyRef.current = contentKey;
+      if (
+        initializedRef.current &&
+        jumpNonce === appliedJumpNonceRef.current &&
+        !streaming &&
+        anchorBeforeResizeRef.current === null
+      ) {
+        anchorBeforeResizeRef.current =
+          lastSettledAnchorRef.current ??
+          findVisibleAnchor("data-node-id") ??
+          findVisibleAnchor("data-para-index");
+      }
+    }
+
     const stage = stageRef.current;
     if (!stage || stage.clientWidth <= 0) return;
     const { w, h } = readStageInnerBox(stage);
     if (w <= 0 || h <= 0) return;
     const count = measureColumns();
-    if (box.w <= 0 || box.h <= 0) return;
+    if (box.w <= 0 || box.h <= 0 || w !== box.w || h !== box.h) return;
     if (!initializedRef.current) {
       initializedRef.current = true;
       appliedJumpNonceRef.current = jumpNonce;
-      if (initialSelector && jumpToSelector(initialSelector)) return;
+      anchorBeforeResizeRef.current = null;
+      if (initialSelector && jumpToSelector(initialSelector, false)) return;
       if (initialPage === "last") {
         followTailRef.current = true;
         const last = Math.max(0, count - 1);
         pageRef.current = last;
         setPage(last);
+        updateSettledAnchor(last);
         return;
       }
       followTailRef.current = autoFollow;
       const start = Math.max(0, Math.min(count - 1, initialPage));
       pageRef.current = start;
       setPage(start);
+      updateSettledAnchor(start);
       return;
     }
     if (jumpNonce !== appliedJumpNonceRef.current) {
       appliedJumpNonceRef.current = jumpNonce;
       anchorBeforeResizeRef.current = null;
-      if (initialSelector && jumpToSelector(initialSelector)) return;
+      if (initialSelector && jumpToSelector(initialSelector, true)) return;
       if (initialPage === "last") {
         followTailRef.current = true;
         const last = Math.max(0, count - 1);
         const prev = pageRef.current;
         pageRef.current = last;
         setPage(last);
+        updateSettledAnchor(last);
         triggerTurnVisual(prev, last);
         return;
       }
@@ -505,6 +558,7 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
       const prev = pageRef.current;
       pageRef.current = target;
       setPage(target);
+      updateSettledAnchor(target);
       triggerTurnVisual(prev, target);
       return;
     }
@@ -515,12 +569,17 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
         pageRef.current = last;
         setPage(last);
       }
+      updateSettledAnchor(last);
       return;
     }
     if (anchorBeforeResizeRef.current) {
       const id = anchorBeforeResizeRef.current;
       anchorBeforeResizeRef.current = null;
-      if (jumpToSelector(`[data-node-id="${CSS.escape(id)}"]`) || jumpToSelector(`[data-para-index="${CSS.escape(id)}"]`)) {
+      const esc = escapeSelectorAttr(id);
+      if (
+        jumpToSelector(`[data-node-id="${esc}"]`, false) ||
+        jumpToSelector(`[data-para-index="${esc}"]`, false)
+      ) {
         return;
       }
     }
@@ -529,18 +588,22 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
       pageRef.current = clamped;
       setPage(clamped);
     }
+    updateSettledAnchor(pageRef.current);
   }, [
     autoFollow,
     box.h,
     box.w,
     contentKey,
+    findVisibleAnchor,
     initialPage,
     initialSelector,
     jumpNonce,
     jumpToSelector,
     measureColumns,
+    sectionKey,
     streaming,
     triggerTurnVisual,
+    updateSettledAnchor,
   ]);
 
   // Fonts finishing load can shift line breaks slightly; remeasure once ready
@@ -557,11 +620,14 @@ export const Paginator = forwardRef<PaginatorHandle, PaginatorProps>(function Pa
   // Notify parent of page & anchor changes
   useEffect(() => {
     const stage = stageRef.current;
-    if (!onPageChange || !stage || stage.clientWidth <= 0 || box.w <= 0 || box.h <= 0) return;
+    if (!stage || stage.clientWidth <= 0 || box.w <= 0 || box.h <= 0) return;
     const { w, h } = readStageInnerBox(stage);
     if (w <= 0 || h <= 0) return;
     const id = findVisibleAnchor("data-node-id") ?? findVisibleAnchor("data-para-index");
-    onPageChange(page, totalPages, id);
+    if (id !== null && !anchorBeforeResizeRef.current) {
+      lastSettledAnchorRef.current = id;
+    }
+    onPageChange?.(page, totalPages, id);
   }, [box.h, box.w, findVisibleAnchor, onPageChange, page, totalPages]);
 
   const isOverlayOrInputActive = () => {

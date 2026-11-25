@@ -23,6 +23,7 @@ export interface NameRequest {
   initial: string;
   placeholder?: string;
   confirm?: string;
+  allowEmpty?: boolean;
   resolve: (name: string | null) => void;
 }
 export type DialogRequest = ConfirmRequest | NameRequest;
@@ -43,7 +44,7 @@ export function Dialog({ request, onDone }: { request: DialogRequest; onDone: ()
   const ok = () => {
     if (closing) return;
     if (request.kind === "confirm") request.resolve(true);
-    else { if (!name.trim()) return; request.resolve(name.trim()); }
+    else { if (!request.allowEmpty && !name.trim()) return; request.resolve(name.trim()); }
     finish();
   };
   useBack(() => { cancel(); return true; });
@@ -61,7 +62,7 @@ export function Dialog({ request, onDone }: { request: DialogRequest; onDone: ()
         )}
         <div className="dialog-actions">
           <button onClick={cancel}>取消</button>
-          <button className={request.kind === "confirm" && request.danger ? "danger-solid" : "primary"} disabled={request.kind === "name" && !name.trim()} onClick={ok}>
+          <button className={request.kind === "confirm" && request.danger ? "danger-solid" : "primary"} disabled={request.kind === "name" && !request.allowEmpty && !name.trim()} onClick={ok}>
             {request.kind === "confirm" ? request.confirm : request.confirm ?? "保存"}
           </button>
         </div>

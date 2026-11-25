@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { eraContext } from "../../engine/era";
 import { dateText } from "../../engine/life";
+import { cleanNovelProse } from "../../engine/text/proseClean";
 import type { StoryNode, World } from "../../engine/types";
 import { useApp } from "../app/context";
 import { Sheet } from "./Sheet";
@@ -107,13 +108,14 @@ function footer(c: CardContent): string[] {
 
 /** Draws the card and returns the canvas; width 1080 for the horizontal layouts. */
 export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvasElement {
-  checkCardText(content.body);
+  const cleanedBody = cleanNovelProse(content.body, SEPARATOR);
+  checkCardText(cleanedBody);
   const font = fontStack();
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("当前设备暂时无法创建画布，请关闭部分页面后重试。");
   const seal = content.seal ?? "穿越";
-  if (layout === "手卷") return renderScroll(canvas, ctx, content, font, seal);
+  if (layout === "手卷") return renderScroll(canvas, ctx, { ...content, body: cleanedBody }, font, seal);
 
   const W = 1080;
   const plain = layout === "简洁";
@@ -141,7 +143,7 @@ export function renderCard(content: CardContent, layout: CardLayout): HTMLCanvas
 
   ctx.font = `${bodySize}px ${font}`;
   const indent = plain ? "" : "　　";
-  const body = content.body.split("\n").map((p) => (p === SEPARATOR ? p : indent + p)).join("\n");
+  const body = cleanedBody.split("\n").map((p) => (p === SEPARATOR ? p : indent + p)).join("\n");
   const lines = wrap((s) => ctx.measureText(s).width, body, maxTextW);
   const titleBlockH = Math.max(1, titleLines.length) * titleLead + 36;
   const headingBlockH = headingLines.length > 0 ? headingLines.length * headingLead + 74 : 0;
@@ -233,7 +235,7 @@ function renderScroll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
   const top = 150;
   const perCol = Math.floor((H - top * 2) / (size * 1.12));
   const cols: string[][] = [];
-  for (const para of content.body.split("\n")) {
+  for (const para of cleanNovelProse(content.body, SEPARATOR).split("\n")) {
     if (para === SEPARATOR) {
       cols.push([...Array<string>(Math.floor(perCol / 2)).fill("　"), SEPARATOR]);
       continue;
@@ -345,16 +347,20 @@ export function CardSheet({ content, onClose, title = "书摘卡", controls }: {
       toast("已保存图片");
       return;
     }
-    if (game.platform.files.exportBytes) {
-      if (await game.platform.files.exportBytes(`${name}.png`, dataUrlToPngBytes(url), "image/png").catch(() => false)) {
-        toast("已保存 PNG 图片");
+    try {
+      if (game.platform.files.exportBytes) {
+        if (await game.platform.files.exportBytes(`${name}.png`, dataUrlToPngBytes(url), "image/png")) {
+          toast("已保存 PNG 图片");
+        }
+        return;
       }
-      return;
-    }
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(content.heading ?? content.title)}</title></head>`
-      + `<body style="margin:0;background:#efe5cf"><img alt="${escapeHtml(content.heading ?? content.title)}" src="${url}" style="display:block;max-width:100%;margin:0 auto"></body></html>`;
-    if (await game.platform.files.exportText(`${name}.html`, html).catch(() => false)) {
-      toast(isAndroid ? "已保存为网页文件，用浏览器打开可长按存图" : "已保存书摘网页文件，用浏览器打开可右键另存原图");
+      const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(content.heading ?? content.title)}</title></head>`
+        + `<body style="margin:0;background:#efe5cf"><img alt="${escapeHtml(content.heading ?? content.title)}" src="${url}" style="display:block;max-width:100%;margin:0 auto"></body></html>`;
+      if (await game.platform.files.exportText(`${name}.html`, html)) {
+        toast(isAndroid ? "已保存为网页文件，用浏览器打开可长按存图" : "已保存书摘网页文件，用浏览器打开可右键另存原图");
+      }
+    } catch {
+      toast("导出失败，请稍后再试");
     }
   };
   return (

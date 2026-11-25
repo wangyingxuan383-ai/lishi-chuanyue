@@ -35,6 +35,11 @@ const formatWords = (chars: number): string =>
     ? `${(chars / 10000).toFixed(1).replace(/\.0$/, "")} 万字`
     : `${Math.max(0, chars).toLocaleString()} 字`;
 
+const formatBadge = (item: Pick<LibraryShelfItem, "format" | "author" | "origin">): string =>
+  item.origin === "world-novel" || item.author.includes("穿越成书")
+    ? "成书"
+    : item.format.toUpperCase();
+
 const ENCODING_OPTIONS: { value: TextEncoding; label: string }[] = [
   { value: "auto", label: "自动识别（推荐）" },
   { value: "utf-8", label: "UTF-8" },
@@ -97,7 +102,7 @@ function LibraryBookCard({
                 置顶
               </span>
             )}
-            <span className="lib-card-fmt">{item.format.toUpperCase()}</span>
+            <span className="lib-card-fmt">{formatBadge(item)}</span>
           </span>
           <b className="lib-card-title">{item.title}</b>
           {item.author ? (
@@ -167,7 +172,7 @@ export function HomeLibrary({
   const sortedItems = useMemo(() => {
     if (!items) return [];
     const filtered = items.filter((item) =>
-      localFind(query, item.title, item.author, item.currentSectionTitle, item.format),
+      localFind(query, item.title, item.author, item.currentSectionTitle, item.format, formatBadge(item)),
     );
     const copy = [...filtered];
     copy.sort((a, b) => {
@@ -365,6 +370,7 @@ export function HomeLibrary({
       initial: item.author,
       placeholder: "如：施耐庵 / 精校全本（留空清除）",
       confirm: "保存",
+      allowEmpty: true,
     });
     if (val === null) return;
     await updateBookShelfPref(game.repo, item.id, { author: val });
@@ -587,7 +593,7 @@ export function HomeLibrary({
           <div className="lib-hero-main">
             <div className="lib-hero-badges">
               <span className="lib-kicker">正在展读</span>
-              <span className="lib-fmt-pill">{featured.format.toUpperCase()}</span>
+              <span className="lib-fmt-pill">{formatBadge(featured)}</span>
               {featured.pinned && <span className="lib-pin-pill">置顶</span>}
               {featured.finished && <span className="lib-done-pill">已读完</span>}
             </div>
@@ -717,7 +723,7 @@ export function HomeLibrary({
                 <b>{manageItem.title}</b>
                 <small>
                   {manageItem.author ? `${manageItem.author} · ` : ""}
-                  {manageItem.format.toUpperCase()} · 共 {manageItem.sectionCount} 节 ·{" "}
+                  {formatBadge(manageItem)} · 共 {manageItem.sectionCount} 节 ·{" "}
                   {formatWords(manageItem.totalChars)}
                 </small>
                 <small>

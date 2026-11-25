@@ -14,7 +14,7 @@ pub(crate) fn record_anchor(db:&Connection, task_id:&str, record:&Value)->Result
     let item=event(record);
     if item["type"]!="message_anchor" || record["childId"].is_string() || item["childId"].is_string() {return Ok(());}
     let entry=ws::text(item,"entryId");
-    if entry.is_empty()||entry.len()>128||!entry.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err(invalid("Pi消息定位无效"));}
+    if entry.is_empty()||entry.len()>128||!entry.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err(invalid("对话分支消息定位无效"));}
     let message_id=if item["role"]=="user" {
         let goal:String=db.query_row("SELECT text FROM pi_tasks WHERE id=?",[task_id],|r|r.get(0))?;
         if item["userHash"]==hash(&goal) {Some(format!("{task_id}:user"))} else {
@@ -45,7 +45,7 @@ pub(crate) fn record_anchor(db:&Connection, task_id:&str, record:&Value)->Result
 
 pub(crate) fn anchor(db:&Connection,session:&str,message:&str)->Result<String> {
     let anchor:Option<String>=db.query_row("SELECT a.entry_id FROM pi_message_anchors a JOIN pi_tasks t ON t.id=a.task_id WHERE t.session_id=? AND a.message_id=? UNION ALL SELECT entry_id FROM pi_session_messages WHERE session_id=? AND message_id=? LIMIT 1",params![session,message,session,message],|r|r.get(0)).optional()?;
-    anchor.ok_or_else(||invalid("这条消息尚无完整Pi定位，不能从不完整过程另起对话"))
+    anchor.ok_or_else(||invalid("这条消息尚无完整对话分支定位，不能从不完整过程另起对话"))
 }
 
 pub(crate) fn inherited(db:&Connection,session:&str)->Result<Vec<Value>> {
@@ -54,7 +54,7 @@ pub(crate) fn inherited(db:&Connection,session:&str)->Result<Vec<Value>> {
 }
 
 pub(crate) fn save_history(db:&Connection,source:&str,target:&str,kept:&Value,messages:&[Value])->Result<()> {
-    let ids=kept.as_array().filter(|v|v.len()<=200_000).ok_or_else(||invalid("Pi分支消息定位无效"))?;
+    let ids=kept.as_array().filter(|v|v.len()<=200_000).ok_or_else(||invalid("对话分支消息定位无效"))?;
     let mut count=0; let mut bytes=0;
     for message in messages {
         let entry=anchor(db,source,ws::text(message,"id"));

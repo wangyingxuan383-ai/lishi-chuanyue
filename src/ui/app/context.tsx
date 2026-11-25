@@ -42,7 +42,7 @@ export const PAPER_TONES: { id: ReaderPaperTone; label: string; bg: string; fg: 
   { id: "bamboo", label: "青竹绿", bg: "#dcebd8", fg: "#1d2d21", dark: false },
   { id: "almond", label: "杏仁纸", bg: "#f2e4cc", fg: "#302318", dark: false },
   { id: "smoke", label: "松烟夜", bg: "#181a1e", fg: "#e5dac6", dark: true },
-  { id: "oled", label: "纯黑屏", bg: "#050506", fg: "#d6ccb8", dark: true },
+  { id: "oled", label: "纯黑屏", bg: "#000000", fg: "#d6ccb8", dark: true },
 ];
 
 export const FONT_FAMILIES: [ReaderFontFamily, string][] = [
@@ -198,7 +198,7 @@ export interface AppValue {
   /** The app's own confirmation: resolves true when the player confirms. */
   ask(o: { title: string; message?: string; confirm: string; danger?: boolean }): Promise<boolean>;
   /** The app's own name prompt: resolves the trimmed name, or null when cancelled. */
-  askName(o: { title: string; initial?: string; placeholder?: string; confirm?: string }): Promise<string | null>;
+  askName(o: { title: string; initial?: string; placeholder?: string; confirm?: string; allowEmpty?: boolean }): Promise<string | null>;
 }
 
 export interface ToastAction { label: string; run: () => void }

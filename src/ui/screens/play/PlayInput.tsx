@@ -11,12 +11,13 @@ interface InputModeSheetProps {
   setModePicker: (open: boolean) => void;
   setModeIndex: (index: number) => void;
   setNoteOpen: (open: boolean) => void;
+  onOpenAsk: () => void;
   captureReading: () => void;
   push: AppValue["push"];
 }
 
 export function InputModeSheet({ watch, modeList, modeIndex, inputBox, noteOpen, mode, worldId, cursor,
-  setModePicker, setModeIndex, setNoteOpen, captureReading, push }: InputModeSheetProps) {
+  setModePicker, setModeIndex, setNoteOpen, onOpenAsk, captureReading, push }: InputModeSheetProps) {
   return (
     <Sheet title={watch ? "怎么指点这一段" : "怎么写这一回合"} onClose={() => setModePicker(false)}>
       <div className="sheet-menu">
@@ -26,6 +27,7 @@ export function InputModeSheet({ watch, modeList, modeIndex, inputBox, noteOpen,
           </button>
         ))}
         {!watch && !noteOpen && mode.mode !== "direct" && <button className="mode-option" onClick={() => { setNoteOpen(true); setModePicker(false); }}><b><Icon name="plus" size={16} />幕后要求</b><small>行动照写，另外告诉叙事者这一段怎么写</small></button>}
+        <button className="mode-option" onClick={() => { setModePicker(false); onOpenAsk(); }}><b>查一查 ›</b><small>问本局人物旧事、时代常识或原著设定，不推进剧情</small></button>
         <button className="mode-option" onClick={() => { captureReading(); setModePicker(false); push({ name: "companion", worldId, lineId: cursor.line.id }); }}><b>伴聊 ›</b><small>角色畅谈、查原著与史料，或让智能体预演修改本局</small></button>
       </div>
     </Sheet>

@@ -1267,7 +1267,7 @@ async fn standard_tier_looks_up_twice_then_must_write_and_lite_check_fixes_one_s
     drop(requests);
     let narrative: String = fixture.store.lock().unwrap().query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).unwrap();
     assert_eq!(narrative, "你付了三文，收好一张纸。");
-    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-5");
+    assert_eq!(snapshot.draft["referenceReview"]["version"], "reference-review-lite-6");
     assert_eq!(snapshot.draft["referenceReview"]["skipped"], 0);
     let saved: String=fixture.store.lock().unwrap().query_row("SELECT record_json FROM nodes WHERE id=?",[&node],|r|r.get(0)).unwrap();
     let record: Value=serde_json::from_str(&saved).unwrap();
@@ -1306,22 +1306,22 @@ async fn a_rejected_lite_correction_cannot_leak_into_a_later_record_patch() {
 
 #[tokio::test]
 async fn deep_tier_caps_lookup_rounds_and_the_allowance_goes_last_when_nearly_spent() {
-    let mut steps: Vec<Step> = (0..4).map(|i| Step::Reply(calls(vec![(["a", "b", "c", "d"][i], "read_history", json!({"query":format!("纸{i}")}))]))).collect();
+    let mut steps: Vec<Step> = (0..2).map(|i| Step::Reply(calls(vec![(["a", "b"][i], "read_history", json!({"query":format!("纸{i}")}))]))).collect();
     steps.push(Step::Reply(written()));
     let fixture = Fixture::new(steps);
     let mut plan = bound(&fixture, "deep", "deep");
-    plan.meta["modelRequestLimit"] = 6.into();
+    plan.meta["modelRequestLimit"] = 4.into();
     fixture.engine.start(plan).unwrap();
     let snapshot = fixture.settled("deep").await;
     assert_eq!(snapshot.status, "committed", "{:?}", snapshot.error);
     let requests = fixture.model.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
-    assert_eq!(requests[3]["tool_choice"], "auto");
-    assert_eq!(requests[4]["tool_choice"], "none");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1]["tool_choice"], "auto");
+    assert_eq!(requests[2]["tool_choice"], "none");
     let first = requests[0]["messages"].as_array().unwrap();
     assert!(!first[0]["content"].as_str().unwrap().contains("剩余额度"));
-    assert!(!requests[0].to_string().contains("剩余额度"), "6 left: not mentioned");
-    let last = requests[3]["messages"].as_array().unwrap();
+    assert!(!requests[0].to_string().contains("剩余额度"), "4 left: not mentioned");
+    let last = requests[1]["messages"].as_array().unwrap();
     assert!(last.last().unwrap()["content"].as_str().unwrap().starts_with("【本次执行剩余额度】包括当前这次，尚可请求模型3次"));
 }
 
@@ -2306,7 +2306,7 @@ async fn deep_tier_empty_passages_and_reference_review_3_preserve_prose_and_appl
     let mut p0 = bound(&f0, "deep-fanfic-custom", "deep");
     p0.action = json!({"mode":"do","text":"凤凰第三变加第四魂技结束全场"});
     p0.reference = Some(json!({"bookId":"book","binding":p0.state["source"],"passages":[],"status":"insufficient","reason":"no_match"}));
-    p0.meta["referenceReviewVersion"] = "reference-review-4".into();
+    p0.meta["referenceReviewVersion"] = "reference-review-5".into();
     f0.engine.start(p0).unwrap();
     let s0 = f0.settled("deep-fanfic-custom").await;
     assert_eq!(s0.status, "committed", "fanfic custom action must not fail review: {:?}", s0.error);
@@ -2314,29 +2314,29 @@ async fn deep_tier_empty_passages_and_reference_review_3_preserve_prose_and_appl
     assert_eq!(s0.draft["referenceReview"]["status"], "skipped");
     assert_eq!(f0.model.count(), 1);
 
-    // 2. Deep review_reference-3 applies verified sentence + recordPatch fix in a single compact pass.
+    // 2. Deep review_reference-5 applies verified sentence + recordPatch fix in a single compact pass.
     let f1 = Fixture::new(vec![
         Step::Reply(written()),
         Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"第一章写明三文","fix":"三文","citations":[{"section":1,"chunk":1,"quote":"一张纸卖三文"}],"recordPatch":{"money":-3}}],"findings":[{"claim":"纸价","status":"corrected","detail":"按第一章改为三文","citations":[{"section":1,"chunk":1,"quote":"一张纸卖三文"}]}],"unresolved":[]}"#)),
     ]);
     let mut p1 = bound(&f1, "deep-review-fix", "deep");
-    p1.meta["referenceReviewVersion"] = "reference-review-4".into();
+    p1.meta["referenceReviewVersion"] = "reference-review-5".into();
     f1.engine.start(p1).unwrap();
     let s1 = f1.settled("deep-review-fix").await;
     assert_eq!(s1.status, "committed", "{:?}", s1.error);
     let node_id = s1.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
     assert_eq!(f1.text(&format!("SELECT narrative FROM nodes WHERE id='{node_id}'")), "你付了三文，收好一张纸。");
-    assert_eq!(s1.draft["referenceReview"]["version"], "reference-review-4");
+    assert_eq!(s1.draft["referenceReview"]["version"], "reference-review-5");
     assert_eq!(s1.draft["referenceReview"]["status"], "reviewed");
 
-    // 3. Truncated/malformed JSON or needsPlayer in review_reference-3 keeps finished prose intact and commits.
+    // 3. Truncated/malformed JSON or needsPlayer in review_reference-5 keeps finished prose intact and commits.
     for reply in [
         Completion { finish_reason: Some("length".into()), ..prose(r#"{"issues":[{"quote":"两文""#) },
         prose(r#"{"needsPlayer":true,"unresolved":["需要玩家决定是否认输"]}"#),
     ] {
         let f2 = Fixture::new(vec![Step::Reply(written()), Step::Reply(reply)]);
         let mut p2 = bound(&f2, "deep-review-fallback", "deep");
-        p2.meta["referenceReviewVersion"] = "reference-review-4".into();
+        p2.meta["referenceReviewVersion"] = "reference-review-5".into();
         f2.engine.start(p2).unwrap();
         let s2 = f2.settled("deep-review-fallback").await;
         assert_eq!(s2.status, "committed", "truncated or needsPlayer review must not discard prose: {:?}", s2.error);
@@ -2419,4 +2419,89 @@ async fn inline_think_with_record_mention_never_truncates_prose_or_hijacks_settl
     let trunc_snap = f_trunc.settled("unclosed-think-trunc").await;
     assert_eq!(trunc_snap.status, "failed");
     assert!(trunc_snap.draft["partialNarrative"].is_null(), "must never persist <think> as partialNarrative");
+}
+
+#[tokio::test]
+async fn reference_review_5_keeps_tools_with_tool_choice_none_on_final_round_and_uses_aux_with_fallback() {
+    // 1. `aux_model` succeeds with `search_original` on round 0; round 1 (`final_round`) MUST keep `tools` non-empty with `tool_choice == "none"`.
+    let f = Fixture::new(vec![
+        Step::Reply(written()),
+        Step::Reply(calls(vec![("rev-s1", "search_original", json!({"query":"一张纸"}))])),
+        Step::Reply(prose(r#"{"issues":[{"quote":"两文","problem":"一张纸卖三文","fix":"三文","citations":[{"section":1,"chunk":1,"quote":"一张纸卖三文"}],"recordPatch":{"money":-3}}],"findings":[],"unresolved":[]}"#)),
+    ]);
+    let mut plan = bound(&f, "review-5-final-tools", "deep");
+    plan.meta["referenceReviewVersion"] = "reference-review-5".into();
+    plan.model.aux_model = Some("fast-aux".into());
+    f.engine.start(plan).unwrap();
+    let saved = f.settled("review-5-final-tools").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let requests = f.model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    // Request 1: review round 0 on `fast-aux` with `search_original` in `tools` and `tool_choice: "auto"`
+    assert_eq!(requests[1]["model"], "fast-aux");
+    assert_eq!(requests[1]["tool_choice"], "auto");
+    assert!(tool_names(&requests[1]).contains(&"search_original".to_owned()));
+    // Request 2: review round 1 (`final_round`) on `fast-aux` MUST keep `tools` non-empty AND set `tool_choice: "none"`!
+    assert_eq!(requests[2]["model"], "fast-aux");
+    assert!(!tool_names(&requests[2]).is_empty(), "final_round must keep tools defined for tool history");
+    assert_eq!(requests[2]["tool_choice"], "none");
+    drop(requests);
+    let node_id = saved.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    assert_eq!(f.text(&format!("SELECT narrative FROM nodes WHERE id='{node_id}'")), "你付了三文，收好一张纸。");
+
+    // 2. If `aux_model` rejects tools with HTTP 400 on round 0, `review_reference` falls back to main model seamlessly.
+    let reject_tools = Error::Provider {
+        kind: "http".into(),
+        status: Some(400),
+        message: "HTTP 400: model fast-no-tools does not support tools".into(),
+        partial: false,
+    };
+    let f2 = Fixture::new(vec![
+        Step::Reply(written()),
+        Step::Fail(reject_tools),
+        Step::Reply(prose(r#"{"issues":[],"findings":[],"unresolved":[]}"#)),
+    ]);
+    let mut p2 = bound(&f2, "review-5-aux-fallback", "deep");
+    let expected_main = p2.model.model.clone();
+    p2.meta["referenceReviewVersion"] = "reference-review-5".into();
+    p2.model.aux_model = Some("fast-no-tools".into());
+    f2.engine.start(p2).unwrap();
+    let s2 = f2.settled("review-5-aux-fallback").await;
+    assert_eq!(s2.status, "committed", "{:?}", s2.error);
+    assert_eq!(s2.draft["referenceReview"]["version"], "reference-review-5");
+    assert_eq!(s2.draft["referenceReview"]["status"], "reviewed");
+    let reqs2 = f2.model.requests.lock().unwrap();
+    assert_eq!(reqs2[1]["model"], "fast-no-tools");
+    assert_eq!(reqs2[2]["model"], expected_main);
+}
+
+#[tokio::test]
+async fn story_prose_strips_accidental_markdown_while_preserving_ask_and_player_narrative() {
+    let md_reply = concat!(
+        "### 第一幕：夜市微雨\n",
+        "　　你推开木门，握紧了袖中的**玄铁令**，望向柜台后的**林晚照**。\n",
+        "---\n",
+        "- 门外雨声渐急，灯影摇晃。\n",
+        "<record>{\"time\":5,\"money\":-2,\"items\":[{\"name\":\"青纸\",\"delta\":1}]}</record>"
+    );
+    let f = Fixture::new(vec![Step::Reply(prose(md_reply))]);
+    f.engine.start(f.plan("strip-story-md")).unwrap();
+    let saved = f.settled("strip-story-md").await;
+    assert_eq!(saved.status, "committed", "{:?}", saved.error);
+    let node_id = saved.result.as_ref().unwrap()["nodeId"].as_str().unwrap();
+    let narrative = f.text(&format!("SELECT narrative FROM nodes WHERE id='{node_id}'"));
+    assert_eq!(
+        narrative,
+        "第一幕：夜市微雨\n　　你推开木门，握紧了袖中的玄铁令，望向柜台后的林晚照。\n◇\n门外雨声渐急，灯影摇晃。"
+    );
+    assert!(!narrative.contains("**"));
+
+    // `ask` mode preserves Markdown formatting intentionally:
+    let f_ask = Fixture::new(vec![Step::Reply(prose("- **林晚照**：翠微楼掌柜。"))]);
+    let mut p_ask = f_ask.plan("keep-ask-md");
+    p_ask.kind = "ask".into();
+    f_ask.engine.start(p_ask).unwrap();
+    let ask_snap = f_ask.settled("keep-ask-md").await;
+    assert_eq!(ask_snap.status, "previewed");
+    assert_eq!(ask_snap.result.unwrap()["text"], "- **林晚照**：翠微楼掌柜。");
 }

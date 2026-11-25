@@ -9,7 +9,7 @@ import { TurnChanges } from "./TurnChanges";
 import { ReportCard } from "./ReportCard";
 
 // Memoized: while a new passage streams in, earlier turns do not re-render (R26-T008).
-export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSourceBack, onNotes, pressed, fresh, watch, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; onPanel?: (tab?: Tab) => void; /** Head passage only: put the book position back where it was (D178). */ onSourceBack?: (position: number) => void; onNotes?: () => void; pressed?: boolean; fresh?: boolean; watch?: boolean; children?: React.ReactNode }) {
+export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSourceBack, onNotes, onCanonCheck, onAskCanon, pressed, fresh, watch, children }: { node: StoryNode; onMenu: (n: StoryNode) => void; onPanel?: (tab?: Tab) => void; /** Head passage only: put the book position back where it was (D178). */ onSourceBack?: (position: number) => void; onNotes?: () => void; onCanonCheck?: (node: StoryNode) => void; onAskCanon?: (initialQuestion: string) => void; pressed?: boolean; fresh?: boolean; watch?: boolean; children?: React.ReactNode }) {
   const press = useLongPress(() => onMenu(node));
   const { devMode } = useApp();
   // Developer mode: era words the local check found (R07-T002).
@@ -24,13 +24,22 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
     findings?: { claim: string; status: string }[];
     issues?: { quote?: string; problem?: string; fix?: string }[];
     unresolved?: string[];
+    needsPlayer?: string | string[];
   } | undefined;
   const reviewFindings = referenceReview?.findings ?? [];
   const reviewIssues = referenceReview?.issues ?? [];
   const reviewUnresolved = referenceReview?.unresolved ?? [];
+  const rawNeedsPlayer = referenceReview?.needsPlayer;
+  const reviewNeedsPlayer = Array.isArray(rawNeedsPlayer)
+    ? rawNeedsPlayer.filter((s): s is string => typeof s === "string" && Boolean(s.trim()))
+    : typeof rawNeedsPlayer === "string" && rawNeedsPlayer.trim()
+      ? [rawNeedsPlayer.trim()]
+      : [];
+  const distinctNeedsPlayer = reviewNeedsPlayer.filter((q) => !reviewUnresolved.some((u) => u.includes(q)));
+  const pendingReviewCount = reviewUnresolved.length + distinctNeedsPlayer.length;
   const reviewSkipped = referenceReview?.status === "skipped";
   const reviewPartial = referenceReview?.status === "partial";
-  const reviewEmpty = reviewFindings.length === 0 && reviewIssues.length === 0 && reviewUnresolved.length === 0;
+  const reviewEmpty = reviewFindings.length === 0 && reviewIssues.length === 0 && pendingReviewCount === 0;
   // A summary already in the player's words (“你修改了剧本”) is shown as it is.
   if (node.kind === "edit") return <div className="edit-line" data-node-id={node.id}>{node.meta.by === "AI" || node.actionText?.startsWith("你") ? node.actionText : `你修改了：${node.actionText}`}</div>;
   return (
@@ -53,8 +62,8 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
             <span>原著核对</span>
             {reviewSkipped
               ? <span className="ref-pill warn">未核对</span>
-              : reviewUnresolved.length
-                ? <span className="ref-pill warn">{reviewUnresolved.length} 项待查</span>
+              : pendingReviewCount
+                ? <span className="ref-pill warn">{pendingReviewCount} 项待查</span>
                 : reviewPartial
                   ? <span className="ref-pill warn">部分核对</span>
                   : reviewIssues.length
@@ -85,6 +94,12 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
                 <span>{t}</span>
               </p>
             ))}
+            {distinctNeedsPlayer.map((t, i) => (
+              <p key={`np${i}`} className="ref-row">
+                <span className="ref-badge branch">待确认</span>
+                <span>{t}</span>
+              </p>
+            ))}
             {reviewEmpty && (
               <p className="ref-row muted">
                 {reviewSkipped
@@ -93,6 +108,20 @@ export const TurnView = memo(function TurnView({ node, onMenu, onPanel, onSource
                     : "本次原著核对未完成，正文保留原稿。"
                   : "已核对，未发现与原著冲突。"}
               </p>
+            )}
+            {(reviewUnresolved.length > 0 || reviewNeedsPlayer.length > 0) && (onCanonCheck || onAskCanon) && (
+              <div className="row gap-2 ref-review-actions">
+                {onCanonCheck && (
+                  <button type="button" className="ghost small" onClick={(e) => { e.stopPropagation(); onCanonCheck(node); }}>
+                    按原著纠错
+                  </button>
+                )}
+                {onAskCanon && (
+                  <button type="button" className="ghost small" onClick={(e) => { e.stopPropagation(); onAskCanon(reviewUnresolved[0] ?? reviewNeedsPlayer[0] ?? ""); }}>
+                    去查一查
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </details>

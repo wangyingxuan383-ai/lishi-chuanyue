@@ -1115,8 +1115,26 @@ export async function notesForTurn(repo: Repo, binding: SourceBinding | null | u
     } else {
       const covering = ranges.filter((n) => (n.scope.from ?? 0) <= at && at <= (n.scope.to ?? Infinity));
       const before = ranges.filter((n) => (n.scope.to ?? Infinity) < at).sort((a, b) => (b.scope.to ?? 0) - (a.scope.to ?? 0));
+      const coveringIds = new Set(covering.map((n) => n.id));
       for (const n of covering) ranked.push([1, n, noteExcerpt(n.content, at, ""), 0]);
-      if (!covering.length && before[0]) ranked.push([1, before[0], noteExcerpt(before[0].content, at, ""), 0]);
+      const turnKeys = terms(withoutRequestWords(recent)).slice(0, 24);
+      const topMatch = turnKeys.length
+        ? ranges
+            .filter((n) => !coveringIds.has(n.id))
+            .map((n) => ({
+              n,
+              hits: turnKeys.filter((k) => n.title.includes(k) || n.content.includes(k)).length,
+              dist: Math.min(Math.abs((n.scope.from ?? 0) - at), Math.abs((n.scope.to ?? Infinity) - at)),
+            }))
+            .filter((x) => x.hits >= 2)
+            .sort((a, b) => b.hits - a.hits || a.dist - b.dist)[0]
+        : undefined;
+      if (!covering.length && before[0] && before[0].id !== topMatch?.n.id) {
+        ranked.push([1, before[0], noteExcerpt(before[0].content, at, ""), 0]);
+      }
+      if (topMatch) {
+        ranked.push([1, topMatch.n, noteExcerpt(topMatch.n.content, at, recent, false, true), 0]);
+      }
     }
     for (const n of notes) if (((n.kind === "person" || n.kind === "setting") && named(n)) || asked(n)) ranked.push([3, n, noteExcerpt(n.content, at, recent, false, queryFirst), overlap(n)]);
   }

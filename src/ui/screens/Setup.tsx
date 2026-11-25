@@ -10,14 +10,22 @@ import {
   looksLikeUrl, presetForUrl, recommendAuxModel, recommendModel, sameServiceBase, saveProfile, serviceBase, type Profile,
 } from "../../engine/llm/providers";
 import { newId, type Repo } from "../../engine/db/repo";
-import type { Platform } from "../../platform";
+import { PlatformError, type Platform } from "../../platform";
 import { useApp } from "../app/context";
 import { applyFallback } from "../app/llmConfig";
 import { openLink } from "../app/update";
 import { Sheet } from "../components/Sheet";
 import { Icon } from "../components/Icon";
 
-type Result = { ok: boolean; text: string } | null;
+type Result = { ok: boolean; text: string; allowSkipTest?: boolean } | null;
+
+function cleanApiKey(raw: string): string {
+  return raw
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim()
+    .replace(/^bearer\s+/i, "")
+    .trim();
+}
 
 export default function Setup({ first, profileId }: { first?: boolean; profileId?: string }) {
   const { game, platform, profile: activeProfile, setProfile, pop, replace, toast } = useApp();
@@ -84,14 +92,15 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
   }, []);
 
   const cleanUrl = cleanBaseUrl(baseUrl);
+  const cleanedKey = cleanApiKey(key);
   const isHttp = cleanUrl.startsWith("http://");
   const shownName = nameTouched ? name : defaultProfileName(preset, cleanUrl, taken);
   const savedKeyValid = !!existing && existingHasKey === true;
   const missingStoredKey = !!existing && existingHasKey === false;
   /** The key in use: the one being typed (in the draft slot), or the saved one. */
-  const keyReady = key.trim().length >= 8 || savedKeyValid;
+  const keyReady = cleanedKey.length >= 8 || savedKeyValid;
   const baseChanged = !!existing && !sameServiceBase(cleanUrl, existing.baseUrl);
-  const canSave = !!cleanUrl && (!!key.trim() || (savedKeyValid && !baseChanged)) && (!isHttp || allowHttp) && !!model.trim();
+  const canSave = !!cleanUrl && (!!cleanedKey || (savedKeyValid && !baseChanged)) && (!isHttp || allowHttp) && !!model.trim();
 
   const choosePreset = (id: string) => {
     setPresetId(id);
@@ -108,15 +117,15 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
 
   /** The slot to call with: the draft (a new key typed) or the saved profile's. */
   const slotFor = async (): Promise<string | null> => {
-    if (key.trim()) {
+    if (cleanedKey) {
       const base = serviceBase(cleanUrl);
-      if (draftKeyBase.current !== `${base}\n${key.trim()}`) {
+      if (draftKeyBase.current !== `${base}\n${cleanedKey}`) {
         // Noted first, so a crash before 保存 is cleaned up at the next start.
         const write = game.repo.setSetting(DRAFT_SLOT_SETTING, draftSlot.current)
-          .then(() => platform.secrets.set(draftSlot.current, key.trim(), base));
+          .then(() => platform.secrets.set(draftSlot.current, cleanedKey, base));
         draftWrite.current = write.catch(() => {});
         await write;
-        draftKeyBase.current = `${base}\n${key.trim()}`;
+        draftKeyBase.current = `${base}\n${cleanedKey}`;
       }
       return draftSlot.current;
     }
@@ -126,9 +135,31 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
 
   /** Fetches the models as soon as a key is there (J-01); the button is only a refresh. */
   const loadModels = async (slotArg?: string, baseArg?: string, presetArg = preset, keepMain = model, keepAux = auxModel) => {
-    const slot = slotArg ?? await slotFor().catch(() => null);
     const base = baseArg ?? cleanUrl;
-    if (!slot || !base) return;
+    if (!base) return;
+    if (base.includes("?") || !/^https?:\/\/[^/?#\s]+/i.test(base)) {
+      setModelsNote("服务地址格式不对：请填写以 https:// 开头的接口地址，不要带 ? 参数或 # 号。");
+      return;
+    }
+    if (!slotArg && cleanedKey && /\s/.test(cleanedKey)) {
+      setModelsNote("API Key 格式不对（不能包含空格或换行），请重新粘贴。");
+      return;
+    }
+    let slot = slotArg ?? null;
+    if (!slot) {
+      try {
+        slot = await slotFor();
+      } catch (e: unknown) {
+        const code = e instanceof PlatformError ? e.code : typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "";
+        if (code === "secret_failed") {
+          setModelsNote("API Key 格式不对（不能包含空格或换行），请重新粘贴。");
+        } else if (code === "secret_base_url") {
+          setModelsNote("服务地址格式不对：请填写以 https:// 开头的接口地址，不要带 ? 参数或 # 号。");
+        }
+        return;
+      }
+    }
+    if (!slot) return;
     setBusy("models");
     setModelsNote(null);
     try {
@@ -148,19 +179,25 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
 
   // Typing stops for a moment with a key in the box: fetch.
   useEffect(() => {
-    if (key.trim().length < 8 || !cleanUrl || (isHttp && !allowHttp)) return;
+    if (cleanedKey.length < 8 || !cleanUrl || (isHttp && !allowHttp)) return;
     const id = setTimeout(() => void loadModels(), 700);
     return () => clearTimeout(id);
-  }, [key, cleanUrl, allowHttp]);
+  }, [cleanedKey, cleanUrl, allowHttp]);
 
   const onKeyChange = (value: string) => {
+    const stripped = value.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
     // An address pasted into the key box goes where it belongs (J-05).
-    if (looksLikeUrl(value) && !value.trim().startsWith("sk-")) { onUrlChange(value); toast("这是地址，已填到“服务地址”里"); return; }
-    setKey(value.trim());
+    if (looksLikeUrl(stripped) && !stripped.startsWith("sk-") && !/^bearer\s+/i.test(stripped)) {
+      onUrlChange(stripped);
+      toast("这是地址，已填到“服务地址”里");
+      return;
+    }
+    setKey(cleanApiKey(value));
     setResult(null);
   };
   const onUrlChange = (value: string) => {
     setBaseUrl(value);
+    setResult(null);
     const match = presetForUrl(value);
     if (match && match.id !== presetId && presetId === "custom") {
       setPresetId(match.id);
@@ -182,8 +219,24 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
     setBusy("save");
     setResult(null);
     try {
+      if (cleanUrl.includes("?") || baseUrl.includes("?") || !/^https?:\/\/[^/?#\s]+/i.test(cleanUrl)) {
+        setResult({
+          ok: false,
+          text: "服务地址格式不对：请填写以 https:// 开头的接口地址，不要带 ? 参数或 # 号。",
+          allowSkipTest: false,
+        });
+        return;
+      }
+      if (cleanedKey && /\s/.test(cleanedKey)) {
+        setResult({
+          ok: false,
+          text: "API Key 格式不对（不能包含空格或换行），请重新粘贴。",
+          allowSkipTest: false,
+        });
+        return;
+      }
       const slot = await slotFor();
-      if (!slot) { setResult({ ok: false, text: missingStoredKey ? "恢复备份后需重新填入密钥" : baseChanged ? "换了地址，要重新填一次 Key。" : "先填 Key。" }); return; }
+      if (!slot) { setResult({ ok: false, text: missingStoredKey ? "恢复备份后需重新填入密钥" : baseChanged ? "换了地址，要重新填一次 Key。" : "先填 Key。", allowSkipTest: false }); return; }
       let includeUsage = existing?.includeUsage ?? true;
       let line = "";
       if (!skipTest) {
@@ -257,7 +310,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
         id: existing?.id, keySlot, name: shownName.trim() || preset.name, provider: presetId, baseUrl: cleanUrl,
         mainModel: model.trim(), auxModel: auxModel.trim() && auxModel.trim() !== model.trim() ? auxModel.trim() : null,
         includeUsage, allowHttp, contextTokens: existing?.contextTokens,
-      }, key.trim() || null);
+      }, cleanedKey || null);
       saved.current = true;
       void dropDraft(platform, draftWrite.current, draftSlot.current);
       if (existing && activeProfile && existing.id !== activeProfile.id) {
@@ -269,9 +322,40 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
       toast(line ? `已连接：${line}` : "已保存");
       if (first) replace({ name: "newgame" }); else pop();
     } catch (e) {
+      const code = e instanceof PlatformError ? e.code : typeof (e as { code?: unknown })?.code === "string" ? (e as { code: string }).code : "";
+      if (code === "secret_failed" || (cleanedKey && /\s/.test(cleanedKey))) {
+        setResult({
+          ok: false,
+          text: "API Key 格式不对（不能包含空格或换行），请重新粘贴。",
+          allowSkipTest: false,
+        });
+        return;
+      }
+      if (
+        code === "secret_base_url" ||
+        cleanUrl.includes("?") ||
+        baseUrl.includes("?") ||
+        (e instanceof PlatformError && /url|base_url|地址/i.test(`${e.code} ${e.message}`))
+      ) {
+        setResult({
+          ok: false,
+          text: "服务地址格式不对：请填写以 https:// 开头的接口地址，不要带 ? 参数或 # 号。",
+          allowSkipTest: false,
+        });
+        return;
+      }
+      if (e instanceof PlatformError) {
+        setResult({
+          ok: false,
+          text: /[\u4e00-\u9fff]/.test(e.message) ? e.message : explainFailure("config"),
+          allowSkipTest: false,
+        });
+        return;
+      }
       const err = e instanceof ChatError ? e : new ChatError("network");
       const kind = err.kind === "http" ? (err.status === 401 || err.status === 403 ? "auth" : err.status === 429 || err.status === 402 ? "quota" : "http") : err.kind;
-      setResult({ ok: false, text: explainFailure(kind, err.status) });
+      const localInvalid = err.kind === "no_secret" || err.kind === "url_not_bound";
+      setResult({ ok: false, text: explainFailure(kind, err.status), allowSkipTest: !localInvalid });
     } finally {
       setBusy(null);
     }
@@ -398,7 +482,7 @@ export default function Setup({ first, profileId }: { first?: boolean; profileId
         </label>
 
         {result && <div className={`notice${result.ok ? " ok" : ""}`}>{result.text}
-          {!result.ok && canSave && <div className="row"><button onClick={() => void save(true)}>不测试，直接保存</button></div>}
+          {!result.ok && result.allowSkipTest !== false && canSave && <div className="row"><button onClick={() => void save(true)}>不测试，直接保存</button></div>}
         </div>}
         <button className="primary big-btn" onClick={() => void save()} disabled={!canSave || !!busy}>{busy === "save" ? "正在连接…" : first ? "连接并开始" : "连接并保存"}</button>
         {first && <button className="ghost" onClick={skip}>稍后再说</button>}

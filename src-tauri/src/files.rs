@@ -158,7 +158,7 @@ pub async fn file_import_book(
     #[cfg(target_os = "android")]
     let selected = crate::document_picker::pick_import(&app)
         .await
-        .map_err(|_| io_error())?;
+        .map_err(crate::document_picker::picker_error)?;
     #[cfg(not(target_os = "android"))]
     let selected = {
         let handle = app.clone();
@@ -288,7 +288,7 @@ pub async fn file_import_text(app: AppHandle) -> Result<Option<String>> {
     #[cfg(target_os = "android")]
     let selected = crate::document_picker::pick_import(&app)
         .await
-        .map_err(|_| io_error())?
+        .map_err(crate::document_picker::picker_error)?
         .map(|(file, _)| file);
     #[cfg(not(target_os = "android"))]
     let selected = {
@@ -304,7 +304,9 @@ pub async fn file_import_text(app: AppHandle) -> Result<Option<String>> {
 #[tauri::command]
 pub async fn file_import_skill(app: AppHandle) -> Result<Option<BookFile>> {
     #[cfg(target_os = "android")]
-    let selected = crate::document_picker::pick_import(&app).await.map_err(|_|io_error())?;
+    let selected = crate::document_picker::pick_import(&app)
+        .await
+        .map_err(crate::document_picker::picker_error)?;
     #[cfg(not(target_os = "android"))]
     let selected = {
         let handle=app.clone();
@@ -328,7 +330,7 @@ pub async fn file_export_text(
     #[cfg(target_os = "android")]
     let selected = crate::document_picker::pick_export(&app, &suggested_name)
         .await
-        .map_err(|_| io_error())?;
+        .map_err(crate::document_picker::picker_error)?;
     #[cfg(not(target_os = "android"))]
     let selected = {
         let handle = app.clone();
@@ -422,6 +424,9 @@ pub async fn export_bytes(
 
     #[cfg(target_os = "android")]
     {
+        crate::document_picker::ensure_idle(&app)
+            .await
+            .map_err(crate::document_picker::picker_error)?;
         struct Temporary(std::path::PathBuf);
         impl Drop for Temporary {
             fn drop(&mut self) {
@@ -431,6 +436,8 @@ pub async fn export_bytes(
         #[derive(serde::Deserialize)]
         struct ExportReply {
             status: String,
+            #[serde(default)]
+            code: Option<String>,
         }
         let dir = app
             .path()
@@ -466,11 +473,14 @@ pub async fn export_bytes(
                 }),
             )
             .await
-            .map_err(|_| io_error())?;
+            .map_err(|_| crate::document_picker::picker_error("file_unavailable"))?;
         drop(temp_guard);
         match reply.status.as_str() {
             "saved" => Ok(true),
             "cancelled" => Ok(false),
+            "failed" => Err(crate::document_picker::picker_error(
+                reply.code.as_deref().unwrap_or("file_unavailable"),
+            )),
             _ => Err(io_error()),
         }
     }
@@ -556,7 +566,7 @@ pub async fn file_export_world(
         return Err(failure("prepare",ARCHIVE_LIMIT.into()));
     }
     #[cfg(target_os="android")]
-    let selected=crate::document_picker::pick_export(&app,&suggested_name).await.map_err(|e|failure("select",e.to_string()))?;
+    let selected=crate::document_picker::pick_export(&app,&suggested_name).await.map_err(|c|failure("select",crate::document_picker::picker_error(c).message.into()))?;
     #[cfg(not(target_os="android"))]
     let selected={let handle=app.clone();blocking(move||Ok(handle.dialog().file().set_file_name(suggested_name).blocking_save_file())).await.map_err(|e|failure("select",e.message.into()))?};
     let Some(selected)=selected else{return Ok(false);};

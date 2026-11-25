@@ -76,7 +76,7 @@ function MyTemplateCard({ t, onUse, onMenu }: { t: UserTemplate; onUse: () => vo
 }
 
 export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) {
-  const { game, replace, pop, toast, ask, askName } = useApp();
+  const { game, push, replace, pop, toast, ask, askName } = useApp();
   const notifications = useNotificationGate(game, toast);
   const [draft, setDraftState] = useState<Draft>(EMPTY);
   const free = draft.settings.mode === "free";
@@ -108,14 +108,20 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   const [pointed, setPointed] = useState<string | null>(null);
   const goalBox = useRef<HTMLTextAreaElement>(null);
   const [phase, setPhase] = useState<"form" | "loading" | "thinking" | "writing" | "organizing">("form");
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
   /** Folded parts of the setup; a part opens when tapped or when something is missing there. */
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [sourceOpen, setSourceOpen] = useState(false);
   const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
   const lastPlay = useRef(draft.play);
   useEffect(() => {
     if (draft.play !== lastPlay.current && draft.play !== "plain") setOpen((o) => ({ ...o, play: true }));
     lastPlay.current = draft.play;
   }, [draft.play]);
+  useEffect(() => {
+    if (draft.fanfic) setSourceOpen(true);
+  }, [draft.fanfic]);
   const nameBox = useRef<HTMLInputElement>(null);
   const ageBox = useRef<HTMLInputElement>(null);
   const identityBox = useRef<HTMLTextAreaElement>(null);
@@ -126,6 +132,17 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   const [failedRun, setFailedRun] = useState<{ id: string; revision: number; proseSaved?: boolean; partialText?: string } | null>(null);
   const [why, setWhy] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const dirtyDraftSaveRef = useRef(false);
+  useEffect(() => () => {
+    if (saveTimer.current !== undefined) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = undefined;
+      if (phaseRef.current === "form" && dirtyDraftSaveRef.current) {
+        dirtyDraftSaveRef.current = false;
+        void game.repo.setSetting("newgameDraft", { ...draftRef.current, idea: ideaRef.current } satisfies SavedDraft);
+      }
+    }
+  }, [game.repo]);
   const tip = useMemo(() => pickRandom(TIPS), []);
   /** 设置 → 游玩默认: what a fresh draft (and 清空重填) starts from. */
   const [defaults, setDefaults] = useState<PlayDefaults | null>(null);
@@ -194,8 +211,13 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     return () => { live = false; };
   }, []);
   const persist = () => {
+    dirtyDraftSaveRef.current = true;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void game.repo.setSetting("newgameDraft", { ...draftRef.current, idea: ideaRef.current } satisfies SavedDraft), 500);
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = undefined;
+      dirtyDraftSaveRef.current = false;
+      void game.repo.setSetting("newgameDraft", { ...draftRef.current, idea: ideaRef.current } satisfies SavedDraft);
+    }, 500);
   };
   const setDraft = (next: Draft | ((d: Draft) => Draft)) => {
     setDraftState((current) => {
@@ -226,7 +248,10 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     const mode = choice === "fanfic" ? "free" : choice;
     setOpeningScope(AUTO_SCOPE);
     setDraft((d) => ({ ...d, fanfic: choice === "fanfic", source: d.source ? { ...d.source, fanfic: choice === "fanfic" } : null, templateId: null, eraId: null, settings: { ...d.settings, mode, clockStyle: mode === "free" ? "elapsed" : "era" } }));
-    if (choice === "fanfic") setSheet(null);
+    if (choice === "fanfic") {
+      setSourceOpen(true);
+      setSheet(null);
+    }
     setGroup("全部");
     setAllTemplates(false);
   };
@@ -278,8 +303,10 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     hint: d.hint, essentials: d.settings.essentials, source: d.source, fanfic: !!d.fanfic, rules: d.settings.rules,
   });
 
+  const toastConnectAi = () => toast("先连接 AI 服务", { label: "去连接", run: () => push({ name: "setup" }) });
+
   const assist = async () => {
-    if (!game.llm) { toast("先连接 AI 服务"); return; }
+    if (!game.llm) { toastConnectAi(); return; }
     if (assisting) return;
     const ticket = ++assistTicket.current;
     const sourceMode = JSON.stringify([draftRef.current.settings.mode, draftRef.current.fanfic, draftRef.current.source]);
@@ -329,7 +356,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   };
   /** AI 帮我拟大纲 / 出题: fills only what is still empty when the answer comes, never the player's words. */
   const draftMode = async (kind: "script" | "challenge") => {
-    if (!game.llm) { toast("先连接 AI 服务"); return; }
+    if (!game.llm) { toastConnectAi(); return; }
     if (drafting) return;
     const d = draftRef.current;
     const full = kind === "script"
@@ -370,8 +397,11 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   };
 
   const start = async (d: Draft, defs: PlayDefaults | null = defaults) => {
-    if (!game.llm) { toast("先连接 AI 服务"); return; }
+    if (!game.llm) { toastConnectAi(); return; }
     if (d.source && !await bookExists(game.repo, d.source.bookId)) { setError("这台设备上没有选中的参考书籍，请重新选择或导入。"); return; }
+    clearTimeout(saveTimer.current);
+    saveTimer.current = undefined;
+    dirtyDraftSaveRef.current = false;
     setError(null); setFailure(null); setFailedRun(null);
     let streamed = d.openingMode === "player" ? d.openingText : "";
     let reachedOrg = d.openingMode === "player";
@@ -402,7 +432,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   };
 
   const retryOpening = (runId: string, initialText = "") => {
-    if (!game.llm) { toast("先连接 AI 服务"); return; }
+    if (!game.llm) { toastConnectAi(); return; }
     setError(null); setFailure(null);
     let streamed = initialText;
     let reachedOrg = !!failedRun?.proseSaved;
@@ -434,7 +464,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     const before = draftRef.current;
     if (before.fanfic) {
       if (!before.source) { setSourceLibrary(true); return; }
-      if (!game.llm) { toast("先连接 AI 服务"); return; }
+      if (!game.llm) { toastConnectAi(); return; }
       const version = revision.current; const ticket = ++assistTicket.current;
       setAssisting(true);
       try {
@@ -481,7 +511,11 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
     toast("已复制开局设定，可以发给朋友");
   };
   const exportFile = async () => {
-    if (await game.platform.files.exportText(`开局-${draft.title || "未命名"}.txt`, shareText(draft)).catch(() => false)) toast("已保存");
+    try {
+      if (await game.platform.files.exportText(`开局-${draft.title || "未命名"}.txt`, shareText(draft))) toast("已保存");
+    } catch {
+      toast("导出失败，请稍后再试");
+    }
   };
   const importFrom = (text: string | null) => {
     if (text && text.length > OPENING_TEXT_LIMIT) { toast("这份开局设定太大，无法导入；原设定没有变化。"); return false; }
@@ -634,7 +668,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
         </div>
         {/* Three ways to start, as cards (R28 第二批); the names stay the buttons' accessible names. */}
         <div className={`starter-row${draft.fanfic ? " two" : ""}`}>
-          <button className="starter" aria-label="随便穿" disabled={assisting} onClick={() => void randomStart()}><span className="starter-icon"><Icon name="dice" size={22} /></span><b>随便穿</b><small>AI 随机生成开局</small></button>
+          <button className="starter" aria-label="随便穿" disabled={assisting} onClick={() => void randomStart()}><span className="starter-icon"><Icon name="dice" size={22} /></span><b>随便穿</b><small>{draft.fanfic ? "AI 随机生成开局" : "随机抽一组设定"}</small></button>
           <button className="starter" aria-label="我的开局" onClick={() => setSheet("mine")}><span className="starter-icon"><Icon name="bookmark" size={22} /></span><b>我的开局</b><small>调取存好的设定</small></button>
           {!draft.fanfic && <button className="starter" aria-label="开局灵感" onClick={() => setSheet("ideas")}><span className="starter-icon"><Icon name="sparkle" size={22} /></span><b>开局灵感</b><small>{free ? "从世界题材挑选" : "从朝代题材挑选"}</small></button>}
         </div>
@@ -644,7 +678,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
         </section>
         <details open={!!draft.carry}><summary>{draft.carry ? `带上《${draft.carry.fromTitle}》的 ${draft.carry.ids.length} 份札记` : "带上以前故事的札记（可选）"}</summary>
           <CarryNotes value={draft.carry ?? null} onChange={(carry) => setDraft((d) => ({ ...d, carry }))} /></details>
-        <details><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) })); }} /></details>
+        <details open={sourceOpen} onToggle={(e) => setSourceOpen((e.currentTarget as HTMLDetailsElement).open)}><summary><SourceSummary value={draft.source} label={draft.fanfic ? "原著与用法" : "参考书籍（可选）"} /></summary><SourceSetup value={draft.source} fanfic={draft.fanfic} onChange={(source) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source, ...(source ? { fanfic: source.fanfic } : {}), ...(source?.fanfic ? { fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } } : {}) })); }} /></details>
         {draft.source && <SourceScopeRow worldId={null} binding={draft.source} value={openingScope} purpose="opening" onChange={setOpeningScope} />}
 
         {filled && <div className="row form-tools"><button className="link" onClick={clearForm}>清空重填</button></div>}
@@ -767,7 +801,7 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
       </div>
       {librarySheet}
       {genre && <GenreOpeningPreview pack={genre.pack} has={{ premise: !!draft.premise.trim(), identity: !!draft.identity.trim(), hint: !!draft.hint.trim() }} stale={genre.revision !== revision.current} onApply={useGenre} onClose={() => setGenre(null)} />}
-      {sourceLibrary && <SourceLibrary onClose={() => setSourceLibrary(false)} onSelect={(book) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source: newBinding(book.id, true), fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } })); setSourceLibrary(false); }} />}
+      {sourceLibrary && <SourceLibrary defaultUsage={draft.fanfic ? "fanfic" : "reference"} onClose={() => setSourceLibrary(false)} onSelect={(book) => { setOpeningScope(AUTO_SCOPE); setDraft((d) => ({ ...d, source: newBinding(book.id, true), fanfic: true, settings: { ...d.settings, mode: "free", clockStyle: "elapsed" } })); setSourceLibrary(false); toast(`已选入《${book.title}》`); }} />}
       {menuSheets}
       {notifications.sheet}
     </div>

@@ -52,14 +52,15 @@ export function ReadingQuickSheet({ onClose }: { onClose: () => void }) {
               ]}
               onChange={(tapZones) => set({ tapZones })}
             />
-            <Switch
-              label="音量键翻页"
-              note="按手机音量上下键翻页"
-              checked={reading.volumeKeyTurn}
-              onChange={(volumeKeyTurn) => set({ volumeKeyTurn })}
-            />
           </>
         )}
+
+        <Switch
+          label="音量键翻页"
+          note="按手机音量上下键翻页"
+          checked={reading.volumeKeyTurn}
+          onChange={(volumeKeyTurn) => set({ volumeKeyTurn })}
+        />
 
         <Choice
           label="字体"

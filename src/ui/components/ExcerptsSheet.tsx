@@ -134,8 +134,12 @@ export function ExcerptsSheet({ worldId, bookId, onJumpHighlight, onClose }: Exc
   const exportMarkdown = async () => {
     if (!shown.length) return;
     const md = exportHighlightsMarkdown(shown, titles);
-    if (await game.platform.files.exportText("佳句摘录.md", md).catch(() => false)) {
-      toast("已导出 Markdown 摘录");
+    try {
+      if (await game.platform.files.exportText("佳句摘录.md", md)) {
+        toast("已导出 Markdown 摘录");
+      }
+    } catch {
+      toast("导出失败，请稍后再试");
     }
   };
 

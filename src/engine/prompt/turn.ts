@@ -17,7 +17,7 @@ import { beatTitle, challengeView } from "../modes";
 
 import { fitReference, referenceBlock, referenceEvidenceBlock, referenceInstructionsBlock } from "../sources/library";
 import type { ReferenceContext } from "../sources/types";
-export const PROMPT_VERSION = "turn-28";
+export const PROMPT_VERSION = "turn-29";
 
 // R13 settings are optional for old saves; kept local until the shared types land.
 type PromptOptions = {
@@ -161,6 +161,8 @@ function systemParts(ctx: StoryContext, panel?: string, modes: ModeContext = {})
 - 行动按情理决定成败，失败有后果；主角重伤或垂危时剧烈行动受限，强行搏杀或奔逃会令伤势加重；其他人物有自己的目的、眼界和处境，不围着主角转，态度变化有缘由。
 - 性别、身份、年龄、钱物、生死以【当前】和已发生的故事为准；钱物只用现有数量，花用写明数目，钱不够就付不起。时间不倒退，正文的${elapsedClock(settings) ? "时间" : "时辰"}与经过时长一致，跳过多久写入 time。
 - 回忆旧事时只依据已记录的事实，绝不为圆场补造未出现过的旧恩怨、旧信物、过往来源、承诺或秘密；未记录的过往只留白或写主角记不清，可以描写此刻的感受和环境，新事件从现在发展。
+- 纯文本小说格式：<record> 之前的正文必须是纯文本小说段落，严禁使用任何 Markdown 标记（禁止 **加粗**、*斜体*、# 标题、- 或数字序号列表、--- 分隔线、代码块）。
+- 严守故事第四面墙：严禁跳出小说以 AI、作者或解说口吻向玩家写【说明】、原著对比分析报告或“当前剧情停留在……你可以决定……”等场外提示；若玩家的输入带有疑问、推演或试探，须化为主角在当下场景中的内心思忖、观察回忆或与在场人物的对话，留在故事内自然推进。
 - ${choicesRule(settings)}。
 【内容尺度】${INTENSITY_TEXT.violence[i.violence]}；${INTENSITY_TEXT.romance[i.romance]}；${free ? INTENSITY_TEXT.darkness[i.darkness].replace("时代", "世界") : INTENSITY_TEXT.darkness[i.darkness]}。`;
   return {
@@ -205,18 +207,21 @@ export function renderState(state: WorldState, era: EraContext, present?: Set<st
     : { ...era.clock, clockStyle: state.era.clockStyle ?? settings.clockStyle ?? era.clock.clockStyle };
   const now = nowOf(clock, state.time.elapsedMinutes);
   const place = state.places.find((p) => p.id === state.placeId)?.name ?? "（未记录）";
-  const items = me.items.map((i) => `${i.name}×${i.quantity}${i.unit}${i.place ? `（放在${i.place}）` : ""}`).join("、") || "无";
-  const statuses = me.statuses.map((s) => `${s.name}${s.detail ? `：${s.detail}` : ""}`).join("；") || "无";
+  const items = (me.items ?? []).map((i) => `${i.name}×${i.quantity}${i.unit}${i.place ? `（放在${i.place}）` : ""}`).join("、") || "无";
+  const statuses = (me.statuses ?? []).map((s) => `${s.name}${s.detail ? `：${s.detail}` : ""}`).join("；") || "无";
   const here = (id: string) => !present || present.has(id);
   const ordered = present
-    ? [...state.people].sort((a, b) => Number(present.has(b.id)) - Number(present.has(a.id)) || (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1))
-    : state.people;
+    ? [...(state.people ?? [])].sort((a, b) => Number(present.has(b.id)) - Number(present.has(a.id)) || (b.lastSeenMinute ?? -1) - (a.lastSeenMinute ?? -1))
+    : (state.people ?? []);
   const rest = ordered.slice(PEOPLE_LINES);
   const people = [
-    ...ordered.slice(0, PEOPLE_LINES).map((p) => `${p.name}${p.aliases.length ? `（又称${p.aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude}${p.alive ? "" : "，已死"}${here(p.id) ? personNotes(p) : ""}`),
-    ...(rest.length ? [`另有：${rest.map((p) => `${p.name}${p.alive ? "" : "（已死）"}`).join("、")}`] : []),
+    ...ordered.slice(0, PEOPLE_LINES).map((p) => {
+      const aliases = p.aliases ?? [];
+      return `${p.name}${aliases.length ? `（又称${aliases.join("、")}）` : ""}：${p.role || "身份不明"}，对主角${p.attitude || "中立"}${p.alive === false ? "，已死" : ""}${here(p.id) ? personNotes(p) : ""}`;
+    }),
+    ...(rest.length ? [`另有：${rest.map((p) => `${p.name}${p.alive === false ? "（已死）" : ""}`).join("、")}`] : []),
   ].join("\n") || "无";
-  const goals = state.goals.filter((g) => g.status === "进行中").map((g) => `【${g.kind}】${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
+  const goals = (state.goals ?? []).filter((g) => g.status === "进行中").map((g) => `【${g.kind}】${g.name}${g.progress ? `（${g.progress}）` : ""}`).join("；") || "无";
   const smallest = era.currency.units[era.currency.units.length - 1].name;
   return `【当前】${now.text} · ${place}
 主角：${me.name}，${me.gender}${me.age != null ? `，${me.age}岁` : ""}，${me.identity}${me.origin ? `（穿越前是${me.origin}）` : ""}

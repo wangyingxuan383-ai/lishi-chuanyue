@@ -2,8 +2,17 @@
 // Answers literary, character, and historical questions about the selected passage
 // while strictly forbidding spoilers beyond the reader's current chapter (`sectionIndex`).
 import { useEffect, useRef, useState } from "react";
-import { ChatError, streamChat, type ChatHandle, type ChatMessage } from "../../../engine/llm/chat";
+import { fallbackEligible, type LlmConfig } from "../../../engine/game";
+import {
+  ChatError,
+  isMaxCompletionTokensParamError,
+  streamChat,
+  type ChatHandle,
+  type ChatMessage,
+  type ChatResult,
+} from "../../../engine/llm/chat";
 import { chatCompletionsUrl, explainFailure } from "../../../engine/llm/providers";
+import type { Json } from "../../../platform";
 import { useApp } from "../../app/context";
 import { Icon } from "../../components/Icon";
 import { Sheet } from "../../components/Sheet";
@@ -65,7 +74,33 @@ function buildSpoilerSafeSystemPrompt(
   ].join("\n");
 }
 
+function needsCompletionTokensRetry(err: unknown): boolean {
+  if (isMaxCompletionTokensParamError(err)) return true;
+  if (!(err instanceof ChatError) || err.kind !== "http" || !!err.partial || ![400, 422].includes(err.status ?? 0)) {
+    return false;
+  }
+  const lower = err.message.toLowerCase();
+  return (
+    /max_completion_tokens/i.test(lower) ||
+    (lower.includes("max_tokens") && (lower.includes("not supported") || lower.includes("unsupported"))) ||
+    (lower.includes("temperature") &&
+      (lower.includes("not supported") || lower.includes("unsupported") || lower.includes("only the default")))
+  );
+}
+
+function isAskFallbackEligible(err: unknown): boolean {
+  if (fallbackEligible(err)) return true;
+  if (!(err instanceof ChatError)) return false;
+  const k = String(err.kind);
+  return k === "rate_limit" || k === "server" || k === "timeout" || k === "network";
+}
+
+function sameAskLlm(a: LlmConfig, b: LlmConfig): boolean {
+  return a.slot === b.slot && a.url === b.url && a.model === b.model;
+}
+
 export function ReaderAskSheet({
+  worldId,
   bookTitle,
   sectionIndex,
   sectionTitle,
@@ -112,7 +147,17 @@ export function ReaderAskSheet({
 
   const askQuestion = async (rawQ?: string) => {
     const q = (rawQ ?? question).trim();
-    if (!q || pending || !profile) return;
+    const primaryLlm: LlmConfig | null =
+      game.llm ??
+      (profile
+        ? {
+            slot: profile.keySlot,
+            url: chatCompletionsUrl(profile.baseUrl),
+            model: profile.mainModel,
+            includeUsage: profile.includeUsage,
+          }
+        : null);
+    if (!q || pending || !primaryLlm) return;
 
     const historyMessages: ChatMessage[] = [];
     for (const t of turns) {
@@ -132,42 +177,112 @@ export function ReaderAskSheet({
       selectedText,
       contextParagraphs,
     );
+    const messages: ChatMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...historyMessages,
+      { role: "user", content: q },
+    ];
 
     let streamed = "";
     let cancelledByUser = false;
-    const handle = streamChat(
-      game.platform,
-      {
-        slot: profile.keySlot,
-        url: chatCompletionsUrl(profile.baseUrl),
-        model: profile.mainModel,
-        includeUsage: profile.includeUsage,
-        temperature: 0.5,
-        maxTokens: 1200,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...historyMessages,
-          { role: "user", content: q },
-        ],
-      },
-      {
-        onThinking: () => updateLatest({ thinking: true }),
-        onText: (_delta, full) => {
-          streamed = full;
-          updateLatest({ a: full, thinking: false, pending: true });
-        },
-      },
-    );
-    handleRef.current = Object.assign(handle, {
-      cancelWithFlag: () => {
-        cancelledByUser = true;
-        handle.cancel();
-      },
-    });
+
+    const recordUsage = async (
+      usedModel: string,
+      res: ChatResult | null,
+      outcome: "ok" | "cancelled" | "failed",
+    ) => {
+      await game.platform.sql
+        .batch([
+          game.repo.usageStatement({
+            worldId: worldId ?? null,
+            nodeId: null,
+            purpose: "ask",
+            model: usedModel,
+            promptTokens: res?.usage?.promptTokens ?? null,
+            completionTokens: res?.usage?.completionTokens ?? null,
+            estimated: res?.usage?.promptTokens == null || res?.usage?.completionTokens == null,
+            firstTokenMs: res?.firstTokenMs ?? null,
+            totalMs: res?.totalMs ?? null,
+            outcome,
+          }),
+        ])
+        .catch(() => {});
+    };
+
+    const runWithLlm = async (llm: LlmConfig): Promise<{ res: ChatResult; usedLlm: LlmConfig }> => {
+      let useCompletionTokens = false;
+      for (;;) {
+        const handle = streamChat(
+          game.platform,
+          {
+            slot: llm.slot,
+            url: llm.url,
+            model: llm.model,
+            includeUsage: llm.includeUsage,
+            temperature: useCompletionTokens ? undefined : 0.5,
+            maxTokens: useCompletionTokens ? undefined : 1200,
+            extra: useCompletionTokens
+              ? { ...(llm.extra as Record<string, Json> | undefined), max_completion_tokens: 1200 }
+              : (llm.extra as Record<string, Json> | undefined),
+            messages,
+          },
+          {
+            onThinking: () => updateLatest({ thinking: true }),
+            onText: (_delta, full) => {
+              streamed = full;
+              updateLatest({ a: full, thinking: false, pending: true });
+            },
+          },
+        );
+        handleRef.current = Object.assign(handle, {
+          cancelWithFlag: () => {
+            cancelledByUser = true;
+            handle.cancel();
+          },
+        });
+        try {
+          const res = await handle.result;
+          await recordUsage(llm.model, res, "ok");
+          return { res, usedLlm: llm };
+        } catch (err: unknown) {
+          if (!cancelledByUser && !useCompletionTokens && needsCompletionTokensRetry(err)) {
+            useCompletionTokens = true;
+            continue;
+          }
+          const unsent =
+            err instanceof ChatError && (err.kind === "no_secret" || err.kind === "url_not_bound");
+          if (!unsent) {
+            const isCancelled =
+              cancelledByUser || (err instanceof ChatError && err.kind === "cancelled");
+            await recordUsage(llm.model, null, isCancelled ? "cancelled" : "failed");
+          }
+          throw err;
+        } finally {
+          void handle.streamId.then((id) => game.platform.llm.ack?.(id)).catch(() => {});
+        }
+      }
+    };
 
     try {
-      const res = await handle.result;
-      updateLatest({ a: res.text || "没有收到回答。", pending: false, thinking: false });
+      let outcome: { res: ChatResult; usedLlm: LlmConfig };
+      try {
+        outcome = await runWithLlm(primaryLlm);
+      } catch (primaryErr: unknown) {
+        const backup = game.fallbackLlm;
+        if (
+          !cancelledByUser &&
+          backup &&
+          !sameAskLlm(backup, primaryLlm) &&
+          isAskFallbackEligible(primaryErr)
+        ) {
+          streamed = "";
+          updateLatest({ a: "", thinking: false, pending: true });
+          outcome = await runWithLlm(backup);
+        } else {
+          throw primaryErr;
+        }
+      }
+      updateLatest({ a: outcome.res.text || "没有收到回答。", pending: false, thinking: false });
     } catch (err: unknown) {
       const friendly =
         cancelledByUser || (err instanceof ChatError && err.kind === "cancelled")
@@ -192,9 +307,7 @@ export function ReaderAskSheet({
         });
       }
     } finally {
-      if (handleRef.current === handle) {
-        handleRef.current = null;
-      }
+      handleRef.current = null;
     }
   };
 
@@ -215,7 +328,7 @@ export function ReaderAskSheet({
           <blockquote>{selectedText.length > 180 ? `${selectedText.slice(0, 180)}…` : selectedText}</blockquote>
         </div>
 
-        {!profile ? (
+        {!profile && !game.llm ? (
           <div className="status-card">
             <b>还没有连接 AI 服务</b>
             <small>连接一个你自己的 AI 服务后，选段即可随时解释典故、梳理人物关系与赏析写法。</small>

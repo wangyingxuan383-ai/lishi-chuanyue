@@ -1,7 +1,7 @@
 // 展开输入 (R13-T103): a full-height editor for a long action, with the
 // player's 常用行动 to drop in. 完成输入 only puts the text back into the input
 // box; nothing here sends a turn.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ActionMode } from "../../engine/types";
 import { newId } from "../../engine/db/repo";
 import { ACTIONS_KEY, loadActions, type SavedAction } from "../../engine/writing/library";
@@ -19,6 +19,22 @@ export function WritingDesk({ text, mode, onDone, onClose }: {
   const { game, toast, askName } = useApp();
   const [draft, setDraft] = useState(text);
   const [draftMode, setDraftMode] = useState(mode);
+  const prevPropText = useRef(text);
+  const prevPropMode = useRef(mode);
+  useEffect(() => {
+    if (text !== prevPropText.current) {
+      const prev = prevPropText.current;
+      prevPropText.current = text;
+      setDraft((cur) => (cur === prev ? text : cur));
+    }
+  }, [text]);
+  useEffect(() => {
+    if (mode !== prevPropMode.current) {
+      const prev = prevPropMode.current;
+      prevPropMode.current = mode;
+      setDraftMode((cur) => (cur === prev ? mode : cur));
+    }
+  }, [mode]);
   const [actions, setActions] = useState<SavedAction[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);

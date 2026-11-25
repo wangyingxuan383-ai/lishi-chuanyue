@@ -953,7 +953,7 @@ fn task_row(db: &Connection, task: &str) -> Result<Value> {
     ws::rows(db, "SELECT * FROM pi_tasks WHERE id=?", &[&task])?
         .into_iter()
         .next()
-        .ok_or_else(|| Error::Invalid("这项Pi任务不存在，旧助手会话不能继续执行".into()))
+        .ok_or_else(|| Error::Invalid("这项改档任务不存在，旧助手会话不能继续执行".into()))
 }
 
 fn task_ticket(task: &Value) -> Result<lease::LeaseTicket> {

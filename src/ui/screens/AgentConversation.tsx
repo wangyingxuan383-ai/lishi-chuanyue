@@ -22,7 +22,7 @@ import { AgentDocuments } from "./AgentDocuments";
 import { AGENT_TASK_RECIPES, taskRecipe, taskRecipeText, type AgentTaskRecipe } from "../../content/agentTasks";
 
 type AgentRoute = Extract<Route, { name: "agent" }>;
-type AgentSettingsSection = "execution" | "skills" | "network" | "limits";
+export type AgentSettingsSection = "execution" | "skills" | "network" | "limits";
 const POLICIES: [AgentPolicy, string, string][] = [
   ["auto-reversible", "自动执行、可撤回", "修改直接生效，保留本次任务恢复点。"],
   ["preview", "预览后采用", "准备好整批修改后，由你采用。"],
@@ -65,7 +65,7 @@ function modelFor(profile: Profile, override: string, preferences?: AgentPrefere
 const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "深度思考中…", compacting: "正在整理记忆", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
 const TASK_NAMES: Record<string, string> = { ...TOOL_LABELS, browser_open:"打开资料网页",browser_read:"读取网页正文",browser_find:"查找网页内容",browser_follow:"阅读网页链接",browser_close:"关闭资料网页",list_documents:"查看资料文件",read_document:"读取资料文件",find_document:"查找资料文件",write_document:"写出资料笔记",call_tool_package:"运行工具包",draft_tool_package:"准备工具包草稿", discover_tools: "查找可用工具", read_tool_result: "读取已保存结果", update_plan: "更新任务进度", ask_user: "请你补充信息", search_agent_history: "查找助手对话", validate_changes: "检查修改影响", read_clock: "查看故事时间", stage_clock: "调整故事时间", stage_route: "准备故事路线", run_script: "处理资料", delegate_readonly: "分工查证", read_skill_resource: "读取技能资料", draft_skill: "准备常用技能", list_mcp_resources: "查看服务资料", read_mcp_resource: "读取服务资料" };
 const statusOf = agentTaskStatus;
-const pendingQuestion = (task: AgentTask): AgentQuestion | undefined => task.status!=="waiting_user" ? undefined : task.question && !["answered", "cancelled", "done"].includes(task.question.status ?? "") ? task.question : task.questions?.find((question) => !["answered", "cancelled", "done"].includes(question.status ?? ""));
+export const pendingQuestion = (task: AgentTask): AgentQuestion | undefined => task.status!=="waiting_user" ? undefined : task.question && !["answered", "cancelled", "done"].includes(task.question.status ?? "") ? task.question : task.questions?.find((question) => !["answered", "cancelled", "done"].includes(question.status ?? ""));
 const pendingInputs = (inputs: AgentInput[]) => inputs.filter((input) => ["steer", "queued"].includes(input.delivery ?? "") && typeof input.text === "string" && input.text.trim() && ["pending", "queued", "accepted"].includes(input.status ?? "pending"));
 const skillCompatibility = (value: AgentSkill["compatibility"]): string => typeof value === "string" ? value : Array.isArray(value) ? value.join("；") : value?.message ?? (value?.javascript ? "可使用手机内的受控 JavaScript" : "");
 function messageText(message: AgentMessage): string {
@@ -350,7 +350,8 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
       const next = await refresh(id);
       const lastModel = next.tasks.at(-1)?.model?.model;
       const chosenProfile = available.find((item) => item.id === saved.profileId) ?? profile ?? available[0];
-      setModel(saved.modelName ?? (next.tasks.at(-1)?.model?.slot === chosenProfile?.keySlot ? lastModel : undefined) ?? chosenProfile?.mainModel ?? "");
+      const validSavedModel = saved.profileId && !available.some((item) => item.id === saved.profileId) ? undefined : saved.modelName;
+      setModel(validSavedModel ?? (next.tasks.at(-1)?.model?.slot === chosenProfile?.keySlot ? lastModel : undefined) ?? chosenProfile?.mainModel ?? "");
       if (!route.initialText) {
         const [savedInput, savedRecipe] = await Promise.all([game.repo.getSetting<string>(`agent:input:${id}`, ""), game.repo.getSetting<string | null>(`agent:input-recipe:${id}`, null)]);
         if (live && sessionRef.current === id && inputRevision.current === draftRevision) { draftOwner.current = id; setInput(savedInput); setDraftRecipeId(taskRecipe(savedRecipe)?.id ?? null); }
@@ -435,7 +436,31 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     catch (failure) { if (alive.current && controlRevision===stopRevision.current) setError(errorText(failure)); }
     finally { if (alive.current) setPending(false); }
   };
-  const makeRequest = () => sessionId && prefs && selected ? { ...prefs, skills: [...new Set([...prefs.skills, ...(draftRecipe?.skills ?? [])])], readOnly: !!prefs.readOnly || !!draftRecipe?.readOnly, sessionId, text: input.trim(), model: modelFor(selected, model, prefs), ...(target ? { target } : {}) } : null;
+  const makeRequest = () => {
+    if (!sessionId || !prefs || !selected) return null;
+    const staleProfile = Boolean(prefs.profileId && prefs.profileId !== selected.id);
+    const effectivePrefs: AgentPreferences = staleProfile
+      ? {
+          ...prefs,
+          profileId: selected.id,
+          modelName: undefined,
+          protocol: undefined,
+          modelUrl: undefined,
+          contextWindowTokens: undefined,
+        }
+      : { ...prefs, profileId: selected.id };
+    const effectiveModel = staleProfile ? selected.mainModel : model;
+    return {
+      ...effectivePrefs,
+      profileId: selected.id,
+      skills: [...new Set([...effectivePrefs.skills, ...(draftRecipe?.skills ?? [])])],
+      readOnly: !!effectivePrefs.readOnly || !!draftRecipe?.readOnly,
+      sessionId,
+      text: input.trim(),
+      model: modelFor(selected, effectiveModel, effectivePrefs),
+      ...(target ? { target } : {}),
+    };
+  };
   const clearSentInput = async () => {
     setTarget(undefined); changeInput(""); setDraftRecipeId(null);
     if (textarea.current) textarea.current.style.height = "auto";
@@ -708,7 +733,7 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
   </div>;
 }
 
-function QuestionSheet({ question, answers, pending, onChange, onClose, onSubmit }: { question: AgentQuestion; answers: Record<string, string>; pending: boolean; onChange: (answers: Record<string, string>) => void; onClose: () => void; onSubmit: (cancelled: boolean) => void }) {
+export function QuestionSheet({ question, answers, pending, onChange, onClose, onSubmit }: { question: AgentQuestion; answers: Record<string, string>; pending: boolean; onChange: (answers: Record<string, string>) => void; onClose: () => void; onSubmit: (cancelled: boolean) => void }) {
   return <Sheet title={question.title || "助手需要你补充"} onClose={onClose}><div className="stack">
     {question.questions.map((item) => <fieldset className="agent-question" key={item.id}><legend>{item.question}</legend>{item.options?.map((option) => <button className="agent-answer" key={option.label} aria-pressed={answers[item.id] === option.label} onClick={() => onChange({ ...answers, [item.id]: option.label })}><b>{option.label}</b>{option.description && <small>{option.description}</small>}</button>)}{item.allowFreeText !== false && <label>也可以自己填写<textarea rows={2} value={answers[item.id] ?? ""} onChange={(event) => onChange({ ...answers, [item.id]: event.target.value })} /></label>}</fieldset>)}
     <p className="muted">返回故事可以继续阅读，之后也能回来回答。</p><div className="row"><button disabled={pending} onClick={() => onSubmit(true)}>取消这次提问</button><button className="primary" disabled={pending || question.questions.some((item) => !answers[item.id]?.trim())} onClick={() => onSubmit(false)}>回答并继续</button></div>
@@ -756,7 +781,7 @@ function AgentModelPicker({ profiles, selected, current, running, onClose, onPic
   </div></Sheet>;
 }
 
-function AgentSettings({ client, initialSection, preferences, recipe, profiles, profileId, model, onClose, onSave, onAdopt }: { client: AgentClient; initialSection: AgentSettingsSection; preferences: AgentPreferences; recipe?: AgentTaskRecipe; profiles: Profile[]; profileId?: string; model: string; onClose: () => void; onSave: (preferences: AgentPreferences, model: string) => Promise<void>; onAdopt: (skill: AgentSkill) => void }) {
+export function AgentSettings({ client, initialSection = "execution", preferences, recipe, profiles, profileId, model, onClose, onSave, onAdopt }: { client: AgentClient; initialSection?: AgentSettingsSection; preferences: AgentPreferences; recipe?: AgentTaskRecipe; profiles: Profile[]; profileId?: string; model: string; onClose: () => void; onSave: (preferences: AgentPreferences, model: string) => Promise<void>; onAdopt?: (skill: AgentSkill) => void }) {
   const { platform, toast } = useApp();
   const [draft, setDraft] = useState<AgentPreferences>(() => structuredClone(preferences));
   const [nextModel, setNextModel] = useState(model);
@@ -785,7 +810,10 @@ function AgentSettings({ client, initialSection, preferences, recipe, profiles, 
     // Move only this sheet once; preference refreshes never move the reader.
     container.scrollTop += target.getBoundingClientRect().top - container.getBoundingClientRect().top - 48;
   }, [initialSection]);
-  useEffect(() => { void client.packageDrafts().then(setPackages).catch((failure) => setError(errorText(failure))); }, [client]);
+  useEffect(() => {
+    if (!platform.execution?.agent) return;
+    void client.packageDrafts().then(setPackages).catch((failure) => setError(errorText(failure)));
+  }, [client, platform.execution?.agent]);
   const importPackage = async () => {
     setSaving(true); setError("");
     try {
@@ -801,7 +829,7 @@ function AgentSettings({ client, initialSection, preferences, recipe, profiles, 
     try {
       const { skill } = await client.adoptPackage(id);
       setDraft((current) => ({ ...current, customSkills: [...current.customSkills.filter((entry) => entry.id !== skill.id), skill] }));
-      onAdopt(skill);
+      onAdopt?.(skill);
       setPackages((current) => current.filter((entry) => entry.id !== id));
       toast("已保存为常用技能，可在本次指定技能中选择");
     } catch (failure) { setError(errorText(failure)); } finally { setSaving(false); }
@@ -860,7 +888,8 @@ function AgentSettings({ client, initialSection, preferences, recipe, profiles, 
         const readOnlyTools = [...new Set((entry.readOnlyTools ?? []).flatMap((tool) => tool.split(/[,，\n]+/)).map((tool) => tool.trim()).filter((tool) => allowedTools.includes(tool)))];
         return { ...entry, allowedTools, readOnlyTools, authorizationVersion: changed ? (original?.authorizationVersion ?? 0) + 1 : original?.authorizationVersion };
       });
-      const authorized = await client.authorizeNetwork({ ...draft.network, mcps });
+      const nextNetwork = { ...draft.network, mcps };
+      const authorized = platform.execution?.agent ? await client.authorizeNetwork(nextNetwork) : nextNetwork;
       await onSave({ ...draft, network: authorized, profileId: draft.profileId ?? profileId }, nextModel);
     } catch (failure) { setError(errorText(failure)); }
     finally { setSaving(false); }

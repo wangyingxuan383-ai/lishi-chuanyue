@@ -55,6 +55,7 @@ export interface ReaderTtsController {
   sleepMode: TtsSleepMode;
   sleepRemainingSec: number | null;
   play: (fromIndex?: number) => void;
+  playFrom: (fromIndex: number) => void;
   pause: () => void;
   resume: () => void;
   toggle: (fromIndex?: number) => void;
@@ -367,12 +368,17 @@ export function useReaderTts({
       if (detail.state === "done") {
         handleParagraphFinished(curIdx);
       } else {
-        markUnavailable();
+        const text = paragraphsRef.current[curIdx]?.text?.trim() ?? "";
+        if (text && hasWebSpeech()) {
+          void speakWithWeb(curIdx, text, seqRef.current);
+        } else {
+          markUnavailable();
+        }
       }
     };
     window.addEventListener("lishi:tts-event", onNativeTts);
     return () => window.removeEventListener("lishi:tts-event", onNativeTts);
-  }, [handleParagraphFinished, markUnavailable]);
+  }, [handleParagraphFinished, markUnavailable, speakWithWeb]);
 
   // Auto-start paragraph 0 when advancing to a new section during continuous listening
   useEffect(() => {
@@ -552,6 +558,7 @@ export function useReaderTts({
     sleepMode,
     sleepRemainingSec,
     play,
+    playFrom: play,
     pause,
     resume,
     toggle,

@@ -15,6 +15,7 @@ import type { World } from "../../engine/types";
 import { useApp } from "../app/context";
 import { localFind } from "../app/localFind";
 import { openWithFlourish } from "../app/motion";
+import { newer } from "../app/update";
 import { useUpdateNotice } from "../app/updateStore";
 import { CinnabarSeal, EmptyVignette } from "../components/ChineseArt";
 import { ExcerptsSheet } from "../components/ExcerptsSheet";
@@ -329,12 +330,12 @@ export default function Home() {
     setExportStatus("正在准备完整存档…");
     try {
       const saved = await exportWorldFile(game.repo, card.world.id, card.world.title);
-      setExportStatus(null);
       if (saved) toast("已导出");
     } catch (error) {
       const message = error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String(error.message) : "导出失败，请稍后重试";
-      setExportStatus(message);
+      toast(message);
     } finally {
+      setExportStatus(null);
       exporting.current = false;
     }
   };
@@ -388,6 +389,14 @@ export default function Home() {
 
   const { store: updates, state: updateState, unread, readyToPrompt } = useUpdateNotice(game);
   useEffect(() => { void updates.check().catch(() => {}); }, [updates]);
+  const activeUpdateRelease =
+    updateState.readyRelease &&
+    updateState.release &&
+    updateState.release.version !== updateState.readyRelease.version
+      ? newer(updateState.release.version, updateState.readyRelease.version)
+        ? updateState.release
+        : updateState.readyRelease
+      : (updateState.readyRelease ?? updateState.release);
 
   const start = () => (profile ? push({ name: "newgame" }) : push({ name: "setup", first: true }));
   const again = async (worldId: string) => {
@@ -796,9 +805,9 @@ export default function Home() {
         />
       )}
 
-      {updateOpen && (updateState.readyRelease ?? updateState.release) && (
+      {updateOpen && activeUpdateRelease && (
         <UpdateSheet
-          release={(updateState.readyRelease ?? updateState.release)!}
+          release={activeUpdateRelease}
           onClose={() => setUpdateOpen(false)}
         />
       )}

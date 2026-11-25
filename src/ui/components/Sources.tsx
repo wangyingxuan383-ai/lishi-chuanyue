@@ -381,7 +381,15 @@ export function BookPreview({
   </div>;
 }
 
-export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSelect?: (book: Pick<SourceBook, "id" | "title" | "format" | "createdAt">, use?: "reference" | "fanfic") => void }) {
+export function SourceLibrary({
+  onClose,
+  onSelect,
+  defaultUsage,
+}: {
+  onClose: () => void;
+  onSelect?: (book: Pick<SourceBook, "id" | "title" | "format" | "createdAt">, use?: "reference" | "fanfic") => void;
+  defaultUsage?: "library" | "reference" | "fanfic";
+}) {
   const { game, toast, ask, push } = useApp();
   const [books, setBooks] = useState<Awaited<ReturnType<typeof listBooks>>>([]);
   const [bookQuery, setBookQuery] = useState("");
@@ -391,7 +399,7 @@ export function SourceLibrary({ onClose, onSelect }: { onClose: () => void; onSe
   const [notes, setNotes] = useState(false);
   const [file, setFile] = useState<{ name: string; bytes: Uint8Array } | null>(null);
   const [encoding, setEncoding] = useState<TextEncoding>("auto"), [progress, setProgress] = useState("");
-  const [error, setError] = useState(""), [usage, setUsage] = useState<"library" | "reference" | "fanfic">(onSelect ? "reference" : "library");
+  const [error, setError] = useState(""), [usage, setUsage] = useState<"library" | "reference" | "fanfic">(defaultUsage ?? (onSelect ? "reference" : "library"));
   const controller = useRef<AbortController | null>(null);
   const load = () => void listBooks(game.repo).then(setBooks);
   useEffect(() => { load(); return () => controller.current?.abort(); }, [game]);
@@ -495,7 +503,7 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false,
       {value.fanfic && value.plot === "canon" && <p className="field-hint m-0">沿原剧情时，每段写完会按内容自动往后跟（一次至多 2 节，不花请求）；跟错了在这一段的变化里点“改回”，或在这里改。</p>}
       <span className="muted">剧情关系</span><div className="segmented">{([["reference", "只作资料"], ["rewrite", "允许改写原著"], ["canon", "尽量沿原剧情"]] as const).map(([v, label]) => <button disabled={disabled} key={v} aria-pressed={v === "reference" ? !value.fanfic : value.fanfic && value.plot === v} onClick={() => set({ fanfic: v !== "reference", ...(v === "reference" ? {} : { plot: v }) })}>{label}</button>)}</div>
       <span className="muted">参考范围</span><div className="segmented"><button disabled={disabled} aria-pressed={value.through === null} onClick={() => set({ through: null })}>全书</button><button disabled={disabled} aria-pressed={value.through !== null} onClick={() => {
-        const nextThrough = value.through ?? (value.position > 0 ? value.position : Math.max(0, book.sections.length - 1));
+        const nextThrough = value.through ?? Math.min(Math.max(0, book.sections.length - 1), value.position);
         set({ through: nextThrough, analysisId: undefined });
         setPicking("through");
       }}>截至指定章节</button></div>
@@ -505,7 +513,22 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false,
           <span aria-hidden="true">第 {value.through + 1} 节 ›</span>
         </button>
       )}
-      {picking === "position" && <ChapterPickSheet title="选择原著位置" book={book} maxSection={value.through ?? undefined} value={value.position} onSelect={(section) => set({ position: section })} onClose={() => setPicking(null)} />}
+      {picking === "position" && (
+        <ChapterPickSheet
+          title="选择原著位置"
+          book={book}
+          value={value.position}
+          onSelect={(section) => {
+            if (value.through !== null && section > value.through) {
+              set({ position: section, through: section, analysisId: undefined });
+              toast("已同步将防剧透上限扩至该节");
+            } else {
+              set({ position: section });
+            }
+          }}
+          onClose={() => setPicking(null)}
+        />
+      )}
       {picking === "through" && <ChapterPickSheet title="选择截至章节" book={book} value={value.through ?? Math.max(0, book.sections.length - 1)} onSelect={(section) => set({ through: section, position: Math.min(value.position, section), analysisId: undefined })} onClose={() => setPicking(null)} />}
       <SourcePresets key={value.bookId} disabled={disabled} value={value.instructions} onChange={(instructions) => { if (!disabled) set({ instructions }); }} />
       <label className="field">原著怎么用<textarea rows={4} maxLength={12000} disabled={disabled} aria-label="原著怎么用" value={value.instructions} onChange={(e) => set({ instructions: e.target.value })} /></label>
@@ -515,7 +538,7 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false,
       <p className="muted m-0">原著札记：让 AI 先整理一段主线、一个人物或一个设定，写作时带上，比每段都翻原文更快更省。</p>
       {notes && <CanonNotesSheet bookId={value.bookId} worldId={worldId} position={value.position} through={value.through} onClose={() => setNotes(false)} />}
     </>}
-    {library && <SourceLibrary onClose={() => setLibrary(false)} onSelect={(b, use) => { onChange(newBinding(b.id, use === "fanfic" || fanfic || value?.fanfic)); toast("已选入，保存设置后生效"); }} />}
+    {library && <SourceLibrary defaultUsage={fanfic ? "fanfic" : "reference"} onClose={() => setLibrary(false)} onSelect={(b, use) => { onChange(newBinding(b.id, use === "fanfic" || fanfic || value?.fanfic)); toast(worldId ? "已选入，保存设置后生效" : `已选入《${b.title}》`); }} />}
     {browse && book && value && <Sheet title={book.title} onClose={() => setBrowse(false)}><BookPreview bookId={value.bookId} through={value.through} initialSection={value.position} /></Sheet>}
     {analysis && book && value && <SourceAnalysis bookId={value.bookId} binding={value} onChange={onChange} onClose={() => setAnalysis(false)} />}
   </div>;

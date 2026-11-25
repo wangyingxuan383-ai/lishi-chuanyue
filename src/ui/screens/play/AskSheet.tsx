@@ -10,7 +10,7 @@ import { AUTO_SCOPE, type SourceScope } from "../../../engine/sources/scope";
 import type { SourceBinding } from "../../../engine/sources/types";
 
 /** 查一查 (R07-T001 / R31-P4): multi-turn questions about this world or the era; the story does not move. */
-export function AskSheet({ worldId, bookId, source, initialQuestion, captureReading, onClose }: { worldId: string; bookId?: string; source?: SourceBinding | null; initialQuestion?: string; captureReading?: () => void; onClose: () => void }) {
+export function AskSheet({ worldId, bookId, source, initialQuestion, autoAsk = false, captureReading, onClose }: { worldId: string; bookId?: string; source?: SourceBinding | null; initialQuestion?: string; autoAsk?: boolean; captureReading?: () => void; onClose: () => void }) {
   const { game, toast, push } = useApp();
   const [saved, setSaved] = useState<number[]>([]);
   const [question, setQuestion] = useState(initialQuestion ?? "");
@@ -23,11 +23,12 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, captureRead
   const pending = asked.some((x) => x.pending);
   /** The question in flight; closing the sheet stops it too (R30, D170). */
   const running = useRef<AbortController | null>(null);
-  useEffect(() => { if (initialQuestion) setQuestion(initialQuestion); }, [initialQuestion]);
+  const autoAsked = useRef(false);
+  useEffect(() => { if (initialQuestion && !autoAsked.current) setQuestion(initialQuestion); }, [initialQuestion]);
   useEffect(() => () => running.current?.abort(), []);
   const update = (patch: { a: string; pending: boolean; note?: string; incomplete?: boolean }) => setAsked((list) => list.map((x, i) => (i === list.length - 1 ? { ...x, ...patch } : x)));
-  const ask = async () => {
-    const q = question.trim();
+  const ask = async (overrideQuestion?: string) => {
+    const q = (overrideQuestion ?? question).trim();
     if (!q || pending) return;
     const history = asked
       .filter((x) => !x.pending && !x.incomplete && x.a && x.a !== "已停止。" && x.a !== "这次没查到，稍后再试。")
@@ -53,6 +54,16 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, captureRead
       setUsageTick((n) => n + 1);
     }
   };
+  useEffect(() => {
+    const initial = initialQuestion?.trim();
+    if (!autoAsk || !initial || autoAsked.current) return;
+    const timer = setTimeout(() => {
+      if (autoAsked.current) return;
+      autoAsked.current = true;
+      void ask(initial);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
   return (
     <Sheet title="查一查" onClose={onClose}>
       <div className="stack">

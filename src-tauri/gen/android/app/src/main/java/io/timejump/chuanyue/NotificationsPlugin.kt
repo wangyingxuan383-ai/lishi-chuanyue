@@ -176,6 +176,7 @@ internal object RomCompat {
 class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
     private var tts: TextToSpeech? = null
     private var ttsReady: Boolean = false
+    private var ttsChineseSupported: Boolean = false
     private var ttsInitializing: Boolean = false
     private var pendingSpeak: Pair<TtsSpeakArgs, Invoke>? = null
 
@@ -189,6 +190,11 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun performSpeak(engine: TextToSpeech, args: TtsSpeakArgs, invoke: Invoke) {
+        if (!ttsChineseSupported && !configureTtsLanguage(engine)) {
+            invoke.resolve(JSObject().put("ok", false))
+            return
+        }
+        ttsChineseSupported = true
         val safeRate = if (args.rate.isFinite()) args.rate.coerceIn(0.5f, 2.5f) else 1.0f
         val maxLen = (try {
             TextToSpeech.getMaxSpeechInputLength()
@@ -210,25 +216,29 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(JSObject().put("ok", ok))
     }
 
-    private fun configureTtsLanguage(engine: TextToSpeech) {
-        try {
-            when {
-                engine.isLanguageAvailable(Locale.SIMPLIFIED_CHINESE) >= TextToSpeech.LANG_AVAILABLE -> {
-                    engine.language = Locale.SIMPLIFIED_CHINESE
-                }
-                engine.isLanguageAvailable(Locale.CHINA) >= TextToSpeech.LANG_AVAILABLE -> {
-                    engine.language = Locale.CHINA
-                }
-                else -> {
-                    val zh = Locale.forLanguageTag("zh")
-                    if (engine.isLanguageAvailable(zh) >= TextToSpeech.LANG_AVAILABLE) {
-                        engine.language = zh
+    private fun configureTtsLanguage(engine: TextToSpeech): Boolean {
+        val candidates = listOf(
+            Locale.SIMPLIFIED_CHINESE,
+            Locale.CHINA,
+            Locale.forLanguageTag("zh-CN"),
+            Locale.TAIWAN,
+            Locale.TRADITIONAL_CHINESE,
+            Locale.forLanguageTag("zh-HK"),
+            Locale.forLanguageTag("zh")
+        )
+        for (locale in candidates) {
+            try {
+                if (engine.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) {
+                    val result = engine.setLanguage(locale)
+                    if (result >= TextToSpeech.LANG_AVAILABLE) {
+                        return true
                     }
                 }
+            } catch (_: Throwable) {
+                // Try the next Chinese locale candidate if an OEM engine throws.
             }
-        } catch (_: Throwable) {
-            // Keep engine default voice if OEM engine throws on locale query.
         }
+        return false
     }
 
     private fun appDetailsIntent(): Intent =
@@ -447,8 +457,8 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
                         activity.runOnUiThread {
                             ttsInitializing = false
                             val engine = tts
-                            if (status == TextToSpeech.SUCCESS && engine != null) {
-                                configureTtsLanguage(engine)
+                            if (status == TextToSpeech.SUCCESS && engine != null && configureTtsLanguage(engine)) {
+                                ttsChineseSupported = true
                                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                                     override fun onStart(utteranceId: String?) {}
 
@@ -473,6 +483,7 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
                                 }
                             } else {
                                 ttsReady = false
+                                ttsChineseSupported = false
                                 try { engine?.shutdown() } catch (_: Throwable) {}
                                 tts = null
                                 val queued = pendingSpeak
@@ -484,6 +495,7 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
                 } catch (_: Throwable) {
                     ttsInitializing = false
                     ttsReady = false
+                    ttsChineseSupported = false
                     tts = null
                     val queued = pendingSpeak
                     pendingSpeak = null
@@ -596,6 +608,7 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
         val engine = tts
         tts = null
         ttsReady = false
+        ttsChineseSupported = false
         ttsInitializing = false
         if (engine != null) {
             try {

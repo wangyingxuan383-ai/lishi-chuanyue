@@ -1292,7 +1292,7 @@ export class Game {
         const action = actionIn ?? { mode: target.actionMode ?? "continue", text: target.actionText ?? "", directorNote: target.directorNote };
         const state = base.id === world.head.id ? world.state : await this.repo.getState(base.id), era = eraContext(world.eraId, state);
         const fortune = luckApplies(action.mode, world.settings) ? await this.fortuneFor(base, world.settings.difficulty, kind === "variant" && hint === "换个结果") : undefined;
-        const turnSource = kind === "turn" ? world.guard.sourceGuard : (state.source ?? null);
+        const turnSource = kind === "turn" || trailing.some((n) => (n.record as TurnRecord | null)?.sourceSet !== undefined) ? world.guard.sourceGuard : (state.source ?? null);
         const input = await this.turnInput(worldId, base, { ...action, rewriteHint: kind === "continue" ? target.meta.rewriteHint as string | undefined : hint, fortune }, turnSource, { settings: world.settings, eraId: world.eraId, state });
         if (batch) input.settings = { ...input.settings, pilot: "ai" };
         const template = writingContextTemplate(input);
@@ -1554,7 +1554,7 @@ export class Game {
         const messages: ChatMessage[] = [
           { role: "system", content: canonCorrectionRules(world.settings, state, !target.parentId) },
           // The same passages as plan.reference: shown here, they count as read and can be quoted.
-          { role: "user", content: `${referenceInstructionsBlock(reference)}${notes}${referenceEvidenceBlock(reference)}\n【选中范围】\n${focus}\n【必要前后文】\n${surrounding}\n【玩家要求】\n${request.hint.trim() || "核对这段与原著是否一致"}${question}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【修订前的本局事实】${renderState(focusedState, era, new Set(focusedState.people.map((p) => p.id)), world.settings)}\n【原回合记录，仅修改受影响字段】${JSON.stringify(target.record)}\n旧资料来源不明的事实待核实。只预览选中范围，不清洗整局历史。` },
+          { role: "user", content: `${referenceInstructionsBlock(reference, { ignorePosition: true })}${notes}${referenceEvidenceBlock(reference)}\n【选中范围】\n${focus}\n【必要前后文】\n${surrounding}\n【玩家要求】\n${request.hint.trim() || "核对这段与原著是否一致"}${question}\n【本回合玩家行动】${target.actionText ?? "开场"}\n【修订前的本局事实】${renderState(focusedState, era, new Set(focusedState.people.map((p) => p.id)), world.settings)}\n【原回合记录，仅修改受影响字段】${JSON.stringify(target.record)}\n旧资料来源不明的事实待核实。只预览选中范围，不清洗整局历史。` },
         ];
         const plan: RunPlan = {
           id: newId(), worldId: anchor.worldId, lineId: anchor.lineId, headId: anchor.headId, baseId: target.parentId, kind: "correction",
@@ -1906,7 +1906,8 @@ export class Game {
       : autoNotes.length ? canonNotesBlock(autoNotes, Math.min(2400, Math.floor(askBudget / 5))) : "";
     let messages = askMessages(askInput);
     const messageChars = () => messages.reduce((n, m) => n + m.content.length, 0) + followUpChars + chosenNotes.length;
-    while (askInput.history.length > 1 && messageChars() + referenceBlock(reference).length + 60 > askBudget) {
+    const askRefOpts = { ignorePosition: true } as const;
+    while (askInput.history.length > 1 && messageChars() + referenceBlock(reference, Infinity, askRefOpts).length + 60 > askBudget) {
       // Keep the opening (`history[0]`) intact when trimming middle turns so initial debts/identities survive.
       if (askInput.history[0]?.kind === "opening") {
         const rest = askInput.history.slice(1);
@@ -1916,8 +1917,8 @@ export class Game {
       }
       messages = askMessages(askInput);
     }
-    if (messageChars() + referenceBlock(reference).length + 60 > askBudget) messages = compactChatMessages(messages) ?? messages;
-    reference = fitReference(reference, Math.max(0, Math.min(Math.floor(askBudget / 4), askBudget - messageChars() - referenceInstructionsBlock(reference).length - 60)));
+    if (messageChars() + referenceBlock(reference, Infinity, askRefOpts).length + 60 > askBudget) messages = compactChatMessages(messages) ?? messages;
+    reference = fitReference(reference, Math.max(0, Math.min(Math.floor(askBudget / 4), askBudget - messageChars() - referenceInstructionsBlock(reference, askRefOpts).length - 60)));
     if (followUps.length) messages = [...messages, ...followUps];
     const appendReference = (suffix: string) => {
       const last = messages[messages.length - 1];
@@ -1929,7 +1930,7 @@ export class Game {
       : state.source
         ? "\n可以调用只读工具查阅本局旧事或绑定原著的原文再回答，不得用记忆冒充查证。"
         : "\n可以调用只读工具查阅本局旧事、人物、设定和知情线索再回答，资料不足就直说。";
-    appendReference(chosenNotes + referenceBlock(reference) + (scoped?.meta.mode === "chapters" ? scopeNote(scoped.meta) : "") + lookupHint);
+    appendReference(chosenNotes + referenceBlock(reference, Infinity, askRefOpts) + (scoped?.meta.mode === "chapters" ? scopeNote(scoped.meta) : "") + lookupHint);
     const plan: RunPlan = {
       id: newId(), worldId, lineId: world.lineId, headId: head.id, baseId: head.id, kind: "ask",
       model: { ...this.requireLlm(), model: this.auxModelName() }, ...this.fallbackFor(true), messages, extractMessages: [], state, settings: world.settings,

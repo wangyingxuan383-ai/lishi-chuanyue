@@ -755,34 +755,166 @@ pub(crate) fn ensure_materialized_session_tx(tx: &Transaction<'_>, id: &str) -> 
     Err(invalid("找不到这段伴聊会话"))
 }
 
-pub(crate) fn load_pi_tasks_summary(db: &Connection, pi_session_id: &str) -> Result<Vec<Value>> {
-    if pi_session_id.is_empty() || !table_exists(db, "pi_tasks")? {
+pub(crate) fn load_pi_tasks_summary(
+    db: &Connection,
+    pi_session_id: &str,
+    companion_session_id: Option<&str>,
+) -> Result<Vec<Value>> {
+    let clean_pi = pi_session_id.trim();
+    let clean_comp = companion_session_id.map(str::trim).filter(|s| !s.is_empty());
+    if (clean_pi.is_empty() && clean_comp.is_none()) || !table_exists(db, "pi_tasks")? {
         return Ok(vec![]);
     }
+    let has_messages = clean_comp.is_some() && table_exists(db, "companion_messages")?;
+    let comp_arg = if has_messages { clean_comp } else { None };
+    let has_leases = table_exists(db, "world_execution_leases")?;
+    let now_ms = crate::execution_lease::now_ms();
     let mut stmt = db.prepare(
-        "SELECT id,text,status,policy,result_json,error,created_at,updated_at
-         FROM pi_tasks WHERE session_id=?1 ORDER BY created_at ASC, id ASC LIMIT 50",
+        "SELECT id,world_id,text,status,policy,metadata_json,lease_json,stop_revision,host_owner,result_json,error,created_at,updated_at
+         FROM pi_tasks
+         WHERE (?1 <> '' AND session_id = ?1)
+            OR (?2 IS NOT NULL AND id IN (
+                SELECT DISTINCT pi_task_id FROM companion_messages
+                WHERE session_id = ?2 AND pi_task_id IS NOT NULL AND pi_task_id <> ''
+            ))
+         ORDER BY created_at ASC, id ASC
+         LIMIT 50",
     )?;
-    let rows = stmt
-        .query_map([pi_session_id], |r| {
-            let result_raw: Option<String> = r.get(4)?;
-            let summary = result_raw
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|v| v["summary"].as_str().map(str::to_owned));
-            Ok(json!({
-                "id": r.get::<_, String>(0)?,
-                "text": r.get::<_, String>(1)?,
-                "status": r.get::<_, String>(2)?,
-                "policy": r.get::<_, String>(3)?,
-                "summary": summary,
-                "error": r.get::<_, Option<String>>(5)?,
-                "createdAt": r.get::<_, String>(6)?,
-                "updatedAt": r.get::<_, String>(7)?,
-            }))
+    let raw_rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    )> = stmt
+        .query_map(params![clean_pi, comp_arg], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+
+    let mut out = Vec::with_capacity(raw_rows.len());
+    for (
+        id,
+        world_id,
+        text,
+        raw_status,
+        policy,
+        meta_raw,
+        lease_raw,
+        stop_rev,
+        host_owner,
+        result_raw,
+        error,
+        created_at,
+        updated_at,
+    ) in raw_rows
+    {
+        let meta_val = parse_json_or(&meta_raw, json!({}));
+        let lease_val = parse_json_or(&lease_raw, json!({}));
+        let parsed_ticket =
+            serde_json::from_value::<crate::execution_lease::LeaseTicket>(lease_val.clone()).ok();
+        let live = if has_leases {
+            if let Some(ref saved) = parsed_ticket {
+                crate::execution_lease::current(db, &world_id)?
+                    .is_some_and(|st| st.ticket == *saved && st.expires_at_ms > now_ms)
+            } else {
+                crate::execution_lease::current(db, &world_id)?.is_some_and(|st| {
+                    !st.ticket.owner_id.is_empty()
+                        && st.ticket.owner_id == id
+                        && st.expires_at_ms > now_ms
+                }) || lease_val["expiresAtMs"].as_i64().is_some_and(|exp| exp > now_ms)
+            }
+        } else {
+            lease_val["expiresAtMs"].as_i64().is_some_and(|exp| exp > now_ms)
+        };
+
+        let is_ongoing = matches!(raw_status.as_str(), "running" | "stopping" | "committing");
+        let eff_status = if is_ongoing && !live {
+            "interrupted".to_owned()
+        } else {
+            raw_status.clone()
+        };
+
+        let row_val = json!({
+            "id": id,
+            "world_id": world_id,
+            "status": raw_status,
+            "metadata_json": meta_val,
+            "lease_json": lease_val,
+            "stop_revision": stop_rev,
+            "host_owner": host_owner,
+        });
+        let attempt_id = lease_val["attemptId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                meta_val["attemptId"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                if lease_val.as_object().is_some_and(|o| !o.is_empty()) {
+                    crate::pi_store::arguments_hash(&lease_val)
+                } else {
+                    String::new()
+                }
+            });
+        let execution = if has_leases && parsed_ticket.is_some() {
+            let mut exec = crate::pi_lifecycle::execution(db, &row_val)?;
+            if eff_status == "interrupted" {
+                exec["phase"] = "interrupted".into();
+                exec["ownerStatus"] = "lost".into();
+            }
+            exec
+        } else {
+            json!({
+                "attemptId": attempt_id,
+                "phase": eff_status,
+                "ownerStatus": if live { "active" } else if is_ongoing { "lost" } else { "idle" },
+            })
+        };
+
+        let summary = result_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v["summary"].as_str().map(str::to_owned));
+        out.push(json!({
+            "id": id,
+            "text": text,
+            "status": eff_status,
+            "policy": policy,
+            "summary": summary,
+            "error": error,
+            "execution": execution,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+        }));
+    }
+    Ok(out)
 }
 
 pub(crate) fn next_message_seq_tx(tx: &Transaction<'_>, session_id: &str) -> Result<i64> {
@@ -1426,6 +1558,7 @@ impl CompanionStore {
         id: &str,
         active_run_for: impl FnOnce(&str) -> Option<String>,
     ) -> Result<Value> {
+        let _ = crate::pi_lifecycle::reconcile(&self.0);
         let mut db = self.0.lock()?;
         let initial_session =
             get_session_db(&db, id)?.ok_or_else(|| invalid("找不到这段伴聊会话"))?;
@@ -1446,10 +1579,11 @@ impl CompanionStore {
                 session["activeLeafId"] = leaf.into();
             }
         }
-        let pi_tasks = match session["piSessionId"].as_str() {
-            Some(pi_id) => load_pi_tasks_summary(&db, pi_id)?,
-            None => vec![],
-        };
+        let pi_tasks = load_pi_tasks_summary(
+            &db,
+            session["piSessionId"].as_str().unwrap_or(""),
+            Some(&real_id),
+        )?;
         let active_val = match active_run_id {
             Some(rid) => Value::String(rid),
             None => Value::Null,
@@ -1465,6 +1599,7 @@ impl CompanionStore {
     }
 
     pub fn get_session_detail(&self, id: &str) -> Result<Value> {
+        let _ = crate::pi_lifecycle::reconcile(&self.0);
         let db = self.0.lock()?;
         let mut session = get_session_db(&db, id)?.ok_or_else(|| invalid("找不到这段伴聊会话"))?;
         let real_id = session["id"].as_str().unwrap_or(id).to_owned();
@@ -1481,10 +1616,11 @@ impl CompanionStore {
                 session["activeLeafId"] = leaf.into();
             }
         }
-        let pi_tasks = match session["piSessionId"].as_str() {
-            Some(pi_id) => load_pi_tasks_summary(&db, pi_id)?,
-            None => vec![],
-        };
+        let pi_tasks = load_pi_tasks_summary(
+            &db,
+            session["piSessionId"].as_str().unwrap_or(""),
+            Some(&real_id),
+        )?;
         session["activeRunId"] = Value::Null;
         Ok(json!({
             "session": session,
@@ -2184,5 +2320,98 @@ mod tests {
             .unwrap();
         assert_eq!(handoff["messages"].as_array().unwrap().len(), 2);
         assert_eq!(handoff["messages"][1]["content"], "西市老字号绸缎庄东家。");
+    }
+
+    #[test]
+    fn pi_tasks_summary_keeps_earlier_route_tasks_and_reconciles_dead_runs_with_attempt_id() {
+        let (raw_store, gateway, live_attempt) = crate::pi_lifecycle::tests::fixture();
+        crate::pi_lifecycle::settle(&raw_store, "t", &live_attempt, "收尾").unwrap();
+        // Finish task 't' on route 'l' (pi session 's') as previewed:
+        raw_store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE pi_tasks SET status='previewed', result_json='{\"summary\":\"已改好时间\"}' WHERE id='t'",
+                [],
+            )
+            .unwrap();
+        // Switch story to a second route 'l2' with a brand-new pi session 's2' and a task 't2':
+        raw_store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l2','w','支线','n','test');
+                 UPDATE worlds SET current_line_id='l2' WHERE id='w';",
+            )
+            .unwrap();
+        gateway
+            .create_session(&crate::pi_store::NewSession {
+                id: "s2".into(),
+                world_id: "w".into(),
+                line_id: "l2".into(),
+                title: "支线任务".into(),
+                session_file: None,
+            })
+            .unwrap();
+        let row2 = gateway
+            .start_task(
+                "s2",
+                "t2",
+                "修改支线人物",
+                "preview",
+                false,
+                json!({"model":"no-http"}),
+                json!({}),
+            )
+            .unwrap();
+        let attempt2 =
+            crate::pi_lifecycle::attempt(&json!({"lease_json": row2["lease_json"].to_string()}));
+        assert_ne!(live_attempt, attempt2);
+
+        let comp = CompanionStore(raw_store.clone());
+        comp.initialize().unwrap();
+        let created = comp
+            .create_session(&json!({
+                "title": "跨路线改档伴聊",
+                "boundWorldId": "w",
+                "boundLineId": "l2",
+                "piSessionId": "s2",
+                "activeGear": "agent",
+            }))
+            .unwrap();
+        let cid = created["session"]["id"].as_str().unwrap();
+        // Earlier message linked to task 't' from old pi_session 's':
+        comp.append_message(
+            cid,
+            &json!({"role":"assistant","gear":"agent","content":"已完成第一处","piTaskId":"t"}),
+        )
+        .unwrap();
+        comp.append_message(
+            cid,
+            &json!({"role":"assistant","gear":"agent","content":"正在改支线","piTaskId":"t2"}),
+        )
+        .unwrap();
+
+        // While lease is live, 't2' reports running with non-empty execution.attemptId, AND 't' from 's' is still returned!
+        let live_detail = comp.get_session_detail(cid).unwrap();
+        let live_tasks = live_detail["piTasks"].as_array().unwrap();
+        assert_eq!(live_tasks.len(), 2);
+        let t1_card = live_tasks.iter().find(|x| x["id"] == "t").unwrap();
+        assert_eq!(t1_card["status"], "previewed");
+        assert_eq!(t1_card["summary"], "已改好时间");
+        let t2_card = live_tasks.iter().find(|x| x["id"] == "t2").unwrap();
+        assert_eq!(t2_card["status"], "running");
+        assert_eq!(t2_card["execution"]["attemptId"], attempt2);
+
+        // Once the execution lease expires, load_pi_tasks_summary (even directly on &Connection) reports 'interrupted'!
+        raw_store
+            .lock()
+            .unwrap()
+            .execute("UPDATE world_execution_leases SET expires_at_ms=0", [])
+            .unwrap();
+        let direct = load_pi_tasks_summary(&raw_store.lock().unwrap(), "s2", Some(cid)).unwrap();
+        let t2_dead = direct.iter().find(|x| x["id"] == "t2").unwrap();
+        assert_eq!(t2_dead["status"], "interrupted");
+        assert_eq!(t2_dead["execution"]["attemptId"], attempt2);
     }
 }

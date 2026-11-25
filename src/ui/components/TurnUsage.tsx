@@ -1,7 +1,7 @@
 // 每段用量 (R29-T004): what the latest passage cost, one small line under it;
 // tapping it shows the requests by purpose. 本局用量 sums the whole story.
 import { useEffect, useState } from "react";
-import { costText, recentUsage, runUsage, tokenText, turnUsage, usageCost, usageLine, worldUsage, type Prices, type UsageTotal } from "../../engine/usage";
+import { costText, recentUsage, runUsage, splitTurnUsage, tokenText, turnUsage, usageCost, usageLine, worldUsage, type Prices, type UsageTotal } from "../../engine/usage";
 import { useApp } from "../app/context";
 import { readBudget } from "./budgetMath";
 import { Sheet } from "./Sheet";
@@ -66,11 +66,14 @@ export function TurnUsageLine({ nodeId }: { nodeId: string }) {
     // Background tidying (补记, 设定集) may land a moment later.
     const later = setTimeout(() => void turnUsage(game.platform, nodeId).then((t) => { if (live && t) setTotal(t); }), 4000);
     return () => { live = false; clearTimeout(later); };
-  }, [nodeId]);
+  }, [game, nodeId]);
   if (!total) return null;
+  const { foreground, background } = splitTurnUsage(total);
+  const displayTotal = foreground ?? total;
+  const line = usageLine(displayTotal, prices);
   return <>
-    <button className="usage-line" aria-label={`这一段的用量：${usageLine(total, prices)}`} onClick={() => setOpen(true)}>{usageLine(total, prices)}</button>
-    {open && <UsageBreakdownSheet title="这一段的用量" total={total} prices={prices} onClose={() => setOpen(false)} />}
+    <button className="usage-line" aria-label={`这一段的用量：${line}`} onClick={() => setOpen(true)}>{line}</button>
+    {open && <UsageBreakdownSheet title="这一段的用量" total={displayTotal} background={foreground ? background : null} prices={prices} onClose={() => setOpen(false)} />}
   </>;
 }
 
@@ -78,21 +81,25 @@ export function PassageUsageSheet({ nodeId, onClose }: { nodeId: string; onClose
   const { game } = useApp();
   const prices = usePrices();
   const [total, setTotal] = useState<UsageTotal | null | undefined>(undefined);
-  useEffect(() => { void turnUsage(game.platform, nodeId).then(setTotal); }, [nodeId]);
-  return total ? <UsageBreakdownSheet title="这一段的用量" total={total} prices={prices} onClose={onClose} />
-    : <Sheet title="这一段的用量" onClose={onClose}><p className="muted">{total === null ? "这一段没有用量记录（亲手写的、早期版本写的，或记录已清理）。" : "正在读取…"}</p></Sheet>;
+  useEffect(() => { void turnUsage(game.platform, nodeId).then(setTotal); }, [game, nodeId]);
+  if (!total) {
+    return <Sheet title="这一段的用量" onClose={onClose}><p className="muted">{total === null ? "这一段没有用量记录（亲手写的、早期版本写的，或记录已清理）。" : "正在读取…"}</p></Sheet>;
+  }
+  const { foreground, background } = splitTurnUsage(total);
+  const displayTotal = foreground ?? total;
+  return <UsageBreakdownSheet title="这一段的用量" total={displayTotal} background={foreground ? background : null} prices={prices} onClose={onClose} />;
 }
 
 export function WorldUsageSheet({ worldId, onClose }: { worldId: string; onClose: () => void }) {
   const { game } = useApp();
   const prices = usePrices();
   const [total, setTotal] = useState<UsageTotal | null | undefined>(undefined);
-  useEffect(() => { void worldUsage(game.platform, worldId).then(setTotal); }, [worldId]);
+  useEffect(() => { void worldUsage(game.platform, worldId).then(setTotal); }, [game, worldId]);
   return total ? <UsageBreakdownSheet title="本局用量" total={total} prices={prices} onClose={onClose} note="这个故事至今所有请求，包括整理设定、章节摘要和只给这个故事的札记。" />
     : <Sheet title="本局用量" onClose={onClose}><p className="muted">{total === null ? "这个故事还没有用量记录。" : "正在读取…"}</p></Sheet>;
 }
 
-export function UsageBreakdownSheet({ title, total, prices, note, onClose }: { title: string; total: UsageTotal; prices: Prices; note?: string; onClose: () => void }) {
+export function UsageBreakdownSheet({ title, total, background, prices, note, onClose }: { title: string; total: UsageTotal; background?: UsageTotal | null; prices: Prices; note?: string; onClose: () => void }) {
   const cost = usageCost(total, prices);
   return (
     <Sheet title={title} onClose={onClose}>
@@ -112,6 +119,17 @@ export function UsageBreakdownSheet({ title, total, prices, note, onClose }: { t
             {usageCost(p, prices) !== null && <span className="tag">{costText(usageCost(p, prices)!)}</span>}
           </div>
         ))}
+        {background && background.parts.length > 0 && (
+          <>
+            <h3 className="settings-sub">另后台整理设定/摘要</h3>
+            {background.parts.map((p) => (
+              <div key={`bg-${p.label}`} className="item-row">
+                <div className="grow"><b>{p.label}</b><small>{p.calls} 次 · 输入 {tokenText(p.input)} · 输出 {tokenText(p.output)}{p.ms ? ` · ${(p.ms / 1000).toFixed(1)} 秒` : ""}</small></div>
+                {usageCost(p, prices) !== null && <span className="tag">{costText(usageCost(p, prices)!)}</span>}
+              </div>
+            ))}
+          </>
+        )}
         <p className="muted m-0">嫌慢或嫌贵，可以点故事顶部“Aa”旁边的小字换成快速档。估算按你填的单价，不是账单。</p>
       </div>
     </Sheet>

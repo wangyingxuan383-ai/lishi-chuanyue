@@ -39,9 +39,18 @@ export const PRESETS: ProviderPreset[] = [
  * https://, a pasted …/chat/completions or …/models, trailing slashes.
  */
 export function cleanBaseUrl(input: string): string {
-  let url = input.trim().replace(/[\s　]+/g, "");
+  let url = input.replace(/[\u200B-\u200D\uFEFF]/g, "").trim().replace(/[\s　]+/g, "");
   if (!url) return "";
-  if (!/^[a-z]+:\/\//i.test(url)) url = `https://${url}`;
+  url = url.replace(/#.*$/, "");
+  if (!url) return "";
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = `https://${url}`;
+  url = url.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^/?#]+)/i, (_, scheme: string, authority: string) => {
+    const atIdx = authority.lastIndexOf("@");
+    if (atIdx >= 0) {
+      return `${scheme.toLowerCase()}${authority.slice(0, atIdx + 1)}${authority.slice(atIdx + 1).toLowerCase()}`;
+    }
+    return `${scheme.toLowerCase()}${authority.toLowerCase()}`;
+  });
   url = url
     .replace(/\/models\/[^/?#]+:(?:stream)?generateContent(?:\?.*)?$/i, "")
     .replace(/\/(chat\/completions|completions|responses|messages|models)\/?$/i, "")
@@ -197,10 +206,26 @@ export async function saveProfile(repo: Repo, p: Omit<Profile, "id" | "keySlot">
   const id = p.id ?? newId();
   const keySlot = p.keySlot ?? `profile-${id.slice(0, 12)}`;
   const cleaned = cleanBaseUrl(p.baseUrl);
-  const baseUrl = /\/v1beta$/i.test(cleaned) || isBareGeminiHost(cleaned)
+  let baseUrl = /\/v1beta$/i.test(cleaned) || isBareGeminiHost(cleaned)
     ? geminiOpenAiUrl(cleaned)
     : (cleaned || p.baseUrl);
-  if (key) await repo.platform.secrets.set(keySlot, key, serviceBase(baseUrl));
+  const cleanKey = key
+    ? key.replace(/[\u200B-\u200D\uFEFF]/g, "").trim().replace(/^bearer\s+/i, "").trim()
+    : "";
+  if (cleanKey) {
+    await repo.platform.secrets.set(keySlot, cleanKey, serviceBase(baseUrl));
+  } else if (p.id) {
+    const [existingRows, secretStatus] = await Promise.all([
+      repo.platform.sql.query("SELECT base_url FROM profiles WHERE id = ?", [id]).catch(() => []),
+      repo.platform.secrets.has(keySlot).catch(() => null),
+    ]);
+    const oldBase =
+      (typeof secretStatus?.boundBaseUrl === "string" && secretStatus.boundBaseUrl) ||
+      (typeof existingRows[0]?.base_url === "string" ? existingRows[0].base_url : null);
+    if (oldBase && sameServiceBase(oldBase, baseUrl)) {
+      baseUrl = cleanBaseUrl(oldBase) || baseUrl;
+    }
+  }
   await repo.platform.sql.query(
     `INSERT INTO profiles (id, name, provider, base_url, main_model, aux_model, params_json, key_slot, capabilities_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -216,6 +241,18 @@ export async function saveProfile(repo: Repo, p: Omit<Profile, "id" | "keySlot">
 export async function deleteProfile(repo: Repo, profile: Profile): Promise<void> {
   await repo.platform.secrets.remove(profile.keySlot);
   await repo.platform.sql.query("DELETE FROM profiles WHERE id = ?", [profile.id]);
+  const savedPrefs = await repo
+    .getSetting<Record<string, unknown> | null>("agent:preferences", null)
+    .catch(() => null);
+  if (savedPrefs && typeof savedPrefs === "object" && savedPrefs.profileId === profile.id) {
+    const nextPrefs = { ...savedPrefs };
+    delete nextPrefs.profileId;
+    delete nextPrefs.modelName;
+    delete nextPrefs.protocol;
+    delete nextPrefs.modelUrl;
+    delete nextPrefs.contextWindowTokens;
+    await repo.setSetting("agent:preferences", nextPrefs);
+  }
 }
 
 export async function fetchModels(platform: Platform, slot: string, baseUrl: string): Promise<string[]> {

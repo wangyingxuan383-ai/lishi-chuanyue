@@ -247,6 +247,7 @@ export interface CompanionHandoffInput {
 export interface EscalateToAgentInput {
   sessionId: string;
   text: string;
+  parentId?: string | null;
   policy?: AgentPolicy | "review";
   target?: { nodeId: string; paragraph?: number };
 }
@@ -2771,7 +2772,7 @@ export async function saveCompanionMessageAsNote(
 }
 
 /**
- * Bridge 3 ("交给智能体执行"): Seamlessly escalates a companion session to the
+ * Bridge 3 ("交给改档助手处理"): Seamlessly escalates a companion session to the
  * guarded Pi `AgentClient` on `boundWorldId`:
  * - Creates or reuses `pi_session_id` on the current world/line.
  * - Prefixes ONLY genuine player-authored (`role === "user"`) statements from the
@@ -2796,13 +2797,6 @@ export async function resolveCompanionAgentPolicy(
   if (explicit === "review" || explicit === "preview") return "preview";
   if (explicit === "auto" || explicit === "auto-reversible") return explicit;
 
-  const rawAdoption = await game.repo
-    .getSetting<unknown>("agentAdoptionMode", null)
-    .catch(() => null);
-  if (rawAdoption === "review" || rawAdoption === "preview") return "preview";
-  if (rawAdoption === "auto") return "auto";
-  if (rawAdoption === "auto-reversible") return "auto-reversible";
-
   const storedPrefs = await game.repo
     .getSetting<Record<string, unknown> | null>("agent:preferences", null)
     .catch(() => null);
@@ -2810,7 +2804,33 @@ export async function resolveCompanionAgentPolicy(
   if (storedPolicy === "review" || storedPolicy === "preview") return "preview";
   if (storedPolicy === "auto" || storedPolicy === "auto-reversible") return storedPolicy;
 
+  const rawAdoption = await game.repo
+    .getSetting<unknown>("agentAdoptionMode", null)
+    .catch(() => null);
+  if (rawAdoption === "review" || rawAdoption === "preview") return "preview";
+  if (rawAdoption === "auto") return "auto";
+  if (rawAdoption === "auto-reversible") return "auto-reversible";
+
   return "preview";
+}
+
+export async function saveCompanionAgentPolicy(
+  game: Game,
+  policy: AgentPolicy,
+): Promise<void> {
+  const storedPrefs = await game.repo
+    .getSetting<Record<string, unknown> | null>("agent:preferences", null)
+    .catch(() => null);
+  await Promise.all([
+    game.repo.setSetting("agent:preferences", {
+      ...(storedPrefs && typeof storedPrefs === "object" ? storedPrefs : {}),
+      policy,
+    }),
+    game.repo.setSetting(
+      "agentAdoptionMode",
+      policy === "auto-reversible" || policy === "auto" ? "auto" : "preview",
+    ),
+  ]);
 }
 
 export async function resolveEscalatedAgentModel(
@@ -2819,12 +2839,27 @@ export async function resolveEscalatedAgentModel(
 ): Promise<LlmConfig & { profileId?: string; protocol?: AgentProtocol; thinkingMode?: AgentThinkingMode; contextWindowTokens?: number; maxOutputTokens?: number }> {
   const base = game.llm!;
   const available = await listProfiles(game.repo);
-  const chosen = prefs.profileId
+  const explicitProfile = prefs.profileId
     ? available.find((p) => p.id === prefs.profileId)
-    : available.find((p) => p.keySlot === base.slot) ?? available[0];
+    : undefined;
+  const staleProfile = Boolean(prefs.profileId && !explicitProfile);
+  const effectivePrefs: AgentPreferences = staleProfile
+    ? {
+        ...prefs,
+        profileId: undefined,
+        modelName: undefined,
+        protocol: undefined,
+        modelUrl: undefined,
+        contextWindowTokens: undefined,
+      }
+    : prefs;
+  const chosen =
+    explicitProfile ??
+    available.find((p) => p.keySlot === base.slot) ??
+    available[0];
   if (!chosen) {
-    const model = (prefs.modelName?.trim() || base.model).trim();
-    const protocol: AgentProtocol = prefs.protocol ?? base.protocol ?? "chat-completions";
+    const model = (effectivePrefs.modelName?.trim() || base.model).trim();
+    const protocol: AgentProtocol = effectivePrefs.protocol ?? base.protocol ?? "chat-completions";
     let fallbackUrl = base.url;
     if (protocol !== "chat-completions" && base.url) {
       let endpoint = base.url.trim().replace(/\/+$/, "").replace(/\/(?:chat\/completions|responses|messages)$/, "");
@@ -2839,17 +2874,17 @@ export async function resolveEscalatedAgentModel(
     }
     return {
       ...base,
-      url: prefs.modelUrl?.trim() || fallbackUrl,
+      url: effectivePrefs.modelUrl?.trim() || fallbackUrl,
       model,
-      contextTokens: prefs.inputTokens ?? base.contextTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
+      contextTokens: effectivePrefs.inputTokens ?? base.contextTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
       protocol,
-      thinkingMode: prefs.thinkingMode ?? "off",
-      ...(prefs.contextWindowTokens ? { contextWindowTokens: prefs.contextWindowTokens } : {}),
-      ...(prefs.maxOutputTokens ? { maxOutputTokens: prefs.maxOutputTokens, maxTokens: prefs.maxOutputTokens } : {}),
+      thinkingMode: effectivePrefs.thinkingMode ?? "off",
+      ...(effectivePrefs.contextWindowTokens ? { contextWindowTokens: effectivePrefs.contextWindowTokens } : {}),
+      ...(effectivePrefs.maxOutputTokens ? { maxOutputTokens: effectivePrefs.maxOutputTokens, maxTokens: effectivePrefs.maxOutputTokens } : {}),
     };
   }
-  const model = (prefs.modelName?.trim() || chosen.mainModel || base.model).trim();
-  const protocol: AgentProtocol = prefs.protocol ?? "chat-completions";
+  const model = (effectivePrefs.modelName?.trim() || chosen.mainModel || base.model).trim();
+  const protocol: AgentProtocol = effectivePrefs.protocol ?? "chat-completions";
   let url = chatCompletionsUrl(chosen.baseUrl);
   if (protocol !== "chat-completions") {
     let endpoint = chosen.baseUrl.trim().replace(/\/+$/, "").replace(/\/(?:chat\/completions|responses|messages)$/, "");
@@ -2865,16 +2900,46 @@ export async function resolveEscalatedAgentModel(
   return {
     profileId: chosen.id,
     slot: chosen.keySlot,
-    url: prefs.modelUrl?.trim() || url,
+    url: effectivePrefs.modelUrl?.trim() || url,
     model,
     auxModel: chosen.auxModel?.trim() || "",
     includeUsage: chosen.includeUsage,
-    contextTokens: prefs.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
+    contextTokens: effectivePrefs.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
     protocol,
-    thinkingMode: prefs.thinkingMode ?? "off",
-    ...(prefs.contextWindowTokens ? { contextWindowTokens: prefs.contextWindowTokens } : {}),
-    ...(prefs.maxOutputTokens ? { maxOutputTokens: prefs.maxOutputTokens, maxTokens: prefs.maxOutputTokens } : {}),
+    thinkingMode: effectivePrefs.thinkingMode ?? "off",
+    ...(effectivePrefs.contextWindowTokens ? { contextWindowTokens: effectivePrefs.contextWindowTokens } : {}),
+    ...(effectivePrefs.maxOutputTokens ? { maxOutputTokens: effectivePrefs.maxOutputTokens, maxTokens: effectivePrefs.maxOutputTokens } : {}),
   };
+}
+
+function sanitizePrefsForResolvedModel(
+  prefs: AgentPreferences,
+  resolvedModel: Awaited<ReturnType<typeof resolveEscalatedAgentModel>>,
+): AgentPreferences {
+  const staleProfile = Boolean(prefs.profileId && prefs.profileId !== resolvedModel.profileId);
+  const sanitized: AgentPreferences = staleProfile
+    ? {
+        ...prefs,
+        profileId: resolvedModel.profileId,
+        modelName: undefined,
+        protocol: undefined,
+        modelUrl: undefined,
+        contextWindowTokens: undefined,
+      }
+    : {
+        ...prefs,
+        profileId: resolvedModel.profileId,
+      };
+  if (sanitized.profileId === undefined) {
+    delete sanitized.profileId;
+  }
+  const trimmedCustomUrl = sanitized.modelUrl?.trim();
+  if (trimmedCustomUrl) {
+    sanitized.modelUrl = trimmedCustomUrl;
+  } else {
+    delete sanitized.modelUrl;
+  }
+  return sanitized;
 }
 
 export async function escalateCompanionToAgent(
@@ -2882,13 +2947,13 @@ export async function escalateCompanionToAgent(
   input: EscalateToAgentInput,
 ): Promise<EscalateToAgentResult> {
   const requestText = input.text.trim();
-  if (!requestText) throw new Error("请写明要交给智能体执行的具体修改要求。");
+  if (!requestText) throw new Error("请写明要交给改档助手处理的具体修改要求。");
   if (!game.llm) throw new Error("请先在设置中配置 AI 服务与模型。");
 
   const companion = new CompanionClient(game);
   const detail = await companion.getSessionDetail(input.sessionId);
   const worldId = detail.session.boundWorldId;
-  if (!worldId) throw new Error("请先挂载要操作的故事，再切换到智能体改档。");
+  if (!worldId) throw new Error("请先挂载要操作的故事，再交给改档助手处理。");
 
   const [start, prefs, policy] = await Promise.all([
     game.repo.generationStart(worldId),
@@ -2896,6 +2961,7 @@ export async function escalateCompanionToAgent(
     resolveCompanionAgentPolicy(game, input.policy),
   ]);
   const resolvedModel = await resolveEscalatedAgentModel(game, prefs);
+  const sanitizedPrefs = sanitizePrefsForResolvedModel(prefs, resolvedModel);
   const agent = new AgentClient(game);
 
   let piSessionId = detail.session.piSessionId;
@@ -2914,8 +2980,16 @@ export async function escalateCompanionToAgent(
   // `task.text` when the request is short or refers back to prior chat — never AI replies
   // and never prior `research`/`agent` tool templates!
   const includePriorChat = requestText.length < 40 || PRIOR_CHAT_REFERENCE_RE.test(requestText);
+  const branchMessages =
+    input.parentId !== undefined
+      ? (() => {
+          if (input.parentId === null) return [];
+          const idx = detail.messages.findIndex((m) => m.id === input.parentId);
+          return idx >= 0 ? detail.messages.slice(0, idx + 1) : detail.messages;
+        })()
+      : detail.messages;
   const priorPlayerLines = includePriorChat
-    ? detail.messages
+    ? branchMessages
         .filter(
           (m) =>
             m.role === "user" &&
@@ -2934,16 +3008,21 @@ export async function escalateCompanionToAgent(
   // Atomic start: start the Pi agent run and bind `piSessionId` BEFORE writing
   // the user/card messages into `companion_messages`, so a failed start never
   // leaves a dead unclickable agent card in chat!
-  const started = await agent.start({
-    ...prefs,
-    ...(resolvedModel.profileId ? { profileId: resolvedModel.profileId } : {}),
-    ...(prefs.modelUrl?.trim() || resolvedModel.url ? { modelUrl: prefs.modelUrl?.trim() || resolvedModel.url } : {}),
+  const startRequest = {
+    ...sanitizedPrefs,
+    ...(sanitizedPrefs.modelUrl?.trim() ? { modelUrl: sanitizedPrefs.modelUrl.trim() } : {}),
     policy,
     sessionId: piSessionId,
     text: combinedPlayerText,
     model: resolvedModel,
     ...(input.target ? { target: input.target } : {}),
-  });
+  };
+  if (resolvedModel.profileId) {
+    startRequest.profileId = resolvedModel.profileId;
+  } else {
+    delete startRequest.profileId;
+  }
+  const started = await agent.start(startRequest);
 
   await companion.updateSession(detail.session.id, {
     piSessionId,
@@ -2953,6 +3032,7 @@ export async function escalateCompanionToAgent(
 
   const userMsg = (
     await companion.appendMessage(detail.session.id, {
+      ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
       role: "user",
       gear: "agent",
       status: "done",
@@ -2966,7 +3046,7 @@ export async function escalateCompanionToAgent(
       role: "assistant",
       gear: "agent",
       status: "done",
-      content: `已转交智能体任务执行（策略：${policy === "preview" ? "先看预览" : policy === "auto" ? "自动采用" : "可撤回项自动采用"}）。`,
+      content: `已交给改档助手处理（方式：${policy === "preview" ? "先看预览" : policy === "auto" ? "自动采用" : "可撤回项自动采用"}）。`,
       piTaskId: started.taskId,
       modelId: resolvedModel.model,
     })
@@ -3006,6 +3086,7 @@ export async function steerCompanionAgent(
     resolveCompanionAgentPolicy(game, input.policy),
   ]);
   const resolvedModel = await resolveEscalatedAgentModel(game, prefs);
+  const sanitizedPrefs = sanitizePrefsForResolvedModel(prefs, resolvedModel);
   const requestedDelivery: "steer" | "queued" =
     input.phase === "closing" || input.phase === "committing"
       ? "queued"
@@ -3037,15 +3118,20 @@ export async function steerCompanionAgent(
     }
   } else {
     const agent = new AgentClient(game);
-    const accepted = await agent.enqueue(input.taskId, requestText, requestedDelivery, {
-      ...prefs,
-      ...(resolvedModel.profileId ? { profileId: resolvedModel.profileId } : {}),
-      ...(prefs.modelUrl?.trim() || resolvedModel.url ? { modelUrl: prefs.modelUrl?.trim() || resolvedModel.url } : {}),
+    const enqueueRequest = {
+      ...sanitizedPrefs,
+      ...(sanitizedPrefs.modelUrl?.trim() ? { modelUrl: sanitizedPrefs.modelUrl.trim() } : {}),
       policy,
       sessionId: input.piSessionId,
       text: requestText,
       model: resolvedModel,
-    });
+    };
+    if (resolvedModel.profileId) {
+      enqueueRequest.profileId = resolvedModel.profileId;
+    } else {
+      delete enqueueRequest.profileId;
+    }
+    const accepted = await agent.enqueue(input.taskId, requestText, requestedDelivery, enqueueRequest);
     if (accepted.delivery === "steer" || accepted.delivery === "queued") {
       actualDelivery = accepted.delivery;
     }

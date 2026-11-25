@@ -306,8 +306,8 @@ impl Engine {
             }
         } else {
             let review_ver = match step_depth {
-                "deep" => Some("reference-review-4"),
-                "standard" if plan.state["source"]["fanfic"] == true => Some("reference-review-lite-5"),
+                "deep" => Some("reference-review-5"),
+                "standard" if plan.state["source"]["fanfic"] == true => Some("reference-review-lite-6"),
                 _ => None,
             };
             match review_ver {
@@ -951,9 +951,35 @@ fn prepare_messages(
     let mut reference=Value::Null;
     let note_str = director_note.unwrap_or("").trim();
     if plan.state["source"].is_object() {
-        // Keep query focused on director note (if any) so search_original ranks by active entities,
-        // place, instructions and current book position instead of drowning in 3 full narratives.
-        let original=crate::runtime_sources::read(store,plan,"search_original",&json!({"query":note_str}))?;
+        // Combine director_note with the tail (~500 chars) of the last 2 non-edit narratives so
+        // autoplay retrieves canon passages matching recent story events even without a director_note.
+        let mut recent_narratives: Vec<&str> = history
+            .iter()
+            .rev()
+            .filter(|n| n["kind"] != "edit")
+            .filter_map(|n| n["narrative"].as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .take(2)
+            .collect();
+        recent_narratives.reverse();
+        let joined_recent = recent_narratives.join("\n");
+        let recent_count = joined_recent.chars().count();
+        let recent_tail: String = joined_recent
+            .chars()
+            .skip(recent_count.saturating_sub(500))
+            .collect();
+        let search_query = if note_str.is_empty() {
+            recent_tail
+        } else if recent_tail.is_empty() {
+            note_str.to_owned()
+        } else {
+            format!("{note_str}\n{recent_tail}")
+        };
+        let original = crate::runtime_sources::read(
+            store,
+            plan,
+            "search_original",
+            &json!({"query": search_query}),
+        )?;
         reference=json!({"bookId":original["bookId"],"title":original["title"],"binding":plan.state["source"],"status":original["status"],"passages":original["excerpts"].as_array().cloned().unwrap_or_default()});
     }
     let saved=&plan.meta["writingContext"];

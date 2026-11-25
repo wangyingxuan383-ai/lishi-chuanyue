@@ -39,9 +39,29 @@ async function summed(platform: Platform, where: string, params: (string | numbe
   return { calls: sum(list, "calls"), input: sum(list, "input"), output: sum(list, "output"), unknown: sum(list, "unknown"), ms: sum(list, "ms"), parts: list };
 }
 const sum = (parts: UsagePart[], key: "calls" | "input" | "output" | "unknown" | "ms") => parts.reduce((n, p) => n + p[key], 0);
+const totalFromParts = (list: UsagePart[]): UsageTotal => ({
+  calls: sum(list, "calls"), input: sum(list, "input"), output: sum(list, "output"), unknown: sum(list, "unknown"), ms: sum(list, "ms"), parts: list,
+});
+
+/** Background tidy-up jobs recorded under a passage's `node_id` after the passage is already shown. */
+export const BACKGROUND_TURN_PURPOSES = ["upkeep", "chapter"] as const;
+const BACKGROUND_TURN_LABELS = new Set(BACKGROUND_TURN_PURPOSES.map((p) => purposeLabel(p)));
+
+/** Splits a passage's total usage into foreground turn work vs post-turn background maintenance (`upkeep` / `chapter`). */
+export function splitTurnUsage(total: UsageTotal): { foreground: UsageTotal | null; background: UsageTotal | null } {
+  const fg = total.parts.filter((p) => !(BACKGROUND_TURN_PURPOSES as readonly string[]).includes(p.purpose) && !BACKGROUND_TURN_LABELS.has(p.label));
+  const bg = total.parts.filter((p) => (BACKGROUND_TURN_PURPOSES as readonly string[]).includes(p.purpose) || BACKGROUND_TURN_LABELS.has(p.label));
+  return {
+    foreground: fg.length ? totalFromParts(fg) : null,
+    background: bg.length ? totalFromParts(bg) : null,
+  };
+}
 
 /** One passage: every request its run made, including background 补记 and 核对. */
 export const turnUsage = (platform: Platform, nodeId: string) => summed(platform, "u.node_id = ?", [nodeId]);
+/** Foreground requests that produced/checked the passage itself, excluding post-commit background `upkeep` and `chapter` summaries. */
+export const turnForegroundUsage = (platform: Platform, nodeId: string) =>
+  summed(platform, `u.node_id = ? AND ${PURPOSE_SQL} NOT IN ('upkeep', 'chapter')`, [nodeId]);
 /** One native execution run (including cancelled, paused or failed runs that never committed a node). */
 export const runUsage = (platform: Platform, runId: string) => summed(platform, "(u.id = ? OR u.id LIKE ?)", [runId, `${runId}:%`]);
 /** Recent calls for a helper popup (改写, 改后同步, 查一查, 札记) since an ISO timestamp. */

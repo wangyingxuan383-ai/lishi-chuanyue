@@ -1,9 +1,11 @@
 import { memo } from "react";
+import { cleanNovelLine, parseNovelProseBlocks } from "../../engine/text/proseClean";
 // Narrative paragraphs; the date line of an opening is emphasised. While a
 // passage streams, each sentence fades in as it starts (UX_CN 3: "writing",
 // not a jittering cursor); the motion setting turns the fade off in CSS.
 
 const DATE_LINE = (p: string) => p.length < 40 && /[载年]/.test(p) && /[时日]/.test(p) && !/[“”"]/.test(p);
+const STREAM_HR_RE = /^[\s\u3000]*(?:-{3,}|\*{3,}|_{3,})[\s\u3000]*$/;
 
 /** Splits after sentence ends (。！？…；), keeping closing quotes with their sentence. */
 export function sentences(text: string): string[] {
@@ -17,15 +19,39 @@ function Streamed({ text }: { text: string }) {
 }
 
 export const StoryText = memo(function StoryText({ text, streaming = false, emphasizeDate = true }: { text: string; streaming?: boolean; emphasizeDate?: boolean }) {
-  const paragraphs = text.split(/\n+/).filter((p) => p.trim());
-  if (streaming && paragraphs.length === 0) paragraphs.push("");
+  if (!streaming) {
+    const blocks = parseNovelProseBlocks(text);
+    return (
+      <div className="story-text">
+        {blocks.map((b, i) => {
+          if (b.kind === "divider") {
+            return <hr key={i} className="story-divider" aria-hidden="true" />;
+          }
+          const p = b.text;
+          const dateLine = emphasizeDate && DATE_LINE(p);
+          const body = dateLine ? p.trim() : p;
+          return dateLine
+            ? <p key={i} className="date-line">{body}</p>
+            : <p key={i}>{body}</p>;
+        })}
+      </div>
+    );
+  }
+  const paragraphs = text.split(/\r?\n+/).filter((p) => p.trim());
+  if (paragraphs.length === 0) paragraphs.push("");
   return (
-    <div className={`story-text${streaming ? " streaming" : ""}`}>
-      {paragraphs.map((p, i) => {
+    <div className="story-text streaming">
+      {paragraphs.map((raw, i) => {
+        const isLast = i === paragraphs.length - 1;
+        if (!isLast && STREAM_HR_RE.test(raw)) {
+          return <hr key={i} className="story-divider" aria-hidden="true" />;
+        }
+        const p = cleanNovelLine(raw);
+        if (!isLast && !p.trim()) return null;
         const dateLine = emphasizeDate && DATE_LINE(p);
-        const last = streaming && i === paragraphs.length - 1 ? "cursor-blink" : undefined;
+        const last = isLast ? "cursor-blink" : undefined;
         // Only the active trailing paragraph needs per-sentence fade spans; earlier paragraphs are already settled (R31-P3).
-        const body = last ? <Streamed text={dateLine ? p.trim() : p} /> : dateLine ? p.trim() : p;
+        const body = isLast ? <Streamed text={dateLine ? p.trim() : p} /> : dateLine ? p.trim() : p;
         return dateLine
           ? <p key={i} className={["date-line", last].filter(Boolean).join(" ")}>{body}</p>
           : <p key={i} className={last}>{body}</p>;

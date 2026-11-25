@@ -22,10 +22,10 @@ const SENTENCE = /[^。！？\n]*[。！？]?[”」』]?/g;
 /** Names in play: everything with a name that the recent text mentions, the latest-mentioned first. */
 export function namesInPlay(state: WorldState, recent: string): { name: string; alias: string[] }[] {
   const all = [
-    ...state.people.map((p) => ({ name: p.name, alias: p.aliases })),
-    ...state.cards.filter((c) => c.kind !== "时代").map((c) => ({ name: c.name, alias: c.keys })),
-    ...state.places.map((p) => ({ name: p.name, alias: p.aliases ?? [] })),
-    ...state.protagonist.items.map((i) => ({ name: i.name, alias: [] as string[] })),
+    ...(state.people ?? []).map((p) => ({ name: p.name, alias: p.aliases ?? [] })),
+    ...(state.cards ?? []).filter((c) => c.kind !== "时代").map((c) => ({ name: c.name, alias: c.keys ?? [] })),
+    ...(state.places ?? []).map((p) => ({ name: p.name, alias: p.aliases ?? [] })),
+    ...(state.protagonist.items ?? []).map((i) => ({ name: i.name, alias: [] as string[] })),
   ];
   return all
     .map((e) => ({ ...e, at: Math.max(...[e.name, ...e.alias].filter((w) => w && w.length >= 2).map((w) => recent.lastIndexOf(w)), -1) }))

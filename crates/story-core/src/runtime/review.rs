@@ -1,6 +1,37 @@
 //! 原著核对: the deep tier's checked rewrite and the standard tier's lite check
-//! (reference-review-4 and reference-review-lite-5, D161, D162).
+//! (reference-review-5 and reference-review-lite-6, D161, D162).
 use super::*;
+
+fn is_aux_tool_unsupported(error: &Error) -> bool {
+    let text_has_tool_rejection = |msg: &str| {
+        let lower = msg.to_lowercase();
+        [
+            "unsupported tool",
+            "tool is not supported",
+            "does not support tools",
+            "tools are not supported",
+            "does not support tool use",
+            "function calling is not supported",
+            "does not support function",
+            "不支持工具",
+        ]
+        .iter()
+        .any(|m| lower.contains(m))
+            || (lower.contains("tool")
+                && ["not supported", "unsupported", "unrecognized", "unknown", "invalid"]
+                    .iter()
+                    .any(|m| lower.contains(m)))
+    };
+    match error {
+        Error::Provider {
+            kind,
+            status: Some(400 | 422),
+            message,
+            partial: false,
+        } if kind == "http" => text_has_tool_rejection(message),
+        other => text_has_tool_rejection(&other.to_string()),
+    }
+}
 
 impl Engine {
     /// One helper-model request, with evidence, text and record validated together.
@@ -14,7 +45,7 @@ impl Engine {
         let passages = lite_review_passages(plan, &extra_passages, cap);
         if passages.is_empty() {
             return Ok((narrative.to_owned(), record.clone(), json!({
-                "version":"reference-review-lite-5","status":"skipped","reason":"no_passages","issues":[],"skipped":0,"unresolved":[]
+                "version":"reference-review-lite-6","status":"skipped","reason":"no_passages","issues":[],"skipped":0,"unresolved":[]
             })));
         }
         let mut messages=lite_review_messages_with(plan, &passages, narrative);
@@ -24,7 +55,7 @@ impl Engine {
         let result=match self.complete(shared,"reference-review-lite",messages,vec![],true).await {
             Ok(result)=>result,
             Err(error@(Error::Cancelled|Error::Stale))=>return Err(error),
-            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-5","status":"skipped","reason":error.to_string()}))),
+            Err(error)=>return Ok((narrative.to_owned(),record.clone(),json!({"version":"reference-review-lite-6","status":"skipped","reason":error.to_string()}))),
         };
         // Do not repair truncated JSON into an executable record patch.
         let stripped = chat::strip_inline_think(&result.text);
@@ -46,7 +77,7 @@ impl Engine {
         };
         let Some(raw_list) = raw_issues.as_array() else {
             return Ok((narrative.to_owned(), record.clone(), json!({
-                "version":"reference-review-lite-5","status":"skipped","issues":[],"skipped":0,
+                "version":"reference-review-lite-6","status":"skipped","issues":[],"skipped":0,
                 "unresolved":["原著核对未返回完整的更正结果，已保留本段原稿和记录。"]
             })));
         };
@@ -69,9 +100,9 @@ impl Engine {
         if apply_skipped > 0 {
             unresolved.push("部分更正未能同时校准正文和回合记录，已跳过冲突条目；可使用“按原著纠错”进一步核对。");
         }
-        Ok((revised,revised_record,json!({"version":"reference-review-lite-5","status":if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
+        Ok((revised,revised_record,json!({"version":"reference-review-lite-6","status":if skipped>0{"partial"}else{"reviewed"},"issues":applied,"skipped":skipped,"unresolved":unresolved})))
     }
-    /// Deep-tier canon review (`reference-review-4`): at most one optional read-tool
+    /// Deep-tier canon review (`reference-review-5`): at most one optional read-tool
     /// round plus a compact sentence-patch reply over the passage as a whole.
     /// Like `review_reference_lite`, any non-cancellation / non-stale problem keeps
     /// the already-written passage and record intact instead of blocking the turn.
@@ -89,7 +120,7 @@ impl Engine {
                     "narrative": narrative,
                     "record": record,
                     "report": {
-                        "version": "reference-review-4",
+                        "version": "reference-review-5",
                         "parts": 1,
                         "findings": [],
                         "issues": [],
@@ -108,7 +139,7 @@ impl Engine {
         let extra_passages = shared.lock().map_err(|_| Error::Cancelled)?.draft["originalPassages"].as_array().cloned().unwrap_or_default();
         let review_tools: Vec<Value> = tools
             .iter()
-            .filter(|t| ["read_original","prepare_reference_check","read_canon_facts","read_history","read_characters"].contains(&t["function"]["name"].as_str().unwrap_or("")))
+            .filter(|t| ["search_original","read_original","prepare_reference_check","read_canon_facts","read_history","read_characters"].contains(&t["function"]["name"].as_str().unwrap_or("")))
             .cloned()
             .collect();
         let initial_passages = collect_review_passages(plan, &extra_passages);
@@ -117,7 +148,7 @@ impl Engine {
                 "narrative": narrative,
                 "record": record,
                 "report": {
-                    "version": "reference-review-4",
+                    "version": "reference-review-5",
                     "parts": 1,
                     "findings": [],
                     "issues": [],
@@ -154,12 +185,12 @@ impl Engine {
             format!("原著第{}节（{pos_title}）前后", position + 1)
         };
         let mut messages=vec![
-            json!({"role":"system","content":r#"你是深度档原著校对。故事现在大约在【当前位置】，那之后的情节尚未发生。
+            json!({"role":"system","content":r#"你是深度档原著校对。【当前位置】仅作开局或近期参考锚点；在参考上限（through）以内，若本局剧情已推进到后续事件或属玩家同人改写/自创能力，均属合法进展，绝不强行改回早期章节。
 规则：
-- 只核对本段草稿中新引入、且在当前位置就已成立的原著具体细节（人名、称谓、身份、关系、能力设定、器物、地点、事件规则）。
-- 保留玩家自创能力、金手指、玩家行动及本局既有分支；资料里没有、属于玩家分支或拿不准的内容一律不改（不要把自创设定当错改掉，也不要拿后文剧透纠正现在）。
-- 若下方【已提供原文】已足够判断，直接输出 JSON，不要调用工具！只有草稿出现了明显可疑的原著专有设定且下方原文未覆盖时，才在同一批里精简查证一次并 read_original，绝不泛搜整本书。
-- 只针对确有原文依据的错误给出最小原句替换（最多 5 条），严禁重写或抄录整段无错正文！每个更正必须附实际读到的原文引文（section 和 chunk 用原文标题显示的数字，quote 逐字照抄原文片段），recordPatch 只填受该句更正影响的回合记录字段（无影响留 {}）。
+- 只核对本段草稿中与原著具体硬性设定（人名、称谓、身份、关系、能力设定、器物、地点、事件规则）明显矛盾的硬伤；若本局剧情已在参考上限以内推进到后续事件，按该事件对应原文校对，绝不因晚于【当前位置】就判错。
+- 保留玩家自创能力、金手指、玩家行动及本局既有分支；属玩家分支、主角行动或同人合理改编的内容一律不改，也绝不放入 unresolved！unresolved 只记正文明确声称遵循原著、但经核对缺少依据的硬性原著设定冲突（无此类硬性冲突时留 []）。
+- 若下方【已提供原文】已足够判断，直接输出 JSON，不要调用工具！只有草稿出现了明显可疑的原著专有设定且下方原文未覆盖时，才在同一批里精简调用 search_original / read_original 查证一次，绝不泛搜整本书。
+- 只针对确有原文依据的错误给出最小原句替换（最多 5 条，fix 必须是纯文本小说句子，不加 Markdown 标记），严禁重写或抄录整段无错正文！每个更正必须附实际读到的原文引文（section 和 chunk 用原文标题显示的数字，quote 逐字照抄原文片段），recordPatch 只填受该句更正影响的回合记录字段（无影响留 {}）。
 - 没有需要改的硬伤时直接返回 {"issues":[],"findings":[],"unresolved":[]}。只返回纯 JSON 对象，不加代码块：
 {"issues":[{"quote":"正文中有错的原句，逐字照抄","problem":"与原著哪里不符","fix":"改正后的这句","citations":[{"section":1,"chunk":1,"quote":"对应原著片段原句"}],"recordPatch":{}}],"findings":[],"unresolved":[]}"#}),
             json!({"role":"user","content":format!("【当前位置】{pos_label}\n【玩家行动】{}\n【原著用法】{}\n【当前必要事实】{}\n【玩家事实定位】{}\n【原著札记】{}\n【已提供原文】{}\n【待核对正文】\n{narrative}\n【原回合记录】\n{record}",
@@ -172,14 +203,49 @@ impl Engine {
             )})
         ];
         let max_rounds = if review_tools.is_empty() { 1usize } else { 2usize };
+        let mut use_aux = plan
+            .model
+            .aux_model
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
         for round in 0..max_rounds {
             self.check(shared)?;
             let final_round = round + 1 == max_rounds;
             if final_round && round > 0 {
-                messages.push(json!({"role":"system","content":"查证到此为止，不再调用工具。请直接输出纯 JSON 校对结果；无法核实或属玩家分支的细节不改，可记入 unresolved。"}));
+                messages.push(json!({"role":"system","content":"查证到此为止，不再调用工具。请直接输出纯 JSON 校对结果；属玩家分支、主角行动或同人合理改编的内容绝不修改，也绝不放入 unresolved（unresolved 只记正文明确声称遵循原著却缺少依据的硬性原著设定冲突，否则留 []）。"}));
             }
-            let offered = if final_round { vec![] } else { review_tools.clone() };
-            let result = self.complete_with(shared, &format!("reference-review:0:{round}"), messages.clone(), offered, false, final_round && !review_tools.is_empty()).await?;
+            let offered = review_tools.clone();
+            let final_only = final_round && !review_tools.is_empty();
+            let attempt = self
+                .complete_with(
+                    shared,
+                    &format!("reference-review:0:{round}"),
+                    messages.clone(),
+                    offered.clone(),
+                    use_aux,
+                    final_only,
+                )
+                .await;
+            let result = match attempt {
+                Err(err)
+                    if use_aux
+                        && round == 0
+                        && !review_tools.is_empty()
+                        && is_aux_tool_unsupported(&err) =>
+                {
+                    use_aux = false;
+                    self.complete_with(
+                        shared,
+                        &format!("reference-review:0:{round}"),
+                        messages.clone(),
+                        offered,
+                        false,
+                        final_only,
+                    )
+                    .await?
+                }
+                other => other?,
+            };
             if !result.tool_calls.is_empty() && !final_round {
                 messages.push(chat::assistant_message(&result));
                 for call in &result.tool_calls {
@@ -213,7 +279,7 @@ impl Engine {
                     "narrative": narrative,
                     "record": record,
                     "report": {
-                        "version": "reference-review-4",
+                        "version": "reference-review-5",
                         "parts": 1,
                         "findings": [],
                         "issues": [],
@@ -271,7 +337,7 @@ impl Engine {
                     "narrative": final_narrative,
                     "record": final_record,
                     "report": {
-                        "version": "reference-review-4",
+                        "version": "reference-review-5",
                         "parts": 1,
                         "issues": applied,
                         "findings": findings,
@@ -306,7 +372,7 @@ impl Engine {
                                     "narrative": revised["narrative"].as_str().unwrap_or(narrative),
                                     "record": norm_rec,
                                     "report": {
-                                        "version": "reference-review-4",
+                                        "version": "reference-review-5",
                                         "parts": 1,
                                         "findings": report["findings"],
                                         "unresolved": unresolved,
@@ -325,7 +391,7 @@ impl Engine {
                 "narrative": narrative,
                 "record": record,
                 "report": {
-                    "version": "reference-review-4",
+                    "version": "reference-review-5",
                     "parts": 1,
                     "findings": report["findings"].as_array().cloned().unwrap_or_default(),
                     "issues": [],
@@ -339,7 +405,7 @@ impl Engine {
             "narrative": narrative,
             "record": record,
             "report": {
-                "version": "reference-review-4",
+                "version": "reference-review-5",
                 "parts": 1,
                 "findings": [],
                 "issues": [],
@@ -440,16 +506,16 @@ fn lite_review_messages_with(plan:&RunPlan, passages:&[&Value], narrative:&str)-
     let source=plan.reading_source();
     let usage=if source["plot"]=="canon"{"尽量沿原著剧情"}else{"同人，允许本局分支"};
     vec![
-        json!({"role":"system","content":"你是原著校对。故事现在大约在原著的【当前位置】，那之后的情节还没有发生。
+        json!({"role":"system","content":"你是原著校对。【当前位置】仅作开局或近期参考锚点；在参考上限（through）以内，若本局剧情已推进到后续事件或属玩家同人改写/自创能力，均属合法进展，绝不强行改回早期章节。
 规则：
-- 只找出正文里与下列原著资料明显矛盾、并且在当前位置时就已成立的具体细节：人名、称谓、身份、关系、能力、物品、地点。
-- 不要拿后面章节才出现的人物、徒弟、身份或事件来“纠正”现在；玩家行动造成的改变、本局已有的分支和资料里没有的内容都不算错。拿不准就不改。
-- 不改文风，不增删情节，不引入正文里没有的人物。
+- 只找出正文里与下列原著资料明显矛盾的具体硬伤：人名、称谓、身份、关系、能力、物品、地点。
+- 玩家行动造成的改变、主角自创能力、本局已有的同人分支以及资料里没有的内容都不算错，一律保留不改。拿不准就不改。
+- 不改文风，不增删情节，不引入正文里没有的人物，fix 必须是纯文本小说句子（禁止 Markdown 标记）。
 - 每个问题必须附原文引文（section 和 chunk 用下面原文标题显示的数字，quote 逐字照抄下面对应原著片段），不能引用正文或札记充当原文。
 - recordPatch 只含受这句更正影响的回合记录字段，不受影响留空对象；数组字段提供更正后的完整列表并保留无关项目，对象字段只提供有变化的属性，不能改整局设定；按列出顺序修正记录，后项基于前项结果；正文和记录无法同步就不要提出这条更正。
 最多 5 条；没有问题返回 {\"issues\":[]}。只返回 JSON，不要加代码块或额外说明：
 {\"issues\":[{\"quote\":\"正文中有错的原句，逐字照抄\",\"problem\":\"与原著哪里不符\",\"fix\":\"改正后的这句\",\"citations\":[{\"section\":1,\"chunk\":1,\"quote\":\"下面对应原著片段中的原句，逐字照抄\"}],\"recordPatch\":{}}]}"}),
-        json!({"role":"user","content":format!("【当前位置】{pos_label}\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（含当前位置附近及本回合查阅的原文片段）{}\n【待校对正文】\n{narrative}",source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到可用的原著原文）".to_owned()}else{evidence})}),
+        json!({"role":"user","content":format!("【当前位置】{pos_label}\n【原著用法】{usage}；{}\n【玩家行动】{}\n【原著札记】{}\n【原著原文】（含当前锚点及本回合检索命中的原文片段）{}\n【待校对正文】\n{narrative}",source["instructions"].as_str().unwrap_or(""),plan.action["text"].as_str().unwrap_or(""),if notes.is_empty(){"（无）"}else{notes},if evidence.is_empty(){"（本回合没有取到可用的原著原文）".to_owned()}else{evidence})}),
     ]
 }
 
@@ -461,15 +527,18 @@ fn lite_review_passages<'a>(plan: &'a RunPlan, extra: &'a [Value], cap: usize) -
     let mut left = cap / 5;
     let mut kept = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    // Pre-supplied passages stay near `position`; passages explicitly read via tools during
-    // this turn are already bounded by `through` and must stay visible even if `position` lagged.
+    // Keyword-matched passages (`match != "nearby"`) and tool-read passages stay visible
+    // anywhere within `through`; fallback `"nearby"` excerpts stay bounded near `position`.
     let pre_iter = plan
         .reference
         .as_ref()
         .and_then(|r| r["passages"].as_array())
         .into_iter()
         .flatten()
-        .map(|p| (p, pre_last));
+        .map(|p| {
+            let limit = if p["match"] == "nearby" { pre_last } else { through };
+            (p, limit)
+        });
     let extra_iter = extra.iter().rev().map(|p| (p, through));
     for (passage, limit) in pre_iter.chain(extra_iter) {
         let Some(section) = passage["section"].as_u64() else { continue; };
@@ -607,17 +676,21 @@ pub(super) fn apply_lite_review(narrative:&str, record:&Value, issues:&Value)->(
 mod lite_review_tests {
     use super::*;
     #[test]
-    fn the_lite_check_sees_where_the_story_is_and_not_far_later_chapters() {
-        let mut plan: RunPlan = serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"turn","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[],"state":{"source":{"bookId":"b","fanfic":true,"plot":"canon","position":12,"instructions":"沿原著"}},"settings":{},"options":{},"action":{"text":"上前行礼"},"meta":{}})).unwrap();
+    fn lite_check_keeps_keyword_hits_within_through_and_drops_past_through_or_distant_nearby() {
+        let mut plan: RunPlan = serde_json::from_value(json!({"id":"r","worldId":"w","lineId":"l","headId":"h","baseId":"h","kind":"turn","model":{"slot":"t","url":"https://unused.invalid","model":"t","includeUsage":false},"messages":[],"extractMessages":[],"state":{"source":{"bookId":"b","fanfic":true,"plot":"canon","position":12,"through":30,"instructions":"沿原著"}},"settings":{},"options":{},"action":{"text":"上前行礼"},"meta":{}})).unwrap();
         plan.reference = Some(json!({"passages":[
             {"kind":"original","section":12,"chunk":40,"title":"双叉岭","text":"两个从者挑着担子"},
-            {"kind":"original","section":26,"chunk":99,"title":"白虎岭","text":"八戒沙僧护着师父"}
+            {"kind":"original","section":26,"chunk":99,"title":"白虎岭","text":"八戒沙僧护着师父"},
+            {"kind":"original","section":28,"chunk":105,"title":"流沙河","text":"无命中邻近段落","match":"nearby"},
+            {"kind":"original","section":35,"chunk":120,"title":"平顶山","text":"超出参考上限段落"}
         ]}));
         let messages = lite_review_messages(&plan, "两个从人上前。", 12000);
         let user = messages[1]["content"].as_str().unwrap();
         assert!(user.contains("【当前位置】原著第13节") && user.contains("[第13节·双叉岭") && user.contains("两个从者"), "{user}");
-        assert!(!user.contains("八戒沙僧"), "{user}");
-        assert!(messages[0]["content"].as_str().unwrap().contains("还没有发生"));
+        assert!(user.contains("八戒沙僧"), "keyword-matched passage within through must stay visible: {user}");
+        assert!(!user.contains("无命中邻近段落"), "nearby fallback past position+3 must stay excluded: {user}");
+        assert!(!user.contains("超出参考上限段落"), "passage past through must stay excluded: {user}");
+        assert!(messages[0]["content"].as_str().unwrap().contains("仅作开局或近期参考锚点"));
     }
     #[test]
     fn lite_review_uses_tool_read_passages_and_normalizes_punctuation_in_citations() {

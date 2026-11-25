@@ -117,12 +117,49 @@ fn scoped_endpoint(raw: &str, expected_base: &str) -> Result<String> {
     }
     let prefix = endpoint_path(base.path())?;
     let target = endpoint_path(parsed.path())?;
-    if !(target == prefix || target.starts_with(&format!("{prefix}/"))) {
+    let in_prefix = |p: &str| target == p || target.starts_with(&format!("{p}/"));
+    let alt_gemini_prefix = prefix
+        .strip_suffix("/openai")
+        .filter(|p| p.ends_with("/v1beta"));
+    if !in_prefix(&prefix) && !alt_gemini_prefix.is_some_and(in_prefix) {
         return Err(endpoint_error(
             "自定义接口地址超出所选服务的路径范围，请检查服务与密钥绑定",
         ));
     }
     Ok(parsed.as_str().trim_end_matches('/').into())
+}
+
+fn same_bound_service_base(bound_norm: &str, expected_norm: &str) -> bool {
+    let Ok(a_str) = normalize_base(bound_norm) else {
+        return false;
+    };
+    let Ok(b_str) = normalize_base(expected_norm) else {
+        return false;
+    };
+    if a_str == b_str {
+        return true;
+    }
+    let (Ok(a), Ok(b)) = (reqwest::Url::parse(&a_str), reqwest::Url::parse(&b_str)) else {
+        return false;
+    };
+    if a.origin() != b.origin() {
+        return false;
+    }
+    let (Ok(pa), Ok(pb)) = (endpoint_path(a.path()), endpoint_path(b.path())) else {
+        return false;
+    };
+    let is_dual = |short: &str, long: &str| {
+        long.strip_suffix("/openai") == Some(short) && short.ends_with("/v1beta")
+    };
+    is_dual(&pa, &pb) || is_dual(&pb, &pa)
+}
+
+fn requested_endpoint(reference: &Value) -> Result<Option<&str>> {
+    match reference.get("modelUrl") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|v| !v.is_empty())),
+        _ => Err(endpoint_error("自定义接口地址格式无效")),
+    }
 }
 
 fn saved_endpoint(
@@ -142,7 +179,7 @@ fn saved_endpoint(
     let preferences: Value = raw
         .as_deref()
         .and_then(|raw| serde_json::from_str(raw).ok())
-        .ok_or_else(|| endpoint_error("请先在 Agent 设置中保存自定义接口地址"))?;
+        .ok_or_else(|| endpoint_error("请先在改档设置中保存自定义接口地址"))?;
     if preferences["profileId"].as_str() != Some(profile)
         || preferences["protocol"]
             .as_str()
@@ -150,13 +187,13 @@ fn saved_endpoint(
             != protocol
     {
         return Err(endpoint_error(
-            "自定义接口地址与已保存的 Agent 服务或接口类型不一致，请重新保存设置",
+            "自定义接口地址与已保存的服务或接口类型不一致，请重新保存改档设置",
         ));
     }
     let saved = preferences["modelUrl"]
         .as_str()
         .filter(|raw| !raw.trim().is_empty())
-        .ok_or_else(|| endpoint_error("请先在 Agent 设置中保存自定义接口地址"))?;
+        .ok_or_else(|| endpoint_error("请先在改档设置中保存自定义接口地址"))?;
     let saved = scoped_endpoint(saved, base)?;
     if saved != requested {
         return Err(endpoint_error(
@@ -174,7 +211,7 @@ fn load_grant(db: &rusqlite::Connection, id: &str) -> Result<EndpointGrant> {
     {
         return Err(endpoint_error("已保存的模型接口定位无效，请重新选择服务"));
     }
-    db.query_row("SELECT id,profile_id,slot,protocol,expected_base,endpoint FROM pi_model_endpoints WHERE id=?", [id], |row| Ok(EndpointGrant { id: row.get(0)?, profile_id: row.get(1)?, slot: row.get(2)?, protocol: row.get(3)?, expected_base: row.get(4)?, endpoint: row.get(5)? })).optional()?.ok_or_else(|| endpoint_error("已保存的模型接口定位不存在，请重新保存 Agent 设置"))
+    db.query_row("SELECT id,profile_id,slot,protocol,expected_base,endpoint FROM pi_model_endpoints WHERE id=?", [id], |row| Ok(EndpointGrant { id: row.get(0)?, profile_id: row.get(1)?, slot: row.get(2)?, protocol: row.get(3)?, expected_base: row.get(4)?, endpoint: row.get(5)? })).optional()?.ok_or_else(|| endpoint_error("已保存的模型接口定位不存在，请重新保存改档设置"))
 }
 
 /// `authorize` must use the platform's native secret adapter and fresh binding
@@ -195,7 +232,8 @@ pub fn resolve(
             serde_json::from_slice(&fs::read(binding_path).map_err(|_| invalid())?)
                 .map_err(|_| invalid())?;
         let bound = bindings.get(slot).ok_or_else(invalid)?;
-        if normalize_base(bound)? != expected {
+        let bound_norm = normalize_base(bound)?;
+        if !same_bound_service_base(&bound_norm, expected) {
             return Err(invalid());
         }
         authorize(slot, bound)
@@ -249,13 +287,14 @@ pub fn resolve_profile(
     // address. Match the existing serviceBase() normalization used when a key
     // is bound. Pi receives the native binding, not the frontend URL.
     let normalized = normalize_base(base.trim())?;
-    let parsed = reqwest::Url::parse(&normalized).map_err(|_| invalid())?;
-    let expected = if let Some(base) = normalized.strip_suffix("/chat/completions") {
-        base.to_owned()
-    } else if parsed.path().trim_matches('/').is_empty() {
-        format!("{normalized}/v1")
+    let candidate = normalized
+        .strip_suffix("/chat/completions")
+        .unwrap_or(&normalized);
+    let candidate_url = reqwest::Url::parse(candidate).map_err(|_| invalid())?;
+    let expected = if candidate_url.path().trim_matches('/').is_empty() {
+        format!("{candidate}/v1")
     } else {
-        normalized
+        candidate.to_owned()
     };
     let model = reference["id"]
         .as_str()
@@ -265,14 +304,11 @@ pub fn resolve_profile(
     if model.trim().is_empty() || model.len() > 512 || model.chars().any(char::is_control) {
         return Err(invalid());
     }
-    let raw_endpoint = match reference.get("modelUrl") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(value.trim()).filter(|v| !v.is_empty()),
-        _ => return Err(endpoint_error("自定义接口地址格式无效")),
-    };
+    let raw_endpoint = requested_endpoint(reference)?;
     let endpoint_ref = match reference.get("endpointRef") {
         None | Some(Value::Null) => None,
-        Some(Value::String(value)) if !value.is_empty() => Some(value.as_str()),
+        Some(Value::String(value)) if value.trim().is_empty() => None,
+        Some(Value::String(value)) => Some(value.as_str()),
         _ => return Err(endpoint_error("已保存的模型接口定位无效，请重新选择服务")),
     };
     let grant = if let Some(endpoint_ref) = endpoint_ref {
@@ -281,7 +317,7 @@ pub fn resolve_profile(
             || grant.profile_id != id
             || grant.slot != key_slot
             || grant.protocol != protocol
-            || grant.expected_base != expected
+            || !same_bound_service_base(&grant.expected_base, &expected)
         {
             return Err(endpoint_error(
                 "原任务的模型接口绑定已变更，请重新选择对应服务后继续",
@@ -289,7 +325,7 @@ pub fn resolve_profile(
         }
         if scoped_endpoint(&grant.endpoint, &expected)? != grant.endpoint {
             return Err(endpoint_error(
-                "已保存的模型接口定位无效，请重新保存 Agent 设置",
+                "已保存的模型接口定位无效，请重新保存改档设置",
             ));
         }
         if let Some(raw) = raw_endpoint {
@@ -333,7 +369,7 @@ pub fn resolve_profile(
         tx.execute("INSERT OR IGNORE INTO pi_model_endpoints(id,profile_id,slot,protocol,expected_base,endpoint) VALUES(?,?,?,?,?,?)", rusqlite::params![grant.id,grant.profile_id,grant.slot,grant.protocol,grant.expected_base,grant.endpoint])?;
         if load_grant(&tx, &grant.id)? != *grant {
             return Err(endpoint_error(
-                "模型接口定位发生冲突，请重新保存 Agent 设置",
+                "模型接口定位发生冲突，请重新保存改档设置",
             ));
         }
         tx.commit()?;
@@ -621,5 +657,163 @@ INSERT INTO profiles VALUES('own-profile','https://fixture.invalid/v1','own-slot
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn whitespace_model_url_is_ignored_and_preserves_aux_model_and_default_base() {
+        let store = fixture();
+        let wire = run(
+            &store,
+            json!({
+                "profileId": "own-profile",
+                "modelUrl": "   \t\n  ",
+                "auxModel": "owned-mini"
+            }),
+        )
+        .unwrap();
+        assert_eq!(wire["baseUrl"], "https://fixture.invalid/v1");
+        assert!(wire["endpointRef"].is_null());
+        assert_eq!(wire["auxModel"], "owned-mini");
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM pi_model_endpoints", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn gemini_dual_base_and_root_chat_completions_authorize_while_rejecting_out_of_scope() {
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dir_path = std::env::temp_dir().join(format!(
+            "lishi-model-ref-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir_path).unwrap();
+        let dir = TempDir(dir_path);
+
+        let store = fixture();
+        let write_bindings = |slot: &str, bound: &str| {
+            let mut map = BTreeMap::new();
+            map.insert(slot.to_owned(), bound.to_owned());
+            fs::write(
+                dir.0.join("secret-bindings.json"),
+                serde_json::to_vec(&map).unwrap(),
+            )
+            .unwrap();
+        };
+
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO profiles VALUES('gem-oai','https://generativelanguage.googleapis.com/v1beta/openai','gem-slot','gemini-2.5-flash','{}');
+                 INSERT INTO profiles VALUES('gem-nat','https://generativelanguage.googleapis.com/v1beta','gem-slot','gemini-2.5-flash','{\"protocol\":\"gemini\"}');
+                 INSERT INTO profiles VALUES('root-cc','https://relay.example.com/chat/completions','root-slot','gpt-4o','{}');",
+            )
+            .unwrap();
+
+        // Bound as /v1beta/openai, profile is /v1beta (and vice versa):
+        write_bindings("gem-slot", "https://generativelanguage.googleapis.com/v1beta/openai");
+        let resolved_nat = resolve(&store, &dir.0, &json!({"profileId":"gem-nat"}), |_, _| {
+            Ok("gem-secret".into())
+        })
+        .unwrap();
+        assert_eq!(
+            resolved_nat["baseUrl"],
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+
+        write_bindings("gem-slot", "https://generativelanguage.googleapis.com/v1beta");
+        let resolved_oai = resolve(&store, &dir.0, &json!({"profileId":"gem-oai"}), |_, _| {
+            Ok("gem-secret".into())
+        })
+        .unwrap();
+        assert_eq!(
+            resolved_oai["baseUrl"],
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+
+        // Grant saved under /v1beta/openai restores cleanly when profile switches to /v1beta,
+        // while still rejecting genuine base changes (/v2, host, port, foov1beta).
+        preferences(
+            &store,
+            json!({
+                "profileId": "gem-oai",
+                "protocol": "gemini",
+                "modelUrl": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            }),
+        );
+        let granted = resolve(
+            &store,
+            &dir.0,
+            &json!({
+                "profileId": "gem-oai",
+                "protocol": "gemini",
+                "modelUrl": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            }),
+            |_, _| Ok("gem-secret".into()),
+        )
+        .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE profiles SET base_url='https://generativelanguage.googleapis.com/v1beta' WHERE id='gem-oai'",
+                [],
+            )
+            .unwrap();
+        let restored = resolve(
+            &store,
+            &dir.0,
+            &json!({
+                "profileId": "gem-oai",
+                "protocol": "gemini",
+                "endpointRef": granted["endpointRef"]
+            }),
+            |_, _| Ok("gem-secret".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            restored["baseUrl"],
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+
+        // Root /chat/completions normalizes to /v1 matching serviceBase().
+        write_bindings("root-slot", "https://relay.example.com/v1");
+        let root_wire = resolve(&store, &dir.0, &json!({"profileId":"root-cc"}), |_, _| {
+            Ok("root-secret".into())
+        })
+        .unwrap();
+        assert_eq!(root_wire["baseUrl"], "https://relay.example.com/v1");
+
+        // Out-of-scope bases remain strictly rejected.
+        assert!(!same_bound_service_base(
+            "https://relay.example.com/foov1beta/openai",
+            "https://relay.example.com/foov1beta"
+        ));
+        assert!(!same_bound_service_base(
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://generativelanguage.googleapis.com:8443/v1beta"
+        ));
+        assert!(!same_bound_service_base(
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://generativelanguage.googleapis.com/v1alpha"
+        ));
+        write_bindings("gem-slot", "https://generativelanguage.googleapis.com/v1alpha");
+        assert!(resolve(&store, &dir.0, &json!({"profileId":"gem-nat"}), |_, _| {
+            Ok("unreachable".into())
+        })
+        .is_err());
     }
 }

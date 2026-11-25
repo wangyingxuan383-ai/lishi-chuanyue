@@ -31,9 +31,12 @@ export interface AskInput {
 export function askMessages(input: AskInput): ChatMessage[] {
   const { state } = input;
   const free = state.era.mode === "free";
-  const cards = state.cards.filter((c) => c.kind !== "时代").map((c) => `- ${c.kind} · ${c.name}${c.keys.length ? `（又称${c.keys.join("、")}）` : ""}：${short(c.content, 120)}`);
-  const places = state.places.filter((p) => (p.description ?? "").trim()).map((p) => `- ${p.name}：${short(p.description ?? "", 80)}`);
-  const goals = state.goals.map((g) => `- 【${g.kind}】${g.name}（${g.status}${g.progress ? `：${g.progress}` : ""}）`);
+  const cards = (state.cards ?? []).filter((c) => c.kind !== "时代").map((c) => {
+    const keys = c.keys ?? [];
+    return `- ${c.kind} · ${c.name}${keys.length ? `（又称${keys.join("、")}）` : ""}：${short(c.content ?? "", 120)}`;
+  });
+  const places = (state.places ?? []).filter((p) => (p.description ?? "").trim()).map((p) => `- ${p.name}：${short(p.description ?? "", 80)}`);
+  const goals = (state.goals ?? []).map((g) => `- 【${g.kind}】${g.name}（${g.status}${g.progress ? `：${g.progress}` : ""}）`);
   const chapters = input.chapters.map((c, i) => `第 ${i + 1} 章 · ${c.title}：${c.summary}`);
   // The opening sets up the debts, deadlines and people; then the newest turns that fit; then
   // 【相关旧事】 for what the question names from turns in between.

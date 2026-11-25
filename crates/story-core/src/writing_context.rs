@@ -561,7 +561,7 @@ pub fn build(input: &Value) -> Result<Value> {
                 format!("第{pos_n}节（{pos_title}）")
             };
             format!(
-                "\n【参考书籍】以下是外部资料，不是本局已发生的事实。本局实际剧情和玩家明确分支保留，AI自行写错不等于玩家改写；按相应时点理解身份与关系。摘要不能替代原文，资料不足不能声称已核实。\n参考范围：{through_label}；玩家设定原著位置：{pos_label}。\n玩家的原著用法：{}\n{}",
+                "\n【参考书籍】以下是外部资料，不是本局已发生的事实。本局实际剧情和玩家明确分支保留，AI自行写错不等于玩家改写；按相应时点理解身份与关系。摘要不能替代原文。\n参考范围：{through_label}；原著切入/近期参考锚点：{pos_label}（同人或长局实际进度以【当前】与上文为准）；未查到原文依据的原著专有细节不要硬编，用留白或主角尚不知晓自然带过，绝不在小说正文里解释“资料不足”或提及“原著节点”。\n玩家的原著用法：{}\n{}",
                 text(&b["instructions"]),
                 if b["fanfic"] != true {
                     "只作背景参考，不强加原著剧情。"
@@ -731,13 +731,18 @@ pub fn build(input: &Value) -> Result<Value> {
         evidence += &format!("{label}{content}\n");
         fitted.push(item);
     }
+    let is_lookup_kind = matches!(text(&input["kind"]), "ask" | "correction");
     if source.is_some() && evidence.is_empty() {
         evidence = if depth == "deep" {
-            "\n【原著资料不足】当前未取得可核实原文，需要补查，不能声称已核对。\n".into()
+            if is_lookup_kind {
+                "\n【原著资料不足】当前未取得可核实原文，需要补查，不能声称已核对。\n".into()
+            } else {
+                "\n【原著参考提示】当前尚未预取到直接命中的原文片段；如需原著专有细节请先调用查阅工具，未核实的细枝末节在小说中自然留白，切勿在正文里向玩家写说明。\n".into()
+            }
         } else if has_book_notes {
-            "\n【原著资料】本回合没有取到直接相关的原文片段，以上面的原著札记为准；札记没写到的细节不编造。\n".into()
+            "\n【原著资料】本回合没有取到直接相关的原文片段，以上面的原著札记为准；札记没写到的细节自然留白，不硬编，也不在正文里写说明。\n".into()
         } else {
-            "\n【原著资料】本回合没有取到直接相关的原文片段。按上文的设定与已知剧情写，不编造原著细节，也不声称已核对原文。\n".into()
+            "\n【原著资料】本回合没有取到直接相关的原文片段。按上文的设定与已知剧情写，未提及的原著细枝末节在小说中自然留白，切勿在正文里解释原因。\n".into()
         };
     }
     if reference.is_object() {

@@ -4,7 +4,17 @@
 // so zero new SQLite schema tables are introduced and `empty_database()` stays untouched.
 import { newId, type Repo } from "../db/repo";
 import { buildNovelBook } from "../novel";
-import { getBooksCharMetrics, saveBook } from "../sources/library";
+import {
+  bookExists,
+  chunkStatements,
+  chunksOf,
+  getBooksCharMetrics,
+  indexChunksTermsAsync,
+  saveBook,
+  sectionStatements,
+  slimBookJson,
+  termStatements,
+} from "../sources/library";
 import type { SourceBook } from "../sources/types";
 import {
   ensureReaderSchema,
@@ -18,6 +28,7 @@ export interface BookShelfPref {
   finished?: boolean;
   author?: string;
   origin?: string;
+  sourceWorldId?: string;
 }
 
 export interface ReadingStatsStore {
@@ -51,6 +62,8 @@ export interface LibraryShelfItem {
   coverTone: number | null;
   finished: boolean;
   author: string;
+  origin?: string;
+  sourceWorldId?: string;
   lastActiveAt: string;
 }
 
@@ -81,6 +94,9 @@ export async function getAllBookShelfPrefs(repo: Repo): Promise<Record<string, B
       ...(typeof item.origin === "string" && item.origin.trim()
         ? { origin: item.origin.trim().slice(0, 40) }
         : {}),
+      ...(typeof item.sourceWorldId === "string" && item.sourceWorldId.trim()
+        ? { sourceWorldId: item.sourceWorldId.trim().slice(0, 80) }
+        : {}),
     };
   }
   return out;
@@ -95,6 +111,10 @@ export async function updateBookShelfPref(
   const prev = all[bookId] ?? {};
   const nextOrigin =
     patch.origin !== undefined ? patch.origin.trim().slice(0, 40) : (prev.origin ?? "");
+  const nextSourceWorldId =
+    patch.sourceWorldId !== undefined
+      ? patch.sourceWorldId.trim().slice(0, 80)
+      : (prev.sourceWorldId ?? "");
   const next: BookShelfPref = {
     pinned: patch.pinned !== undefined ? !!patch.pinned : !!prev.pinned,
     coverTone:
@@ -109,6 +129,7 @@ export async function updateBookShelfPref(
         ? patch.author.trim().slice(0, 40)
         : (prev.author ?? ""),
     ...(nextOrigin ? { origin: nextOrigin } : {}),
+    ...(nextSourceWorldId ? { sourceWorldId: nextSourceWorldId } : {}),
   };
   all[bookId] = next;
   await repo.setSetting(BOOK_PREFS_KEY, all);
@@ -310,6 +331,8 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
       coverTone: pref.coverTone ?? null,
       finished: !!pref.finished,
       author: pref.author ?? "",
+      ...(pref.origin ? { origin: pref.origin } : {}),
+      ...(pref.sourceWorldId ? { sourceWorldId: pref.sourceWorldId } : {}),
       lastActiveAt: progress?.updatedAt ?? createdAt,
     };
   });
@@ -337,12 +360,24 @@ export async function saveWorldNovelToLibrary(
   if (!built || !built.sections.length) {
     throw new Error("这部故事还没有可成书的正文段落");
   }
-  const bookId = newId();
+  const prefs = await getAllBookShelfPrefs(repo);
+  let reusedBookId: string | null = null;
+  for (const [candidateId, pref] of Object.entries(prefs)) {
+    if (pref.origin === "world-novel" && pref.sourceWorldId === worldId) {
+      if (await bookExists(repo, candidateId)) {
+        reusedBookId = candidateId;
+        break;
+      }
+    }
+  }
+  const bookId = reusedBookId ?? newId();
+  const existingPref = reusedBookId ? prefs[reusedBookId] : undefined;
+  const nowIso = new Date().toISOString();
   const sourceBook: SourceBook = {
     id: bookId,
     title: built.title,
-    format: "epub",
-    createdAt: new Date().toISOString(),
+    format: "txt",
+    createdAt: nowIso,
     sections: built.sections.map((sec, idx) => {
       const body = sec.paragraphs
         .map((p) => (p.kind === "divider" ? (p.text === "◇" ? "◇" : `◇ ${p.text} ◇`) : p.text))
@@ -359,10 +394,29 @@ export async function saveWorldNovelToLibrary(
       };
     }),
   };
-  await saveBook(repo, sourceBook);
+  if (reusedBookId) {
+    const chunks = chunksOf(sourceBook);
+    const index = await indexChunksTermsAsync(chunks);
+    await repo.platform.sql.batch([
+      { sql: "DELETE FROM source_terms WHERE book_id = ?", params: [bookId] },
+      { sql: "DELETE FROM source_chunks WHERE book_id = ?", params: [bookId] },
+      { sql: "DELETE FROM source_sections WHERE book_id = ?", params: [bookId] },
+      {
+        sql: "UPDATE source_books SET title = ?, format = ?, created_at = ?, json = ? WHERE id = ?",
+        params: [sourceBook.title, sourceBook.format, nowIso, slimBookJson(sourceBook), bookId],
+      },
+      ...sectionStatements(bookId, sourceBook.sections),
+      ...chunkStatements(bookId, chunks),
+      ...termStatements(bookId, index),
+    ]);
+  } else {
+    await saveBook(repo, sourceBook);
+  }
+  const defaultAuthor = built.author ? `${built.author} · 穿越成书` : "穿越成书";
   await updateBookShelfPref(repo, bookId, {
-    author: opts?.author ?? (built.author ? `${built.author} · 穿越成书` : "穿越成书"),
+    author: opts?.author ?? (existingPref?.author ? existingPref.author : defaultAuthor),
     origin: "world-novel",
+    sourceWorldId: worldId,
   });
   if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
     window.dispatchEvent(new CustomEvent("lishi:library-changed", { detail: { bookId } }));

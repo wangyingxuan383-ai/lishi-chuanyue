@@ -118,6 +118,31 @@ fn selected_document(
     }
 }
 
+/// Maps native SAF picker failure codes into player-friendly `PlatformError`s.
+#[cfg(any(target_os = "android", test))]
+pub fn picker_error(code: &str) -> crate::error::PlatformError {
+    use crate::error::{io_error, PlatformError};
+    match code {
+        "file_busy" => PlatformError::new(
+            "file_busy",
+            "已有文件选择窗口正在打开，请先完成或关闭当前选择",
+        ),
+        "file_unconfirmed" => PlatformError::new(
+            "file_unconfirmed",
+            "未能确认系统文件选择结果，请重新选择",
+        ),
+        "file_write_failed" => PlatformError::new(
+            "file_write_failed",
+            "写入导出文件失败，请检查存储空间或更换保存位置",
+        ),
+        "file_unavailable" => PlatformError::new(
+            "file_unavailable",
+            "当前无法打开系统文件选择器，请稍后重试",
+        ),
+        _ => io_error(),
+    }
+}
+
 /// Kotlin may keep a timed-out picker quarantined until it actually returns.
 /// Exports must also respect it because Tauri's result callback is shared.
 #[cfg(target_os = "android")]
@@ -291,5 +316,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(name.as_deref(), Some("notes.docx"));
+
+        assert_eq!(picker_error("file_busy").code, "file_busy");
+        assert_eq!(picker_error("file_unconfirmed").code, "file_unconfirmed");
+        assert_eq!(picker_error("file_write_failed").code, "file_write_failed");
+        assert_eq!(picker_error("file_unavailable").code, "file_unavailable");
     }
 }

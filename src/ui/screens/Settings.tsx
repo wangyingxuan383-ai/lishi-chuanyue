@@ -541,14 +541,14 @@ function ReadingPage() {
             ]}
             onChange={(tapZones) => set({ tapZones })}
           />
-          <Switch
-            label="音量键翻页"
-            note="在阅读器中按手机音量上/下键翻页（打开菜单或离开页面时自动恢复调节音量）"
-            checked={reading.volumeKeyTurn}
-            onChange={(volumeKeyTurn) => set({ volumeKeyTurn })}
-          />
         </>
       )}
+      <Switch
+        label="音量键翻页"
+        note="在阅读器中按手机音量上/下键翻页（打开菜单或离开页面时自动恢复调节音量）"
+        checked={reading.volumeKeyTurn}
+        onChange={(volumeKeyTurn) => set({ volumeKeyTurn })}
+      />
       <PaperTonePicker value={reading.paperTone} onChange={(paperTone) => set({ paperTone })} />
       <NightDimControl value={reading.nightDim} onChange={(nightDim) => set({ nightDim })} />
 
@@ -901,7 +901,7 @@ function NetworkPage({ value, onChange }: { value: { proxy: "none" | "system" | 
       <Note>连不上海外服务（比如 OpenRouter、Gemini）时才需要改。国内的服务一般直接连接就好。</Note>
       <Choice label="连接方式" value={mode} options={[["none", "直接连接"], ["system", "跟随系统代理"], ["custom", "自定义代理"]]}
         onChange={(v) => { setMode(v); if (v !== "custom") void apply({ proxy: v }); }} />
-      {mode === "system" && <Note>电脑上会用系统设置里的代理。手机上的应用请求不一定能读到系统代理【还没在手机上验证】，连不上时改用自定义代理。</Note>}
+      {mode === "system" && <Note>电脑上会使用系统代理；手机系统通常不会把系统代理传给应用，连不上时请改用自定义代理。</Note>}
       {mode === "custom" && <label className="setting">
         <div className="setting-head"><b>代理地址</b><small>如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080</small></div>
         <div className="row">
@@ -926,7 +926,17 @@ function AboutPage() {
   }, []);
   const check = () => updates.check(true);
   const hasNew = latest && newer(latest.version, __APP_VERSION__);
-  const ready = readyRelease && newer(readyRelease.version, __APP_VERSION__) ? readyRelease : null;
+  const readySuperseded = Boolean(
+    readyRelease &&
+      hasNew &&
+      latest &&
+      latest.version !== readyRelease.version &&
+      !newer(readyRelease.version, latest.version),
+  );
+  const ready =
+    readyRelease && newer(readyRelease.version, __APP_VERSION__) && !readySuperseded
+      ? readyRelease
+      : null;
   return (
     <>
       <div className="about-head">

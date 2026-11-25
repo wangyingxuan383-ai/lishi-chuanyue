@@ -92,6 +92,7 @@
 .story .story-text p, .paged-columns .story-text p { text-indent: 2em; }
 :root[data-indent="off"] .story .story-text p, :root[data-indent="off"] .paged-columns .story-text p { text-indent: 0; }
 .story .story-text p.date-line, .story-text p.date-line { text-indent: 0; text-align: center; letter-spacing: 0.25em; color: var(--accent-text); margin: 1em 0; font-size: 0.85em; font-family: var(--serif); }
+.story-divider { border: 0; border-top: 1px solid var(--line); width: 4.5em; margin: 0.9em auto; opacity: 0.65; }
 .cursor-blink::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent-text); }
 .story-text.streaming .sent { animation: ink-in 0.5s ease-out both; }
 @keyframes ink-in { from { opacity: 0; } }
@@ -196,6 +197,8 @@ button.turn-changes {
 .ref-badge.ok { color: var(--gain); background: color-mix(in srgb, var(--gain) 12%, transparent); }
 .ref-badge.branch { color: var(--accent-text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .ref-badge.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.ref-review-actions { padding-top: 4px; border-top: 1px dashed color-mix(in srgb, var(--line) 70%, transparent); }
+.ref-review-actions button { min-height: 32px; padding: 2px 10px; font-size: 12px; }
 
 /* Input dock */
 .dock {

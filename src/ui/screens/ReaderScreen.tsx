@@ -360,36 +360,6 @@ export default function ReaderScreen({
   const tocRef = useRef(toc);
   tocRef.current = toc;
 
-  useBack(() => {
-    if (selection) {
-      window.getSelection?.()?.removeAllRanges();
-      setSelection(null);
-      return true;
-    }
-    if (ttsTimerOpen) {
-      setTtsTimerOpen(false);
-      return true;
-    }
-    if (autoRead.active) {
-      setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
-      setAutoReadProgress(null);
-      return true;
-    }
-    if (!hudHidden) {
-      setHudHidden(true);
-      return true;
-    }
-    return false;
-  });
-
-  useEffect(() => {
-    if (!reading.keepAwake) return;
-    void game.platform.system.setKeepAwake(true).catch(() => {});
-    return () => {
-      void game.platform.system.setKeepAwake(false).catch(() => {});
-    };
-  }, [game.platform.system, reading.keepAwake]);
-
   // Track document visibility, app resume & window blur/focus for volume-key release and accurate reading stats
   useEffect(() => {
     const syncVis = () => {
@@ -477,23 +447,6 @@ export default function ReaderScreen({
     newNoteSheet !== null ||
     activeHighlight !== null ||
     cardContent !== null;
-
-  const volumeTurnActive = reading.volumeKeyTurn && !hasOverlayOpen && docVisible && !loading && !error;
-
-  // Sync Android hardware volume-key interception & immediately restore on notification-shade / foreground resume
-  useEffect(() => {
-    const sync = () => {
-      void game.platform.system.setVolumePageTurn?.(volumeTurnActive).catch(() => {});
-    };
-    sync();
-    window.addEventListener("lishi:app-resume", sync);
-    window.addEventListener("focus", sync);
-    return () => {
-      window.removeEventListener("lishi:app-resume", sync);
-      window.removeEventListener("focus", sync);
-      void game.platform.system.setVolumePageTurn?.(false).catch(() => {});
-    };
-  }, [game.platform.system, volumeTurnActive]);
 
   const refreshAnnotations = useCallback(async () => {
     if (!targetId) return;
@@ -719,6 +672,9 @@ export default function ReaderScreen({
     ]);
     await refreshAnnotations();
     if (!rawToc.length) return;
+    const targetSec = prog ? prog.sectionIndex : sectionIndex;
+    const clampedSec = Math.max(0, Math.min(rawToc.length - 1, targetSec));
+    const fresh = await fetchSectionCached(clampedSec);
     setToc(
       rawToc.map((item) => ({
         index: item.section,
@@ -727,15 +683,36 @@ export default function ReaderScreen({
         locked: spoilerCeiling != null && item.section > spoilerCeiling,
       })),
     );
-    const targetSec = prog ? prog.sectionIndex : sectionIndex;
-    const clampedSec = Math.max(0, Math.min(rawToc.length - 1, targetSec));
-    setEntrySelector(null);
-    setEntryPage(0);
-    setPendingScrollRatio(prog && prog.sectionIndex === clampedSec ? prog.scrollRatio : 0);
-    setJumpNonce((n) => n + 1);
-    setSectionIndex(clampedSec);
-    const fresh = await fetchSectionCached(clampedSec);
+    const hasSavedInSec = !!prog && prog.sectionIndex === clampedSec;
+    let paraIdx = 0;
+    if (fresh && fresh.paragraphs.length > 0 && hasSavedInSec) {
+      const cleanAnchor = prog.anchorText.trim();
+      const matched = cleanAnchor
+        ? fresh.paragraphs.findIndex(
+            (p) => p.includes(cleanAnchor) || (p.trim().length >= 6 && cleanAnchor.includes(p.trim())),
+          )
+        : -1;
+      if (matched >= 0) {
+        paraIdx = matched;
+      } else {
+        paraIdx = Math.min(
+          fresh.paragraphs.length - 1,
+          Math.max(0, Math.floor((prog.scrollRatio ?? 0) * fresh.paragraphs.length)),
+        );
+      }
+    }
     setBookSection(fresh);
+    setSectionIndex(clampedSec);
+    setEntryPage(0);
+    lastVisibleParaRef.current = paraIdx;
+    if (fresh && fresh.paragraphs.length > 0) {
+      if (paraIdx === 0) modeSwitchRestoreRef.current = true;
+      setEntrySelector(`[data-para-index="${paraIdx}"]`);
+    } else {
+      setEntrySelector(null);
+    }
+    setPendingScrollRatio(hasSavedInSec ? prog.scrollRatio : 0);
+    setJumpNonce((n) => n + 1);
   }, [bookId, fetchSectionCached, game.repo, refreshAnnotations, sectionIndex, spoilerCeiling]);
 
   const currentSection = useMemo(() => {
@@ -1061,6 +1038,102 @@ export default function ReaderScreen({
     [armJumpUndo, ask, bookId, scheduleSaveProgress, sectionIndex, spoilerCeiling, spoilerUnlocked, toc.length],
   );
 
+  // Offline dual-engine TTS audiobook controller
+  const focusSpokenParagraph = useCallback(
+    (pIdx: number) => {
+      if (reading.pageMode === "paged") {
+        paginatorRef.current?.jumpToSelector(`[data-para-index="${pIdx}"]`);
+      } else {
+        programmaticScrollUntilRef.current = performance.now() + 450;
+        const el = scrollerRef.current?.querySelector<HTMLElement>(`[data-para-index="${pIdx}"]`);
+        el?.scrollIntoView({ behavior: motionOn() ? "smooth" : "auto", block: "center" });
+      }
+    },
+    [reading.pageMode],
+  );
+
+  const tts = useReaderTts({
+    platform: game.platform,
+    paragraphs: currentSection?.paragraphs ?? [],
+    sectionIndex,
+    onParagraphFocus: focusSpokenParagraph,
+    onSectionEnd: async () => {
+      if (sectionIndex < toc.length - 1) {
+        if (bookId && !spoilerUnlocked && spoilerCeiling != null && sectionIndex + 1 > spoilerCeiling) {
+          toast(`已读至防剧透上限（第 ${spoilerCeiling + 1} 节），已自动停播`);
+          return false;
+        }
+        return await goSection(sectionIndex + 1, { page: 0 });
+      }
+      toast("整本书已朗读完毕");
+      return false;
+    },
+    toast,
+  });
+
+  useBack(() => {
+    if (selection) {
+      window.getSelection?.()?.removeAllRanges();
+      setSelection(null);
+      return true;
+    }
+    if (ttsTimerOpen) {
+      setTtsTimerOpen(false);
+      return true;
+    }
+    if (ttsOpen) {
+      tts.stop();
+      setTtsTimerOpen(false);
+      setTtsOpen(false);
+      return true;
+    }
+    if (autoRead.active) {
+      setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
+      setAutoReadProgress(null);
+      return true;
+    }
+    if (!hudHidden) {
+      setHudHidden(true);
+      return true;
+    }
+    return false;
+  });
+
+  const shouldKeepAwake =
+    reading.keepAwake || (autoRead.active && !autoRead.paused) || tts.status === "playing";
+
+  useEffect(() => {
+    if (!shouldKeepAwake) return;
+    void game.platform.system.setKeepAwake(true).catch(() => {});
+    return () => {
+      void game.platform.system.setKeepAwake(false).catch(() => {});
+    };
+  }, [game.platform.system, shouldKeepAwake]);
+
+  const volumeTurnActive =
+    reading.volumeKeyTurn &&
+    !hasOverlayOpen &&
+    !ttsOpen &&
+    tts.status === "idle" &&
+    docVisible &&
+    !loading &&
+    !error;
+
+  // Sync Android hardware volume-key interception & immediately restore on notification-shade / foreground resume
+  useEffect(() => {
+    const sync = () => {
+      void game.platform.system.setVolumePageTurn?.(volumeTurnActive).catch(() => {});
+    };
+    sync();
+    window.addEventListener("lishi:app-resume", sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.removeEventListener("lishi:app-resume", sync);
+      window.removeEventListener("focus", sync);
+      void game.platform.system.setVolumePageTurn?.(false).catch(() => {});
+    };
+  }, [game.platform.system, volumeTurnActive]);
+
   // Scroll-mode hardware volume-key handler
   useEffect(() => {
     if (!volumeTurnActive || reading.pageMode !== "scroll") return;
@@ -1101,35 +1174,6 @@ export default function ReaderScreen({
     window.addEventListener("lishi:volume-page", onVolumeScroll);
     return () => window.removeEventListener("lishi:volume-page", onVolumeScroll);
   }, [goSection, reading.pageMode, sectionIndex, toast, toc.length, volumeTurnActive]);
-
-  // Offline dual-engine TTS audiobook controller
-  const focusSpokenParagraph = useCallback(
-    (pIdx: number) => {
-      if (reading.pageMode === "paged") {
-        paginatorRef.current?.jumpToSelector(`[data-para-index="${pIdx}"]`);
-      } else {
-        programmaticScrollUntilRef.current = performance.now() + 450;
-        const el = scrollerRef.current?.querySelector<HTMLElement>(`[data-para-index="${pIdx}"]`);
-        el?.scrollIntoView({ behavior: motionOn() ? "smooth" : "auto", block: "center" });
-      }
-    },
-    [reading.pageMode],
-  );
-
-  const tts = useReaderTts({
-    platform: game.platform,
-    paragraphs: currentSection?.paragraphs ?? [],
-    sectionIndex,
-    onParagraphFocus: focusSpokenParagraph,
-    onSectionEnd: async () => {
-      if (sectionIndex < toc.length - 1) {
-        return await goSection(sectionIndex + 1, { page: 0 });
-      }
-      toast("整本书已朗读完毕");
-      return false;
-    },
-    toast,
-  });
 
   // Auto-page / Auto-scroll controller
   const pauseAutoReadOnTouch = useCallback(() => {
@@ -1250,6 +1294,7 @@ export default function ReaderScreen({
     startY: number;
     startTime: number;
     startDim: number;
+    lastDim: number;
     mode: "undecided" | "dim" | "horizontal";
   } | null>(null);
 
@@ -1263,6 +1308,7 @@ export default function ReaderScreen({
       startY: e.clientY,
       startTime: performance.now(),
       startDim: reading.nightDim,
+      lastDim: reading.nightDim,
       mode: "undecided",
     };
   };
@@ -1287,10 +1333,8 @@ export default function ReaderScreen({
     if (g.mode !== "dim") return;
     // Dragging down increases nightDim (0..50); dragging up decreases nightDim toward 0
     const nextDim = Math.min(50, Math.max(0, Math.round(g.startDim + dy / 4.2)));
+    g.lastDim = nextDim;
     setBrightnessHud(nextDim);
-    if (nextDim !== readingRef.current.nightDim) {
-      setReading({ ...readingRef.current, nightDim: nextDim });
-    }
   };
 
   const finishBezelPointer = (e: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
@@ -1300,6 +1344,13 @@ export default function ReaderScreen({
     e.stopPropagation();
     if (g.mode === "dim") {
       if (brightnessTimerRef.current) clearTimeout(brightnessTimerRef.current);
+      if (cancelled) {
+        setBrightnessHud(null);
+        return;
+      }
+      if (g.lastDim !== readingRef.current.nightDim) {
+        setReading({ ...readingRef.current, nightDim: g.lastDim });
+      }
       brightnessTimerRef.current = setTimeout(() => setBrightnessHud(null), 900);
       return;
     }
@@ -1888,6 +1939,7 @@ export default function ReaderScreen({
           <Paginator
             key={`${targetId}:${sectionIndex}`}
             ref={paginatorRef}
+            sectionKey={`${targetId}:${sectionIndex}`}
             contentKey={paginatorKey}
             jumpNonce={jumpNonce}
             initialPage={entryPage}
@@ -2129,7 +2181,7 @@ export default function ReaderScreen({
               type="button"
               className="primary reader-tts-play"
               aria-label={tts.status === "playing" ? "暂停朗读" : "开始朗读"}
-              onClick={() => tts.toggle()}
+              onClick={() => tts.toggle(getCurrentParagraphIndex())}
             >
               <Icon name={tts.status === "playing" ? "pause" : "play"} size={17} />
               <span>{tts.status === "playing" ? "暂停" : tts.status === "paused" ? "继续" : "朗读"}</span>
@@ -2398,7 +2450,7 @@ export default function ReaderScreen({
                 setJumpUndo(null);
                 setTtsOpen(true);
                 setHudHidden(true);
-                if (tts.status === "idle") {
+                if (tts.status === "idle" || tts.status === "unavailable") {
                   const pIdx = getCurrentParagraphIndex();
                   tts.play(pIdx);
                 }
@@ -2437,11 +2489,11 @@ export default function ReaderScreen({
       </div>
 
       {/* Eye-comfort late-night dim veil (0%..50%) */}
-      {reading.nightDim > 0 && (
+      {(brightnessHud ?? reading.nightDim) > 0 && (
         <div
           className="reader-dim-veil"
           aria-hidden="true"
-          style={{ opacity: Number((reading.nightDim / 100).toFixed(2)) }}
+          style={{ opacity: Number(((brightnessHud ?? reading.nightDim) / 100).toFixed(2)) }}
         />
       )}
 

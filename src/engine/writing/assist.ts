@@ -22,14 +22,14 @@ import { completeJson, parseRecord } from "../record/parse";
 
 /** writing-5: the version is kept with each adopted rewrite; it is not sent to the model. */
 export const WRITING_PROMPT_VERSION = "writing-5";
-export const CANON_WRITING_PROMPT_VERSION = "writing-canon-7";
+export const CANON_WRITING_PROMPT_VERSION = "writing-canon-8";
 export function canonCorrectionRules(settings: WorldSettings, state: WorldState, opening = false): string {
   return `对这个回合按原著纠错。遵循原著技能已随本次任务附上，按它的方法核对；先用下面给出的相关原文片段和札记，不够再按检索返回编号阅读原文与邻段（独立查证同批完成，复用已读证据）。
 【核对边界】
 - 核对身份、关系、称谓、时间、地点、能力、物品和事件；只预览，不直接改动当前路线。
 - 玩家明确改写的事实及合理后果保留；AI 先前自行写错的细节不等于玩家改写。跨回合问题列入 related。
 【四种结果 outcome】
-- changed：选中范围里有与原著不符、且有已读原文依据的地方。只改选中范围（允许按要求补全遗漏，不续写其后，范围外正文由程序保留）；每条更正写进 corrections，citations 必须逐字摘自已读原文（玩家分支不放进 corrections，也不伪造引文）。
+- changed：选中范围里有与原著不符、且有已读原文依据的地方。只改选中范围（允许按要求补全遗漏，不续写其后，范围外正文由程序保留）；replacement 必须是纯文本小说段落，严禁使用 **加粗**、列表、# 标题、--- 分隔线等 Markdown 符号；每条更正写进 corrections，citations 必须逐字摘自已读原文（玩家分支不放进 corrections，也不伪造引文）。
 - verified：核对后这段与原著一致，不用改。findings 写核对了什么，citations 附已读原文。
 - answer：玩家在提问（如“城门几时关？”“他俩是什么关系？”）。answer 写答案，findings 附原文出处；不改正文。
 - not_found：读过的原文里没有依据（如属于本局自设或玩家分支）。把缺什么写进 unresolved，不凭记忆补原著细节。
@@ -209,7 +209,7 @@ export async function assertWritingAnchor(game: Game, anchor: WritingAnchor): Pr
 
 export function writingMessages(kind: "rewrite" | "polish", text: string, hint: string, context: string, mode: ActionMode, range?: TextRange): ChatMessage[] {
   const task = kind === "rewrite"
-    ? "只做文风润色，按玩家要求调整所选文字的措辞、节奏和描写，与前后文语气衔接自然，不重复前后文已有的句子。不改变已经发生的事实、人物决定、钱物数量、生死、时间与地点；保持原有叙事人称与说话人归属；要求涉及改事实时仍保留原事实。只输出替换这段的正文，不续写后续剧情，不加代码块或额外说明。"
+    ? "只做文风润色，按玩家要求调整所选文字的措辞、节奏和描写，与前后文语气衔接自然，不重复前后文已有的句子。不改变已经发生的事实、人物决定、钱物数量、生死、时间与地点；保持原有叙事人称与说话人归属；要求涉及改事实时仍保留原事实。只输出替换这段的纯文本小说段落，严禁使用 **加粗**、列表、# 标题、--- 分隔线等 Markdown 符号，不续写后续剧情，不加代码块或额外说明。"
     : `润色玩家还没发送的输入（方式：${({ do: "行动", say: "说话", write: "亲手写剧情", direct: "幕后要求", skip: "过些日子", continue: "继续" })[mode]}）。保持原意与人称，不替玩家添加决定，也不写行动结果。只输出润色后的输入，不加多余引号或额外说明。`;
   const required = `【要处理的文字】\n${text}\n\n【玩家要求】\n${(hint ?? "").trim() || "让表达更自然流畅"}`;
   // The selected text already appears in the required part. Keep just the
@@ -487,7 +487,7 @@ export function filterCorrectionPatch(raw: unknown): { kept?: TurnRecord; droppe
 // 按我的要求改 (R30 step 2): the player's words are the evidence. Facts change as
 // asked, the turn's record follows, earlier facts the player corrected are fixed
 // in the 设定集 too; no book quote is needed, unlike 按原著纠错.
-export const REVISION_PROMPT_VERSION = "revise-passage-4";
+export const REVISION_PROMPT_VERSION = "revise-passage-5";
 export interface PlayerRevisionRequest { anchor: WritingAnchor; range: TextRange; hint: string; /** 资料范围 (D184). */ scope?: SourceScope }
 export interface PlayerRevisionPreview {
   anchor: WritingAnchor; range: TextRange; hint: string; replacement: string; narrative: string;
@@ -500,7 +500,7 @@ export { abilityCardName } from "../memory/cards";
 import { abilityCardName } from "../memory/cards";
 
 export function playerRevisionRules(settings: WorldSettings, state: WorldState, opening = false): string {
-  return `按玩家的要求修改互动小说里选中的这段正文。玩家的要求就是依据：要求改的事实（人物、身份、数字、等级、年限、能力、物品、关系、时间、地点等）照改，选中范围里与之矛盾的说法一并改顺；没要求改的内容和写法尽量保持原样。只改选中范围，不续写其后的剧情，范围外的正文由程序原样保留。
+  return `按玩家的要求修改互动小说里选中的这段正文。玩家的要求就是依据：要求改的事实（人物、身份、数字、等级、年限、能力、物品、关系、时间、地点等）照改，选中范围里与之矛盾的说法一并改顺；没要求改的内容和写法尽量保持原样。只改选中范围，不续写其后的剧情，范围外的正文由程序原样保留；replacement 必须是纯文本小说段落，严禁使用 **加粗**、列表、# 标题、--- 分隔线等 Markdown 符号。
 - recordPatch：改动影响本回合记录时，只对受影响的字段返回最小 recordPatch（字段同正常回合，数组只给受影响的项目；删除本回合误记的 items/people/goals 项目写 {"name":"原名","remove":true}，改名替换写 {"oldName":"原名","name":"新名",...}）；改动涉及剧情变化时按改后正文重写 log；改的是较早段落而非最新一段时不要改 choices；不返回 protagonist/source/facts/executionMode/setStats 等整局字段；无影响就省略。
 - correctionPatch：玩家改的如果是这一段之前就已成立的事实（主角已有的能力或修为、身份、人物的关系或来历、地点、设定），用它把之前的资料也一起改正，只能用 profile、people、place、places、cards：profile 只改 name、age、identity、origin；cards 用 {"name":"卡片名","kind":"原卡片的种类，新卡写设定","content":"改正后的全文"}，主角自己的本事写在“${abilityCardName(state.protagonist.name)}”这张卡里（没有就新建）。
 不需要原著引文。最后只返回一个 JSON 对象（不要加代码块或额外说明）：{"replacement":"选中范围改好的正文","recordPatch":{},"correctionPatch":{},"note":"一句话说明改了什么"}。

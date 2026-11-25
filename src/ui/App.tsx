@@ -329,8 +329,19 @@ export default function App() {
   }), []);
   const ask = useCallback((o: { title: string; message?: string; confirm: string; danger?: boolean }) =>
     new Promise<boolean>((resolve) => openDialog({ kind: "confirm", ...o, id: ++dialogId.current, resolve })), [openDialog]);
-  const askName = useCallback((o: { title: string; initial?: string; placeholder?: string; confirm?: string }) =>
+  const askName = useCallback((o: { title: string; initial?: string; placeholder?: string; confirm?: string; allowEmpty?: boolean }) =>
     new Promise<string | null>((resolve) => openDialog({ kind: "name", ...o, initial: o.initial ?? "", id: ++dialogId.current, resolve })), [openDialog]);
+
+  const readingSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pendingReadingSave = useRef<Reading | null>(null);
+  useEffect(() => () => {
+    clearTimeout(readingSaveTimer.current);
+    if (pendingReadingSave.current && boot) {
+      const latest = pendingReadingSave.current;
+      pendingReadingSave.current = null;
+      void boot.game.repo.setSetting("reading", latest);
+    }
+  }, [boot]);
 
   // Screen-level back, registered once so overlays opened later run first:
   // pop the stack; on the home screen, press twice to exit.
@@ -366,7 +377,14 @@ export default function App() {
     setReading(r) {
       applyReading(r);
       setReadingState(r);
-      void boot.game.repo.setSetting("reading", r);
+      pendingReadingSave.current = r;
+      clearTimeout(readingSaveTimer.current);
+      readingSaveTimer.current = setTimeout(() => {
+        readingSaveTimer.current = undefined;
+        const latest = pendingReadingSave.current;
+        pendingReadingSave.current = null;
+        if (latest) void boot.game.repo.setSetting("reading", latest);
+      }, 200);
     },
     devMode,
     setDevMode(v) {

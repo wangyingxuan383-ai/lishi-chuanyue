@@ -11,20 +11,22 @@ import { MenuSheet, Sheet } from "./Sheet";
 import { RecentUsageLine } from "./TurnUsage";
 import { SourceScopeRow, SourceScopeSheet } from "./SourceScope";
 import { AUTO_SCOPE, type SourceScope } from "../../engine/sources/scope";
+import { CompanionMarkdown } from "../screens/companion/CompanionMarkdown";
 import { diffStats, diffText } from "./textDiff";
 import "./writing.css";
 
-export interface WritingDraft { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; mode: ActionMode; source?: SourceBinding | null }
+export type WritingAssistMode = "revise" | "polish" | "canon";
+export interface WritingDraft { anchor: WritingAnchor; kind: "rewrite" | "polish"; text: string; mode: ActionMode; source?: SourceBinding | null; initialMode?: WritingAssistMode }
 
 const brief = (text: string, max = 12) => {
   const t = text.replace(/\s+/g, "");
   return t.length > max ? `${t.slice(0, max)}…` : t;
 };
 
-type Mode = "revise" | "polish" | "canon";
+type Mode = WritingAssistMode;
 const MODE_NOTE: Record<Mode, string> = {
   revise: "按你说的改，事实、数字、能力、情节都可以改；本回合记录和之前的设定会一起改正。改最新一段会多出一个版本，改较早的回合会另起一条路线，原来的都保留。",
-  polish: "只改写法，不改事实；采用时会问你事实要不要一起改，原文随时可以恢复。",
+  polish: "只改写法措辞，不改剧情事实；采用后直接替换文字，原文随时可恢复。",
   canon: "查阅原文，只改有原著依据的错误，同步本回合记录。较早回合采用后另起修订路线，原路线和后续保留。查不到依据时会说明；本局自己的设定用“按我的要求改”。",
 };
 const PLACEHOLDER: Record<Mode, string> = {
@@ -67,11 +69,14 @@ function Citations({ items }: { items: { detail: string; citations: { quote: str
 }
 
 export function WritingAssist({ draft, onClose, onAdopt, captureReading }: {
-  draft: WritingDraft; onClose: () => void; onAdopt: (text: string, correction?: CanonCorrectionPreview, revision?: PlayerRevisionPreview) => Promise<void>; captureReading?: () => void;
+  draft: WritingDraft; onClose: () => void; onAdopt: (text: string, correction?: CanonCorrectionPreview, revision?: PlayerRevisionPreview, adoptedMode?: Mode) => Promise<void>; captureReading?: () => void;
 }) {
   const { game, push } = useApp();
   const rewrite = draft.kind === "rewrite";
-  const [mode, setMode] = useState<Mode>(rewrite ? "revise" : "polish");
+  const resolvedInitialMode: Mode = rewrite
+    ? (draft.initialMode && (draft.initialMode !== "canon" || !!draft.source) ? draft.initialMode : "revise")
+    : "polish";
+  const [mode, setMode] = useState<Mode>(resolvedInitialMode);
   const canon = mode === "canon";
   const [revision, setRevision] = useState<PlayerRevisionPreview | null>(null);
   const ranges = paragraphs(draft.text);
@@ -160,8 +165,8 @@ export function WritingAssist({ draft, onClose, onAdopt, captureReading }: {
     try {
       // The head may have moved on by the AI's own tidy-up since the preview: adopt against today's.
       const anchor = draft.anchor;
-      if (mode === "revise" && revision) await onAdopt(revision.narrative, undefined, { ...revision, anchor: { ...revision.anchor, headId: anchor.headId } });
-      else await onAdopt(canon && correction ? correction.narrative : rewrite ? replaceRange(draft.text, range, preview) : preview, canon && correction ? { ...correction, anchor: { ...correction.anchor, headId: anchor.headId } } : undefined);
+      if (mode === "revise" && revision) await onAdopt(revision.narrative, undefined, { ...revision, anchor: { ...revision.anchor, headId: anchor.headId } }, mode);
+      else await onAdopt(canon && correction ? correction.narrative : rewrite ? replaceRange(draft.text, range, preview) : preview, canon && correction ? { ...correction, anchor: { ...correction.anchor, headId: anchor.headId } } : undefined, undefined, mode);
       if (alive.current) onClose();
     }
     catch (e) { if (alive.current) setError(writingError(e)); }
@@ -203,7 +208,9 @@ export function WritingAssist({ draft, onClose, onAdopt, captureReading }: {
       {revision?.note && <p className="muted m-0">{revision.note}</p>}
       {revision && <RecordChanges changes={revision.recordChanges} patch={revision.correctionPatch} dropped={revision.droppedCorrections} />}
       {revision && !adoptable && <p className="muted m-0">这次改稿和原来一样，没有要采用的改动；换个说法再改一版。</p>}
-      {outcomeText && <p className={outcome === "not_found" ? "field-hint warn" : "m-0"} role="status">{outcomeText}</p>}
+      {outcomeText && (outcome === "answer"
+        ? <div role="status"><CompanionMarkdown text={outcomeText} /></div>
+        : <p className={outcome === "not_found" ? "field-hint warn" : "m-0"} role="status">{outcomeText}</p>)}
       {correction && outcome === "changed" && <details><summary>更正与出处</summary><Citations items={correction.corrections} /></details>}
       {correction && (outcome === "verified" || outcome === "answer") && !!correction.findings?.length && <details open><summary>{outcome === "answer" ? "原文出处" : "核对依据"}</summary><Citations items={correction.findings} /></details>}
       {correction && outcome === "changed" && correction.recordChanges && <RecordChanges changes={correction.recordChanges} patch={correction.correctionPatch} />}

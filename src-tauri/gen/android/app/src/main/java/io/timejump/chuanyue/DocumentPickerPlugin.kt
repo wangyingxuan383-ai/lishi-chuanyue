@@ -159,7 +159,7 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
     @Command
     fun ensureIdle(invoke: Invoke) {
         handler.post {
-            val reply = if (pending == null) JSObject().put("status", "idle")
+            val reply = if (pending == null && FilesPlugin.activeExportCount == 0) JSObject().put("status", "idle")
                 else documentPickerFailure("file_busy")
             invoke.resolve(reply)
         }
@@ -189,7 +189,7 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
 
     private fun launchPicker(invoke: Invoke, intent: Intent, grant: Boolean = false, writable: Boolean = false, directory: Boolean = false) {
         handler.post {
-            if (pending != null) {
+            if (pending != null || FilesPlugin.activeExportCount > 0) {
                 invoke.resolve(documentPickerFailure("file_busy"))
                 return@post
             }
@@ -266,8 +266,9 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
         if (activity !== ownerActivity) return
         val current = pending ?: return
         if (!current.gate.hasPaused) return
+        if (activity.isInMultiWindowMode || !activity.hasWindowFocus()) return
         handler.postDelayed({
-            if (pending === current) {
+            if (pending === current && !activity.isInMultiWindowMode && activity.hasWindowFocus()) {
                 // Normal Android activity results precede onResume. A small grace
                 // also allows the already queued plugin result to run first.
                 current.gate.returnedWithoutCallback()

@@ -11,6 +11,7 @@ import { newId } from "./db/repo";
 import { appendContinuity } from "./continuity";
 import { saveBook } from "./sources/library";
 import { getNote, noteWithinScope } from "./sources/notes";
+import { cleanBaseUrl, deleteProfile, saveProfile } from "./llm/providers";
 import {
   BUILTIN_PERSONAS,
   CompanionClient,
@@ -24,6 +25,7 @@ import {
   resolveCompanionAgentPolicy,
   resolveEscalatedAgentModel,
   resolveSessionDraftSource,
+  saveCompanionAgentPolicy,
   saveCompanionMessageAsNote,
   steerCompanionAgent,
   stopCompanionRun,
@@ -605,7 +607,7 @@ describe("Companion engine (R33-T001..T003)", () => {
     await game.repo.setSetting("agentAdoptionMode", "review");
     expect(await resolveCompanionAgentPolicy(game)).toBe("preview");
     await game.repo.setSetting("agentAdoptionMode", "auto");
-    await game.repo.setSetting("agent:preferences", { ...basePrefs, protocol: "openai-responses" });
+    await game.repo.setSetting("agent:preferences", { protocol: "openai-responses" });
 
     let failStart = true;
     const agentCalls: Record<string, unknown>[] = [];
@@ -880,5 +882,265 @@ describe("Companion engine (R33-T001..T003)", () => {
     expect(sessA1.boundLineId).toBe(lineA.id);
     expect(sessB1.id).not.toBe(sessA1.id);
     expect(sessB1.boundLineId).toBe(lineB.id);
+  });
+
+  it("omits modelUrl unless explicitly configured in agent:preferences, falls back cleanly on deleted profileId, and cleans agent:preferences on deleteProfile (R39-T002)", async () => {
+    const { game, world, line } = await createWorldFixture();
+    const client = new CompanionClient(game);
+    const sess = await client.createSession({
+      title: "服务与地址契约",
+      boundWorldId: world.id,
+      boundLineId: line.id,
+    });
+
+    // Save two profiles: an active profile and a secondary profile we will delete.
+    const activeProf = await saveProfile(
+      game.repo,
+      {
+        name: "主用DeepSeek",
+        provider: "deepseek",
+        baseUrl: "\u200BHTTPS://API.DEEPSEEK.COM/v1/#frag\uFEFF",
+        mainModel: "deepseek-v4-flash",
+        auxModel: "deepseek-flash",
+        includeUsage: true,
+        allowHttp: false,
+      },
+      "sk-active-12345678",
+    );
+    expect(activeProf.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(cleanBaseUrl(" \u200BHTTPS://API.EXAMPLE.COM/v1/chat/completions#top ")).toBe(
+      "https://api.example.com/v1",
+    );
+
+    const deletedProf = await saveProfile(
+      game.repo,
+      {
+        name: "即将删除的中转",
+        provider: "custom",
+        baseUrl: "https://old-relay.example.com/v1",
+        mainModel: "stale-relay-model",
+        auxModel: null,
+        includeUsage: true,
+        allowHttp: false,
+      },
+      "sk-stale-87654321",
+    );
+
+    game.llm = {
+      slot: activeProf.keySlot,
+      url: "https://api.deepseek.com/v1/chat/completions",
+      model: activeProf.mainModel,
+      auxModel: activeProf.auxModel ?? "",
+      includeUsage: true,
+    };
+
+    const agentCalls: Record<string, unknown>[] = [];
+    game.platform.execution = {
+      async agent(req): Promise<import("../platform").Json> {
+        const r = req as Record<string, unknown>;
+        agentCalls.push(r);
+        if (r.op === "create") {
+          return {
+            id: "pi-r39-1",
+            worldId: world.id,
+            lineId: line.id,
+            title: "服务与地址契约",
+            createdAt: "2026-11-25T00:00:00Z",
+            updatedAt: "2026-11-25T00:00:00Z",
+          };
+        }
+        if (r.op === "session") {
+          return {
+            session: {
+              id: String(r.id),
+              worldId: world.id,
+              lineId: line.id,
+              title: "服务与地址契约",
+              createdAt: "2026-11-25T00:00:00Z",
+              updatedAt: "2026-11-25T00:00:00Z",
+            },
+            messages: [],
+            tasks: [],
+          };
+        }
+        if (r.op === "start") {
+          return { taskId: "pi-task-r39", runId: "pi-task-r39" };
+        }
+        if (r.op === "enqueue_input" || r.op === "enqueue") {
+          return { id: "inp-r39", delivery: "steer", status: "accepted" };
+        }
+        throw new Error(`unexpected op ${String(r.op)}`);
+      },
+      settle: async () => ({}),
+      start: async () => "run",
+      snapshot: async () => ({
+        id: "run",
+        worldId: world.id,
+        status: "committed",
+        budget: { modelRequests: 0, toolCalls: 0, corrections: 0, activeMs: 0 },
+        draft: {},
+        result: null,
+        error: null,
+        events: [],
+      }),
+      list: async () => [],
+      stop: async () => ({ executionId: null, status: "cancelled", accepted: true, settled: true }),
+      resume: async () => {},
+    };
+
+    // 1. Default `agent:preferences` (never saved): `modelUrl` MUST be omitted on both escalate & steer!
+    const startedDefault = await escalateCompanionToAgent(game, {
+      sessionId: sess.session.id,
+      text: "检查主角当前银两",
+    });
+    expect(startedDefault.agentMessage.content).toContain("已交给改档助手处理");
+    expect(startedDefault.agentMessage.content).not.toContain("智能体");
+    const defaultStartCall = agentCalls.find((c) => c.op === "start")!;
+    expect("modelUrl" in defaultStartCall).toBe(false);
+    expect(defaultStartCall.profileId).toBe(activeProf.id);
+
+    agentCalls.length = 0;
+    await steerCompanionAgent(game, {
+      sessionId: sess.session.id,
+      piSessionId: startedDefault.piSessionId,
+      taskId: startedDefault.taskId,
+      text: "顺便检查行囊物品",
+    });
+    const defaultSteerCall = agentCalls.find((c) => c.op === "enqueue_input" || c.op === "enqueue")!;
+    const defaultSteerReq = defaultSteerCall.request as Record<string, unknown>;
+    expect("modelUrl" in defaultSteerReq).toBe(false);
+    expect(defaultSteerReq.profileId).toBe(activeProf.id);
+
+    // 2. Explicit custom `modelUrl` in `agent:preferences` IS included cleanly:
+    await saveCompanionAgentPolicy(game, "auto-reversible");
+    expect(await resolveCompanionAgentPolicy(game)).toBe("auto-reversible");
+    expect(await game.repo.getSetting("agentAdoptionMode", null)).toBe("auto");
+
+    await game.repo.setSetting("agent:preferences", {
+      profileId: activeProf.id,
+      policy: "preview",
+      modelName: "deepseek-v4-flash",
+      modelUrl: "  https://custom-gateway.example.com/v1/chat/completions  ",
+    });
+    expect(await resolveCompanionAgentPolicy(game)).toBe("preview");
+
+    agentCalls.length = 0;
+    await escalateCompanionToAgent(game, {
+      sessionId: sess.session.id,
+      text: "补充一条西市物价设定",
+    });
+    const customUrlStart = agentCalls.find((c) => c.op === "start")!;
+    expect(customUrlStart.modelUrl).toBe("https://custom-gateway.example.com/v1/chat/completions");
+    expect(customUrlStart.profileId).toBe(activeProf.id);
+    expect(customUrlStart.policy).toBe("preview");
+
+    agentCalls.length = 0;
+    await steerCompanionAgent(game, {
+      sessionId: sess.session.id,
+      piSessionId: startedDefault.piSessionId,
+      taskId: startedDefault.taskId,
+      text: "物价按斗米二十文写",
+    });
+    const customUrlSteer = (agentCalls.find((c) => c.op === "enqueue_input" || c.op === "enqueue")!
+      .request as Record<string, unknown>);
+    expect(customUrlSteer.modelUrl).toBe("https://custom-gateway.example.com/v1/chat/completions");
+
+    // 3. Stale deleted `profileId` in `agent:preferences`:
+    //    (a) Even if `agent:preferences` still holds a stale deleted `profileId` (e.g. imported settings),
+    //        `escalateCompanionToAgent` falls back cleanly to `activeProf` and NEVER leaks deleted `profileId` or `modelUrl`!
+    await game.platform.sql.query("DELETE FROM profiles WHERE id = ?", [deletedProf.id]);
+    await game.repo.setSetting("agent:preferences", {
+      profileId: deletedProf.id,
+      policy: "preview",
+      modelName: "stale-relay-model",
+      protocol: "anthropic",
+      modelUrl: "https://old-relay.example.com/v1/messages",
+      contextWindowTokens: 64_000,
+    });
+
+    agentCalls.length = 0;
+    await escalateCompanionToAgent(game, {
+      sessionId: sess.session.id,
+      text: "核对沈捕头的态度",
+    });
+    const fallbackStart = agentCalls.find((c) => c.op === "start")!;
+    expect(fallbackStart.profileId).toBe(activeProf.id);
+    expect(fallbackStart.profileId).not.toBe(deletedProf.id);
+    expect("modelUrl" in fallbackStart).toBe(false);
+    expect((fallbackStart.model as Record<string, unknown>).model).toBe("deepseek-v4-flash");
+    expect((fallbackStart.model as Record<string, unknown>).protocol).toBe("chat-completions");
+    expect((fallbackStart.model as Record<string, unknown>).contextWindowTokens).toBeNull();
+
+    //    (b) Calling `deleteProfile` directly cleans `profileId`, `modelName`, `protocol`, `modelUrl`, and `contextWindowTokens` from `agent:preferences`!
+    const tempProf = await saveProfile(
+      game.repo,
+      {
+        name: "临时服务",
+        provider: "custom",
+        baseUrl: "https://temp.example.com/v1",
+        mainModel: "temp-model",
+        auxModel: null,
+        includeUsage: true,
+        allowHttp: false,
+      },
+      "sk-temp-12345678",
+    );
+    await game.repo.setSetting("agent:preferences", {
+      profileId: tempProf.id,
+      policy: "auto-reversible",
+      modelName: "temp-model",
+      protocol: "openai-responses",
+      modelUrl: "https://temp.example.com/v1/responses",
+      contextWindowTokens: 128_000,
+      thinkingMode: "deep",
+    });
+    await deleteProfile(game.repo, tempProf);
+    const cleanedPrefs = await game.repo.getSetting<Record<string, unknown>>("agent:preferences", {});
+    expect(cleanedPrefs.profileId).toBeUndefined();
+    expect(cleanedPrefs.modelName).toBeUndefined();
+    expect(cleanedPrefs.protocol).toBeUndefined();
+    expect(cleanedPrefs.modelUrl).toBeUndefined();
+    expect(cleanedPrefs.contextWindowTokens).toBeUndefined();
+    expect(cleanedPrefs.policy).toBe("auto-reversible");
+    expect(cleanedPrefs.thinkingMode).toBe("deep");
+
+    //    (c) `saveProfile` with `!key` preserves bound `/v1beta` vs `/v1beta/openai` cleanly:
+    await game.platform.secrets.set(
+      "profile-gem-native",
+      "AIza-test-gemini-key",
+      "https://generativelanguage.googleapis.com/v1beta",
+    );
+    await game.platform.sql.query(
+      `INSERT INTO profiles (id, name, provider, base_url, main_model, aux_model, params_json, key_slot, capabilities_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "gem-prof-1",
+        "Gemini",
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta",
+        "gemini-2.5-flash",
+        null,
+        "{}",
+        "profile-gem-native",
+        "{}",
+        "2026-11-25T00:00:00Z",
+      ],
+    );
+    const updatedGem = await saveProfile(
+      game.repo,
+      {
+        id: "gem-prof-1",
+        keySlot: "profile-gem-native",
+        name: "Gemini 主力",
+        provider: "gemini",
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+        mainModel: "gemini-2.5-pro",
+        auxModel: "gemini-2.5-flash",
+        includeUsage: true,
+        allowHttp: false,
+      },
+      null,
+    );
+    expect(updatedGem.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta");
   });
 });

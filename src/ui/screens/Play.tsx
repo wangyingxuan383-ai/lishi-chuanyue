@@ -15,7 +15,7 @@ import { BookmarkSheet, LinesSheet } from "../components/Lines";
 import { Panel, type Tab } from "../components/Panel";
 import { TimeCorrectionSheet } from "../components/TimeCorrectionSheet";
 import { RulesSheet } from "../components/RulesSheet";
-import { Sheet } from "../components/Sheet";
+import { MenuSheet, Sheet } from "../components/Sheet";
 import { RecapCard, useRecap } from "../components/Recap";
 import { TocSheet } from "../components/Toc";
 import { StoryText, daypart, waitingLine } from "../components/StoryText";
@@ -34,7 +34,7 @@ import { buzz, motionLevel, motionOn } from "../app/motion";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
 import { adoptRewrite, adoptCanonCorrection, adoptPlayerRevision, assertWritingAnchor, headFollowsUpkeep, isLatestPassage, STALE_WRITING, WritingError, writingError, type WritingAnchor, type CanonCorrectionPreview, type PlayerRevisionPreview } from "../../engine/writing/assist";
 import { FactSyncSheet, type FactSyncAsk } from "../components/FactSync";
-import { WritingAssist, type WritingDraft } from "../components/WritingAssist";
+import { WritingAssist, type WritingAssistMode, type WritingDraft } from "../components/WritingAssist";
 import { WritingDesk } from "../components/WritingDesk";
 import { PlayQualityEffects } from "../components/PlayQualityEffects";
 import { AutoplaySheet, ChallengeEndCard, ModeBanner, ScriptEndCard, endsAt } from "../components/Modes";
@@ -100,6 +100,22 @@ function setPlayViewCache(repo: Repo, worldId: string, view: CachedPlayView): vo
   }
 }
 
+/** Detects out-of-character meta questions about the original book or current save state before sending a story turn. */
+export function looksLikeMetaQuestion(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/^[“"「『]/.test(trimmed)) return false;
+  const hasQuestionPhrasing =
+    /[？?]\s*$/.test(trimmed) ||
+    /(?:吗|呢|么)\s*[？?。！!]?$/.test(trimmed) ||
+    /(?:是不是|会不会|还会是|怎么回事|为什么|什么情况|有哪些|是谁|是什么)/.test(trimmed);
+  if (!hasQuestionPhrasing) return false;
+  return (
+    /(?:原作|原著|原书|原剧情|原版|按原著|本局|这局|设定集|世界线|作者|AI)/i.test(trimmed) ||
+    /^(?:按理来说|照理说|请问|问一下|想问下)[\s，,][\s\S]*(?:吗|呢|是不是|会不会|还会)/.test(trimmed)
+  );
+}
+
 export default function Play({ worldId, active = true, resumeRunId }: { worldId: string; active?: boolean; resumeRunId?: string }) {
   const { game, push, replace, toast, devMode, pop, profile, reading } = useApp();
   if (!cacheHookedGames.has(game)) {
@@ -149,6 +165,14 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     setPanel(true);
   }, []);
   const [askInitial, setAskInitial] = useState("");
+  const [askAuto, setAskAuto] = useState(false);
+  const [metaPromptText, setMetaPromptText] = useState<string | null>(null);
+  const openAskFromComposer = useCallback(() => {
+    const draftText = input.trim();
+    setAskAuto(false);
+    setAskInitial(draftText);
+    setSheet("ask");
+  }, [input]);
   const openNotes = useCallback(() => setSheet("notes"), []);
   const wide = useWide();
   const mouse = useMouse();
@@ -388,8 +412,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     const follows = (anchor: WritingAnchor) => !!head && !busy && anchor.worldId === worldId && anchor.lineId === cursor?.line.id && headFollowsUpkeep(visibleNodes.current, anchor.headId, head.id);
     setWriting((w) => (w && follows(w.anchor) ? { ...w, anchor: { ...w.anchor, headId: head!.id } } : null));
     setFactAsk((a) => (a && follows(a.anchor) ? { ...a, anchor: { ...a.anchor, headId: head!.id } } : null));
-    setDesk(false);
   }, [worldId, cursor?.head.id, cursor?.line.id, busy]);
+  useEffect(() => {
+    setDesk(false);
+  }, [worldId, cursor?.line.id]);
+  useEffect(() => {
+    if (busy) setDesk(false);
+  }, [busy]);
   // After the third turn, once ever: everything a passage can do is behind a long press (AUDIT 4.2).
   const [pressTip, setPressTip] = useState(false);
   const [usageNode, setUsageNode] = useState<string | null>(null);
@@ -403,7 +432,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const playOverlayOpen =
     !!sheet || (panel && !wide) || !!menuNode || !!menuMore || !!editing ||
     !!rawNode || !!context || !!remember || !!bookmark || !!cardNode ||
-    !!writing || !!factAsk || desk || modePicker || !!usageNode || typing;
+    !!writing || !!factAsk || desk || modePicker || !!metaPromptText || !!usageNode || typing;
   useEffect(() => {
     if (!active) return;
     const enabled = isPaged && reading.volumeKeyTurn && !playOverlayOpen;
@@ -547,7 +576,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
   }, [active, returnAnchor, nodes, gen?.text, gen?.phase, notice, recap, reading.autoScroll]);
   // Leaving while a passage is written is fine: it keeps writing and the shelf shows it (D160).
-  const send = (override?: { mode: ActionMode; text: string }, overrideNote?: string | null) => {
+  const send = (override?: { mode: ActionMode; text: string }, overrideNote?: string | null, bypassMetaCheck = false) => {
     if (busy || !cursor) return;
     if (!game.llm) { push({ name: "setup" }); return; }
     // If a failed turn still holds the player's original prompt and they tap bottom “继续”
@@ -557,9 +586,15 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       void notifications.gate(() => generation.retryExecution(runId));
       return;
     }
+    const candidateMode = override?.mode ?? (input.trim() ? currentMode.mode : "continue");
+    const candidateText = override?.text ?? (candidateMode === "continue" ? "" : input.trim());
+    if (!bypassMetaCheck && (candidateMode === "do" || candidateMode === "continue") && looksLikeMetaQuestion(candidateText)) {
+      setMetaPromptText(candidateText);
+      return;
+    }
     void notifications.gate(() => {
-      const mode = override?.mode ?? (input.trim() ? currentMode.mode : "continue");
-      const text = override?.text ?? (mode === "continue" ? "" : input.trim());
+      const mode = candidateMode;
+      const text = candidateText;
       // An open 幕后要求 goes with a typed action and with a tapped choice alike.
       const directorNote = overrideNote !== undefined ? overrideNote : draft.directorNote();
       // A tapped choice leaves what the player was typing in the box (R28-T009).
@@ -569,7 +604,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       generation.start({
         action: { mode, text },
         // A failure gives the words back to the box; 再试一次 sends them again without doubling them.
-        retry: () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote); },
+        retry: () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote, true); },
         restore: (mode === "continue" || mode === "skip") && !directorNote ? null : { mode, text, note: directorNote ?? "" },
         run: (on) => game.play(worldId, { mode, text, directorNote }, on),
       });
@@ -683,7 +718,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     setFactAsk({ anchor, text, latest: await isLatestPassage(game, anchor), isOpening: !targetNode?.parentId, autoStart });
   };
   /** 只改文字: into the passage itself (R14 engine review); the first original stays for 恢复原文. */
-  const saveTextOnly = async (anchor: WritingAnchor, text: string) => {
+  const saveTextOnly = async (anchor: WritingAnchor, text: string, customToast?: string) => {
     checkScope(anchor);
     const beforeNode = await game.repo.getNode(anchor.nodeId);
     const wasAlreadyRewritten = beforeNode?.rewritten ?? false;
@@ -695,7 +730,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     const pins = (await game.repo.pinsOnPath(anchor.worldId, anchor.nodeId)).filter((p) => p.originNodeId === anchor.nodeId && !text.includes(p.text.trim()));
     // Undo restores original cleanly (clearing `rewritten` when this was the first edit, or restoring the previous manual edit).
     toast(
-      pins.length ? `已改写；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : "已改写，后面的剧情会按改过的文字继续",
+      pins.length ? `${customToast ?? "已改写"}；有 ${pins.length} 条记住的事摘自改前的文字，可以到要点里改` : (customToast ?? "已改写，后面的剧情会按改过的文字继续"),
       {
         label: "撤回",
         run: still(afterCur.head.id, () => {
@@ -720,12 +755,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     toast(inPlace ? "已改好，事实跟着改了；原来的写法留作另一个版本" : "已改好，进入改写后的路线；原路线和后续剧情保留",
       inPlace ? undefined : { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, preview.anchor.lineId).then(() => refresh())) });
   };
-  const openWriting = (kind: "rewrite" | "polish", node: StoryNode) => {
+  const openWriting = (kind: "rewrite" | "polish", node: StoryNode, initialMode?: WritingAssistMode) => {
     if (!cursor || busy) return;
     setWriting({ kind, text: kind === "rewrite" ? node.narrative : input, mode: currentMode.mode, source: state?.source,
+      ...(initialMode ? { initialMode } : {}),
       anchor: { worldId, lineId: cursor.line.id, headId: cursor.head.id, nodeId: node.id, original: node.narrative } });
   };
-  const adoptWriting = async (text: string, correction?: CanonCorrectionPreview, revision?: PlayerRevisionPreview) => {
+  const adoptWriting = async (text: string, correction?: CanonCorrectionPreview, revision?: PlayerRevisionPreview, adoptedMode?: WritingAssistMode) => {
     if (!writing) return;
     const draft = writing;
     checkScope(draft.anchor);
@@ -753,7 +789,11 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       toast("已进入修订路线，原路线和后续剧情保留", { label: "回到原路线", run: still(revised.head.id, () => void tree.switchLine(game.repo, worldId, draft.anchor.lineId).then(() => refresh())) });
       return;
     }
-    if (draft.kind === "rewrite") { await applyRewrite(draft.anchor, text); return; }
+    if (draft.kind === "rewrite") {
+      if (adoptedMode === "polish") { await saveTextOnly(draft.anchor, text, "已采用润色"); return; }
+      await applyRewrite(draft.anchor, text);
+      return;
+    }
     await assertWritingAnchor(game, draft.anchor);
     checkScope(draft.anchor);
     if (writingScope.current.input !== draft.text || writingScope.current.mode !== draft.mode) throw new WritingError("输入已经改过了，请重新润色，保留你刚写的内容。");
@@ -853,7 +893,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   const pick = (i: number) => ({ inInputs: true, run: () => {
     const choice = turn?.choices[i];
     if (!ready || busy || isDead || !choice || turn?.status === "interrupted") return false;
-    send({ mode: watch ? "direct" : "do", text: choice });
+    send({ mode: watch ? "direct" : "do", text: choice }, undefined, true);
   } });
   const focusInput = { inInputs: true, run: () => { if (!inputBox.current || isDead) return false; inputBox.current.focus(); } };
   const keys = () => setSheet("keys");
@@ -864,7 +904,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     "Ctrl+R": { inInputs: true, run: () => { if (!ready || busy || !turn?.parentId || turn.kind === "opening") return false; regenerate(null); } },
     "Ctrl+K": focusInput,
     "/": focusInput,
-    "Ctrl+F": { inInputs: true, run: () => { if (!ready) return false; setSheet("ask"); } },
+    "Ctrl+F": { inInputs: true, run: () => { if (!ready) return false; openAskFromComposer(); } },
     "Ctrl+,": { inInputs: true, run: () => (busy ? (toast("正在写，先停止或等写完"), undefined) : (captureReading(), push({ name: "settings" }))) },
     "F1": { inInputs: true, run: () => (busy ? (toast("正在写，先停止或等写完"), undefined) : (captureReading(), push({ name: "guide" }))) },
     "Ctrl+Enter": { inInputs: true, run: () => { if (!ready || busy || isDead) return false; send(); } },
@@ -1008,7 +1048,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
               {shown.map((node) => {
                 const isHead = node.id === turn?.id && !busy;
                 return (
-                  <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
+                  <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} onCanonCheck={!busy && state.source ? (n) => openWriting("rewrite", n, "canon") : undefined} onAskCanon={(q) => { setAskAuto(false); setAskInitial(q); setSheet("ask"); }} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
                     {isHead && node.status === "interrupted" && (
                       <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(a) => a.run()} onOpenUsage={() => setSheet("usage")} />
                     )}
@@ -1031,7 +1071,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
                 );
               })}
               {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
-                onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
+                onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice }, undefined, true)} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
               {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
               {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
               {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
@@ -1060,7 +1100,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
               {shown.map((node) => {
                 const isHead = node.id === turn?.id && !busy;
                 return (
-                  <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
+                  <TurnView key={node.id} node={node} onMenu={setMenuNode} onPanel={openPanel} onSourceBack={isHead ? sourceBack : undefined} onNotes={openNotes} onCanonCheck={!busy && state.source ? (n) => openWriting("rewrite", n, "canon") : undefined} onAskCanon={(q) => { setAskAuto(false); setAskInitial(q); setSheet("ask"); }} pressed={menuNode?.id === node.id} fresh={fresh === node.id} watch={watch}>{isHead ? <>
                     {isHead && node.status === "interrupted" && (
                       <NoticeCard notice={{ text: `这段没有写完。${notice?.text && !notice.actions.length ? ` ${notice.text}` : ""}`, actions: [{ label: "续写", run: resume }, { label: "重说", run: () => regenerate(null) }], runId: notice?.runId }} onAction={(a) => a.run()} onOpenUsage={() => setSheet("usage")} />
                     )}
@@ -1083,7 +1123,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
                 );
               })}
               {showChoices && <NextChoices choices={turn!.choices} watch={watch} mouse={mouse}
-                onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice })} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
+                onPick={(choice) => send({ mode: watch ? "direct" : "do", text: choice }, undefined, true)} onFill={(choice) => { setInput(choice); setModeIndex(0); requestAnimationFrame(() => { const el = inputBox.current; if (el) { el.focus(); el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; } }); }} />}
               {gen && <WritingTurn gen={gen} statusText={statusText || ""} waitLine={waitingLine(place, now.hour)} waited={waited} slow={slow && !executionStatus} />}
               {executionStatus && <p className="status-line" role="status">{executionStatus}</p>}
               {notice && !(turn?.status === "interrupted" && !notice.actions.length) && (
@@ -1114,13 +1154,13 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
         agentBusy={agentBusy} turn={turn} head={head} noteOpen={noteOpen} note={note} mode={mode} modeIndex={modeIndex} modeList={modeList}
         gen={gen} roomy={roomy} inputBox={inputBox} setInput={setInput} setModeIndex={setModeIndex} setNote={setNote}
         setNoteOpen={setNoteOpen} setTyping={setTyping} onModes={() => setModePicker(true)} onDesk={() => setDesk(true)}
-        onPolish={() => openWriting("polish", turn ?? head)} onAutoplay={() => setSheet("autoplay")}
+        onPolish={() => openWriting("polish", turn ?? head)} onAutoplay={() => setSheet("autoplay")} onOpenAsk={openAskFromComposer}
         onQueueAutoplayNote={auto?.runId ? async (text) => { await game.queueAutoplayNote(auto.runId!, text); toast(text.trim() ? "已排队，将在下一段生效" : "已取消下一段提示"); } : undefined}
         onSend={() => send()} onStopOrSend={stopOrSend} />
 
       {menuNode && <PassageMenu menuNode={menuNode} head={head} turn={turn} busy={busy} setMenuNode={setMenuNode}
         openWriting={openWriting} setEditing={setEditing}
-        onAskAbout={(n) => { const excerpt = n.narrative.replace(/\s+/g, " ").trim(); setAskInitial(`关于“${excerpt.slice(0, 48)}${excerpt.length > 48 ? "…" : ""}”：`); setSheet("ask"); }}
+        onAskAbout={(n) => { const excerpt = n.narrative.replace(/\s+/g, " ").trim(); setAskAuto(false); setAskInitial(`关于“${excerpt.slice(0, 48)}${excerpt.length > 48 ? "…" : ""}”：`); setSheet("ask"); }}
         setRemember={setRemember} goBack={goBack} toast={toast} setMenuMore={setMenuMore} />}
       {menuMore && <PassageMoreMenu menuMore={menuMore} busy={busy} devMode={devMode} game={game} setMenuMore={setMenuMore}
         setEditing={setEditing} refresh={refresh} toast={toast} setBookmark={setBookmark} setCardNode={setCardNode}
@@ -1197,13 +1237,44 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       )}
       {modePicker && <InputModeSheet watch={watch} modeList={modeList} modeIndex={modeIndex} inputBox={inputBox} noteOpen={noteOpen}
         mode={mode} worldId={worldId} cursor={cursor} setModePicker={setModePicker} setModeIndex={setModeIndex}
-        setNoteOpen={setNoteOpen} captureReading={captureReading} push={push} />}
+        setNoteOpen={setNoteOpen} onOpenAsk={openAskFromComposer} captureReading={captureReading} push={push} />}
+      {metaPromptText !== null && (
+        <MenuSheet
+          title="这句话像是在查原著或本局情况"
+          onClose={() => setMetaPromptText(null)}
+          items={[
+            {
+              label: "用「查一查」回答（不推进故事）",
+              onSelect: () => {
+                const q = metaPromptText;
+                setMetaPromptText(null);
+                setInput("");
+                draft.clearAfterSend("do");
+                setAskInitial(q);
+                setAskAuto(true);
+                setSheet("ask");
+              },
+            },
+            {
+              label: "仍作为主角行动写进故事",
+              onSelect: () => {
+                const actText = metaPromptText;
+                setMetaPromptText(null);
+                const actMode = currentMode.mode === "continue" ? "do" : currentMode.mode;
+                const noteToUse = draft.directorNote();
+                setInput("");
+                send({ mode: actMode, text: actText }, noteToUse, true);
+              },
+            },
+          ]}
+        />
+      )}
       {sheet === "life" && <LifeSheet world={world} state={state} headId={head.id} dead={dead} onClose={() => setSheet(null)} />}
       {cardNode && <PassageCardSheet world={world} node={cardNode} onClose={() => setCardNode(null)} />}
       {sheet === "keys" && <ShortcutsSheet onClose={() => setSheet(null)} />}
       {sheet === "reading" && <ReadingQuickSheet onClose={() => setSheet(null)} />}
       {sheet === "depth" && <DepthSheet value={depthOf(world.settings)} onChange={(depth) => { void updateSettings({ depth }).then(() => toast(`已换成${DEPTH_LABEL[depth]}档，从下一段起生效`)); }} onClose={() => setSheet(null)} />}
-      {sheet === "ask" && <AskSheet worldId={worldId} bookId={state.source?.bookId} source={state.source} initialQuestion={askInitial} captureReading={captureReading} onClose={() => { setSheet(null); setAskInitial(""); }} />}
+      {sheet === "ask" && <AskSheet worldId={worldId} bookId={state.source?.bookId} source={state.source} initialQuestion={askInitial} autoAsk={askAuto} captureReading={captureReading} onClose={() => { setSheet(null); setAskInitial(""); setAskAuto(false); }} />}
       {sheet === "skip" && <SkipSheet onClose={() => setSheet(null)} onStart={(text) => { setSheet(null); send({ mode: "skip", text }); }} />}
       {sheet === "hints" && (
         <Sheet title="重说时希望…" onClose={() => setSheet(null)}>

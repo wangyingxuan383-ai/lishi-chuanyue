@@ -423,10 +423,17 @@ struct Fact {
 
 impl Fact {
     fn value(&self, book: &str, position: i64) -> Value {
+        let temporal_note = if self.section < position && self.through.is_none() {
+            "出处较早，未注明失效章节；较早身份不能直接当作当前身份，须核对后续原文。"
+        } else if self.section > position {
+            "出处位于参考锚点之后（在允许参考范围内）；本局是否已发生及人物知情范围按本局正文判断。"
+        } else {
+            "按注明的章节范围理解；人物是否知情另按本局正文判断。"
+        };
         let mut value = json!({"id":self.id,"bookId":book,"jobId":self.job,"section":self.section,"chunk":self.chunk,
             "title":self.title,"kind":self.kind,"subject":self.subject,"aliases":self.aliases,"statement":self.statement,"quote":self.quote,
             "validFrom":self.from,"validThrough":self.through,
-            "temporalNote":if self.section<position && self.through.is_none() {"出处较早，未注明失效章节；较早身份不能直接当作当前身份，须核对后续原文。"} else {"按注明的章节范围理解；人物是否知情另按本局正文判断。"}});
+            "temporalNote":temporal_note});
         if let Some(page) = self.page {
             value["page"] = page.into();
         }
@@ -459,13 +466,9 @@ fn facts(
     position: i64,
     keys: &Keys,
     all: bool,
-    ignore_position: bool,
+    position_bias: bool,
 ) -> Result<Vec<Fact>> {
-    let sql = if ignore_position {
-        "SELECT f.id,f.job_id,f.section,f.chunk,f.kind,f.subject,f.aliases_json,f.statement,f.quote,f.valid_from,f.valid_through,s.title,s.page,c.text FROM canon_facts f JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section JOIN source_sections s ON s.book_id=f.book_id AND s.section=f.section JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id WHERE f.book_id=?1 AND f.section<=?2 AND (?3 IS NULL OR f.job_id=?3)"
-    } else {
-        "SELECT f.id,f.job_id,f.section,f.chunk,f.kind,f.subject,f.aliases_json,f.statement,f.quote,f.valid_from,f.valid_through,s.title,s.page,c.text FROM canon_facts f JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section JOIN source_sections s ON s.book_id=f.book_id AND s.section=f.section JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id WHERE f.book_id=?1 AND f.section<=?2 AND COALESCE(f.valid_from,f.section)<=?4 AND (f.valid_through IS NULL OR f.valid_through>=?4) AND (?3 IS NULL OR f.job_id=?3)"
-    };
+    let sql = "SELECT f.id,f.job_id,f.section,f.chunk,f.kind,f.subject,f.aliases_json,f.statement,f.quote,f.valid_from,f.valid_through,s.title,s.page,c.text FROM canon_facts f JOIN source_chunks c ON c.book_id=f.book_id AND c.ordinal=f.chunk AND c.section=f.section JOIN source_sections s ON s.book_id=f.book_id AND s.section=f.section JOIN source_jobs j ON j.id=f.job_id AND j.book_id=f.book_id WHERE f.book_id=?1 AND f.section<=?2 AND (?3 IS NULL OR f.job_id=?3)";
     let mut statement = db.prepare(sql)?;
     let job = binding["analysisId"].as_str();
     let map_row = |r: &rusqlite::Row<'_>| {
@@ -491,15 +494,10 @@ fn facts(
             r.get::<_, String>(13)?,
         ))
     };
-    let collected: Vec<(Fact, String)> = if ignore_position {
-        statement
-            .query_map(params![book, through, job], map_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    } else {
-        statement
-            .query_map(params![book, through, job, position], map_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    };
+    let collected: Vec<(Fact, String)> = statement
+        .query_map(params![book, through, job], map_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let soft_temporal_penalty = position_bias && binding["plot"] == "canon";
     let mut selected = vec![];
     let mut seen = HashSet::new();
     for (fact, original) in collected {
@@ -514,8 +512,8 @@ fn facts(
         {
             continue;
         }
-        let score = fact.score(keys);
-        if !all && score == 0 {
+        let raw_score = fact.score(keys);
+        if !all && raw_score == 0 {
             continue;
         }
         let fingerprint = json!([
@@ -530,14 +528,25 @@ fn facts(
         if !seen.insert(fingerprint) {
             continue;
         }
-        selected.push((fact, score));
+        let out_of_temporal_window = fact.from.unwrap_or(fact.section) > position
+            || fact.through.is_some_and(|t| t < position);
+        let ranked_score = if soft_temporal_penalty && out_of_temporal_window {
+            raw_score
+        } else {
+            raw_score.saturating_mul(2).saturating_add(u32::from(all))
+        };
+        selected.push((fact, ranked_score));
     }
     selected.sort_by(|(a, x), (b, y)| {
         y.cmp(x)
             .then_with(|| {
-                a.section
-                    .abs_diff(position)
-                    .cmp(&b.section.abs_diff(position))
+                if position_bias {
+                    a.section
+                        .abs_diff(position)
+                        .cmp(&b.section.abs_diff(position))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
             })
             .then_with(|| a.chunk.cmp(&b.chunk))
     });
@@ -903,7 +912,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
     }
     let position = binding["position"].as_i64().unwrap_or(0).clamp(from, through);
     let raw_query = args["query"].as_str().unwrap_or("").trim();
-    let ignore_position = matches!(plan.kind.as_str(), "correction" | "ask" | "pi_task");
+    let position_bias = range.is_none() && !matches!(plan.kind.as_str(), "correction" | "ask" | "pi_task");
     let mut keys = query_keys(plan, args);
     let notes = facts(
         db,
@@ -914,7 +923,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
         position,
         &keys,
         name == "read_canon_facts" && raw_query.is_empty(),
-        ignore_position,
+        position_bias,
     )?;
     if name == "read_canon_facts" {
         let mut remaining = budget(plan);
@@ -1114,20 +1123,24 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
             }
         }
     }
-    // On ordinary turns (not whole-book lookups or explicit chapter ranges), favor passages near the current book position.
-    if name == "search_original" && !ignore_position && range.is_none() {
+    // On ordinary turns (not whole-book lookups or explicit chapter ranges), gently break ties near the current book position without drowning later-chapter keyword hits.
+    if name == "search_original" && position_bias {
         for (id, score) in scores.iter_mut() {
             let dist = scope.get(id).map_or(0, |s| s.abs_diff(position)) as f64;
-            *score *= 1.0 + 0.9 / (1.0 + dist / 6.0);
+            *score *= 1.0 + 0.35 / (1.0 + dist / 12.0);
         }
     }
     let mut ranked: Vec<_> = scores.into_iter().collect();
     ranked.sort_by(|(a, x), (b, y)| {
         y.total_cmp(x)
             .then_with(|| {
-                scope[a]
-                    .abs_diff(position)
-                    .cmp(&scope[b].abs_diff(position))
+                if position_bias {
+                    scope[a]
+                        .abs_diff(position)
+                        .cmp(&scope[b].abs_diff(position))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
             })
             .then_with(|| a.cmp(b))
     });
@@ -1524,56 +1537,24 @@ mod tests {
             .iter()
             .all(|p| p["kind"] == "original" && !p["text"].as_str().unwrap().contains("这段JSON")));
         plan.state["source"]["position"] = json!(1);
-        assert!(
+        plan.state["source"]["plot"] = json!("canon");
+        // Facts within `through` remain discoverable even when `position` lags behind later chapters!
+        assert_eq!(
             read(&store, &plan, "read_canon_facts", &json!({"query":"子安"})).unwrap()["facts"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            read(&store, &plan, "read_canon_facts", &json!({"query":"玄影"})).unwrap()["facts"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        let keys = query_keys(&plan, &json!({"query":"玄影"}));
-        assert!(facts(
-            &store.lock().unwrap(),
-            "book",
-            &plan.state["source"],
-            0,
-            2,
-            1,
-            &keys,
-            false,
-            false,
-        )
-        .unwrap()
-        .is_empty());
-        assert_eq!(
-            facts(
-                &store.lock().unwrap(),
-                "book",
-                &plan.state["source"],
-                0,
-                2,
-                1,
-                &keys,
-                false,
-                true,
-            )
-            .unwrap()
-            .len(),
-            1
-        );
-        plan.state["source"]["position"] = json!(2);
-        assert_eq!(
-            read(&store, &plan, "read_canon_facts", &json!({"query":"玄影"})).unwrap()["facts"]
                 .as_array()
                 .unwrap()
                 .len(),
             1
         );
+        let later = read(&store, &plan, "read_canon_facts", &json!({"query":"玄影"})).unwrap();
+        assert_eq!(later["facts"].as_array().unwrap().len(), 1);
+        assert_eq!(later["facts"][0]["section"], 2);
+        // Under `plot == "canon"`, an in-window fact at `position == 1` ranks ahead of out-of-window facts via soft penalty.
+        add_fact(&store, 1, 1, "沈青", "沈医官", "沈青善辨药性，受任医官", 1, Some(1));
+        let ranked_shen = read(&store, &plan, "read_canon_facts", &json!({"query":"沈青"})).unwrap();
+        assert_eq!(ranked_shen["facts"][0]["section"], 1);
+        assert_eq!(ranked_shen["facts"].as_array().unwrap().len(), 3);
+        // Hard `through` ceiling still strictly excludes facts after `through`.
         plan.state["source"]["through"] = json!(1);
         assert!(
             read(&store, &plan, "read_canon_facts", &json!({"query":"玄影"})).unwrap()["facts"]
@@ -1612,19 +1593,59 @@ mod tests {
     }
 
     #[test]
-    fn book_position_follows_the_passage_forward_only_and_at_most_five_chapters() {
+    fn book_position_follows_the_passage_forward_only_and_supports_rewrite_and_corroborated_jumps() {
         let (store, marks) = following_book();
         let db = store.lock().unwrap();
         let binding = |position: i64, plot: &str| json!({"bookId":"book","fanfic":true,"plot":plot,"position":position,"through":null});
         let passage = |i: usize| format!("他走在路上看见风雪，忽然想起{}。", marks[i]);
-        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(7)).unwrap(), Some(5), "at most two sections at a time");
-        assert_eq!(follow_position(&db, &binding(0, "canon"), &passage(9)).unwrap(), Some(2), "at most two sections at a time");
+        assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(7)).unwrap(), Some(7), "advances directly within +6");
+        assert_eq!(follow_position(&db, &binding(0, "canon"), &passage(9)).unwrap(), Some(4), "steps smoothly when uncorroborated beyond +6");
         assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(2)).unwrap(), None, "never backwards");
         assert_eq!(follow_position(&db, &binding(3, "canon"), &passage(3)).unwrap(), None, "still in the same chapter");
-        assert_eq!(follow_position(&db, &binding(3, "rewrite"), &passage(7)).unwrap(), None, "a rewritten plot is left alone");
+        assert_eq!(follow_position(&db, &binding(3, "rewrite"), &passage(7)).unwrap(), Some(7), "rewrite plot also follows position");
+        assert_eq!(follow_position(&db, &binding(3, "settings"), &passage(7)).unwrap(), None, "settings-only plot does not follow position");
         assert_eq!(follow_position(&db, &binding(3, "canon"), "他走在路上看见风雪。").unwrap(), None, "nothing distinctive");
         let limited = json!({"bookId":"book","fanfic":true,"plot":"canon","position":3,"through":5});
         assert_eq!(follow_position(&db, &limited, &passage(7)).unwrap(), None, "past the reading limit");
+        drop(db);
+
+        // 40-chapter fanfic book (`plot == "rewrite"`): advances across >12 sections when corroborated by `read_sections` or chapter title!
+        let mut long_sections: Vec<String> = (0..40)
+            .map(|i| format!("第{}日，学院众人照常早起晨练，议论魂环与修行。", i + 1))
+            .collect();
+        long_sections[24] = "众人踏入星斗大森林外围，赵无极沉声提醒提防泰坦巨猿与凤尾鸡冠蛇。".to_owned();
+        long_sections[35] = "索托大斗魂场灯火通明，皇斗战队玉天恒率队登台迎战。".to_owned();
+        let (long_store, _) = setup(&long_sections);
+        let db = long_store.lock().unwrap();
+        db.execute(
+            "UPDATE source_sections SET title='第二十五章 星斗大森林（一）' WHERE book_id='book' AND section=24",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE source_sections SET title='第36章 皇斗战队' WHERE book_id='book' AND section=35",
+            [],
+        )
+        .unwrap();
+        let rewrite_bind = json!({"bookId":"book","fanfic":true,"plot":"rewrite","position":0,"through":38});
+        // Jump from 0 -> 24 (>12 sections) corroborated by normalized chapter title "星斗大森林":
+        let by_title = follow_position_with_reads(
+            &db,
+            &rewrite_bind,
+            "清晨众人踏入星斗大森林，赵无极提醒众人戒备泰坦巨猿。",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(by_title, Some(24));
+        // Jump from 0 -> 35 (>28 sections!) corroborated by `read_sections = &[35]`:
+        let by_reads = follow_position_with_reads(
+            &db,
+            &rewrite_bind,
+            "夜幕下索托大斗魂场人声鼎沸，玉天恒率领队伍登台迎战。",
+            &[35],
+        )
+        .unwrap();
+        assert_eq!(by_reads, Some(35));
     }
 
     /// Thirty chapters; every one mentions 核对 (the request word), one mentions 比试.
@@ -1811,30 +1832,155 @@ mod tests {
 
 fn utf16_slice(text:&str,start:usize,end:usize)->String { let mut at=0; text.chars().filter(|c|{let old=at;at+=c.len_utf16();old>=start&&at<=end}).collect() }
 
+fn normalize_section_title_core(raw: &str) -> Option<String> {
+    static LEADING_CN_RE: OnceLock<Regex> = OnceLock::new();
+    static LEADING_EN_RE: OnceLock<Regex> = OnceLock::new();
+    static LEADING_NUM_RE: OnceLock<Regex> = OnceLock::new();
+    static TRAILING_PART_RE: OnceLock<Regex> = OnceLock::new();
+    let cn_re = LEADING_CN_RE.get_or_init(|| {
+        Regex::new(r"^\s*第\s*[0-9零〇一二两三四五六七八九十百千万]+\s*[卷集部篇章节回话幕折]\s*[:：、.\-—\s]*").unwrap()
+    });
+    let en_re = LEADING_EN_RE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*(?:chapter|section|part|vol\.?|volume)\s+\d+\s*[:：.\-—\s]*").unwrap()
+    });
+    let num_re = LEADING_NUM_RE.get_or_init(|| {
+        Regex::new(r"^\s*\d{1,5}\s*[.、:：\-—\s]+").unwrap()
+    });
+    let tail_re = TRAILING_PART_RE.get_or_init(|| {
+        Regex::new(r"\s*[（(【\[][0-9零〇一二两三四五六七八九十百千万上下中完合终]+[）)】\]]\s*$").unwrap()
+    });
+
+    let mut cur = raw.trim().to_owned();
+    loop {
+        let next = if let Some(m) = cn_re.find(&cur) {
+            cur[m.end()..].to_owned()
+        } else if let Some(m) = en_re.find(&cur) {
+            cur[m.end()..].to_owned()
+        } else if let Some(m) = num_re.find(&cur) {
+            cur[m.end()..].to_owned()
+        } else {
+            break;
+        };
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    while let Some(m) = tail_re.find(&cur) {
+        cur.truncate(m.start());
+    }
+    let cleaned = cur
+        .trim_matches(|c: char| c.is_whitespace() || ":：、.-—《》「」『』“”\"'()（）[]【】".contains(c))
+        .trim();
+    if cleaned.chars().count() < 2
+        || matches!(cleaned, "序章" | "楔子" | "引子" | "前言" | "后记" | "番外" | "正文" | "尾声")
+    {
+        None
+    } else {
+        Some(cleaned.to_owned())
+    }
+}
+
 /// 原著进度跟随 (R30 step 2, D178): which chapter of the bound book a passage
 /// most likely follows, from the book's own search index, no model request.
-/// Only forward from `position`, at most five chapters at a time, and only
-/// when one chapter clearly leads; otherwise None and the position stays.
-pub(crate) fn follow_position(db: &rusqlite::Connection, binding: &Value, narrative: &str) -> Result<Option<i64>> {
-    let Some(book) = binding["bookId"].as_str() else { return Ok(None) };
-    if binding["fanfic"] != true || binding["plot"] != "canon" {
+pub fn follow_position(
+    db: &rusqlite::Connection,
+    binding: &Value,
+    narrative: &str,
+) -> Result<Option<i64>> {
+    follow_position_with_reads(db, binding, narrative, &[])
+}
+
+pub(crate) fn follow_position_with_reads(
+    db: &rusqlite::Connection,
+    binding: &Value,
+    narrative: &str,
+    read_sections: &[i64],
+) -> Result<Option<i64>> {
+    let Some(book) = binding["bookId"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if binding["plot"] == "settings" || binding["fanfic"] == false {
         return Ok(None);
     }
-    let last: Option<i64> = db.query_row("SELECT MAX(section) FROM source_sections WHERE book_id=?", [book], |r| r.get(0)).optional()?.flatten();
+    let last: Option<i64> = db
+        .query_row(
+            "SELECT MAX(section) FROM source_sections WHERE book_id=?",
+            [book],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
     let Some(last) = last else { return Ok(None) };
     let through = binding["through"].as_i64().unwrap_or(last).min(last);
     let position = binding["position"].as_i64().unwrap_or(0).clamp(0, through);
     if position >= through {
         return Ok(None);
     }
-    // Look a little behind (the passage may still be in the current section) and moderately ahead.
-    let (from, to) = ((position - 2).max(0), (position + 12).min(through));
-    let mut stmt = db.prepare("SELECT ordinal,section,LENGTH(text) FROM source_chunks WHERE book_id=? AND section BETWEEN ? AND ?")?;
-    let window: HashMap<i64, (i64, i64)> = stmt.query_map(params![book, from, to], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect::<std::result::Result<_, _>>()?;
+
+    let read_corroborated: HashSet<i64> = read_sections
+        .iter()
+        .copied()
+        .filter(|&s| s > position && s <= through)
+        .collect();
+    let mut title_matched = HashSet::<i64>::new();
+    {
+        let mut sec_stmt = db.prepare(
+            "SELECT section, title FROM source_sections WHERE book_id=? AND section>? AND section<=?",
+        )?;
+        let sec_rows = sec_stmt.query_map(params![book, position, through], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in sec_rows {
+            let (sec, raw_title) = row?;
+            if let Some(core) = normalize_section_title_core(&raw_title) {
+                if narrative.contains(&core) {
+                    title_matched.insert(sec);
+                }
+            }
+        }
+    }
+
+    let mut intervals = vec![((position - 2).max(0), through.min(position + 28))];
+    for &s in read_corroborated.union(&title_matched) {
+        intervals.push(((s - 2).max(0), through.min(s + 4)));
+    }
+    intervals.sort_by_key(|r| r.0);
+    let mut merged = Vec::<(i64, i64)>::new();
+    for (lo, hi) in intervals {
+        if let Some(last_iv) = merged.last_mut() {
+            if lo <= last_iv.1 + 1 {
+                last_iv.1 = last_iv.1.max(hi);
+                continue;
+            }
+        }
+        merged.push((lo, hi));
+    }
+
+    let mut window = HashMap::<i64, (i64, i64)>::new();
+    {
+        let mut stmt = db.prepare(
+            "SELECT ordinal,section,LENGTH(text) FROM source_chunks WHERE book_id=? AND section BETWEEN ? AND ?",
+        )?;
+        for (lo, hi) in &merged {
+            let rows = stmt.query_map(params![book, lo, hi], |r| {
+                Ok((r.get::<_, i64>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+            })?;
+            for row in rows {
+                let (ord, info) = row?;
+                window.insert(ord, info);
+            }
+        }
+    }
     if window.is_empty() {
         return Ok(None);
     }
-    let total: f64 = db.query_row("SELECT COUNT(*) FROM source_chunks WHERE book_id=?", [book], |r| r.get::<_, i64>(0))? as f64;
+
+    let total: f64 = db.query_row(
+        "SELECT COUNT(*) FROM source_chunks WHERE book_id=?",
+        [book],
+        |r| r.get::<_, i64>(0),
+    )? as f64;
     let mut keys = terms(narrative);
     keys.truncate(400);
     if keys.is_empty() {
@@ -1843,18 +1989,21 @@ pub(crate) fn follow_position(db: &rusqlite::Connection, binding: &Value, narrat
     let placeholders = vec!["?"; keys.len()].join(",");
     let mut values = vec![book.to_owned()];
     values.extend(keys.iter().cloned());
-    let mut stmt = db.prepare(&format!("SELECT postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"))?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| r.get::<_, String>(0))?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT postings FROM source_terms WHERE book_id=? AND term IN ({placeholders})"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| {
+        r.get::<_, String>(0)
+    })?;
     let mut chunk_scores = HashMap::<i64, (f64, usize)>::new();
-    let max_df = (total * 0.03).clamp(3.0, 40.0);
+    let max_df = (total * 0.35).max(8.0);
     for raw in rows {
         let postings = serde_json::from_str::<Vec<i64>>(&raw?).unwrap_or_default();
         let df = postings.len() as f64;
-        // Words found all over the book (names, common phrases) say nothing about where we are.
         if df == 0.0 || df > max_df {
             continue;
         }
-        let weight = (total / df).ln();
+        let weight = ((total + 1.0) / (df + 1.0)).ln();
         for chunk in postings.into_iter().filter(|c| window.contains_key(c)) {
             let entry = chunk_scores.entry(chunk).or_insert((0.0, 0));
             entry.0 += weight;
@@ -1871,10 +2020,39 @@ pub(crate) fn follow_position(db: &rusqlite::Connection, binding: &Value, narrat
             *entry = (score, hits);
         }
     }
-    let Some((&best, &(top, top_hits))) = sections.iter().max_by(|a, b| a.1.0.total_cmp(&b.1.0).then(b.0.cmp(a.0))) else { return Ok(None) };
-    let runner_up = sections.iter().filter(|(s, _)| s.abs_diff(best) > 1).map(|(_, (v, _))| *v).fold(0.0, f64::max);
-    if best <= position || top_hits < 3 || top < 12.0 || top < runner_up * 1.4 {
+    for (&sec, entry) in sections.iter_mut() {
+        if sec <= position {
+            continue;
+        }
+        if read_corroborated.contains(&sec) && entry.1 >= 2 {
+            entry.0 += 4.5;
+            entry.1 += 1;
+        }
+        if title_matched.contains(&sec) && entry.1 >= 1 {
+            entry.0 += 6.0;
+            entry.1 += 1;
+        }
+    }
+    let Some((&best, &(top, top_hits))) = sections
+        .iter()
+        .max_by(|a, b| a.1 .0.total_cmp(&b.1 .0).then(b.0.cmp(a.0)))
+    else {
+        return Ok(None);
+    };
+    let runner_up = sections
+        .iter()
+        .filter(|(s, _)| s.abs_diff(best) > 1)
+        .map(|(_, (v, _))| *v)
+        .fold(0.0, f64::max);
+    if best <= position || top_hits < 3 || top < 9.0 || top < runner_up * 1.35 {
         return Ok(None);
     }
-    Ok(Some(best.min(position + 2)))
+    let corroborated = read_corroborated.contains(&best) || title_matched.contains(&best);
+    let high_confidence = top_hits >= 4 && top >= 14.0 && top >= runner_up * 1.5;
+    let next = if best <= position + 6 || corroborated || high_confidence {
+        best
+    } else {
+        best.min(position + 4)
+    };
+    Ok(Some(next.min(through)))
 }

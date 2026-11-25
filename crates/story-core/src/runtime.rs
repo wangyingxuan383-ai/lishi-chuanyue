@@ -612,13 +612,24 @@ impl Engine {
             if purpose != "capability" {
                 let local_used=c.step_budget();let left = request_limit - local_used.model_requests;
                 if left <= 3 {
-                    allowance = Some(format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次；工具还可调用{}次。停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；Agent用commit_turn，原著改稿返回要求的完整JSON。",crate::types::RUN_TOOL_LIMIT.saturating_sub(local_used.tool_calls)));
+                    let tools_left = crate::types::RUN_TOOL_LIMIT.saturating_sub(local_used.tool_calls);
+                    allowance = Some(if matches!(plan.kind.as_str(), "ask" | "correction") {
+                        format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次；工具还可调用{tools_left}次。停止非必要补查：有依据就按本次任务要求输出完整结果；缺依据须明确资料不足，不编造。若本次是最后一次模型请求，完成所需最终输出；原著改稿返回要求的完整JSON。")
+                    } else {
+                        format!("【本次执行剩余额度】包括当前这次，尚可请求模型{left}次；工具还可调用{tools_left}次。停止非必要补查：按已有设定与上文直接写出完整纯文本小说正文与<record>，未核实的原著细枝末节在故事中自然留白，绝不在小说正文里写“资料不足”或场外说明。")
+                    });
                 }
             }
         }
         let mut messages = messages;
         if final_only {
-            let last = if plan.kind == "correction" { correction::CORRECTION_FINAL } else { "【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本次的完整结果，不要再调用工具；资料不足之处按已知写，不编造原著细节。" };
+            let last = if plan.kind == "correction" {
+                correction::CORRECTION_FINAL
+            } else if plan.kind == "ask" {
+                "【查阅到此为止】本档的资料查询已用完。依据上文已有的资料、札记和原文直接简明作答，不要再调用工具；资料不足就明确说明，不编造原著细节。"
+            } else {
+                "【查阅到此为止】本档的资料查询已用完。依据上文已有的设定、札记和原文直接写出本回合纯文本小说正文及<record>，不要再调用工具；未核实的原著细枝末节在故事中自然留白，绝不在正文里解释“资料不足”或写场外说明。"
+            };
             messages.push(json!({"role":"system","content":last}));
         }
         if let Some(note) = allowance {
@@ -766,7 +777,12 @@ impl Engine {
                     let _ = store.run_event(&progress_plan, event);
                 }
                 let has_record = find_record_tag(&clean_text).is_some();
-                let visible = narrative_part(&clean_text);
+                let raw_visible = narrative_part(&clean_text);
+                let visible = if is_story_plan(&progress_plan) && !progress_plan.meta["playerNarrative"].is_string() {
+                    sanitize_story_prose(&raw_visible)
+                } else {
+                    raw_visible
+                };
                 if has_record {
                     record_seen.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -974,7 +990,12 @@ impl Engine {
         } else if output_cut_short(result) && !complete_prose_before_record(plan, purpose, result) {
             let label = crate::stage_context::label(purpose);
             if purpose.starts_with("writing:") && is_story_plan(plan) {
-                let visible = narrative_part(&clean_text);
+                let raw_visible = narrative_part(&clean_text);
+                let visible = if plan.meta["playerNarrative"].is_string() {
+                    raw_visible
+                } else {
+                    sanitize_story_prose(&raw_visible)
+                };
                 if !visible.is_empty() {
                     let prefix = if plan.kind == "continue" { plan.original.as_str() } else { "" };
                     shared.lock().map_err(|_| Error::Cancelled)?.draft["partialNarrative"] = format!("{prefix}{visible}").into();
@@ -1127,7 +1148,7 @@ impl Engine {
             messages = saved.clone();
         }
         // A real tool roundtrip is the capability test. Never infer from a vendor name.
-        let modern=plan.kind=="ask"||plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-3"|"reference-review-4"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"|"reference-review-lite-5"));
+        let modern=plan.kind=="ask"||plan.meta["writingContext"].is_object()||plan.meta["correctionRange"].is_object()||plan.meta["depth"].is_string()||matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-3"|"reference-review-4"|"reference-review-5"|"reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"|"reference-review-lite-5"|"reference-review-lite-6"));
         let support = if tier == Tier::Fast && plan.kind != "ask" {
             false
         } else if modern {
@@ -1269,7 +1290,11 @@ impl Engine {
         }
         let raw = result.text.clone();
         let clean_raw = chat::strip_inline_think(&raw);
-        let visible_prose = narrative_part(&clean_raw);
+        let visible_prose = if plan.meta["playerNarrative"].is_string() {
+            narrative_part(&clean_raw)
+        } else {
+            sanitize_story_prose(&narrative_part(&clean_raw))
+        };
         let mut narrative = if let Some(player) = plan.meta["playerNarrative"].as_str() {
             player.to_owned()
         } else {
@@ -1363,13 +1388,13 @@ impl Engine {
         if let Some(problem) = turn_record_problem(&plan, &record) {
             return Err(Error::fail(crate::failure::FailKind::Format, format!("正文已保留，{problem}，可以接着整理")));
         }
-        if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-3"|"reference-review-4")) && !plan.meta["playerNarrative"].is_string() {
+        if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-1"|"reference-review-2"|"reference-review-3"|"reference-review-4"|"reference-review-5")) && !plan.meta["playerNarrative"].is_string() {
             let reviewed=self.review_reference(&shared,&plan,&mcp,&active_tools,&narrative,&record).await?;
-            narrative=reviewed["narrative"].as_str().unwrap_or(&narrative).to_owned();record=reviewed["record"].clone();
+            narrative=sanitize_story_prose(reviewed["narrative"].as_str().unwrap_or(&narrative));record=reviewed["record"].clone();
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=reviewed["report"].clone();
-        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"|"reference-review-lite-5")) && !plan.meta["playerNarrative"].is_string() {
+        } else if has_book && matches!(plan.meta["referenceReviewVersion"].as_str(),Some("reference-review-lite-1"|"reference-review-lite-2"|"reference-review-lite-3"|"reference-review-lite-4"|"reference-review-lite-5"|"reference-review-lite-6")) && !plan.meta["playerNarrative"].is_string() {
             let (revised,revised_record,report)=self.review_reference_lite(&shared,&plan,&narrative,&record).await?;
-            narrative=revised; record=revised_record;
+            narrative=sanitize_story_prose(&revised); record=revised_record;
             shared.lock().map_err(|_|Error::Cancelled)?.draft["referenceReview"]=report;
         }
         if let Some(problem) = turn_record_problem(&plan, &record) {
@@ -1731,8 +1756,22 @@ impl Engine {
         // 原著进度跟随 (D178): the passage moves the book position forward when
         // it clearly follows a later chapter. Kept in this node's state, so it
         // goes with the route and is undone with the passage.
-        if matches!(plan.kind.as_str(), "turn" | "variant" | "continue") && state["source"].is_object() {
-            if let Ok(Some(next)) = crate::runtime_sources::follow_position(&tx, &state["source"], narrative) {
+        let allow_follow = matches!(plan.kind.as_str(), "turn" | "variant" | "continue")
+            || (plan.kind == "opening" && state["source"]["fanfic"] == true);
+        if allow_follow && state["source"].is_object() {
+            let read_sections: Vec<i64> = c.draft["originalPassages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|p| p["kind"] == "original" && p["match"] != "nearby")
+                .filter_map(|p| p["section"].as_i64())
+                .collect();
+            if let Ok(Some(next)) = crate::runtime_sources::follow_position_with_reads(
+                &tx,
+                &state["source"],
+                narrative,
+                &read_sections,
+            ) {
                 let from = state["source"]["position"].as_i64().unwrap_or(0);
                 let book_id = state["source"]["bookId"].as_str().unwrap_or("");
                 let section_title = |sec: i64| -> Option<String> {
@@ -2318,6 +2357,49 @@ pub fn narrative_part(text: &str) -> String {
     }
     visible.trim_end().to_owned()
 }
+
+/// Strips accidental Markdown formatting from AI-generated story prose while
+/// keeping Chinese paragraph indentation (`\u{3000}`) and literary punctuation intact.
+pub fn sanitize_story_prose(text: &str) -> String {
+    static ATX_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static UL_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static BOLD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let atx_re = ATX_RE.get_or_init(|| regex::Regex::new(r"^([\s\u{3000}]*)#{1,6}[ \t\u{3000}]+(\S.*)$").unwrap());
+    let ul_re = UL_RE.get_or_init(|| regex::Regex::new(r"^([\s\u{3000}]*)[-*+][ \t\u{3000}]+(\S.*)$").unwrap());
+    let bold_re = BOLD_RE.get_or_init(|| regex::Regex::new(r"\*\*[ \t]*([^*\n]+?)[ \t]*\*\*").unwrap());
+
+    let mut lines = Vec::new();
+    for raw_line in text.split('\n') {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with("```") {
+            continue;
+        }
+        let no_spaces: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        if no_spaces.len() >= 3
+            && (no_spaces.bytes().all(|b| b == b'-') || no_spaces.bytes().all(|b| b == b'*'))
+        {
+            lines.push("◇".to_owned());
+            continue;
+        }
+        let mut line = raw_line.to_owned();
+        if let Some(caps) = atx_re.captures(&line) {
+            let indent: String = caps[1].chars().filter(|&c| c == '\u{3000}').collect();
+            line = format!("{indent}{}", &caps[2]);
+        } else if let Some(caps) = ul_re.captures(&line) {
+            line = format!("{}{}", &caps[1], &caps[2]);
+        }
+        lines.push(line);
+    }
+    let mut joined = lines.join("\n");
+    for _ in 0..3 {
+        let next = bold_re.replace_all(&joined, "$1");
+        if next == joined {
+            break;
+        }
+        joined = next.into_owned();
+    }
+    joined.trim_end().to_owned()
+}
 fn insert_node(
     tx: &Transaction<'_>,
     id: &str,
@@ -2571,7 +2653,7 @@ impl Tier {
         match plan.meta["depth"].as_str() { Some("fast") => Tier::Fast, Some("standard") => Tier::Standard, _ => Tier::Deep }
     }
     fn tool_rounds(self) -> Option<u64> {
-        match self { Tier::Fast => Some(0), Tier::Standard => Some(2), Tier::Deep => Some(4) }
+        match self { Tier::Fast => Some(0), Tier::Standard => Some(2), Tier::Deep => Some(2) }
     }
 }
 /// Lookup rounds for 按原著纠错 and 查一查 before they must answer; each round may read several things.
@@ -2590,7 +2672,7 @@ const CORRECTION_TOOLS: [&str; 9] = [
     "read_history",
     "read_characters",
 ];
-const CORRECTION_RULES: &str = "按原著纠错模式：遵循原著技能与本局资料已附在上下文中，不必读取 read_world 或技能目录。先看已提供的原文与札记，不够再用 list_sections 查章节目录、search_original（可翻页或限定章节）和 read_original 核对原句，最后只返回要求的 JSON 对象，不要输出 <record> 块或调用写入工具。";
+const CORRECTION_RULES: &str = "按原著纠错模式：遵循原著技能与本局资料已附在上下文中，不必读取 read_world 或技能目录。先看已提供的原文与札记，不够再用 list_sections 查章节目录、search_original（可翻页或限定章节）和 read_original 核对原句，最后只返回要求的 JSON 对象，不要输出 <record> 块或调用写入工具。改写后的小说正文片段（replacement）必须是纯文本小说叙事，严禁使用任何 Markdown 标记（禁止 **加粗**、*斜体*、# 标题、列表、--- 分隔线、代码块），也严禁在小说正文里跳出叙事写【说明】或设定分析。";
 /// Focused read tools for 查一查: covers book lookup + story history/resources/continuity without writing or skill clutter.
 const ASK_TOOLS: [&str; 9] = [
     "list_sections",
@@ -2604,10 +2686,10 @@ const ASK_TOOLS: [&str; 9] = [
     "read_continuity",
 ];
 const ASK_RULES: &str = "查一查模式：只回答玩家问题，不推进剧情，不输出 <record> 块，不调用写入工具。先看上下文里已给的本局资料、札记和原文片段；不够时可调用只读工具补查本局旧事、人物、设定、知情线索或绑定原著原文，查清后简明作答，资料不足就直说。";
-const ORDINARY_RULES_FAST:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料都已在上下文中，直接写本回合正文及<record>。";
-const ORDINARY_RULES_STANDARD:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料已在上下文中，信息够用就直接写本回合正文及<record>。若涉及原著具体规则、考核方式、人物身份、招式能力、地点细节而上下文里的原文没有覆盖，先用 list_sections / search_original / read_original 查清再写，不要凭印象编造；需要查的几项在同一批里一起查，查完就写；不要调用写入工具。";
-const ORDINARY_RULES:&str="普通回合：本回合所需的世界、规则、人物和旧事已在上下文中，直接写本回合正文及<record>。只有在需要核实上下文里没有的具体人物、设定或原著细节时才调用只读工具，不要为了例行检查读取技能或世界资料；不要调用写入工具。";
-const CLASSIC_RULES:&str="经典模式：生成和整理顺序由程序安排。你可以读取技能并调用只读工具核实资料。绑定参考书且任务需要原著细节时，按遵循原著技能读取原文，不用模型记忆补齐事实。最后返回本回合正文及<record>；不要调用写入工具。";
+const ORDINARY_RULES_FAST:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料都已在上下文中，直接写本回合正文及<record>。\n- 禁破第四面墙：严禁跳出小说叙事直接向玩家写【说明】、设定分析、原著对比报告或“当前剧情停留在……你可以决定……”等场外提示；即使【玩家行动】带有疑问或推演口吻，也必须化为主角在当下场景中的内心思忖、观察或与在场人物的交谈，留在故事里自然推进。\n- 纯文本小说格式：<record> 之前的正文必须是纯文本小说段落，严禁使用任何 Markdown 标记（禁止 **加粗**、*斜体*、# 标题、- 或 1. 列表、--- 分隔线、代码块）。";
+const ORDINARY_RULES_STANDARD:&str="普通回合：本回合所需的世界、规则、人物、旧事和原著资料已在上下文中，信息够用就直接写本回合正文及<record>。若涉及原著具体规则、考核方式、人物身份、招式能力、地点细节而上下文里的原文没有覆盖，先用 list_sections / search_original / read_original 查清再写，不要凭印象编造；需要查的几项在同一批里一起查，查完就写；不要调用写入工具。\n- 禁破第四面墙：严禁跳出小说叙事直接向玩家写【说明】、设定分析、原著对比报告或“当前剧情停留在……你可以决定……”等场外提示；即使【玩家行动】带有疑问或推演口吻，也必须化为主角在当下场景中的内心思忖、观察或与在场人物的交谈，留在故事里自然推进。\n- 纯文本小说格式：<record> 之前的正文必须是纯文本小说段落，严禁使用任何 Markdown 标记（禁止 **加粗**、*斜体*、# 标题、- 或 1. 列表、--- 分隔线、代码块）。";
+const ORDINARY_RULES:&str="普通回合：本回合所需的世界、规则、人物和旧事已在上下文中，直接写本回合正文及<record>。只有在需要核实上下文里没有的具体人物、设定或原著细节时才调用只读工具，不要为了例行检查读取技能或世界资料；不要调用写入工具。\n- 禁破第四面墙：严禁跳出小说叙事直接向玩家写【说明】、设定分析、原著对比报告或“当前剧情停留在……你可以决定……”等场外提示；即使【玩家行动】带有疑问或推演口吻，也必须化为主角在当下场景中的内心思忖、观察或与在场人物的交谈，留在故事里自然推进。\n- 纯文本小说格式：<record> 之前的正文必须是纯文本小说段落，严禁使用任何 Markdown 标记（禁止 **加粗**、*斜体*、# 标题、- 或 1. 列表、--- 分隔线、代码块）。";
+const CLASSIC_RULES:&str="经典模式：生成和整理顺序由程序安排。你可以读取技能并调用只读工具核实资料。绑定参考书且任务需要原著细节时，按遵循原著技能读取原文，不用模型记忆补齐事实。最后返回本回合纯文本小说正文及<record>（正文严禁跳出叙事向玩家写场外说明，严禁使用任何 Markdown 标记）；不要调用写入工具。";
 
 #[cfg(test)]
 mod correction_notes_tests {

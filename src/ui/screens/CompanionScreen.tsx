@@ -15,6 +15,7 @@ import {
   resolveCompanionAgentPolicy,
   resolveEscalatedAgentModel,
   resolveSessionDraftSource,
+  saveCompanionAgentPolicy,
   saveCompanionMessageAsNote,
   saveMemory,
   sendCompanionMessage,
@@ -42,11 +43,14 @@ import {
   getAgentPreferences,
   mergeAgentDelta,
   mergeAgentSessionPage,
+  saveAgentPreferences,
   type AgentPolicy,
+  type AgentPreferences,
   type AgentSessionDetail,
   type AgentSnapshot,
   type AgentTask,
 } from "../../engine/agent";
+import { listProfiles, type Profile } from "../../engine/llm/providers";
 import { bookExists, getBookOutline, listBooks } from "../../engine/sources/library";
 import { newBinding, type SourceBinding, type SourceBook } from "../../engine/sources/types";
 import type { World } from "../../engine/types";
@@ -62,6 +66,12 @@ import { BookPreview, SourceLibrary } from "../components/Sources";
 import { StoryText } from "../components/StoryText";
 import { useMedia } from "../components/useMedia";
 import { DiffView } from "../components/WritingAssist";
+import {
+  AgentSettings,
+  QuestionSheet,
+  pendingQuestion,
+  type AgentSettingsSection,
+} from "./AgentConversation";
 import { EMPTY, normalizeOpeningDraft } from "./openingDraft";
 import { CompanionMarkdown } from "./companion/CompanionMarkdown";
 import { MemorySheet } from "./companion/MemorySheet";
@@ -158,13 +168,15 @@ const BookPreviewCompat = BookPreview as unknown as (props: {
   through?: number | null;
 }) => ReturnType<typeof BookPreview>;
 
+const isNpcPersona = (p?: Pick<CompanionPersona, "id" | "roleKind"> | null): boolean =>
+  Boolean(p && (p.roleKind === "npc" || p.id.startsWith("npc:")));
+
 function defaultStarters(
   persona: CompanionPersona,
   gear: CompanionGear,
   worldTitle?: string,
   bookTitle?: string,
 ): string[] {
-  if (persona.starters?.length) return persona.starters.slice(0, 4);
   if (gear === "agent" && worldTitle) {
     return [
       `帮我核对《${worldTitle}》最近几段的人物关系，整理出矛盾点`,
@@ -172,6 +184,17 @@ function defaultStarters(
       "检查主角当前的行囊、钱物和伤势是否与正文一致",
       "帮我理一理接下来的三条剧情走向建议",
     ];
+  }
+  if (gear === "research" && (worldTitle || bookTitle)) {
+    return [
+      bookTitle ? `帮我查查《${bookTitle}》里主要势力的来历与规矩` : `梳理《${worldTitle}》目前登场人物的来历与关系`,
+      worldTitle ? `梳理《${worldTitle}》目前埋下的伏笔与未解线索` : `查查《${bookTitle}》前期有哪些关键伏笔`,
+      "帮我查证一下古代驿站传信与通关文牒的细节",
+      "写一段既有烟火气又不拖沓的开场环境描写灵感",
+    ];
+  }
+  if ((gear === "chat" || (!worldTitle && !bookTitle)) && persona.starters?.length) {
+    return persona.starters.slice(0, 4);
   }
   if (gear === "research" || bookTitle) {
     return [
@@ -285,9 +308,25 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   const localStartedTaskIdsRef = useRef<Set<string>>(new Set());
   const seededPiSessionRef = useRef<string | null>(null);
   const [recoveries, setRecoveries] = useState<{ id: string; createdAt: string }[] | null>(null);
+  const [lastPersonaId, setLastPersonaId] = useState<string | null>(null);
+  const [agentPrefs, setAgentPrefs] = useState<AgentPreferences | null>(null);
+  const [agentProfiles, setAgentProfiles] = useState<Profile[]>([]);
+  const [agentModelName, setAgentModelName] = useState("");
+  const [agentSettingsSection, setAgentSettingsSection] = useState<AgentSettingsSection>("execution");
+  const [questionTaskId, setQuestionTaskId] = useState<string | null>(null);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, Record<string, string>>>({});
+  const [questionSubmitting, setQuestionSubmitting] = useState(false);
 
   const [sheet, setSheet] = useState<
-    "sessions" | "persona" | "memory" | "context" | "more" | "sourceLib" | null
+    | "sessions"
+    | "persona"
+    | "memory"
+    | "context"
+    | "more"
+    | "sourceLib"
+    | "agentSettings"
+    | "agentQuestion"
+    | null
   >(null);
   const [menuSession, setMenuSession] = useState<CompanionSession | null>(null);
   const [previewBook, setPreviewBook] = useState<{
@@ -310,14 +349,27 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   const [atBottom, setAtBottom] = useState(true);
 
   const activePersona = useMemo(() => {
-    const id = session?.personaId ?? props.personaId ?? "lingxi";
+    const id = session?.personaId ?? props.personaId ?? lastPersonaId ?? "lingxi";
     return (
       personas.find((p) => p.id === id) ??
       getBuiltinPersona(id) ??
       personas[0] ??
       BUILTIN_PERSONAS[0]
     );
-  }, [personas, session?.personaId, props.personaId]);
+  }, [personas, session?.personaId, props.personaId, lastPersonaId]);
+
+  const preferredNonNpcPersonaId = useMemo(() => {
+    if (lastPersonaId) {
+      const saved = personas.find((p) => p.id === lastPersonaId && !isNpcPersona(p));
+      if (saved) return saved.id;
+    }
+    return (
+      personas.find((p) => !isNpcPersona(p))?.id ??
+      personas[0]?.id ??
+      BUILTIN_PERSONAS[0]?.id ??
+      "lingxi"
+    );
+  }, [lastPersonaId, personas]);
 
   const activeGear: CompanionGear = session?.activeGear ?? props.gear ?? "chat";
 
@@ -504,20 +556,32 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     bootedRef.current = true;
 
     void (async () => {
-      const [loadedPersonas, refs, existingSessions, inheritedPolicy] = await Promise.all([
-        listPersonas(game).catch(() => BUILTIN_PERSONAS),
-        refreshReferenceLists(),
-        listSessions(game).catch(() => [] as CompanionSession[]),
-        resolveCompanionAgentPolicy(game).catch(() => "preview" as AgentPolicy),
-      ]);
+      const [loadedPersonas, refs, existingSessions, inheritedPolicy, savedLastPersonaId] =
+        await Promise.all([
+          listPersonas(game).catch(() => BUILTIN_PERSONAS),
+          refreshReferenceLists(),
+          listSessions(game).catch(() => [] as CompanionSession[]),
+          resolveCompanionAgentPolicy(game).catch(() => "preview" as AgentPolicy),
+          game.repo.getSetting<string | null>("companion:lastPersonaId", null).catch(() => null),
+        ]);
       if (!aliveRef.current) return;
       if (!policyTouchedRef.current) setAgentPolicy(inheritedPolicy);
       const availPersonas = loadedPersonas.length ? loadedPersonas : BUILTIN_PERSONAS;
       setPersonas(availPersonas);
       setSessions(existingSessions);
 
+      const savedPersona = savedLastPersonaId
+        ? availPersonas.find((p) => p.id === savedLastPersonaId && !isNpcPersona(p))
+        : undefined;
+      if (savedPersona) setLastPersonaId(savedPersona.id);
+
       const defaultPersonaId =
-        props.personaId ?? availPersonas[0]?.id ?? BUILTIN_PERSONAS[0]?.id ?? "lingxi";
+        props.personaId ??
+        savedPersona?.id ??
+        availPersonas.find((p) => !isNpcPersona(p))?.id ??
+        availPersonas[0]?.id ??
+        BUILTIN_PERSONAS[0]?.id ??
+        "lingxi";
       const chosenBootPersona = availPersonas.find((p) => p.id === defaultPersonaId) as
         | (CompanionPersona & { boundLineId?: string | null })
         | undefined;
@@ -612,6 +676,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
       if (props.autoSend && props.prompt?.trim() && targetId && !autoSentRef.current) {
         autoSentRef.current = true;
+        const promptText = props.prompt.trim();
         setInput("");
         const sendGear = (props.gear === "research" ? "research" : "chat") as "chat" | "research";
         if (props.gear === "agent" && props.worldId) {
@@ -619,13 +684,16 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           try {
             const started = await escalateCompanionToAgent(game, {
               sessionId: targetId,
-              text: props.prompt.trim(),
+              text: promptText,
               policy: policyTouchedRef.current ? agentPolicy : inheritedPolicy,
             });
             localStartedTaskIdsRef.current.add(started.taskId);
             await loadActiveSession(targetId);
           } catch (err) {
-            if (aliveRef.current) toast(err instanceof Error ? err.message : "未能启动改档任务");
+            if (aliveRef.current) {
+              setInput(promptText);
+              toast(err instanceof Error ? err.message : "未能启动改档任务");
+            }
           } finally {
             if (aliveRef.current) setAgentBusy(false);
           }
@@ -633,7 +701,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           startStreamRun(targetId, {
             sessionId: targetId,
             gear: sendGear,
-            text: props.prompt.trim(),
+            text: promptText,
           });
         }
       }
@@ -677,6 +745,16 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     },
     [game],
   );
+
+  // Clear cached Pi session state immediately whenever piSessionId changes across sessions.
+  useEffect(() => {
+    setPiDetail(null);
+    setPiSnapshots({});
+    piSnapCache.current = {};
+    piSnapVer.current = {};
+    setQuestionTaskId(null);
+    setSheet((cur) => (cur === "agentQuestion" ? null : cur));
+  }, [session?.piSessionId]);
 
   // Poll native Agent session when bound to a world & piSessionId exists.
   useEffect(() => {
@@ -811,6 +889,82 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     return null;
   }, [piSnapshots, piTaskSummaries, projectedPi, session?.piSessionId]);
 
+  const waitingUserTask = useMemo(() => {
+    if (!session?.piSessionId) return null;
+    if (projectedPi?.tasks.length) {
+      for (let i = projectedPi.tasks.length - 1; i >= 0; i--) {
+        const raw = projectedPi.tasks[i];
+        const snap = piSnapshots[raw.runId];
+        const proj = agentTaskProjection(raw, snap);
+        const st = agentTaskStatus(proj, snap);
+        if (st === "waiting_user") return proj;
+      }
+      return null;
+    }
+    for (let i = piTaskSummaries.length - 1; i >= 0; i--) {
+      if (piTaskSummaries[i].status === "waiting_user") {
+        return { id: piTaskSummaries[i].id, status: "waiting_user" } as AgentTask;
+      }
+    }
+    return null;
+  }, [piSnapshots, piTaskSummaries, projectedPi, session?.piSessionId]);
+
+  const activeQuestionTask = useMemo(() => {
+    if (!questionTaskId || !projectedPi) return null;
+    const raw = projectedPi.tasks.find((t) => t.id === questionTaskId);
+    if (!raw) return null;
+    return agentTaskProjection(raw, piSnapshots[raw.runId]);
+  }, [questionTaskId, projectedPi, piSnapshots]);
+
+  const activeQuestion = useMemo(
+    () => (activeQuestionTask ? pendingQuestion(activeQuestionTask) : undefined),
+    [activeQuestionTask],
+  );
+
+  const openAgentSettings = useCallback(
+    async (section: AgentSettingsSection = "execution") => {
+      try {
+        const [loadedPrefs, availableProfiles, resolvedPolicy] = await Promise.all([
+          getAgentPreferences(game),
+          listProfiles(game.repo),
+          resolveCompanionAgentPolicy(game),
+        ]);
+        if (!aliveRef.current) return;
+        const mergedPrefs: AgentPreferences = { ...loadedPrefs, policy: resolvedPolicy };
+        const chosenProfile =
+          (mergedPrefs.profileId
+            ? availableProfiles.find((p) => p.id === mergedPrefs.profileId)
+            : undefined) ??
+          profile ??
+          availableProfiles[0];
+        const staleProfile = Boolean(
+          mergedPrefs.profileId && !availableProfiles.some((p) => p.id === mergedPrefs.profileId),
+        );
+        const effectivePrefs: AgentPreferences = staleProfile
+          ? {
+              ...mergedPrefs,
+              profileId: chosenProfile?.id,
+              modelName: undefined,
+              protocol: undefined,
+              modelUrl: undefined,
+              contextWindowTokens: undefined,
+            }
+          : {
+              ...mergedPrefs,
+              ...(chosenProfile ? { profileId: mergedPrefs.profileId ?? chosenProfile.id } : {}),
+            };
+        setAgentPrefs(effectivePrefs);
+        setAgentProfiles(availableProfiles);
+        setAgentModelName(effectivePrefs.modelName ?? chosenProfile?.mainModel ?? "");
+        setAgentSettingsSection(section);
+        setSheet("agentSettings");
+      } catch (err) {
+        toast(err instanceof Error ? err.message : "无法读取改档设置");
+      }
+    },
+    [game, profile, toast],
+  );
+
   function startStreamRun(
     sessionId: string,
     sendInput: {
@@ -915,6 +1069,39 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     }
   };
 
+  const openTaskQuestion = async (task: AgentTask, prefillText?: string): Promise<boolean> => {
+    let targetTask: AgentTask | undefined = task;
+    let q = pendingQuestion(targetTask);
+    if (!q && session?.piSessionId) {
+      const freshDetail = await agentClient.pollSession(session.piSessionId).catch(() => null);
+      if (freshDetail) {
+        setPiDetail((cur) => mergeAgentSessionPage(cur, freshDetail, "latest"));
+        const raw = freshDetail.tasks.find((t) => t.id === task.id);
+        if (raw) {
+          const freshSnap = await agentClient.delta(raw.id, 0, 0).catch(() => undefined);
+          if (freshSnap) {
+            piSnapCache.current[raw.runId] = freshSnap;
+            setPiSnapshots((cur) => ({ ...cur, [raw.runId]: freshSnap }));
+          }
+          targetTask = agentTaskProjection(raw, freshSnap);
+          q = pendingQuestion(targetTask);
+        }
+      }
+    }
+    if (!q || !targetTask) return false;
+    if (prefillText && q.questions.length === 1 && q.questions[0].allowFreeText !== false) {
+      const qItem = q.questions[0];
+      setQuestionAnswers((prev) => ({
+        ...prev,
+        [q!.id]: { ...(prev[q!.id] ?? {}), [qItem.id]: prefillText },
+      }));
+      setInput("");
+    }
+    setQuestionTaskId(targetTask.id);
+    setSheet("agentQuestion");
+    return true;
+  };
+
   const handleSend = async (overrideText?: string) => {
     if (!session || isStreaming || agentBusy) return;
     const text = (overrideText ?? input).trim();
@@ -924,6 +1111,23 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       if (!session.boundWorldId || boundWorldMissing || !boundWorldBrief) {
         toast("改档前请先选择一个要修改的故事");
         setSheet("context");
+        return;
+      }
+      if (waitingUserTask) {
+        const q = pendingQuestion(waitingUserTask);
+        const isSingleFreeText = Boolean(
+          overrideText === undefined &&
+            q &&
+            q.questions.length === 1 &&
+            q.questions[0].allowFreeText !== false,
+        );
+        const opened = await openTaskQuestion(
+          waitingUserTask,
+          overrideText === undefined ? text : undefined,
+        );
+        if (!opened || !isSingleFreeText) {
+          toast("请先回答上方改档卡片中的问题，或点停止后再发新要求");
+        }
         return;
       }
       if (!overrideText) setInput("");
@@ -981,14 +1185,73 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   };
 
   const handleEditResend = (msg: CompanionMessage) => {
-    if (!session || isStreaming) return;
+    if (!session || isStreaming || agentBusy) return;
     const text = editingText.trim();
     if (!text) return;
+    if (msg.gear === "agent" && session.boundWorldId) {
+      if (boundWorldMissing || !boundWorldBrief) {
+        toast("改档前请先选择一个要修改的故事");
+        setSheet("context");
+        return;
+      }
+      if (waitingUserTask) {
+        void openTaskQuestion(waitingUserTask, text);
+        toast("请先回答上方改档卡片中的问题，或点停止后再发新要求");
+        return;
+      }
+      setEditingMsgId(null);
+      setEditingText("");
+      setAgentBusy(true);
+      void (async () => {
+        try {
+          if (activeLinkedTask && session.piSessionId) {
+            const steered = await steerCompanionAgent(game, {
+              sessionId: session.id,
+              piSessionId: session.piSessionId,
+              taskId: activeLinkedTask.id,
+              phase: activeLinkedTask.phase,
+              text,
+              policy: policyTouchedRef.current ? agentPolicy : undefined,
+            });
+            await loadActiveSession(session.id);
+            await refreshPiSessionNow();
+            await refreshSessions();
+            toast(
+              steered.delivery === "queued"
+                ? "补充要求已排队，当前改档完成后接着处理"
+                : "已同步给正在执行的改档任务，将在下一步处理",
+            );
+          } else {
+            const started = await escalateCompanionToAgent(game, {
+              sessionId: session.id,
+              text,
+              parentId: msg.parentId,
+              policy: policyTouchedRef.current ? agentPolicy : undefined,
+            });
+            localStartedTaskIdsRef.current.add(started.taskId);
+            await loadActiveSession(session.id);
+            await refreshPiSessionNow();
+            await refreshSessions();
+            setBudgetTick((n) => n + 1);
+          }
+          stickBottomRef.current = true;
+          followRef.current = true;
+          requestAnimationFrame(() => scrollBottom(true));
+        } catch (err) {
+          setEditingMsgId(msg.id);
+          setEditingText(text);
+          toast(err instanceof Error ? err.message : "未能启动改档任务");
+        } finally {
+          if (aliveRef.current) setAgentBusy(false);
+        }
+      })();
+      return;
+    }
     setEditingMsgId(null);
     setEditingText("");
     startStreamRun(session.id, {
       sessionId: session.id,
-      gear: activeGear === "research" ? "research" : "chat",
+      gear: msg.gear === "research" || activeGear === "research" ? "research" : "chat",
       text,
       parentId: msg.parentId,
       editMessageId: msg.id,
@@ -1040,6 +1303,10 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       toast("正在回复中，请先停止或等待回复完成再切换角色");
       return;
     }
+    if (!isNpcPersona(persona)) {
+      setLastPersonaId(persona.id);
+      void game.repo.setSetting("companion:lastPersonaId", persona.id).catch(() => {});
+    }
     const personaLineId =
       persona.boundLineId ??
       (typeof persona.metadata?.boundLineId === "string" && persona.metadata.boundLineId.trim()
@@ -1083,8 +1350,14 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         : session?.legacyPi && !props.worldId
           ? "chat"
           : activeGear;
+    const nextPersonaId =
+      !isNpcPersona(activePersona) && !session?.legacyPi
+        ? activePersona.id
+        : isNpcPersona(activePersona) && nextWorldId && activePersona.sourceWorldId === nextWorldId
+          ? activePersona.id
+          : preferredNonNpcPersonaId;
     const created = await createSession(game, {
-      personaId: activePersona.id,
+      personaId: nextPersonaId,
       activeGear: nextGear,
       boundWorldId: nextWorldId,
       boundLineId: nextLineId,
@@ -1148,7 +1421,9 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       if (rest.length > 0) {
         await loadActiveSession(rest[0].id);
       } else {
-        const fresh = await createSession(game, { personaId: activePersona.id });
+        const fresh = await createSession(game, {
+          personaId: !isNpcPersona(activePersona) ? activePersona.id : preferredNonNpcPersonaId,
+        });
         await refreshSessions();
         await loadActiveSession(fresh.id);
       }
@@ -1256,11 +1531,11 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       const outline = await getBookOutline(game.repo, cite.bookId).catch(() => null);
       if (outline) {
         const through =
-          session?.bookScope?.mode === "through" && boundWorldBrief?.source
-            ? (boundWorldBrief.source.through ?? boundWorldBrief.source.position)
+          session?.bookScope?.mode === "full"
+            ? null
             : session?.bookScope?.mode === "chapters"
               ? session.bookScope.to
-              : null;
+              : boundWorldBrief?.source?.through ?? null;
         setPreviewBook({ bookId: outline.id, title: outline.title, through, quote: cite.quote });
         return;
       }
@@ -1300,18 +1575,17 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       const src = boundWorldBrief.source;
       const scope = session.bookScope;
       if (src) {
-        if (scope?.mode === "full") {
-          return { label: `🌍 《${title}》 · 读全书`, missing: false };
-        }
         if (scope?.mode === "chapters") {
           return {
             label: `🌍 《${title}》 · 第 ${scope.from + 1}～${scope.to + 1} 节`,
             missing: false,
           };
         }
-        const ceiling = src.through ?? src.position;
+        if (scope?.mode === "full" || src.through === null || src.through === undefined) {
+          return { label: `🌍 《${title}》 · 读全书`, missing: false };
+        }
         return {
-          label: `🌍 《${title}》 · 防剧透至第 ${ceiling + 1} 节`,
+          label: `🌍 《${title}》 · 防剧透至第 ${src.through + 1} 节`,
           missing: false,
         };
       }
@@ -1352,6 +1626,33 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
   const piTasksById = useMemo(() => {
     const map = new Map<string, AgentTask>();
     for (const t of projectedPi?.tasks ?? []) map.set(t.id, t);
+    return map;
+  }, [projectedPi]);
+
+  const piSummaryById = useMemo(() => {
+    const map = new Map<string, CompanionPiTaskSummary>();
+    for (const s of piTaskSummaries) map.set(s.id, s);
+    return map;
+  }, [piTaskSummaries]);
+
+  const piAssistantMsgsByTaskId = useMemo(() => {
+    const map = new Map<string, { text: string; streaming: boolean }>();
+    if (!projectedPi) return map;
+    const grouped = new Map<string, typeof projectedPi.messages>();
+    for (const m of projectedPi.messages) {
+      if (m.role !== "assistant" || !m.taskId) continue;
+      const list = grouped.get(m.taskId) ?? [];
+      list.push(m);
+      grouped.set(m.taskId, list);
+    }
+    for (const [tid, list] of grouped) {
+      const text = list
+        .map((m) => (m.displayContent ?? m.content).trim())
+        .filter(Boolean)
+        .join("\n\n");
+      const streaming = list.some((m) => m.status === "streaming");
+      if (text) map.set(tid, { text, streaming });
+    }
     return map;
   }, [projectedPi]);
 
@@ -1510,6 +1811,33 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     if (snaps.length) setPiSnapshots((cur) => ({ ...cur, ...Object.fromEntries(snaps) }));
   }, [agentClient, session?.boundWorldId, session?.piSessionId, syncCommittedPiTasks]);
 
+  const handleStopAgentTask = async (rawTask: AgentTask) => {
+    const cachedSnap = piSnapshots[rawTask.runId] ?? piSnapCache.current[rawTask.runId];
+    let projected = agentTaskProjection(rawTask, cachedSnap);
+    let attempt = projected.execution?.attemptId;
+    if (!attempt) {
+      await refreshPiSessionNow();
+      const refreshedSnap = piSnapCache.current[rawTask.runId];
+      attempt = refreshedSnap?.task?.execution?.attemptId;
+    }
+    if (!attempt && session?.piSessionId) {
+      const freshSession = await agentClient.pollSession(session.piSessionId).catch(() => null);
+      const freshTask = freshSession?.tasks.find((t) => t.id === rawTask.id);
+      attempt = freshTask?.execution?.attemptId;
+    }
+    if (!attempt) {
+      toast("正在同步任务状态，请稍后再点停止");
+      return;
+    }
+    try {
+      await agentClient.stop(rawTask.id, attempt);
+      await refreshPiSessionNow();
+      toast("已发送停止指令");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "正在停止任务…");
+    }
+  };
+
   const handleContinueAgentTask = async (task: AgentTask) => {
     if (agentBusy) return;
     setAgentBusy(true);
@@ -1519,7 +1847,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         game.platform as typeof game.platform & {
           agent?: {
             resumeCheck?: (args: { taskId: string; limits?: unknown }) => Promise<Record<string, unknown>>;
-            resume?: (args: { taskId: string; recheck?: boolean }) => Promise<unknown>;
+            resume?: (args: { taskId: string; recheck?: boolean; text?: string }) => Promise<unknown>;
           };
         }
       ).agent;
@@ -1546,7 +1874,13 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           });
           if (!ok) return;
         }
-        await directAgent.resume?.({ taskId: task.id, recheck: headMoved });
+        const extraText = input.trim() || undefined;
+        await directAgent.resume?.({
+          taskId: task.id,
+          recheck: headMoved,
+          ...(extraText ? { text: extraText } : {}),
+        });
+        if (extraText) setInput("");
         await refreshPiSessionNow();
         return;
       }
@@ -1567,7 +1901,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       }
 
       if (check.reasonCode === "budget_exhausted") {
-        throw new Error(check.message || "已达到助手执行上限，可在改档详情的设置中调整上限后继续");
+        throw new Error(check.message || "已达到助手执行上限，可在改档设置中调整上限后继续");
       }
 
       const checkRec = check as unknown as Record<string, unknown>;
@@ -1597,17 +1931,21 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       const resolvedModel = game.llm
         ? await resolveEscalatedAgentModel(game, prefs)
         : task.model;
+      const resolvedProfileId = (resolvedModel as { profileId?: string } | undefined)?.profileId;
+      const staleProfile = Boolean(prefs.profileId && prefs.profileId !== resolvedProfileId);
+      const extraText = input.trim() || undefined;
       await agentClient.continue(
         task.id,
-        undefined,
+        extraText,
         prefs.limits,
         prefs.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS,
         resolvedModel,
-        prefs.modelUrl ?? "",
+        staleProfile ? "" : (prefs.modelUrl?.trim() ?? ""),
         headMoved,
-        (resolvedModel as { profileId?: string } | undefined)?.profileId,
+        resolvedProfileId,
         prefs.thinkingMode,
       );
+      if (extraText) setInput("");
       await refreshPiSessionNow();
     } catch (e) {
       toast(e instanceof Error ? e.message : "继续执行未成功");
@@ -1622,6 +1960,15 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     const status = agentTaskStatus(task, snap);
     const running = isTaskInFlight(status);
     const resumable = ["paused", "cancelled", "interrupted", "failed", "stale", "blocked"].includes(status);
+    const question = pendingQuestion(task);
+    const assistantEntry = piAssistantMsgsByTaskId.get(rawTask.id);
+    const liveAssistantProse = assistantEntry?.text ?? "";
+    const planItems = task.plan ?? [];
+    const toolSteps = snap?.steps ?? [];
+    const modelReqs = task.budget?.modelRequests ?? 0;
+    const toolCallsCount = task.budget?.toolCalls ?? toolSteps.length;
+    const hasProcessDetails =
+      planItems.length > 0 || toolSteps.length > 0 || modelReqs > 0 || toolCallsCount > 0;
     const previewData =
       task.preview ??
       task.changes ??
@@ -1633,7 +1980,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       <div className="companion-agent-card" key={task.id}>
         <div className="companion-agent-head">
           <span
-            className={`companion-agent-status${status === "committed" ? " done" : resumable ? " warn" : ""}`}
+            className={`companion-agent-status${status === "committed" ? " done" : resumable || status === "waiting_user" ? " warn" : ""}`}
           >
             {AGENT_STATUS_TEXT[status] ?? "正在处理改档任务"}
           </span>
@@ -1642,9 +1989,95 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           </button>
         </div>
 
-        {task.summary && <CompanionMarkdown text={task.summary} />}
+        {task.summary ? (
+          <CompanionMarkdown text={task.summary} />
+        ) : liveAssistantProse ? (
+          <CompanionMarkdown
+            text={liveAssistantProse}
+            streaming={Boolean(assistantEntry?.streaming || running)}
+          />
+        ) : null}
+
+        {question && (
+          <div className="notice">
+            <div className="stack gap-1">
+              <b>{question.title || "改档助手需要你补充说明"}</b>
+              {question.questions.map((qItem) => (
+                <p key={qItem.id} className="m-0">
+                  {qItem.question}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
+
         {(snap?.error || task.error) && (
           <p className="field-hint warn m-0">{snap?.error ?? task.error}</p>
+        )}
+
+        {hasProcessDetails && (
+          <details className="companion-agent-steps">
+            <summary>
+              执行过程（模型 {modelReqs} 次 · 工具 {toolCallsCount} 次）
+            </summary>
+            <div className="stack gap-2 mt-2">
+              {planItems.length > 0 && (
+                <div className="companion-steps-list">
+                  {planItems.map((item, idx) => {
+                    const pStatus =
+                      item.status === "completed" || item.status === "done"
+                        ? "done"
+                        : item.status === "in_progress"
+                          ? "running"
+                          : item.status === "blocked" || item.status === "cancelled"
+                            ? "failed"
+                            : "";
+                    const pLabel =
+                      ({
+                        pending: "待做",
+                        in_progress: "正在做",
+                        completed: "已完成",
+                        done: "已完成",
+                        cancelled: "已取消",
+                        blocked: "待补充",
+                      } as Record<string, string>)[item.status] ?? "待做";
+                    return (
+                      <div key={item.id ?? `plan-${idx}`} className="companion-step-item">
+                        <span>{item.title ?? item.step ?? item.text}</span>
+                        <span className={`companion-step-status ${pStatus}`}>{pLabel}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {toolSteps.length > 0 && (
+                <div className="companion-steps-list">
+                  {toolSteps.map((step) => {
+                    const stepFailed = step.outcome === "error" || step.status === "failed";
+                    const stepRunning = step.status === "running";
+                    return (
+                      <div key={step.id} className="companion-step-item">
+                        <span>
+                          {step.childId ? "只读助手 · " : ""}
+                          {step.summary ||
+                            `${step.action}${step.object ? ` · ${step.object}` : ""}${
+                              step.resultText ? `：${step.resultText}` : ""
+                            }`}
+                        </span>
+                        <span
+                          className={`companion-step-status ${
+                            stepRunning ? "running" : stepFailed ? "failed" : "done"
+                          }`}
+                        >
+                          {stepRunning ? (running ? "执行中" : "已中断") : stepFailed ? "失败" : "完成"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </details>
         )}
 
         {diffs.length > 0 && (
@@ -1664,16 +2097,22 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         )}
 
         <div className="companion-agent-actions">
-          {running && task.execution?.attemptId && (
+          {question && (
             <button
               type="button"
-              onClick={() =>
-                void agentClient
-                  .stop(task.id, task.execution!.attemptId)
-                  .catch(() => toast("正在停止任务…"))
-              }
+              className="primary"
+              onClick={() => void openTaskQuestion(task)}
             >
-              停止
+              回答问题
+            </button>
+          )}
+          {(running || status === "waiting_user") && (
+            <button
+              type="button"
+              disabled={status === "stopping"}
+              onClick={() => void handleStopAgentTask(rawTask)}
+            >
+              {status === "stopping" ? "正在停止…" : "停止"}
             </button>
           )}
           {status === "previewed" && (
@@ -2182,7 +2621,29 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                   liveStream &&
                   liveStream.sessionId === session?.id;
                 const effStatus = useLive ? liveStream.update.status : msg.status;
-                const effText = useLive && liveStream.update.text ? liveStream.update.text : msg.content;
+                const linkedTaskRaw = msg.piTaskId ? piTasksById.get(msg.piTaskId) : undefined;
+                const linkedTask = linkedTaskRaw
+                  ? agentTaskProjection(linkedTaskRaw, piSnapshots[linkedTaskRaw.runId])
+                  : undefined;
+                const linkedSummaryRow = msg.piTaskId ? piSummaryById.get(msg.piTaskId) : undefined;
+                const linkedAssistantProse = msg.piTaskId
+                  ? piAssistantMsgsByTaskId.get(msg.piTaskId)?.text ?? ""
+                  : "";
+                const linkedSubstantiveText =
+                  linkedTask?.summary?.trim() ||
+                  linkedSummaryRow?.summary?.trim() ||
+                  linkedAssistantProse.trim();
+                const effText =
+                  useLive && liveStream.update.text
+                    ? liveStream.update.text
+                    : msg.piTaskId
+                      ? linkedSubstantiveText || msg.content
+                      : msg.content;
+                const showProseBubble = Boolean(
+                  effText && !(linkedTaskRaw && (linkedTask?.summary?.trim() || linkedAssistantProse.trim())),
+                );
+                const effMsgForActions =
+                  effText !== msg.content ? { ...msg, content: effText } : msg;
                 const effThinking =
                   useLive && liveStream.update.thinking ? liveStream.update.thinking : msg.thinking;
                 const effSteps =
@@ -2191,7 +2652,6 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                   useLive && liveStream.update.citations.length
                     ? liveStream.update.citations
                     : msg.citations;
-                const linkedTask = msg.piTaskId ? piTasksById.get(msg.piTaskId) : undefined;
 
                 return renderWithTrailing(
                   <article key={msg.id} className="companion-msg assistant" data-message-id={msg.id}>
@@ -2210,7 +2670,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
                     {renderThoughtDrawer(effStatus, effThinking, effSteps, effCitations, Boolean(effText.trim()))}
 
-                    {effText && (
+                    {showProseBubble && (
                       <div className="companion-msg-prose">
                         <CompanionMarkdown
                           text={effText}
@@ -2219,16 +2679,20 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                       </div>
                     )}
 
-                    {!effText.trim() && (effStatus === "cancelled" || effStatus === "interrupted") && !linkedTask && !msg.piTaskId && (
+                    {!effText.trim() && (effStatus === "cancelled" || effStatus === "interrupted") && !linkedTaskRaw && !msg.piTaskId && (
                       <p className="muted m-0">（已停止生成）</p>
                     )}
 
-                    {linkedTask && renderAgentTaskCard(linkedTask)}
+                    {linkedTaskRaw && renderAgentTaskCard(linkedTaskRaw)}
 
-                    {!linkedTask && msg.piTaskId && session?.boundWorldId && !boundWorldMissing && (
+                    {!linkedTaskRaw && msg.piTaskId && session?.boundWorldId && !boundWorldMissing && (
                       <div className="companion-agent-card">
                         <div className="companion-agent-head">
-                          <span className="companion-agent-status">已提交改档任务</span>
+                          <span className="companion-agent-status">
+                            {linkedSummaryRow
+                              ? AGENT_STATUS_TEXT[linkedSummaryRow.status] ?? "已提交改档任务"
+                              : "已提交改档任务"}
+                          </span>
                           <button type="button" className="primary small" onClick={openAgentWorkspace}>
                             查看修改预览 / 采用 ›
                           </button>
@@ -2281,7 +2745,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                           <button
                             type="button"
                             className="companion-action-btn"
-                            onClick={() => void handleRememberMessage(msg)}
+                            onClick={() => void handleRememberMessage(effMsgForActions)}
                           >
                             <Icon name="bookmark" size={14} />
                             记住这条
@@ -2291,7 +2755,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                           <button
                             type="button"
                             className="companion-action-btn bridge"
-                            onClick={() => void handleSaveAsNote(msg)}
+                            onClick={() => void handleSaveAsNote(effMsgForActions)}
                           >
                             <Icon name="memo" size={14} />
                             存进札记
@@ -2301,7 +2765,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                           <button
                             type="button"
                             className="companion-action-btn bridge"
-                            onClick={() => void handleDraftNewGame(msg)}
+                            onClick={() => void handleDraftNewGame(effMsgForActions)}
                           >
                             <Icon name="sparkle" size={14} />
                             拿去开新局
@@ -2387,19 +2851,34 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                   {agentPolicy === "preview"
                     ? `先看修改预览，确认后才写入《${boundWorldBrief.world.title}》`
                     : agentPolicy === "auto"
-                      ? `直接采用修改并写入《${boundWorldBrief.world.title}》`
+                      ? `直接采用修改并写入《${boundWorldBrief.world.title}》（不另留副本）`
                       : `直接生效并保留《${boundWorldBrief.world.title}》恢复点`}
                 </span>
-                <div className="row gap-1">
+                <div className="row gap-1 wrap">
                   <button
                     type="button"
                     className="ghost"
                     onClick={() => {
+                      const order: AgentPolicy[] = ["preview", "auto-reversible", "auto"];
+                      const nextPolicy = order[(order.indexOf(agentPolicy) + 1) % order.length];
                       policyTouchedRef.current = true;
-                      setAgentPolicy((p) => (p === "preview" ? "auto-reversible" : "preview"));
+                      setAgentPolicy(nextPolicy);
+                      void saveCompanionAgentPolicy(game, nextPolicy).catch(() => {});
                     }}
                   >
-                    切换为{agentPolicy === "preview" ? "直接生效（可撤回）" : "先看预览"}
+                    切换为
+                    {agentPolicy === "preview"
+                      ? "直接生效（可撤回）"
+                      : agentPolicy === "auto-reversible"
+                        ? "直接采用（不留副本）"
+                        : "先看预览"}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void openAgentSettings()}
+                  >
+                    改档设置
                   </button>
                   {session.piSessionId && (
                     <button type="button" className="ghost" onClick={openAgentWorkspace}>
@@ -2597,6 +3076,12 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
               onSelect: openAgentWorkspace,
             },
             {
+              label: "改档设置",
+              icon: "settings",
+              hidden: !session?.boundWorldId || boundWorldMissing,
+              onSelect: () => void openAgentSettings(),
+            },
+            {
               label: "整理早期对话摘要",
               icon: "memo",
               hidden: messages.length < 6,
@@ -2643,8 +3128,91 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           activePersonaId={activePersona.id}
           boundWorldId={!boundWorldMissing ? session?.boundWorldId : null}
           onSelect={(p) => void handleSelectPersona(p)}
-          onChanged={(updated) => setPersonas(updated.length ? updated : BUILTIN_PERSONAS)}
+          onChanged={(updated, fallback) => {
+            const nextList = updated.length ? updated : BUILTIN_PERSONAS;
+            setPersonas(nextList);
+            if (lastPersonaId && !nextList.some((p) => p.id === lastPersonaId)) {
+              const nextFallback =
+                fallback && !isNpcPersona(fallback)
+                  ? fallback.id
+                  : nextList.find((p) => !isNpcPersona(p))?.id ?? null;
+              setLastPersonaId(nextFallback);
+              void game.repo.setSetting("companion:lastPersonaId", nextFallback).catch(() => {});
+            }
+          }}
           onClose={() => setSheet(null)}
+        />
+      )}
+
+      {/* ---------- Inline Agent Settings Sheet ---------- */}
+      {sheet === "agentSettings" && agentPrefs && (
+        <AgentSettings
+          client={agentClient}
+          initialSection={agentSettingsSection}
+          preferences={agentPrefs}
+          profiles={agentProfiles}
+          profileId={
+            (agentPrefs.profileId
+              ? agentProfiles.find((p) => p.id === agentPrefs.profileId)?.id
+              : undefined) ??
+            profile?.id ??
+            agentProfiles[0]?.id
+          }
+          model={agentModelName}
+          onClose={() => setSheet(null)}
+          onAdopt={(skill) =>
+            setAgentPrefs((cur) =>
+              cur
+                ? {
+                    ...cur,
+                    customSkills: [...cur.customSkills.filter((s) => s.id !== skill.id), skill],
+                  }
+                : cur,
+            )
+          }
+          onSave={async (next, nextModel) => {
+            const saved: AgentPreferences = { ...next, modelName: nextModel.trim() || undefined };
+            await saveAgentPreferences(game, saved);
+            await saveCompanionAgentPolicy(game, saved.policy);
+            policyTouchedRef.current = true;
+            setAgentPolicy(saved.policy);
+            setAgentPrefs(saved);
+            setAgentModelName(nextModel);
+            setSheet(null);
+            toast("改档设置已保存");
+          }}
+        />
+      )}
+
+      {/* ---------- Inline Agent Question Sheet ---------- */}
+      {sheet === "agentQuestion" && activeQuestion && activeQuestionTask && (
+        <QuestionSheet
+          question={activeQuestion}
+          answers={questionAnswers[activeQuestion.id] ?? {}}
+          pending={questionSubmitting}
+          onChange={(answers) =>
+            setQuestionAnswers((prev) => ({ ...prev, [activeQuestion.id]: answers }))
+          }
+          onClose={() => setSheet(null)}
+          onSubmit={(cancelled) => {
+            void (async () => {
+              setQuestionSubmitting(true);
+              try {
+                await agentClient.answer(
+                  activeQuestionTask.id,
+                  activeQuestion.id,
+                  questionAnswers[activeQuestion.id] ?? {},
+                  cancelled,
+                );
+                setSheet(null);
+                await refreshPiSessionNow();
+              } catch (err) {
+                toast(err instanceof Error ? err.message : "提交回答未成功");
+              } finally {
+                if (aliveRef.current) setQuestionSubmitting(false);
+              }
+            })();
+          }}
         />
       )}
 
@@ -2941,7 +3509,11 @@ function ContextAttachmentSheet({
             <div className="settings-list">
               {worlds.map((item) => {
                 const selected = item.world.id === selectedWorldId;
-                const ceiling = item.source ? (item.source.through ?? item.source.position) + 1 : null;
+                const sourceScopeLabel = item.source
+                  ? item.source.through !== null && item.source.through !== undefined
+                    ? `含参考书 · 防剧透至第 ${item.source.through + 1} 节`
+                    : "含参考书 · 读全书"
+                  : "原创 / 历史存档";
                 return (
                   <button
                     key={item.world.id}
@@ -2959,9 +3531,7 @@ function ContextAttachmentSheet({
                         {item.world.title}
                         {selected ? "（已选）" : ""}
                       </b>
-                      <small>
-                        {ceiling !== null ? `含参考书 · 当前进度第 ${ceiling} 节` : "原创 / 历史存档"}
-                      </small>
+                      <small>{sourceScopeLabel}</small>
                     </span>
                     <span aria-hidden="true">›</span>
                   </button>
