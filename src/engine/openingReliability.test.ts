@@ -24,10 +24,11 @@ describe("opening and recovery contracts", () => {
     for (const call of llm.calls) {
       const content = JSON.stringify(call.body.messages);
       expect(content).toContain("陆青是陆白的兄长");
+      expect(content).toContain("参考范围：全书");
       expect(content).toContain(source.instructions);
-      expect(content).not.toContain("不能泄露的未来身份");
       expect(content).not.toContain("[object Object]");
     }
+    expect(JSON.stringify(llm.calls[0]!.body.messages)).toContain("渡江后成为掌门");
     expect(source.through).toBe(0);
   });
 

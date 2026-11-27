@@ -7,12 +7,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Platform } from "../../../platform";
 
 export type TtsRate = 0.75 | 1.0 | 1.25 | 1.5 | 2.0;
-export type TtsSleepMode = 0 | 15 | 30 | 60 | "chapter";
+export type TtsSleepMode = "off" | 0 | 15 | 30 | 60 | "chapter";
 export type TtsStatus = "idle" | "playing" | "paused" | "unavailable";
 
 export const TTS_RATES: TtsRate[] = [0.75, 1.0, 1.25, 1.5, 2.0];
 export const TTS_SLEEP_OPTIONS: [TtsSleepMode, string][] = [
-  [0, "不定时"],
+  ["off", "不定时"],
   [15, "15 分钟"],
   [30, "30 分钟"],
   [60, "60 分钟"],
@@ -20,6 +20,7 @@ export const TTS_SLEEP_OPTIONS: [TtsSleepMode, string][] = [
 ];
 
 const MISSING_TTS_MSG = "当前设备未安装系统语音朗读引擎";
+const MAX_CONSECUTIVE_EMPTY_SECTIONS = 12;
 
 export interface TtsParagraphInput {
   kind: string;
@@ -39,10 +40,18 @@ export function formatSleepRemaining(seconds: number | null): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+export interface TtsJumpTarget {
+  nonce: number;
+  sectionIndex: number;
+  paragraphIndex: number;
+}
+
 export interface UseReaderTtsOptions {
   platform: Platform;
   paragraphs: TtsParagraphInput[];
   sectionIndex: number;
+  sectionReady?: boolean;
+  jumpTarget?: TtsJumpTarget | null;
   onParagraphFocus?: (paragraphIndex: number) => void;
   onSectionEnd?: () => void | boolean | Promise<void | boolean>;
   toast: (msg: string) => void;
@@ -89,6 +98,8 @@ export function useReaderTts({
   platform,
   paragraphs,
   sectionIndex,
+  sectionReady = true,
+  jumpTarget = null,
   onParagraphFocus,
   onSectionEnd,
   toast,
@@ -96,8 +107,8 @@ export function useReaderTts({
   const [status, setStatus] = useState<TtsStatus>("idle");
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
   const [rate, setRateState] = useState<TtsRate>(1.0);
-  const [sleepMode, setSleepModeState] = useState<TtsSleepMode>(0);
-  const [sleepRemainingSec, setSleepRemainingSec] = useState<number | null>(null);
+  const [sleepMode, setSleepModeState] = useState<TtsSleepMode>("off");
+  const [sleepRemainingSec, setSleepRemainingSec] = useState<number | null>(0);
 
   const statusRef = useRef<TtsStatus>("idle");
   statusRef.current = status;
@@ -110,6 +121,10 @@ export function useReaderTts({
 
   const paragraphsRef = useRef(paragraphs);
   paragraphsRef.current = paragraphs;
+  const sectionIndexRef = useRef(sectionIndex);
+  sectionIndexRef.current = sectionIndex;
+  const sectionReadyRef = useRef(sectionReady);
+  sectionReadyRef.current = sectionReady;
   const onFocusRef = useRef(onParagraphFocus);
   onFocusRef.current = onParagraphFocus;
   const onSectionEndRef = useRef(onSectionEnd);
@@ -121,8 +136,21 @@ export function useReaderTts({
   const activeUtteranceIdRef = useRef<string | null>(null);
   const webGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sleepDeadlineRef = useRef<number | null>(null);
+  const sleepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevSectionRef = useRef(sectionIndex);
   const pendingSectionContinueRef = useRef(false);
+  const awaitingAdvanceFromSectionRef = useRef<number | null>(null);
+  const emptySectionStreakRef = useRef(0);
+  const appliedJumpNonceRef = useRef<number | null>(jumpTarget?.nonce ?? null);
+  const pendingJumpParaRef = useRef<{ sectionIndex: number; paragraphIndex: number } | null>(null);
+
+  const clearSleepTimer = useCallback(() => {
+    if (sleepIntervalRef.current) {
+      clearInterval(sleepIntervalRef.current);
+      sleepIntervalRef.current = null;
+    }
+    sleepDeadlineRef.current = null;
+  }, []);
 
   const cancelEngines = useCallback(
     (opts?: { skipNativeStop?: boolean }) => {
@@ -158,12 +186,19 @@ export function useReaderTts({
 
   const stop = useCallback(() => {
     cancelEngines();
+    clearSleepTimer();
     pendingSectionContinueRef.current = false;
+    awaitingAdvanceFromSectionRef.current = null;
+    pendingJumpParaRef.current = null;
+    emptySectionStreakRef.current = 0;
+    sleepModeRef.current = "off";
+    setSleepModeState("off");
+    setSleepRemainingSec(0);
     setStatus("idle");
     statusRef.current = "idle";
     setSpeakingIndex(null);
     indexRef.current = null;
-  }, [cancelEngines]);
+  }, [cancelEngines, clearSleepTimer]);
 
   const findSpeakable = useCallback((start: number, dir: 1 | -1): number | null => {
     const list = paragraphsRef.current;
@@ -172,6 +207,38 @@ export function useReaderTts({
     }
     return null;
   }, []);
+
+  const advanceNextSectionOrStop = useCallback(() => {
+    if (!onSectionEndRef.current) {
+      stop();
+      return;
+    }
+    if (emptySectionStreakRef.current > MAX_CONSECUTIVE_EMPTY_SECTIONS) {
+      emptySectionStreakRef.current = 0;
+      stop();
+      toastRef.current("后续章节暂无可朗读正文");
+      return;
+    }
+    awaitingAdvanceFromSectionRef.current = sectionIndexRef.current;
+    pendingSectionContinueRef.current = true;
+    setStatus("playing");
+    statusRef.current = "playing";
+    setSpeakingIndex(null);
+    indexRef.current = null;
+    void Promise.resolve(onSectionEndRef.current())
+      .then((res) => {
+        if (res === false) {
+          pendingSectionContinueRef.current = false;
+          awaitingAdvanceFromSectionRef.current = null;
+          stop();
+        }
+      })
+      .catch(() => {
+        pendingSectionContinueRef.current = false;
+        awaitingAdvanceFromSectionRef.current = null;
+        stop();
+      });
+  }, [stop]);
 
   const speakAtRef = useRef<(idx: number) => void>(() => {});
 
@@ -186,30 +253,12 @@ export function useReaderTts({
       // End of current chapter
       if (sleepModeRef.current === "chapter") {
         stop();
-        setSleepModeState(0);
-        setSleepRemainingSec(null);
-        sleepDeadlineRef.current = null;
         toastRef.current("已读完本章，定时朗读结束");
         return;
       }
-      if (onSectionEndRef.current) {
-        pendingSectionContinueRef.current = true;
-        void Promise.resolve(onSectionEndRef.current())
-          .then((res) => {
-            if (res === false) {
-              pendingSectionContinueRef.current = false;
-              stop();
-            }
-          })
-          .catch(() => {
-            pendingSectionContinueRef.current = false;
-            stop();
-          });
-      } else {
-        stop();
-      }
+      advanceNextSectionOrStop();
     },
-    [findSpeakable, stop],
+    [advanceNextSectionOrStop, findSpeakable, stop],
   );
 
   const speakWithWeb = useCallback(
@@ -301,16 +350,42 @@ export function useReaderTts({
 
   const speakAt = useCallback(
     (rawIdx: number) => {
-      const targetIdx = findSpeakable(rawIdx, 1);
+      const clampedStart = Math.max(0, Math.trunc(rawIdx));
+      let targetIdx = findSpeakable(clampedStart, 1);
+      if (targetIdx === null && clampedStart > 0) {
+        // If user jumped to a trailing divider paragraph, try advancing to next chapter
+        // rather than yanking back to paragraph 0.
+        if (onSectionEndRef.current && sleepModeRef.current !== "chapter") {
+          emptySectionStreakRef.current += 1;
+          advanceNextSectionOrStop();
+          return;
+        }
+        stop();
+        return;
+      }
       if (targetIdx === null) {
+        // Entire chapter has zero speakable paragraphs (empty or pure ornament dividers):
+        // automatically skip ahead to the next chapter up to MAX_CONSECUTIVE_EMPTY_SECTIONS.
+        if (onSectionEndRef.current) {
+          emptySectionStreakRef.current += 1;
+          advanceNextSectionOrStop();
+          return;
+        }
         stop();
         return;
       }
       const text = paragraphsRef.current[targetIdx]?.text?.trim() ?? "";
       if (!text) {
+        if (onSectionEndRef.current) {
+          emptySectionStreakRef.current += 1;
+          advanceNextSectionOrStop();
+          return;
+        }
         stop();
         return;
       }
+
+      emptySectionStreakRef.current = 0;
 
       const nativeTtsSpeak =
         platform.name === "android" && typeof platform.system.ttsSpeak === "function"
@@ -353,7 +428,16 @@ export function useReaderTts({
 
       void speakWithWeb(targetIdx, text, seq);
     },
-    [cancelEngines, findSpeakable, markUnavailable, platform.name, platform.system, speakWithWeb, stop],
+    [
+      advanceNextSectionOrStop,
+      cancelEngines,
+      findSpeakable,
+      markUnavailable,
+      platform.name,
+      platform.system,
+      speakWithWeb,
+      stop,
+    ],
   );
 
   speakAtRef.current = speakAt;
@@ -380,42 +464,93 @@ export function useReaderTts({
     return () => window.removeEventListener("lishi:tts-event", onNativeTts);
   }, [handleParagraphFinished, markUnavailable, speakWithWeb]);
 
-  // Auto-start paragraph 0 when advancing to a new section during continuous listening
+  // Unified section-transition & external-jump effect so simultaneous `(sectionIndex, jumpTarget)`
+  // updates in a single React commit never overwrite `jumpTarget.paragraphIndex` back to `0`.
   useEffect(() => {
-    if (prevSectionRef.current === sectionIndex) return;
-    prevSectionRef.current = sectionIndex;
-    if (pendingSectionContinueRef.current || statusRef.current === "playing") {
-      cancelEngines();
-      if (paragraphs.length > 0) {
+    const hasNewJump = Boolean(jumpTarget && jumpTarget.nonce !== appliedJumpNonceRef.current);
+    if (hasNewJump && jumpTarget) {
+      appliedJumpNonceRef.current = jumpTarget.nonce;
+      pendingJumpParaRef.current = {
+        sectionIndex: jumpTarget.sectionIndex,
+        paragraphIndex: Math.max(0, Math.trunc(jumpTarget.paragraphIndex)),
+      };
+      if (statusRef.current === "playing") {
         pendingSectionContinueRef.current = false;
-        void speakAt(0);
-      } else {
-        setStatus("playing");
-        statusRef.current = "playing";
-        setSpeakingIndex(null);
-        indexRef.current = null;
-        pendingSectionContinueRef.current = true;
       }
-    } else if (statusRef.current === "paused") {
-      cancelEngines();
-      setSpeakingIndex(0);
-      indexRef.current = 0;
     }
-  }, [cancelEngines, paragraphs, sectionIndex, speakAt]);
 
-  // Also handle async section content load when `pendingSectionContinueRef` is waiting on paragraphs
-  useEffect(() => {
-    if (pendingSectionContinueRef.current && statusRef.current === "playing" && paragraphs.length > 0) {
-      pendingSectionContinueRef.current = false;
-      void speakAt(0);
+    const sectionChanged = prevSectionRef.current !== sectionIndex;
+    if (sectionChanged) {
+      prevSectionRef.current = sectionIndex;
+      awaitingAdvanceFromSectionRef.current = null;
+      const explicitPara =
+        pendingJumpParaRef.current?.sectionIndex === sectionIndex
+          ? pendingJumpParaRef.current.paragraphIndex
+          : 0;
+      if (pendingSectionContinueRef.current || statusRef.current === "playing") {
+        cancelEngines();
+        if (sectionReady) {
+          pendingSectionContinueRef.current = false;
+          pendingJumpParaRef.current = null;
+          speakAt(explicitPara);
+        } else {
+          setStatus("playing");
+          statusRef.current = "playing";
+          setSpeakingIndex(null);
+          indexRef.current = null;
+          pendingSectionContinueRef.current = true;
+        }
+      } else if (statusRef.current === "paused") {
+        cancelEngines();
+        if (pendingJumpParaRef.current?.sectionIndex === sectionIndex) {
+          pendingJumpParaRef.current = null;
+        }
+        setSpeakingIndex(explicitPara);
+        indexRef.current = explicitPara;
+      }
+      return;
     }
-  }, [paragraphs, speakAt]);
+
+    // Same-section explicit jump while playing or paused
+    if (hasNewJump && pendingJumpParaRef.current?.sectionIndex === sectionIndex) {
+      const targetPara = pendingJumpParaRef.current.paragraphIndex;
+      if (statusRef.current === "playing") {
+        if (sectionReady && paragraphs.length > 0) {
+          pendingJumpParaRef.current = null;
+          speakAt(targetPara);
+        } else {
+          pendingSectionContinueRef.current = true;
+        }
+      } else if (statusRef.current === "paused") {
+        pendingJumpParaRef.current = null;
+        setSpeakingIndex(targetPara);
+        indexRef.current = targetPara;
+      }
+      return;
+    }
+
+    // Async section content finished loading while waiting to continue
+    if (
+      pendingSectionContinueRef.current &&
+      awaitingAdvanceFromSectionRef.current !== sectionIndex &&
+      statusRef.current === "playing" &&
+      sectionReady
+    ) {
+      const explicitPara =
+        pendingJumpParaRef.current?.sectionIndex === sectionIndex
+          ? pendingJumpParaRef.current.paragraphIndex
+          : 0;
+      pendingSectionContinueRef.current = false;
+      pendingJumpParaRef.current = null;
+      speakAt(explicitPara);
+    }
+  }, [cancelEngines, jumpTarget, paragraphs, sectionIndex, sectionReady, speakAt]);
 
   // Sleep countdown timer (15 / 30 / 60 minutes)
   useEffect(() => {
+    clearSleepTimer();
     if (typeof sleepMode !== "number" || sleepMode <= 0) {
-      sleepDeadlineRef.current = null;
-      setSleepRemainingSec(null);
+      setSleepRemainingSec(0);
       return;
     }
     const deadline = Date.now() + sleepMode * 60_000;
@@ -427,30 +562,47 @@ export function useReaderTts({
       const left = Math.max(0, Math.ceil((sleepDeadlineRef.current - Date.now()) / 1000));
       setSleepRemainingSec(left);
       if (left <= 0) {
-        sleepDeadlineRef.current = null;
-        setSleepModeState(0);
-        setSleepRemainingSec(null);
         stop();
         toastRef.current("定时时间到，已停止朗读");
       }
     }, 1000);
-    return () => clearInterval(timer);
-  }, [sleepMode, stop]);
+    sleepIntervalRef.current = timer;
+    return () => {
+      if (sleepIntervalRef.current === timer) {
+        sleepIntervalRef.current = null;
+      }
+      clearInterval(timer);
+    };
+  }, [clearSleepTimer, sleepMode, stop]);
 
-  // Cleanly stop all TTS playback on unmount
+  // Cleanly stop all TTS playback & timers on unmount
   useEffect(
     () => () => {
+      clearSleepTimer();
       cancelEngines();
     },
-    [cancelEngines],
+    [cancelEngines, clearSleepTimer],
   );
 
   const play = useCallback(
     (fromIndex?: number) => {
-      const start = fromIndex ?? indexRef.current ?? 0;
+      if (fromIndex !== undefined) {
+        const cleanIdx = Math.max(0, Math.trunc(fromIndex));
+        pendingJumpParaRef.current = { sectionIndex, paragraphIndex: cleanIdx };
+        if (!sectionReadyRef.current) {
+          setStatus("playing");
+          statusRef.current = "playing";
+          pendingSectionContinueRef.current = true;
+          return;
+        }
+        pendingJumpParaRef.current = null;
+        speakAt(cleanIdx);
+        return;
+      }
+      const start = indexRef.current ?? 0;
       speakAt(start);
     },
-    [speakAt],
+    [sectionIndex, speakAt],
   );
 
   const pause = useCallback(() => {

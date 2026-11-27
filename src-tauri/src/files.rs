@@ -321,25 +321,58 @@ pub async fn file_import_skill(app: AppHandle) -> Result<Option<BookFile>> {
     }).await
 }
 
+#[cfg(not(target_os = "android"))]
+fn apply_save_dialog_filters<R: Runtime>(
+    dialog: tauri_plugin_dialog::FileDialogBuilder<R>,
+    file_name: &str,
+) -> tauri_plugin_dialog::FileDialogBuilder<R> {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".lishi.json") {
+        dialog
+            .add_filter("世界存档文件", &["json"])
+            .add_filter("所有文件", &["*"])
+    } else if lower.ends_with(".json") {
+        dialog.add_filter("JSON 文件", &["json"])
+    } else if lower.ends_with(".epub") {
+        dialog
+            .add_filter("EPUB 电子书", &["epub"])
+            .add_filter("导出文件", &["epub", "png", "md", "txt"])
+    } else if lower.ends_with(".png") {
+        dialog
+            .add_filter("PNG 图片", &["png"])
+            .add_filter("导出文件", &["epub", "png", "md", "txt"])
+    } else if lower.ends_with(".md") {
+        dialog
+            .add_filter("Markdown 文档", &["md"])
+            .add_filter("文本文件", &["md", "txt"])
+    } else if lower.ends_with(".txt") {
+        dialog.add_filter("文本文件", &["txt"])
+    } else {
+        dialog.add_filter("导出文件", &["epub", "png", "md", "txt", "json"])
+    }
+}
+
 #[tauri::command]
 pub async fn file_export_text(
     app: AppHandle,
     suggested_name: String,
     text: String,
 ) -> Result<bool> {
+    let safe_name = sanitize_export_name_with_fallback(&suggested_name, "export.txt");
     #[cfg(target_os = "android")]
-    let selected = crate::document_picker::pick_export(&app, &suggested_name)
+    let selected = crate::document_picker::pick_export(&app, &safe_name)
         .await
         .map_err(crate::document_picker::picker_error)?;
     #[cfg(not(target_os = "android"))]
     let selected = {
         let handle = app.clone();
+        let dialog_name = safe_name.clone();
         blocking(move || {
-            Ok(handle
-                .dialog()
-                .file()
-                .set_file_name(suggested_name)
-                .blocking_save_file())
+            let dialog = apply_save_dialog_filters(
+                handle.dialog().file().set_file_name(&dialog_name),
+                &dialog_name,
+            );
+            Ok(dialog.blocking_save_file())
         })
         .await?
     };
@@ -355,23 +388,121 @@ pub async fn file_export_text(
     .await
 }
 
-fn sanitize_export_name(raw: &str) -> String {
-    let leaf: String = raw
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
+fn is_windows_reserved_stem(stem: &str) -> bool {
+    let first = stem.split('.').next().unwrap_or(stem).trim_matches([' ', '.']);
+    matches!(
+        first.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn split_valid_extension(name: &str) -> (&str, &str) {
+    let lower = name.to_ascii_lowercase();
+    if name.len() >= ".lishi.json".len() && lower.ends_with(".lishi.json") {
+        let idx = name.len() - ".lishi.json".len();
+        return (&name[..idx], &name[idx..]);
+    }
+    if let Some(dot) = name.rfind('.') {
+        let ext = &name[dot + 1..];
+        if !ext.is_empty() && ext.len() <= 16 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return (&name[..dot], &name[dot..]);
+        }
+    }
+    (name, "")
+}
+
+fn truncate_utf8_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+pub(crate) fn sanitize_export_name_with_fallback(raw: &str, fallback: &str) -> String {
+    let trimmed_raw = raw.trim();
+    let looks_like_path = trimmed_raw.starts_with('/')
+        || trimmed_raw.starts_with('\\')
+        || (trimmed_raw.len() >= 3
+            && trimmed_raw.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed_raw.as_bytes()[1] == b':'
+            && matches!(trimmed_raw.as_bytes()[2], b'/' | b'\\'))
+        || trimmed_raw
+            .split(['/', '\\'])
+            .any(|seg| seg == "." || seg == "..");
+
+    let candidate_source = if looks_like_path {
+        trimmed_raw.rsplit(['/', '\\']).next().unwrap_or("")
+    } else {
+        trimmed_raw
+    };
+
+    let filtered: String = candidate_source
         .chars()
         .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim()
-        .chars()
-        .take(255)
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
         .collect();
-    if leaf.is_empty() || leaf == "." || leaf == ".." {
-        "export.bin".to_owned()
-    } else {
-        leaf
+    let cleaned = filtered.trim().trim_end_matches(['.', ' ']);
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return fallback.to_owned();
     }
+
+    let (raw_stem, ext) = split_valid_extension(cleaned);
+    let fallback_stem = split_valid_extension(fallback).0;
+    let default_stem = if fallback_stem.is_empty() {
+        "export"
+    } else {
+        fallback_stem
+    };
+
+    let mut stem = raw_stem.trim().trim_end_matches(['.', ' ']).to_owned();
+    if stem.is_empty() || stem.chars().all(|c| c == '.') {
+        stem = default_stem.to_owned();
+    }
+    if is_windows_reserved_stem(&stem) {
+        stem.insert(0, '_');
+    }
+    let max_stem_bytes = 240usize.saturating_sub(ext.len()).max(16);
+    let truncated_stem = truncate_utf8_bytes(&stem, max_stem_bytes).trim_end_matches(['.', ' ']);
+    let final_stem = if truncated_stem.is_empty() {
+        default_stem
+    } else if is_windows_reserved_stem(truncated_stem) {
+        return format!("_{truncated_stem}{ext}");
+    } else {
+        truncated_stem
+    };
+    format!("{final_stem}{ext}")
+}
+
+fn sanitize_export_name(raw: &str) -> String {
+    sanitize_export_name_with_fallback(raw, "export.bin")
 }
 
 pub(crate) fn resolve_export_mime(name: &str, explicit: Option<&str>) -> String {
@@ -501,26 +632,10 @@ pub async fn export_bytes(
         let handle = app.clone();
         let name_for_dialog = safe_name.clone();
         let selected = blocking(move || {
-            let ext = std::path::Path::new(&name_for_dialog)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|s| s.to_ascii_lowercase());
-            let mut dialog = handle.dialog().file().set_file_name(&name_for_dialog);
-            dialog = match ext.as_deref() {
-                Some("epub") => dialog
-                    .add_filter("EPUB 电子书", &["epub"])
-                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
-                Some("png") => dialog
-                    .add_filter("PNG 图片", &["png"])
-                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
-                Some("md") => dialog
-                    .add_filter("Markdown 文档", &["md"])
-                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
-                Some("txt") => dialog
-                    .add_filter("文本文件", &["txt"])
-                    .add_filter("导出文件", &["epub", "png", "md", "txt"]),
-                _ => dialog.add_filter("导出文件", &["epub", "png", "md", "txt"]),
-            };
+            let dialog = apply_save_dialog_filters(
+                handle.dialog().file().set_file_name(&name_for_dialog),
+                &name_for_dialog,
+            );
             Ok(dialog.blocking_save_file())
         })
         .await?;
@@ -544,6 +659,7 @@ pub async fn file_export_world(
 )->std::result::Result<bool,serde_json::Value>{
     use tauri::Manager;
     let failure=|phase:&str,message:String|serde_json::json!({"code":"archive_export_failed","phase":phase,"message":format!("{}：{}",match phase {"prepare"=>"准备存档失败","select"=>"未能选择保存位置",_=>"保存文件失败"},message)});
+    let safe_name = sanitize_export_name_with_fallback(&suggested_name, "world.lishi.json");
     let directory=app.path().app_cache_dir().map_err(|e|failure("prepare",e.to_string()))?.join("archive-export");
     let path=directory.join(format!("{}.json",uuid::Uuid::new_v4()));
     struct Temporary(std::path::PathBuf);
@@ -566,9 +682,16 @@ pub async fn file_export_world(
         return Err(failure("prepare",ARCHIVE_LIMIT.into()));
     }
     #[cfg(target_os="android")]
-    let selected=crate::document_picker::pick_export(&app,&suggested_name).await.map_err(|c|failure("select",crate::document_picker::picker_error(c).message.into()))?;
+    let selected=crate::document_picker::pick_export(&app,&safe_name).await.map_err(|c|failure("select",crate::document_picker::picker_error(c).message.into()))?;
     #[cfg(not(target_os="android"))]
-    let selected={let handle=app.clone();blocking(move||Ok(handle.dialog().file().set_file_name(suggested_name).blocking_save_file())).await.map_err(|e|failure("select",e.message.into()))?};
+    let selected={
+        let handle=app.clone();
+        let dialog_name=safe_name.clone();
+        blocking(move||{
+            let dialog=apply_save_dialog_filters(handle.dialog().file().set_file_name(&dialog_name),&dialog_name);
+            Ok(dialog.blocking_save_file())
+        }).await.map_err(|e|failure("select",e.message.into()))?
+    };
     let Some(selected)=selected else{return Ok(false);};
     blocking(move||{let mut source=std::fs::File::open(&temporary.0).map_err(|_|io_error())?;let mut destination=open_file(&app,selected,"wt")?;std::io::copy(&mut source,&mut destination).map_err(|_|io_error())?;destination.flush().map_err(|_|io_error())?;Ok(true)}).await.map_err(|e|failure("write",e.message.into()))
 }
@@ -635,5 +758,35 @@ mod tests {
             write_bytes_atomic(&target, b"replaced").unwrap();
             assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
         }
+    }
+
+    #[test]
+    fn sanitize_export_name_scrubs_illegal_chars_control_trailing_dots_and_reserved_devices() {
+        assert_eq!(
+            sanitize_export_name_with_fallback("大明/1644:崇祯?*\"<>|\r\n卷一.lishi.json", "world.lishi.json"),
+            "大明_1644_崇祯______卷一.lishi.json"
+        );
+        assert_eq!(
+            sanitize_export_name_with_fallback("  开局-测试...   ", "export.txt"),
+            "开局-测试"
+        );
+        assert_eq!(
+            sanitize_export_name_with_fallback("开局-测试.. .txt ", "export.txt"),
+            "开局-测试.txt"
+        );
+        for reserved in ["CON", "prn", "Aux", "NUL", "COM1", "com9", "LPT1", "lpt9"] {
+            let txt = sanitize_export_name_with_fallback(&format!("{reserved}.txt"), "export.txt");
+            assert_eq!(txt, format!("_{reserved}.txt"));
+            let world = sanitize_export_name_with_fallback(&format!("{reserved}.lishi.json"), "world.lishi.json");
+            assert_eq!(world, format!("_{reserved}.lishi.json"));
+        }
+        assert_eq!(
+            sanitize_export_name_with_fallback("/.lishi.json", "world.lishi.json"),
+            "world.lishi.json"
+        );
+        let huge = format!("{}.lishi.json", "汉".repeat(120));
+        let capped = sanitize_export_name_with_fallback(&huge, "world.lishi.json");
+        assert!(capped.ends_with(".lishi.json"));
+        assert!(capped.len() <= 255);
     }
 }

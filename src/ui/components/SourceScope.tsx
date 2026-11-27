@@ -82,7 +82,8 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
   useEffect(() => {
     let live = true;
     void (async () => {
-      const [c, n, r] = await Promise.all([binding ? bookChapters(game.repo, binding) : Promise.resolve([]), choosableNotes(game.repo, binding, worldId), game.scopeRoom(purpose)]);
+      const openBinding = binding ? { ...binding, through: null } : binding;
+      const [c, n, r] = await Promise.all([openBinding ? bookChapters(game.repo, openBinding) : Promise.resolve([]), choosableNotes(game.repo, openBinding, worldId), game.scopeRoom(purpose)]);
       if (!live) return;
       setChapters(c); setNotes(n); setRoom(r);
       const lastSection = c.length ? c[c.length - 1].section : 0;
@@ -208,9 +209,9 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
       {mode === "notes" && (notes === null ? <p className="muted m-0">正在读取札记…</p>
         : allNotes.length === 0 ? <p className="muted m-0">还没有整理好的札记。可以先在游玩页的“更多 → 札记”里整理，再回来选。</p>
         : <>{noteList("原著札记", notes.book)}{noteList("本局札记", notes.story)}
-          {purpose === "correction" && <p className="muted m-0">纠错要引原文：查原文只在勾选的原著札记覆盖的章节里；勾选的都没写章节时，在本局能看的范围里查。</p>}</>)}
+          {purpose === "correction" && <p className="muted m-0">纠错要引原文：查原文只在勾选的原著札记覆盖的章节里；勾选的都没写章节时，在全书里查。</p>}</>)}
       {mode === "chapters" && (chapters === null ? <p className="muted m-0">正在读取目录…</p>
-        : chapters.length === 0 ? <p className="muted m-0">这本书在本局允许的范围里没有正文。</p>
+        : chapters.length === 0 ? <p className="muted m-0">这本书没有可读取的正文。</p>
         : <div className="stack gap-2 scope-chapter-picker">
           <div className="scope-toc-bar">
             <input type="search" aria-label="搜索原著目录" value={query}
@@ -283,7 +284,7 @@ export function SourceScopeSheet({ worldId, binding, value, purpose, onChange, o
             setFrom={(n) => { setFrom(n); setRangeAnchor(null); }}
             setTo={(n) => { setTo(n); setRangeAnchor(null); }}
             describe={describeSection}
-            total={binding?.through != null ? `本局可参考到第 ${binding.through + 1} 节（共 ${chapters.length} 节）` : `全书共 ${chapters.length} 节`} />
+            total={`全书共 ${chapters.length} 节`} />
           <p className={whole ? "m-0" : "field-hint m-0"} aria-live="polite">{chapterWords(range)}{rangeSummary && rangeSummary !== chapterWords(range) ? `（${rangeSummary}）` : ""}约 {amount(chars)}，{whole
             ? "会整段交给 AI。"
             : "一次放不下，会在这几章里找和要求相关的段落。想让 AI 读全这几章，可以先在“札记”里把它们整理成一份札记，再选“只用指定札记”。"}</p>

@@ -81,7 +81,7 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
 
   const selectMode = (mode: string) => { touched.current = true; setModeIndex(Math.max(0, modeList.findIndex((m) => m.mode === mode))); };
   /** After sending: the box and the note are emptied; 写 and 幕后 are one-off ways of writing. */
-  const clearAfterSend = (mode: string) => {
+  const clearAfterSend = (mode: string, keepInput = false) => {
     touched.current = true;
     if (timer.current !== undefined) {
       clearTimeout(timer.current);
@@ -90,9 +90,24 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
     pendingWriteRef.current = false;
     setNote("");
     setNoteOpen(false);
+    const nextMode = mode === "write" || (mode === "direct" && !watch) ? modeList[0].mode : currentMode.mode;
     if (mode === "write" || (mode === "direct" && !watch)) setModeIndex(0);
-    latestRef.current = { worldId, value: null };
-    void game.repo.setSetting(`draft:${worldId}`, null).catch(() => {});
+    const nextValue = keepInput ? buildDraftPayload(input, "", false, nextMode) : null;
+    latestRef.current = { worldId, value: nextValue };
+    void game.repo.setSetting(`draft:${worldId}`, nextValue).catch(() => {});
+  };
+  /** Clears only `input` while keeping any open `directorNote` (`note` + `noteOpen`) and mode intact. */
+  const clearInputOnly = () => {
+    touched.current = true;
+    if (timer.current !== undefined) {
+      clearTimeout(timer.current);
+      timer.current = undefined;
+    }
+    pendingWriteRef.current = false;
+    setInput("");
+    const nextValue = buildDraftPayload("", note, noteOpen, currentMode.mode);
+    latestRef.current = { worldId, value: nextValue };
+    void game.repo.setSetting(`draft:${worldId}`, nextValue).catch(() => {});
   };
   /** A failed action comes back to the box, with its way of writing and note. */
   const restore = (r: Restore, force = false) => {
@@ -115,5 +130,5 @@ export function usePlayDraft(game: Game, worldId: string, ready: boolean, watch:
   /** The 幕后要求 that goes with the next passage (typed action or tapped choice alike). */
   const directorNote = () => (!watch && noteOpen && note.trim() ? note.trim() : null);
 
-  return { input, setInput, note, setNote, noteOpen, setNoteOpen, modeIndex, setModeIndex, modeList, currentMode, selectMode, clearAfterSend, restore, clearIfMatches, directorNote };
+  return { input, setInput, note, setNote, noteOpen, setNoteOpen, modeIndex, setModeIndex, modeList, currentMode, selectMode, clearAfterSend, clearInputOnly, restore, clearIfMatches, directorNote };
 }

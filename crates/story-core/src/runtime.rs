@@ -1206,8 +1206,19 @@ impl Engine {
             let final_only = !active_tools.is_empty() && tool_rounds.is_some_and(|n| round >= resume_round_base.saturating_add(n));
             let attempt=self.complete_with(&shared,&format!("writing:{round}"),messages.clone(),active_tools.clone(),false,final_only).await;
             let response=match attempt {
-                Err(error) if modern&&plan.kind!="correction"&&round==0&&!active_tools.is_empty()&&["unsupported tool","tool is not supported","does not support tools","tools are not supported","does not support tool use","不支持工具"].iter().any(|s|error.to_string().to_lowercase().contains(s))=>{
+                Err(error)
+                    if round == 0
+                        && !active_tools.is_empty()
+                        && (modern || plan.kind == "correction")
+                        && Self::is_tool_unsupported_error(&error) =>
+                {
                     self.save_observed_tool_support(&shared, false)?;
+                    if plan.kind == "correction" {
+                        return Err(Error::fail(
+                            crate::failure::FailKind::Unsupported,
+                            "这个服务与模型尚不支持所需工具调用，请更换支持工具的模型；文字润色仍可使用",
+                        ));
+                    }
                     active_tools.clear();
                     continue;
                 },
@@ -1507,6 +1518,49 @@ impl Engine {
         Ok(())
     }
 
+    pub(crate) fn is_tool_unsupported_error(error: &Error) -> bool {
+        let text_has_tool_rejection = |msg: &str| {
+            let lower = msg.to_lowercase();
+            [
+                "unsupported tool",
+                "tool is not supported",
+                "does not support tools",
+                "tools are not supported",
+                "does not support tool use",
+                "tool use is not supported",
+                "tool calling is not supported",
+                "does not support tool calling",
+                "function calling is not supported",
+                "does not support function",
+                "functions are not supported",
+                "不支持工具",
+                "不支持函数调用",
+                "不支持function",
+            ]
+            .iter()
+            .any(|m| lower.contains(m))
+                || (lower.contains("tool")
+                    && [
+                        "not supported",
+                        "unsupported",
+                        "unrecognized",
+                        "unknown",
+                        "invalid",
+                    ]
+                    .iter()
+                    .any(|m| lower.contains(m)))
+                || (lower.contains("function")
+                    && ["not supported", "unsupported", "unrecognized", "unknown"]
+                        .iter()
+                        .any(|m| lower.contains(m)))
+        };
+        match error {
+            Error::Provider { partial: true, .. } => false,
+            Error::Provider { message, .. } => text_has_tool_rejection(message),
+            other => text_has_tool_rejection(&other.to_string()),
+        }
+    }
+
     fn cached_tool_support(&self,model:&crate::types::ModelConfig)->Result<Option<bool>>{
         let key=format!("toolCapability:{}:{}:{}",model.slot,model.url,model.model);
         let raw=self.store.lock()?.query_row("SELECT value FROM settings WHERE key=?",[key],|r|r.get::<_,String>(0)).optional()?;
@@ -1536,17 +1590,16 @@ impl Engine {
                         .and_then(|s| serde_json::from_str::<Value>(s).ok())
                         .is_some_and(|v| v["value"] == "ready")
             }),
-            Err(Error::Invalid(message) | Error::Fail { kind: crate::failure::FailKind::Other, message })
-                if [
-                    "400",
-                    "404",
-                    "422",
-                    "unsupported tool",
-                    "tool is not supported",
-                    "不支持工具",
-                ]
-                .iter()
-                .any(|s| message.to_lowercase().contains(s)) =>
+            Err(Error::Provider {
+                status: Some(400 | 404 | 422),
+                partial: false,
+                ..
+            }) => false,
+            Err(ref error) if Self::is_tool_unsupported_error(error) => false,
+            Err(Error::Invalid(ref message) | Error::Fail { kind: crate::failure::FailKind::Other, ref message })
+                if ["400", "404", "422"]
+                    .iter()
+                    .any(|s| message.to_lowercase().contains(s)) =>
             {
                 false
             }
@@ -1673,7 +1726,7 @@ impl Engine {
         let mut meta = plan.meta.clone();
         // A saved passage keeps what describes it, not the prompts that built
         // it: those were copied into every node and only grew the save (R30).
-        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "targetId", "executionLease", "writingContext", "upkeepMessages", "upkeepTextGuard", "chapterMessages", "chapterTextGuard", "chapterRefresh", "sourceScope", "textGuard", "textGuardAt", "autoplayTextHash", "codexMessages",
+        for key in ["settingsGuard", "generationSnapshot", "sourceGuard", "readingSource", "targetId", "executionLease", "writingContext", "upkeepMessages", "upkeepTextGuard", "chapterMessages", "chapterTextGuard", "chapterRefresh", "sourceScope", "textGuard", "textGuardAt", "autoplayTextHash", "codexMessages",
             "autoplayTurnSystem", "autoplayExtractSystem", "autoplayUpkeepSystem", "autoplayChapterSystem", "resumeBudgetBase", "stepBudgetBase"] {
             if let Some(object) = meta.as_object_mut() {
                 object.remove(key);
@@ -1766,9 +1819,17 @@ impl Engine {
                 .filter(|p| p["kind"] == "original" && p["match"] != "nearby")
                 .filter_map(|p| p["section"].as_i64())
                 .collect();
+            let mut follow_source = state["source"].clone();
+            if plan
+                .meta
+                .get("readingSource")
+                .is_some_and(|rs| rs.is_object() && rs["through"].is_null())
+            {
+                follow_source["through"] = Value::Null;
+            }
             if let Ok(Some(next)) = crate::runtime_sources::follow_position_with_reads(
                 &tx,
-                &state["source"],
+                &follow_source,
                 narrative,
                 &read_sections,
             ) {
@@ -2773,6 +2834,263 @@ mod correction_notes_tests {
         let clamped: f64 = tx.query_row("SELECT value FROM settings WHERE key='tokenRatio:extreme-model'", [], |r| r.get::<_, String>(0)).unwrap().parse().unwrap();
         assert!((clamped - 0.45).abs() < 1e-4, "{clamped}");
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn tool_unsupported_classifier_matches_provider_rejections_without_false_positives() {
+        for msg in [
+            "Function calling is not supported for this model",
+            "This endpoint does not support function definitions",
+            "Unrecognized request argument supplied: tools",
+            "Unknown parameter: 'tools'",
+            "Invalid parameter: tool_choice",
+            "当前模型不支持工具调用",
+        ] {
+            let err = Error::Provider {
+                kind: "http".into(),
+                status: Some(400),
+                message: msg.into(),
+                partial: false,
+            };
+            assert!(Engine::is_tool_unsupported_error(&err), "expected match for: {msg}");
+        }
+        let partial_err = Error::Provider {
+            kind: "http".into(),
+            status: Some(400),
+            message: "Function calling is not supported".into(),
+            partial: true,
+        };
+        assert!(!Engine::is_tool_unsupported_error(&partial_err), "partial stream must never be classified as tool-unsupported retryable");
+        let rate_err = Error::Provider {
+            kind: "http".into(),
+            status: Some(429),
+            message: "Rate limit exceeded".into(),
+            partial: false,
+        };
+        assert!(!Engine::is_tool_unsupported_error(&rate_err));
+    }
+
+    #[tokio::test]
+    async fn r41_tool_capability_and_first_round_fallback_plus_maintain_deleted_world_guards() {
+        use crate::chat::{BoxFuture, Completion, Model, TextSink};
+        use std::collections::VecDeque;
+        use tokio_util::sync::CancellationToken;
+
+        enum MockReply {
+            Err(Error),
+            OkText(&'static str),
+        }
+        struct MockModel {
+            replies: Mutex<VecDeque<MockReply>>,
+            seen_bodies: Mutex<Vec<Value>>,
+        }
+        impl Model for MockModel {
+            fn complete(
+                &self,
+                _config: crate::types::ModelConfig,
+                body: Value,
+                _cancel: CancellationToken,
+                sink: TextSink,
+            ) -> BoxFuture<Result<Completion>> {
+                self.seen_bodies.lock().unwrap().push(body);
+                let step = self.replies.lock().unwrap().pop_front().expect("mock step");
+                Box::pin(async move {
+                    match step {
+                        MockReply::Err(e) => Err(e),
+                        MockReply::OkText(t) => {
+                            sink(t.to_owned());
+                            Ok(Completion {
+                                text: t.to_owned(),
+                                continuation: Default::default(),
+                                tool_calls: vec![],
+                                finish_reason: Some("stop".into()),
+                                usage: Some(json!({"prompt_tokens": 50, "completion_tokens": 20})),
+                                first_token_ms: Some(5),
+                                total_ms: 10,
+                            })
+                        }
+                    }
+                })
+            }
+        }
+
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        crate::migration::migrate(&mut db, None).unwrap();
+        let store = Store(Arc::new(Mutex::new(db)));
+        store.initialize().unwrap();
+        let base_state = json!({
+            "version": 2,
+            "time": {"start": "第一天", "elapsedMinutes": 0, "startHour": 8},
+            "placeId": null,
+            "protagonist": {
+                "name": "李安",
+                "aliases": [],
+                "age": 20,
+                "gender": "男",
+                "identity": "旅人",
+                "origin": "现代",
+                "cheat": "",
+                "stats": {"money": 10, "debt": 0, "health": 100, "energy": 100, "fame": 0},
+                "statuses": [],
+                "items": []
+            },
+            "people": [],
+            "places": [],
+            "cards": [],
+            "goals": [],
+            "facts": [],
+            "era": {"packId": null, "mode": "free", "clockStyle": "elapsed"},
+            "deviations": [],
+            "source": {"bookId": "b1", "through": null, "position": 0, "method": "search", "instructions": ""}
+        });
+        {
+            let lock = store.lock().unwrap();
+            lock.execute("INSERT INTO source_books VALUES('b1','测试书','txt','t','{\"sections\":[{\"title\":\"一\",\"text\":\"原文\"}]}')", []).unwrap();
+            lock.execute("INSERT INTO source_sections VALUES('b1',0,'一',NULL)", []).unwrap();
+            lock.execute("INSERT INTO source_chunks VALUES('b1',0,0,'原文')", []).unwrap();
+            lock.execute("INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w','测试','free','l','{}','t','t','t')", []).unwrap();
+            lock.execute("INSERT INTO nodes(id,world_id,seq,kind,narrative,created_at) VALUES('n0','w',1,'opening','开局正文','t')", []).unwrap();
+            lock.execute("INSERT INTO states(node_id,state_json) VALUES('n0',?)", [base_state.to_string()]).unwrap();
+            lock.execute("INSERT INTO lines(id,world_id,name,node_id,kind,created_at) VALUES('l','w','主线','n0','line','t')", []).unwrap();
+        }
+
+        let mock = Arc::new(MockModel {
+            replies: Mutex::new(VecDeque::from([
+                // 1. Modern `ask` round 0 fails with "Function calling is not supported" -> strips tools & retries:
+                MockReply::Err(Error::Provider {
+                    kind: "http".into(),
+                    status: Some(400),
+                    message: "Function calling is not supported by this model".into(),
+                    partial: false,
+                }),
+                MockReply::OkText("降级无工具回答成功。"),
+                // 2. Classic `tool_capability` HTTP 422 -> caches false & writes passage without tools:
+                MockReply::Err(Error::Provider {
+                    kind: "http".into(),
+                    status: Some(422),
+                    message: "Unprocessable tool schema".into(),
+                    partial: false,
+                }),
+                MockReply::OkText("无工具经典回合正文。<record>{\"time\":5,\"choices\":[]}</record>"),
+                // 3. `correction` on fresh model rejects tools -> caches false & fails with FailKind::Unsupported:
+                MockReply::Err(Error::Provider {
+                    kind: "http".into(),
+                    status: Some(400),
+                    message: "This model does not support function calling".into(),
+                    partial: false,
+                }),
+                // 4. `maintain` runs while line gets soft-deleted before commit -> safely skips writing orphan chapter/edit:
+                MockReply::OkText("{\"people\":[{\"name\":\"王五\",\"role\":\"路人\",\"attitude\":\"中立\"}]}"),
+                MockReply::OkText("{\"title\":\"第一章\",\"gist\":\"开端\",\"summary\":\"测试摘要\"}"),
+            ])),
+            seen_bodies: Mutex::new(vec![]),
+        });
+        let engine = Arc::new(Engine::new(
+            store.clone(),
+            mock.clone(),
+            Arc::new(|_| Box::new(())),
+            Arc::new(|_| {}),
+        ));
+
+        let wait_run = |id: &str| {
+            let eng = engine.clone();
+            let st = store.clone();
+            let rid = id.to_owned();
+            async move {
+                for _ in 0..100 {
+                    let snap = eng.snapshot(&rid, 0).unwrap();
+                    let lease_busy = crate::execution_lease::current(&st.lock().unwrap(), "w")
+                        .unwrap()
+                        .is_some_and(|l| !l.ticket.owner_id.is_empty());
+                    if !matches!(snap.status.as_str(), "running" | "queued") && !lease_busy {
+                        return snap;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                panic!("run {rid} did not finish");
+            }
+        };
+
+        let make_plan = |id: &str, kind: &str, model_name: &str, meta: Value| crate::types::RunPlan {
+            id: id.into(),
+            world_id: "w".into(),
+            line_id: "l".into(),
+            head_id: "n0".into(),
+            base_id: Some("n0".into()),
+            kind: kind.into(),
+            model: crate::types::ModelConfig {
+                slot: "main".into(),
+                url: "https://api.example.invalid/v1/chat/completions".into(),
+                model: model_name.into(),
+                aux_model: None,
+                include_usage: true,
+                max_tokens: Some(1024),
+                extra: Default::default(),
+            },
+            messages: vec![json!({"role": "user", "content": "测试请求"})],
+            extract_messages: vec![],
+            state: base_state.clone(),
+            settings: json!({"choiceCount": 0}),
+            options: json!({"mode": "do", "difficulty": "标准", "currency": {"units": [{"name": "文", "value": 1}]}}),
+            action: json!({"mode": "do", "text": "行动"}),
+            meta,
+            reference: Some(json!({"bookId": "b1"})),
+            original: "开局正文".into(),
+            carried_edits: vec![],
+            trailing_ids: vec![],
+            new_world: None,
+            fallback_model: None,
+        };
+
+        // 1. `ask` degrades gracefully without tools and caches `supported: false`:
+        engine.start(make_plan("run-ask", "ask", "no-tool-v1", json!({}))).unwrap();
+        let ask_snap = wait_run("run-ask").await;
+        assert_eq!(ask_snap.status, "previewed", "{:?}", ask_snap.error);
+        assert_eq!(ask_snap.result.as_ref().unwrap()["text"], "降级无工具回答成功。");
+        {
+            let bodies = mock.seen_bodies.lock().unwrap();
+            assert!(bodies[0].get("tools").is_some(), "round 0 sent tools");
+            assert!(bodies[1].get("tools").is_none(), "degraded retry stripped tools");
+        }
+
+        // 2. Classic `turn` with HTTP 422 on `tool_capability` returns Ok(false) and finishes turn:
+        engine.start(make_plan("run-classic", "turn", "classic-422-v1", json!({}))).unwrap();
+        let classic_snap = wait_run("run-classic").await;
+        assert_eq!(classic_snap.status, "committed", "{:?}", classic_snap.error);
+        let new_head = classic_snap.result.as_ref().unwrap()["nodeId"].as_str().unwrap().to_owned();
+
+        // 3. `correction` with tool-unsupported error caches false and surfaces `unsupported` failure kind:
+        let mut corr_plan = make_plan("run-corr", "correction", "corr-notool-v1", json!({"correctionRange": {"start": 0, "end": 4}}));
+        corr_plan.head_id = new_head.clone();
+        corr_plan.base_id = Some(new_head.clone());
+        engine.start(corr_plan).unwrap();
+        let corr_snap = wait_run("run-corr").await;
+        assert_eq!(corr_snap.status, "failed");
+        assert_eq!(corr_snap.error_kind.as_deref(), Some("unsupported"));
+
+        // 4. `maintain` with archived world (`archived = 1`) safely skips writing edit nodes or chapters:
+        store.lock().unwrap().execute("UPDATE worlds SET archived=1 WHERE id='w'", []).unwrap();
+        let mut m_plan = make_plan(
+            "run-maint",
+            "maintain",
+            "maint-v1",
+            json!({
+                "maintainNode": new_head.clone(),
+                "upkeepMessages": [{"role": "user", "content": "整理"}],
+                "chapterMessages": [{"role": "user", "content": "摘要"}],
+                "chapterFirstId": "n0"
+            }),
+        );
+        m_plan.head_id = new_head.clone();
+        m_plan.base_id = Some(new_head);
+        engine.start(m_plan).unwrap();
+        let maint_snap = wait_run("run-maint").await;
+        assert_eq!(maint_snap.status, "committed");
+        let chapter_count: i64 = store.lock().unwrap().query_row("SELECT COUNT(*) FROM chapters WHERE world_id='w'", [], |r| r.get(0)).unwrap();
+        let edit_count: i64 = store.lock().unwrap().query_row("SELECT COUNT(*) FROM nodes WHERE world_id='w' AND kind='edit'", [], |r| r.get(0)).unwrap();
+        assert_eq!(chapter_count, 0, "archived world must not receive late maintain chapters");
+        assert_eq!(edit_count, 0, "archived world must not receive late maintain edit nodes");
     }
 }
 

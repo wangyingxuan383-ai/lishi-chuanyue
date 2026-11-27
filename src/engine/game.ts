@@ -434,6 +434,8 @@ export class Game {
 
   async autoStoryPlot(worldId: string): Promise<void> {
     if (!this.llm || !(await this.repo.getSetting("autoStoryPlot", true))) return;
+    const world = await this.repo.getWorld(worldId);
+    if (!world || world.archived) return;
     const head = (await tree.cursor(this.repo, worldId)).head;
     const chapters = await this.repo.chaptersOnPath(worldId, head.id);
     const last = chapters.at(-1);
@@ -444,19 +446,21 @@ export class Game {
     const own = (await listStoryNotes(this.repo, worldId)).filter((n) => n.kind === "plot" && !n.originWorldId);
     // A 主线梗概 the player made from the start is kept up instead of adding a second one.
     let note = own.find((n) => n.scope.auto) ?? own.find((n) => (n.scope.from ?? 0) === 0 && n.status === "done");
-    const offRoute = !!note && note.status === "done" && noteOffRoute(note, new Set(path.map((n) => n.id)));
+    if (note && this.noteRuns.has(note.id)) return;
+    const routeSet = new Set(path.map((n) => n.id));
+    const offRoute = !!note && noteOffRoute(note, routeSet);
     // A turn it read was edited: once the chapters there are summarized again, the
     // automatic summary is made again from them (D183); one the player wrote is only marked.
     // A chapter the player wrote is never summarized again, so it does not hold this back.
-    const edited = !!note && note.status === "done" && note.scope.auto === true && note.scope.staleFrom !== undefined && !chapters.some((c) => c.stale && !c.edited);
-    if (note && edited && !offRoute && !this.noteRuns.has(note.id)) {
+    const edited = !!note && note.scope.auto === true && note.scope.staleFrom !== undefined && !chapters.some((c) => c.stale && !c.edited);
+    if (note && edited && !offRoute) {
       note = restartOnRoute(note, end);
       note.scope.auto = true;
       await saveNote(this.repo, note, true);
     } else if (note && offRoute) {
       // The player went back or switched route: the automatic summary follows the route being
       // played; one the player wrote is only marked in 札记, never redone without asking.
-      if (!note.scope.auto || this.noteRuns.has(note.id)) return;
+      if (!note.scope.auto) return;
       note = restartOnRoute(note, end);
       note.scope.auto = true;
       await saveNote(this.repo, note, true);
@@ -465,12 +469,30 @@ export class Game {
       if (chapters.length > 3) return;
       note = newStoryNote(worldId, "plot", { from: 0, to: end, auto: true }, "主线梗概");
       await saveNote(this.repo, note);
-    } else if (note.status === "done" && (note.scope.to ?? -1) < end && !this.noteRuns.has(note.id)) {
+    } else if (note.scope.auto === true && (note.status === "failed" || note.status === "paused")) {
+      if (!note.progress.parts?.some(Boolean)) {
+        if (note.progress.update && end > note.progress.update.to) {
+          note = { ...note, progress: { ...note.progress, update: { ...note.progress.update, to: end } }, updatedAt: new Date().toISOString() };
+          await saveNote(this.repo, note, true);
+        } else if (!note.progress.update && (note.scope.to ?? -1) < end) {
+          note = { ...note, scope: { ...note.scope, to: end }, updatedAt: new Date().toISOString() };
+          await saveNote(this.repo, note, true);
+        }
+      }
+    } else if (note.status === "done" && (note.scope.to ?? -1) < end) {
       note = startNoteUpdate(note, end);
       await saveNote(this.repo, note, true);
     } else return;
     for (const fn of this.listeners) fn(worldId);
-    await this.runCanonNote(note.id, () => {});
+    const finished = await this.runCanonNote(note.id, () => {});
+    if (finished.status === "done" && (finished.scope.to ?? -1) < end && finished.scope.staleFrom === undefined) {
+      const latestWorld = await this.repo.getWorld(worldId);
+      if (latestWorld && !latestWorld.archived) {
+        const catchUp = startNoteUpdate(finished, end);
+        await saveNote(this.repo, catchUp, true);
+        await this.runCanonNote(catchUp.id, () => {});
+      }
+    }
     for (const fn of this.listeners) fn(worldId);
   }
 
@@ -642,11 +664,12 @@ export class Game {
   /** The same scoped local reference retrieval as ordinary writing. No extra AI probe. */
   private async withOpeningSources(messages: ChatMessage[], current: Partial<SetupDraft>, idea: string): Promise<ChatMessage[]> {
     if (!current.source) return messages;
+    const openSource: SourceBinding = { ...current.source, through: null };
     const budget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
-    const context = await referenceContext(this.repo, current.source, [idea, current.premise, current.identity, current.hint].filter(Boolean).join("\n"), Math.min(2400, Math.floor(budget / 4)));
+    const context = await referenceContext(this.repo, openSource, [idea, current.premise, current.identity, current.hint].filter(Boolean).join("\n"), Math.min(2400, Math.floor(budget / 4)));
     const instructions = referenceInstructionsBlock(context);
     const evidence = referenceEvidenceBlock(context);
-    return [...messages, { role: "user", content: `【本次开局参考】保留选定作品、起点和参考范围。以下原文只用于核对世界设定；不得将模型印象冒充原著。资料不足写在设定中待确认，不杜撰原著细节。${instructions}${evidence}` }];
+    return [...messages, { role: "user", content: `【本次开局参考】保留选定作品和开局起点。以下原文只用于核对世界设定；不得将模型印象冒充原著。资料不足写在设定中待确认，不杜撰原著细节。${instructions}${evidence}` }];
   }
 
   private async draft<T>(messages: ChatMessage[], purpose: string, parse: (value: unknown) => T | null): Promise<T | null> {
@@ -681,14 +704,15 @@ export class Game {
    * quarter of the input budget so that a few whole chapters can go in.
    */
   private async sourceBrief(worldId: string, binding: SourceBinding | null | undefined, query: string | import("./sources/types").ReferenceQuery, max = 3000, scope?: SourceScope, opts: { allChapters?: boolean } = {}): Promise<string> {
+    const openBinding = binding ? { ...binding, through: null } : binding;
     if (isChosen(scope)) {
       const room = Math.max(max, await this.scopeRoom());
-      const material = await scopedMaterial(this.repo, binding, scope, query, room, { worldId });
+      const material = await scopedMaterial(this.repo, openBinding, scope, query, room, { worldId });
       return `${canonNotesBlock(material.notes, room)}${referenceEvidenceBlock(material.reference)}`.trim().slice(0, room);
     }
-    if (!binding) return "";
+    if (!openBinding) return "";
     const queryText = typeof query === "string" ? query : `${query.text}\n${query.rewriteHint ?? ""}`;
-    const allNotes = await notesForTurn(this.repo, binding, worldId, queryText, { allChapters: opts.allChapters }).catch(() => []);
+    const allNotes = await notesForTurn(this.repo, openBinding, worldId, queryText, { allChapters: opts.allChapters }).catch(() => []);
     const bookNotes = allNotes.filter((n) => n.source !== "story");
     const storyNotes = allNotes.filter((n) => n.source === "story");
     // Give book notes and story notes independent shares so a long story plot note cannot starve book canon notes.
@@ -696,7 +720,7 @@ export class Game {
     const bookBlock = canonNotesBlock(bookNotes, Math.floor(noteBudget * 0.65));
     const storyBlock = canonNotesBlock(storyNotes, Math.max(0, noteBudget - bookBlock.length));
     const notes = `${bookBlock}${storyBlock}`;
-    const passages = referenceEvidenceBlock(await referenceContext(this.repo, binding, query, max - notes.length, undefined, { ignorePosition: opts.allChapters }).catch(() => undefined));
+    const passages = referenceEvidenceBlock(await referenceContext(this.repo, openBinding, query, max - notes.length, undefined, { ignorePosition: opts.allChapters }).catch(() => undefined));
     return `${notes}${passages}`.trim().slice(0, max);
   }
 
@@ -780,7 +804,7 @@ export class Game {
     this.requireExecution();
     if (input.source) {
       const header = validBinding(input.source) ? await getBookHeader(this.repo, input.source.bookId) : null;
-      if (!header || input.source.position >= header.sectionCount || input.source.through !== null && (input.source.through >= header.sectionCount || input.source.position > input.source.through)) { onEvent({ type: "failed", reason: "other", detail: "参考的原著位置无效，请重新选择", partialSaved: false }); return null; }
+      if (!header || input.source.position >= header.sectionCount) { onEvent({ type: "failed", reason: "other", detail: "参考的原著位置无效，请重新选择", partialSaved: false }); return null; }
     }
     const settings: WorldSettings = { ...DEFAULT_SETTINGS, ...input.settings };
     const free = settings.mode === "free";
@@ -789,7 +813,7 @@ export class Game {
     // A built-in pack is only a preset: its era card, places, calendar and currency are copied in (D121).
     const preset = pack ? packCards(pack) : { cards: [], places: [] };
     const initial: WorldState = {
-      ...(input.source && validBinding(input.source) ? { source: structuredClone(input.source) } : {}),
+      ...(input.source && validBinding(input.source) ? { source: { ...structuredClone(input.source), through: null } } : {}),
       version: 2,
       time: { start: pack ? formatDate(pack.start.date, pack.calendar) : "", date: pack?.start.date ?? null, startHour: pack?.start.hour, elapsedMinutes: 0 },
       placeId: null,
@@ -823,7 +847,7 @@ export class Game {
     const referenceCap = scoped?.whole ? quarter : Math.min(3000, quarter);
     const openingReference = fitReference(scoped ? scoped.reference : await referenceContext(this.repo, initial.source, openingQuery, quarter), referenceCap);
     const openingNotes = [
-      ...(input.carry ? await this.carriedBriefs(input.carry) : []),
+      ...(input.carry ? await this.carriedBriefs(input.carry, initial.source?.bookId ?? null) : []),
       ...(scoped ? scoped.notes : initial.source ? (await notesForTurn(this.repo, initial.source, "", [settings.premise, p.name, p.identity].join("\n")).catch(() => [])) : []),
     ];
     const notesBudget = scoped?.meta.mode === "notes" ? Math.max(3000, quarter) : 3000;
@@ -877,8 +901,10 @@ export class Game {
     if (carry?.ids.length) {
       const doneKey = `carriedDone:${worldId}`;
       if (!(await this.repo.getSetting<boolean>(doneKey, false))) {
+        const cursor = await tree.cursor(this.repo, worldId).catch(() => null);
+        const targetBookId = cursor ? (await this.repo.getState(cursor.head.id).catch(() => null))?.source?.bookId ?? null : null;
+        await carryNotes(this.repo, carry.ids, worldId, { worldId: carry.fromWorldId, title: carry.fromTitle }, targetBookId).catch(() => 0);
         await this.repo.setSetting(doneKey, true);
-        await carryNotes(this.repo, carry.ids, worldId, { worldId: carry.fromWorldId, title: carry.fromTitle }).catch(() => 0);
       }
     }
     await this.repo.setSetting("newgameDraft", null).catch(() => {});
@@ -918,13 +944,14 @@ export class Game {
   }
 
   /** The notes a new story brings along, as the opening reads them (前作 background). */
-  private async carriedBriefs(carry: NonNullable<NewWorld["carry"]>): Promise<NoteBrief[]> {
+  private async carriedBriefs(carry: NonNullable<NewWorld["carry"]>, targetBookId: string | null = null): Promise<NoteBrief[]> {
     const briefs: NoteBrief[] = [];
     for (const id of carry.ids) {
       const note = await getNote(this.repo, id).catch(() => null);
       if (!note || note.status !== "done" || !note.content.trim()) continue;
       const origin = note.originTitle ?? carry.fromTitle;
-      briefs.push({ title: note.source === "story" ? `${note.title}（前作《${origin}》）` : note.title, kind: note.kind, content: note.content.slice(0, 2400), source: note.source === "story" ? "story" : "book" });
+      const asStory = note.source === "story" || (note.worldId != null && targetBookId !== note.bookId);
+      briefs.push({ title: asStory ? `${note.title}（前作《${origin}》）` : note.title, kind: note.kind, content: note.content.slice(0, 2400), source: asStory ? "story" : "book" });
     }
     return briefs;
   }
@@ -981,11 +1008,13 @@ export class Game {
 
   /** Player configuration only: external material can never set current facts through a model record. */
   async bindSource(worldId: string, source: SourceBinding | null): Promise<void> {
+    let normalized: SourceBinding | null = source;
     if (source) {
       const header = validBinding(source) ? await getBookHeader(this.repo, source.bookId) : null;
-      if (!header || source.position >= header.sectionCount || source.through !== null && (source.through >= header.sectionCount || source.position > source.through)) throw new Error("参考书籍或用法无效，请重新选择");
+      if (!header || source.position >= header.sectionCount) throw new Error("参考书籍或用法无效，请重新选择");
+      normalized = { ...source, through: null };
     }
-    await this.editState(worldId, { sourceSet: source }, source ? "你修改了参考书籍用法" : "你解除了参考书籍绑定");
+    await this.editState(worldId, { sourceSet: normalized }, normalized ? "你修改了参考书籍用法" : "你解除了参考书籍绑定");
   }
 
   private nativeEvent(event: Record<string, unknown>, onEvent: (event: TurnEvent) => void): void {
@@ -1319,6 +1348,7 @@ export class Game {
           carriedEdits: kind === "variant" ? [...((target.meta.carriedEdits as CarriedEdit[] | undefined) ?? []), ...trailing.filter((n) => n.meta.by !== "AI").map(({ id, record, actionText, directorNote }) => ({ id, record, actionText, directorNote }))] : (target.meta.carriedEdits as CarriedEdit[] | undefined) ?? [],
           meta: {
             ...world.guard,
+            ...(turnSource ? { readingSource: { ...turnSource, through: null } } : {}),
             promptVersion: PROMPT_VERSION, depth: input.depth, referenceReviewVersion: referenceReview(input.depth ?? "standard", turnSource ?? undefined), budgetChars: input.budgetChars, writingContext: { template, era: input.era, pins: input.pins ?? [], settings: world.settings, ...(batch ? { canonNotes: input.canonNotes ?? [] } : {}) }, ...(kind !== "turn" ? { targetId: target.id } : {}),
             ...(hint ? { rewriteHint: hint } : {}),
             textGuard: textGuard(path), textGuardAt: base.id,
@@ -1423,8 +1453,8 @@ export class Game {
       const selectedScope = isChosen(request.scope);
       const headSource = (await this.repo.getState(anchor.headId)).source;
       const baseSource = headSource && targetState.source?.bookId === headSource.bookId
-        ? { ...headSource, position: Math.min(targetState.source.position, headSource.through ?? Infinity) }
-        : targetState.source ?? before.source ?? headSource;
+        ? { ...headSource, through: null, position: targetState.source.position }
+        : (targetState.source ?? before.source ?? headSource);
       const revisionQuery = {
         text: focus,
         rewriteHint: request.hint,
@@ -1528,6 +1558,7 @@ export class Game {
         if (!baseline || typeof baseline !== "object") throw new WritingError("找不到修订前的状态");
         const latest = await isLatestPassage(this, anchor);
         const source = resolveRevisionSource(targetState, current, latest)!;
+        const openSource: SourceBinding = { ...source, through: null };
         const state = { ...(structuredClone(baseline) as WorldState), source }, era = eraContext(world.eraId, state);
         const budget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
         const focus = anchor.original.slice(request.range.start, request.range.end);
@@ -1539,15 +1570,15 @@ export class Game {
         const query = { text: focus, rewriteHint: request.hint, recent: surrounding, entities: [state.protagonist, ...named].map(({ name, aliases }) => ({ name, aliases })) };
         // 资料范围 (D184): correction's primary job is reading original text, so allow up to 3/5 of input budget.
         const sourceRoom = Math.floor((budget * 3) / 5);
-        const scoped = isChosen(request.scope) ? await scopedMaterial(this.repo, source, request.scope, query, sourceRoom, { worldId: anchor.worldId, lookups: true }) : null;
+        const scoped = isChosen(request.scope) ? await scopedMaterial(this.repo, openSource, request.scope, query, sourceRoom, { worldId: anchor.worldId, lookups: true }) : null;
         const found = scoped
-          ? scoped.reference ?? { bookId: source.bookId, title: "", binding: { ...source }, passages: [], status: "insufficient" as const, reason: "no_match" as const }
-          : await referenceContext(this.repo, source, query, sourceRoom, undefined, { ignorePosition: true });
+          ? scoped.reference ?? { bookId: openSource.bookId, title: "", binding: { ...openSource }, passages: [], status: "insufficient" as const, reason: "no_match" as const }
+          : await referenceContext(this.repo, openSource, query, sourceRoom, undefined, { ignorePosition: true });
         if (!found) throw new WritingError("参考书籍不存在，请重新绑定");
         const reference = fitReference(found, sourceRoom)!;
         const notes = canonNotesBlock(scoped
           ? scoped.notes
-          : await notesForTurn(this.repo, source, anchor.worldId, `${focus}\n${request.hint}`, { allChapters: true }).catch(() => []), scoped ? Math.floor(sourceRoom / 2) : notesRoom(budget));
+          : await notesForTurn(this.repo, openSource, anchor.worldId, `${focus}\n${request.hint}`, { allChapters: true }).catch(() => []), scoped ? Math.floor(sourceRoom / 2) : notesRoom(budget));
         const focusedState = { ...state, people: state.people.filter((p) => [p.name, ...p.aliases].some((name) => name && relevant.includes(name))) };
         const question = (/[？?]|是什么|为什么|是谁|哪里|哪儿|哪个|多少|怎么回事|有没有/.test(request.hint) ? "\n【这是一个问题】玩家想知道答案；照原文回答，正文与原著一致就不用改。" : "")
           + (scoped ? scopeNote(scoped.meta) : "");
@@ -1561,7 +1592,7 @@ export class Game {
           model: this.requireLlm(), ...this.fallbackFor(), messages, extractMessages: [], state, settings: world.settings,
           options: { mode: target.actionMode ?? "continue", difficulty: world.settings.difficulty, currency: era.currency, clock: era.clock },
           action: { mode: target.actionMode ?? "continue", text: target.actionText ?? "" }, reference,
-          meta: { ...(await this.nativeGuard(anchor.worldId, anchor.headId)), anchor, correctionRange: request.range, originalRecord: target.record, writingVersion: CANON_WRITING_PROMPT_VERSION, rewriteHint: request.hint, budgetChars: budget, baseline: target.parentId ? undefined : baseline, ...(scoped ? { sourceScope: scoped.meta } : {}) },
+          meta: { ...(await this.nativeGuard(anchor.worldId, anchor.headId)), readingSource: openSource, anchor, correctionRange: request.range, originalRecord: target.record, writingVersion: CANON_WRITING_PROMPT_VERSION, rewriteHint: request.hint, budgetChars: budget, baseline: target.parentId ? undefined : baseline, ...(scoped ? { sourceScope: scoped.meta } : {}) },
         };
         if (cancelled) throw new ChatError("cancelled");
         handle.runId = plan.id;
@@ -1600,7 +1631,20 @@ export class Game {
       if (!book) throw new Error("书籍不存在");
       if (note.originWorldId) throw new Error("这份札记来自前作，只能手改，不会随这个故事更新。");
       const config = this.llm ? structuredClone(this.llm) : null;
-      if (!config && !resume) this.requireLlm();
+      if (!config && !resume) {
+        if (note.progress.update && !(note.progress.parts?.some(Boolean))) {
+          const reverted: CanonNote = {
+            ...note,
+            content: note.content || note.progress.update.base,
+            status: "done",
+            progress: { parts: [], total: 0 },
+            updatedAt: new Date().toISOString(),
+          };
+          await saveNote(this.repo, reverted, true);
+          onProgress({ ...reverted });
+        }
+        this.requireLlm();
+      }
       const model = config?.auxModel || config?.model || note.model;
       const configuration = config && crypto.subtle
         ? Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stableJson(config)))),
@@ -1833,13 +1877,14 @@ export class Game {
     const depth = depthOf(world.settings);
     const budgetChars = depthBudget(Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / ratio.value), depth);
     const binding = sourceOverride === undefined ? state.source : sourceOverride;
-    const reference = await referenceContext(this.repo, binding, {
+    const openBinding = binding ? { ...binding, through: null } : binding;
+    const reference = await referenceContext(this.repo, openBinding, {
       text: action.text, rewriteHint: action.rewriteHint, directorNote: action.directorNote,
       recent: path.slice(-3).map((n) => n.narrative).join("\n"),
       entities: [state.protagonist, ...state.people.slice(-6)].map(({ name, aliases }) => ({ name, aliases })),
       place: state.places.find((p) => p.id === state.placeId)?.name,
     }, Math.floor(budgetChars / 4));
-    const canonNotes = await notesForTurn(this.repo, binding, worldId, [path.slice(-3).map((n) => n.narrative).join("\n"), action.text, action.directorNote ?? ""].join("\n")).catch(() => []);
+    const canonNotes = await notesForTurn(this.repo, openBinding, worldId, [path.slice(-3).map((n) => n.narrative).join("\n"), action.text, action.directorNote ?? ""].join("\n")).catch(() => []);
     return {
       reference, canonNotes, continuity: await readContinuity(this.repo, worldId, base.id).catch(() => undefined),
       era: eraContext(world.eraId, state), settings: world.settings, protagonistName: state.protagonist.name,
@@ -1896,10 +1941,11 @@ export class Game {
     const followUpChars = followUps.reduce((n, m) => n + m.content.length, 0);
     const askBudget = Math.round((this.llm?.contextTokens ?? DEFAULT_CONTEXT_TOKENS) / (await this.tokenRatio()).value);
     const askQuery = { text: queryText, entities: [state.protagonist, ...state.people].map(({ name, aliases }) => ({ name, aliases })) };
-    // 资料范围 (D184): only the chosen notes (no lookups in the book) or chapters; auto searches full allowed range + relevant notes.
-    const scoped = isChosen(scope) ? await scopedMaterial(this.repo, state.source, scope, askQuery, Math.floor(askBudget / 4), { worldId }) : null;
-    let reference = scoped ? scoped.reference : await referenceContext(this.repo, state.source, askQuery, Math.floor(askBudget / 4), undefined, { ignorePosition: true });
-    const autoNotes = scoped ? [] : await notesForTurn(this.repo, state.source, worldId, queryText, { allChapters: true }).catch(() => []);
+    const openSource = state.source ? { ...state.source, through: null } : state.source;
+    // 资料范围 (D184): only the chosen notes (no lookups in the book) or chapters; auto searches full book + relevant notes.
+    const scoped = isChosen(scope) ? await scopedMaterial(this.repo, openSource, scope, askQuery, Math.floor(askBudget / 4), { worldId }) : null;
+    let reference = scoped ? scoped.reference : await referenceContext(this.repo, openSource, askQuery, Math.floor(askBudget / 4), undefined, { ignorePosition: true });
+    const autoNotes = scoped ? [] : await notesForTurn(this.repo, openSource, worldId, queryText, { allChapters: true }).catch(() => []);
     // The chosen (or auto-matched) notes go in after history fitting, counted in the budget.
     const chosenNotes = scoped?.notes.length
       ? canonNotesBlock(scoped.notes, Math.floor(askBudget / 4))
@@ -1935,7 +1981,7 @@ export class Game {
       id: newId(), worldId, lineId: world.lineId, headId: head.id, baseId: head.id, kind: "ask",
       model: { ...this.requireLlm(), model: this.auxModelName() }, ...this.fallbackFor(true), messages, extractMessages: [], state, settings: world.settings,
       options: {}, action: { mode: "continue", text: question }, reference,
-      meta: { ...world.guard, budgetChars: askBudget, ...(scoped ? { sourceScope: scoped.meta } : {}) },
+      meta: { ...world.guard, ...(openSource ? { readingSource: openSource } : {}), budgetChars: askBudget, ...(scoped ? { sourceScope: scoped.meta } : {}) },
     };
     if (signal?.aborted) throw new DOMException("已停止", "AbortError");
     const handle = startRun(this.platform, plan, (event) => { if (event.type === "text" && typeof event.full === "string" && event.full.trim()) onText(event.full); });
@@ -2012,18 +2058,33 @@ export class Game {
     if (this.chaptering.has(worldId) || !this.llm) return null;
     this.chaptering.add(worldId);
     try {
+      const world = await this.repo.getWorld(worldId);
+      if (!world || world.archived) return null;
       const at = head ?? (await tree.cursor(this.repo, worldId)).head;
       const { chapters, turns, firstTurn } = await this.unsummarized(worldId, at);
       if (!turns.length) return null;
-      const world = (await this.repo.getWorld(worldId))!;
+      const sourceNodes = turns.map((n) => ({ id: n.id, narrative: n.narrative }));
       const state = await this.repo.getState(at.id);
       const protagonist = state.protagonist.name;
       const parsed = await this.summarize(worldId, at.id, { mode: state.era.mode, premise: world.settings.premise, protagonist, previous: chapters, turns, firstTurn });
       if (!parsed) return null;
-      const chapter = await this.repo.addChapter({
-        worldId, firstNodeId: turns[0].id, lastNodeId: turns[turns.length - 1].id, ...parsed,
-        model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
-      });
+      const liveWorld = await this.repo.getWorld(worldId);
+      if (!liveWorld || liveWorld.archived) return null;
+      const liveCursor = await tree.cursor(this.repo, worldId).catch(() => null);
+      const checkHeadId = head ? head.id : liveCursor?.head.id;
+      if (!checkHeadId) return null;
+      const chapter = await this.repo.addChapterGuarded(
+        {
+          worldId,
+          firstNodeId: sourceNodes[0].id,
+          lastNodeId: sourceNodes[sourceNodes.length - 1].id,
+          ...parsed,
+          model: this.llm.auxModel || this.llm.model,
+          promptVersion: state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION,
+        },
+        { headId: checkHeadId, sourceNodes },
+      );
+      if (!chapter) return null;
       for (const fn of this.listeners) fn(worldId);
       return chapter;
     } finally {
@@ -2031,17 +2092,21 @@ export class Game {
     }
   }
 
-  /** Summarizes an existing chapter again from its turns; the player's edits are replaced. */
+  /** Summarizes an existing chapter again from its turns; the player's edits are replaced unless edited/rewritten concurrently. */
   async rewriteChapter(worldId: string, chapterId: string): Promise<Chapter | null> {
     if (!this.llm) return null;
+    const world = await this.repo.getWorld(worldId);
+    if (!world || world.archived) return null;
     const chapters = await this.repo.chaptersOnPath(worldId, (await tree.cursor(this.repo, worldId)).head.id);
     const index = chapters.findIndex((c) => c.id === chapterId);
     if (index < 0) return null;
     const chapter = chapters[index];
     const path = await this.repo.path(chapter.lastNodeId);
     const from = path.findIndex((n) => n.id === chapter.firstNodeId);
+    if (from < 0) return null;
     const turns = path.slice(from).filter((n) => n.kind === "turn" && n.status !== "interrupted");
-    const world = (await this.repo.getWorld(worldId))!;
+    if (!turns.length) return null;
+    const sourceNodes = turns.map((n) => ({ id: n.id, narrative: n.narrative }));
     const state = await this.repo.getState(chapter.lastNodeId);
     const protagonist = state.protagonist.name;
     const parsed = await this.summarize(worldId, chapter.lastNodeId, {
@@ -2050,8 +2115,9 @@ export class Game {
     });
     if (!parsed) return null;
     const fields = { ...parsed, model: this.llm.auxModel || this.llm.model, promptVersion: state.era.mode === "free" ? CHAPTER_FREE_PROMPT_VERSION : CHAPTER_PROMPT_VERSION, edited: false };
-    if (!await this.repo.updateChapter(chapter.id, fields, chapter)) return null;
-    return { ...chapter, ...fields };
+    if (!await this.repo.updateChapter(chapter.id, fields, chapter, sourceNodes)) return null;
+    const { stale: _stale, ...cleanChapter } = chapter;
+    return { ...cleanChapter, ...fields };
   }
 
   /** Reattaches native runs after a restart and discards legacy TS pending data. */

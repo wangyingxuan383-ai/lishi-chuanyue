@@ -25,17 +25,233 @@ fn insert_str(out: &mut Map<String, Value>, key: &str, v: &Value) {
         out.insert(key.into(), json!(s));
     }
 }
-fn trailing_commas(s: &str) -> String {
-    Regex::new(r",\s*([}\]])")
-        .unwrap()
-        .replace_all(s, "$1")
-        .into_owned()
+fn skip_single_quoted_token(chars: &[char], start: usize, out: &mut String) -> Option<usize> {
+    if chars.get(start) != Some(&'\'') {
+        return None;
+    }
+    let at_token_start = start == 0 || {
+        let prev = chars[start - 1];
+        prev.is_whitespace() || matches!(prev, '{' | '[' | ':' | ',')
+    };
+    if !at_token_start {
+        return None;
+    }
+    out.push('\'');
+    let mut i = start + 1;
+    while i < chars.len() {
+        let sc = chars[i];
+        if sc == '\\' && i + 1 < chars.len() {
+            out.push('\\');
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if sc == '\'' {
+            let prev_alpha = i > 0 && chars[i - 1].is_ascii_alphabetic();
+            let next_alpha = i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic();
+            out.push('\'');
+            i += 1;
+            if prev_alpha && next_alpha {
+                continue;
+            }
+            return Some(i);
+        }
+        out.push(sc);
+        i += 1;
+    }
+    Some(i)
 }
+
+fn trailing_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let mut in_double = false;
+    let mut escaped = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_double {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_double = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if let Some(next_idx) = skip_single_quoted_token(&chars, i, &mut out) {
+            i = next_idx;
+            continue;
+        }
+        if c == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && matches!(chars[j], '}' | ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn quote_keys(s: &str) -> String {
-    Regex::new(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:")
-        .unwrap()
-        .replace_all(s, "$1\"$2\":")
-        .into_owned()
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut i = 0;
+    let mut in_double = false;
+    let mut escaped = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_double {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_double = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if let Some(next_idx) = skip_single_quoted_token(&chars, i, &mut out) {
+            i = next_idx;
+            continue;
+        }
+        if c == '{' || c == ',' {
+            out.push(c);
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let key_start = j;
+            if j < chars.len() && (chars[j].is_ascii_alphabetic() || chars[j] == '_') {
+                j += 1;
+                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let key_end = j;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == ':' {
+                    for &ws in &chars[i + 1..key_start] {
+                        out.push(ws);
+                    }
+                    out.push('"');
+                    for &kc in &chars[key_start..key_end] {
+                        out.push(kc);
+                    }
+                    out.push('"');
+                    for &ws in &chars[key_end..=j] {
+                        out.push(ws);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn replace_single_quotes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut i = 0;
+    let mut in_double = false;
+    let mut escaped = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_double {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_double = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let at_token_start = i == 0 || {
+            let prev = chars[i - 1];
+            prev.is_whitespace() || matches!(prev, '{' | '[' | ':' | ',')
+        };
+        if c == '\'' && at_token_start {
+            out.push('"');
+            i += 1;
+            while i < chars.len() {
+                let sc = chars[i];
+                if sc == '\\' && i + 1 < chars.len() {
+                    let next = chars[i + 1];
+                    if next == '\'' {
+                        out.push('\'');
+                    } else {
+                        out.push('\\');
+                        out.push(next);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if sc == '"' {
+                    out.push('\\');
+                    out.push('"');
+                    i += 1;
+                    continue;
+                }
+                if sc == '\'' {
+                    let prev_alpha = i > 0 && chars[i - 1].is_ascii_alphabetic();
+                    let next_alpha = i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic();
+                    if prev_alpha && next_alpha {
+                        out.push('\'');
+                        i += 1;
+                        continue;
+                    }
+                    out.push('"');
+                    i += 1;
+                    break;
+                }
+                out.push(sc);
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 fn close_brackets(s: &str) -> String {
@@ -117,12 +333,15 @@ fn decode_json(text: &str, repair_tail: bool) -> Option<Value> {
     for base in candidates {
         let trailing = trailing_commas(&base);
         let quoted = quote_keys(&trailing);
+        let single_repaired = trailing_commas(&replace_single_quotes(&quoted));
+        let single_first = quote_keys(&trailing_commas(&replace_single_quotes(&base)));
         let smart = trailing_commas(&base.replace(['“', '”'], "\""));
         for repaired in [
             base,
             trailing,
-            quoted.clone(),
-            quoted.replace('\'', "\""),
+            quoted,
+            single_repaired,
+            single_first,
             smart,
         ] {
             if let Ok(v) = serde_json::from_str(&repaired) {
@@ -411,5 +630,28 @@ mod tests {
         let unclosed = "<think>还没想完 {\"time\": 10, \"choices\": [\"走\"]}";
         assert!(complete_json(unclosed).is_none());
         assert!(lenient_json(unclosed).is_none());
+    }
+
+    #[test]
+    fn quote_keys_and_single_quotes_preserve_double_quoted_colons_and_apostrophes() {
+        let unquoted_with_english = r#"{time: 15, place: "Arthur's Tavern, note: don't touch, risk: high", choices: ["Ask Arthur's guard", "Don't move",]}"#;
+        let parsed = lenient_json(unquoted_with_english).expect("should parse unquoted keys without corrupting double-quoted strings");
+        assert_eq!(
+            parsed["place"],
+            "Arthur's Tavern, note: don't touch, risk: high"
+        );
+        assert_eq!(
+            parsed["choices"],
+            json!(["Ask Arthur's guard", "Don't move"])
+        );
+
+        let single_quoted = r#"{'time': 20, 'place': 'Arthur\'s Hall, hint: don\'t panic', "log": "He whispered, clue: Arthur's ring, don't lose it", 'choices': ['Stay']}"#;
+        let parsed_single = complete_json(single_quoted).expect("should parse mixed single and double quoted JSON");
+        assert_eq!(parsed_single["place"], "Arthur's Hall, hint: don't panic");
+        assert_eq!(
+            parsed_single["log"],
+            "He whispered, clue: Arthur's ring, don't lose it"
+        );
+        assert_eq!(parsed_single["choices"], json!(["Stay"]));
     }
 }

@@ -1,4 +1,4 @@
-.agent-conversation { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.agent-conversation { height: 100%; height: 100dvh; min-width: 0; max-width: 100%; overflow-x: hidden; }
 .agent-conversation .agent-messages { min-height: 0; min-width: 0; }
 .agent-reading { position: relative; flex: 1; min-height: 0; display: flex; }
 .agent-turn { padding: 10px 0 14px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }

@@ -26,19 +26,121 @@ export function attitudeClass(a: Attitude): string {
   return a === "仇视" || a === "敌意" ? "att-hostile" : a === "冷淡" ? "att-cold" : a === "友善" ? "att-friendly" : a === "亲近" || a === "生死之交" ? "att-close" : "att-plain";
 }
 
-function Editor({ person, state, era, onClose, onClosePanel, captureReading, onSave, worldId, headId, lineId, busy = false, onContinuitySaved }: {
-  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; captureReading?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; lineId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
+export interface PersonFormFields {
+  name: string;
+  aliases: string;
+  role: string;
+  attitude: Attitude;
+  notes: string;
+  origin: string;
+  alive: boolean;
+}
+
+export function personToFormFields(person: Person | null | undefined): PersonFormFields {
+  return {
+    name: person?.name ?? "",
+    aliases: person?.aliases.join("、") ?? "",
+    role: person?.role ?? "",
+    attitude: person?.attitude ?? "一般",
+    notes: person?.notes ?? "",
+    origin: person?.origin ?? "",
+    alive: person?.alive ?? true,
+  };
+}
+
+export function didPersonChangeInUpkeep(prev: Person | undefined, next: Person | undefined): boolean {
+  if (!prev && !next) return false;
+  if (!prev || !next) return true;
+  return (
+    prev.name !== next.name ||
+    prev.aliases.join("\u001f") !== next.aliases.join("\u001f") ||
+    prev.role !== next.role ||
+    prev.attitude !== next.attitude ||
+    prev.notes !== next.notes ||
+    (prev.origin ?? "") !== (next.origin ?? "") ||
+    prev.alive !== next.alive
+  );
+}
+
+/**
+ * Reconciles an open Person editor form when background upkeep updates the state:
+ * fields untouched by the player adopt the latest AI values (e.g. `alive: false` or updated `notes`),
+ * while fields modified by both the player and upkeep flag `hasFieldConflict` so `expectedHeadId`
+ * is not silently advanced over AI updates without player review.
+ */
+export function reconcilePersonFormOnUpkeep(
+  base: PersonFormFields,
+  draft: PersonFormFields,
+  nextPerson: Person | undefined,
+): { nextBase: PersonFormFields; nextDraft: PersonFormFields; syncedAny: boolean; hasFieldConflict: boolean } {
+  if (!nextPerson) {
+    return { nextBase: base, nextDraft: draft, syncedAny: false, hasFieldConflict: true };
+  }
+  const incoming = personToFormFields(nextPerson);
+  const nextDraft: PersonFormFields = { ...draft };
+  let syncedAny = false;
+  let hasFieldConflict = false;
+  const syncField = <K extends keyof PersonFormFields>(key: K) => {
+    if (base[key] === incoming[key]) return;
+    if (draft[key] === base[key]) {
+      nextDraft[key] = incoming[key];
+      syncedAny = true;
+    } else if (draft[key] !== incoming[key]) {
+      hasFieldConflict = true;
+    }
+  };
+  for (const key of ["name", "aliases", "role", "attitude", "notes", "origin", "alive"] as const) {
+    syncField(key);
+  }
+  return { nextBase: incoming, nextDraft, syncedAny, hasFieldConflict };
+}
+
+function Editor({ person, state, era, onClose, onClosePanel, captureReading, onSave, worldId, headId, latestHeadId, upkeepSeq = 0, onResolveUpkeepHead, lineId, busy = false, onContinuitySaved }: {
+  person: Person | null; state: WorldState; era: EraContext; onClose: () => void; onClosePanel?: () => void; captureReading?: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void>; worldId?: string; headId?: string; latestHeadId?: string; upkeepSeq?: number; onResolveUpkeepHead?: (nextHeadId: string | undefined) => void; lineId?: string; busy?: boolean; onContinuitySaved?: () => void | Promise<void>;
 }) {
   const { game, push, ask, toast } = useApp();
   const noteEntry = useContext(NoteEntry);
-  const [name, setName] = useState(person?.name ?? "");
-  const [aliases, setAliases] = useState(person?.aliases.join("、") ?? "");
-  const [role, setRole] = useState(person?.role ?? "");
-  const [attitude, setAttitude] = useState<Attitude>(person?.attitude ?? "一般");
-  const [notes, setNotes] = useState(person?.notes ?? "");
-  const [origin, setOrigin] = useState(person?.origin ?? "");
-  const [alive, setAlive] = useState(person?.alive ?? true);
+  const initialFields = personToFormFields(person);
+  const baseFieldsRef = useRef<PersonFormFields>(initialFields);
+  const [name, setName] = useState(initialFields.name);
+  const [aliases, setAliases] = useState(initialFields.aliases);
+  const [role, setRole] = useState(initialFields.role);
+  const [attitude, setAttitude] = useState<Attitude>(initialFields.attitude);
+  const [notes, setNotes] = useState(initialFields.notes);
+  const [origin, setOrigin] = useState(initialFields.origin);
+  const [alive, setAlive] = useState(initialFields.alive);
+  const [upkeepConflict, setUpkeepConflict] = useState(false);
   const [saving, setSaving] = useState(false);
+  const appliedSeqRef = useRef(0);
+  useEffect(() => {
+    if (!person || upkeepSeq === 0 || upkeepSeq === appliedSeqRef.current) return;
+    appliedSeqRef.current = upkeepSeq;
+    const livePerson = state.people.find((p) => p.id === person.id);
+    const currentDraft: PersonFormFields = { name, aliases, role, attitude, notes, origin, alive };
+    const { nextBase, nextDraft, syncedAny, hasFieldConflict } = reconcilePersonFormOnUpkeep(
+      baseFieldsRef.current,
+      currentDraft,
+      livePerson,
+    );
+    baseFieldsRef.current = nextBase;
+    if (syncedAny) {
+      setName(nextDraft.name);
+      setAliases(nextDraft.aliases);
+      setRole(nextDraft.role);
+      setAttitude(nextDraft.attitude);
+      setNotes(nextDraft.notes);
+      setOrigin(nextDraft.origin);
+      setAlive(nextDraft.alive);
+    }
+    if (hasFieldConflict) {
+      setUpkeepConflict(true);
+      toast("AI 刚更新了这个人物，请先核对最新内容再保存");
+    } else {
+      setUpkeepConflict(false);
+      onResolveUpkeepHead?.(latestHeadId);
+      if (syncedAny) toast("AI 刚更新了这个人物的状态，已同步未改动的项");
+    }
+  }, [upkeepSeq, person, state.people, latestHeadId, name, aliases, role, attitude, notes, origin, alive, onResolveUpkeepHead, toast]);
   const clean = name.trim();
   // A new entry, or a new name, must not be someone the list already has under another wording (AUDIT_V4_FUNCTION F3).
   const found = clean && clean !== person?.name ? matchName(state.people, clean, { partial: false }) : undefined;
@@ -61,6 +163,46 @@ function Editor({ person, state, era, onClose, onClosePanel, captureReading, onS
   return (
     <Sheet title={person ? person.name : "添加人物"} onClose={onClose}>
       <div className="stack gap-10">
+        {upkeepConflict && person && (
+          <div className="stack gap-2">
+            <p className="notice m-0">AI 刚刚整理更新了这个人物的资料，为免误覆盖最新状态，请先核对。</p>
+            <div className="row gap-2">
+              {state.people.some((p) => p.id === person.id) && (
+                <button
+                  type="button"
+                  className="ghost small"
+                  onClick={() => {
+                    const livePerson = state.people.find((p) => p.id === person.id);
+                    if (!livePerson) return;
+                    const fresh = personToFormFields(livePerson);
+                    baseFieldsRef.current = fresh;
+                    setName(fresh.name);
+                    setAliases(fresh.aliases);
+                    setRole(fresh.role);
+                    setAttitude(fresh.attitude);
+                    setNotes(fresh.notes);
+                    setOrigin(fresh.origin);
+                    setAlive(fresh.alive);
+                    setUpkeepConflict(false);
+                    onResolveUpkeepHead?.(latestHeadId);
+                  }}
+                >
+                  载入 AI 最新内容
+                </button>
+              )}
+              <button
+                type="button"
+                className="ghost small"
+                onClick={() => {
+                  setUpkeepConflict(false);
+                  onResolveUpkeepHead?.(latestHeadId);
+                }}
+              >
+                保留我的修改继续
+              </button>
+            </div>
+          </div>
+        )}
         {person && (
           <div className="person-head row between wrap">
             <div className="row">
@@ -146,7 +288,10 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, path
 }) {
   const { game } = useApp();
   const [editing, setEditing] = useState<{ person: Person | null } | null>(null);
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const [expectedHeadId, setExpectedHeadId] = useState(headId);
+  const [upkeepSeq, setUpkeepSeq] = useState(0);
   const [view, setView] = useState<"list" | "atlas">("list");
   const [atlas, setAtlas] = useState<CharacterEntry[] | null>(null);
   const prevAnchor = useRef<{ worldId?: string; headId?: string; state: WorldState }>({ worldId, headId, state });
@@ -159,16 +304,33 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, path
       }
       return;
     }
-    if (prev.worldId === worldId && prev.headId === headId) return;
+    if (prev.worldId === worldId && prev.headId === headId) {
+      prevAnchor.current = { worldId, headId, state };
+      return;
+    }
+    const prevState = prev.state;
+    const prevHeadId = prev.headId;
     prevAnchor.current = { worldId, headId, state };
-    if (prev.worldId !== worldId || !prev.headId) {
+    if (prev.worldId !== worldId || !prevHeadId) {
       setExpectedHeadId(headId);
       setEditing(null);
       return;
     }
+    const applyUpkeepTransition = () => {
+      const activePerson = editingRef.current?.person;
+      if (activePerson) {
+        const oldP = prevState.people.find((p) => p.id === activePerson.id);
+        const newP = state.people.find((p) => p.id === activePerson.id);
+        if (didPersonChangeInUpkeep(oldP, newP)) {
+          setUpkeepSeq((n) => n + 1);
+          return;
+        }
+      }
+      setExpectedHeadId(headId);
+    };
     if (path) {
-      if (headFollowsUpkeep(path, prev.headId, headId)) {
-        setExpectedHeadId(headId);
+      if (headFollowsUpkeep(path, prevHeadId, headId)) {
+        applyUpkeepTransition();
       } else {
         setExpectedHeadId(headId);
         setEditing(null);
@@ -178,8 +340,8 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, path
     let live = true;
     void game.repo.path(headId).then((loadedPath) => {
       if (!live) return;
-      if (headFollowsUpkeep(loadedPath, prev.headId!, headId)) {
-        setExpectedHeadId(headId);
+      if (headFollowsUpkeep(loadedPath, prevHeadId, headId)) {
+        applyUpkeepTransition();
       } else {
         setExpectedHeadId(headId);
         setEditing(null);
@@ -315,7 +477,7 @@ export function People({ state, era, busy, onSave, worldId, headId, lineId, path
           </button>
         ))
       )}
-      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={expectedHeadId} lineId={lineId} busy={busy} captureReading={captureReading} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
+      {editing && <Editor person={editing.person} state={state} era={era} worldId={worldId} headId={expectedHeadId} latestHeadId={headId} upkeepSeq={upkeepSeq} onResolveUpkeepHead={setExpectedHeadId} lineId={lineId} busy={busy} captureReading={captureReading} onContinuitySaved={onContinuitySaved} onClose={() => setEditing(null)} onClosePanel={onClosePanel} onSave={onSave} />}
     </div>
   );
 }

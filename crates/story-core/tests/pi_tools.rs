@@ -332,7 +332,11 @@ fn original_tools_and_generic_book_reads_share_the_fixed_chapter_boundary() {
         json!({"bookId":"book","through":0,"position":0,"method":"search","instructions":"只使用第一章"}),
     );
     f.add_book();
-    let task = f.start("scoped-book", json!({}), true);
+    let task = f.start(
+        "scoped-book",
+        json!({"referenceScope":{"bookId":"book","from":0,"through":0,"explicitRange":true}}),
+        true,
+    );
     let directory=f.call(&task,"book-directory","list_resources",json!({"kind":"book"}));
     let book_ref=directory["resources"][0]["ref"].clone();
     assert_eq!(book_ref["containerId"],"book");

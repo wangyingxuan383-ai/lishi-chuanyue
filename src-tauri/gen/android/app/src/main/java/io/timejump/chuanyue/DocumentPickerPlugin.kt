@@ -16,10 +16,13 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.util.concurrent.atomic.AtomicLong
 
 internal const val DOCUMENT_PICK_TIMEOUT_MS = 180_000L
-private const val RETURN_CALLBACK_GRACE_MS = 1_000L
+internal const val RETURN_CALLBACK_GRACE_MS = 1_000L
+internal const val RETURN_FOCUS_RETRY_MS = 1_500L
 private const val MAX_DOCUMENT_URI_CHARS = 8192
+internal val nextPickerRequestToken = AtomicLong(0L)
 
 /** No path, initial URI, broad storage permission or persistent grant is requested. */
 internal fun buildImportDocumentIntent(): Intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -33,11 +36,15 @@ internal fun buildImportDocumentIntent(): Intent = Intent(Intent.ACTION_OPEN_DOC
 internal fun exportMimeType(suggestedName: String): String =
     if (suggestedName.endsWith(".json", ignoreCase = true)) "application/json" else "text/plain"
 
-internal fun buildExportDocumentIntent(suggestedName: String): Intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-    addCategory(Intent.CATEGORY_OPENABLE)
-    type = exportMimeType(suggestedName)
-    putExtra(Intent.EXTRA_TITLE, suggestedName)
-    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+internal fun buildExportDocumentIntent(suggestedName: String): Intent {
+    val fallback = if (suggestedName.trim().endsWith(".json", ignoreCase = true)) "export.json" else "export.txt"
+    val safeName = sanitizeExportDisplayName(suggestedName, fallback)
+    return Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = exportMimeType(safeName)
+        putExtra(Intent.EXTRA_TITLE, safeName)
+        addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+    }
 }
 
 internal fun documentPickerFailure(code: String): JSObject = JSObject()
@@ -49,6 +56,57 @@ internal fun sanitizeDocumentDisplayName(raw: String?): String? {
     val cleaned = leaf.filter { !Character.isISOControl(it) }.trim().take(512)
     if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return null
     return cleaned
+}
+
+private val WINDOWS_RESERVED_STEMS = setOf(
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+)
+
+internal fun sanitizeExportDisplayName(raw: String?, fallback: String): String {
+    if (raw == null) return fallback
+    val trimmedRaw = raw.trim()
+    val looksLikePath = trimmedRaw.startsWith('/') ||
+        trimmedRaw.startsWith('\\') ||
+        trimmedRaw.split('/', '\\').any { it == "." || it == ".." }
+    val source = if (looksLikePath) trimmedRaw.substringAfterLast('/').substringAfterLast('\\') else trimmedRaw
+    val filtered = buildString(source.length) {
+        for (ch in source) {
+            if (Character.isISOControl(ch)) continue
+            when (ch) {
+                '/', '\\', ':', '*', '?', '"', '<', '>', '|' -> append('_')
+                else -> append(ch)
+            }
+        }
+    }.trim().trimEnd('.', ' ')
+    if (filtered.isEmpty() || filtered == "." || filtered == "..") return fallback
+
+    val lower = filtered.lowercase()
+    val (rawStem, ext) = when {
+        filtered.length >= ".lishi.json".length && lower.endsWith(".lishi.json") -> {
+            val idx = filtered.length - ".lishi.json".length
+            filtered.substring(0, idx) to filtered.substring(idx)
+        }
+        '.' in filtered -> {
+            val dot = filtered.lastIndexOf('.')
+            val candidateExt = filtered.substring(dot + 1)
+            if (candidateExt.length in 1..16 && candidateExt.all { it.isLetterOrDigit() && it.code < 128 }) {
+                filtered.substring(0, dot) to filtered.substring(dot)
+            } else {
+                filtered to ""
+            }
+        }
+        else -> filtered to ""
+    }
+    val fallbackStem = fallback.substringBefore('.').ifEmpty { "export" }
+    var stem = rawStem.trim().trimEnd('.', ' ')
+    if (stem.isEmpty() || stem.all { it == '.' }) stem = fallbackStem
+    val firstSeg = stem.substringBefore('.').trim(' ', '.').uppercase()
+    if (firstSeg in WINDOWS_RESERVED_STEMS) stem = "_$stem"
+    val maxChars = (180 - ext.length).coerceAtLeast(16)
+    if (stem.length > maxChars) stem = stem.take(maxChars).trimEnd('.', ' ').ifEmpty { fallbackStem }
+    return "$stem$ext"
 }
 
 internal fun fallbackUriDisplayName(uri: Uri): String? {
@@ -143,7 +201,15 @@ internal class DocumentPickerRequestSlot<T : Any> {
 @TauriPlugin
 class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     private val handler = Handler(Looper.getMainLooper())
-    private class Pending(val invoke: Invoke, val gate: DocumentPickerReplyGate, val grant: Boolean = false, val writable: Boolean = false, val directory: Boolean = false) {
+    private class Pending(
+        val token: Long,
+        val invoke: Invoke,
+        val gate: DocumentPickerReplyGate,
+        val grant: Boolean = false,
+        val writable: Boolean = false,
+        val directory: Boolean = false
+    ) {
+        var callbackReceived: Boolean = false
         lateinit var timeout: Runnable
     }
     private val requests = DocumentPickerRequestSlot<Pending>()
@@ -198,12 +264,11 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
                     invoke.resolve(documentPickerFailure("file_unavailable"))
                     return@post
                 }
-                val current = Pending(invoke, DocumentPickerReplyGate { invoke.resolve(it) }, grant, writable, directory)
+                val token = nextPickerRequestToken.incrementAndGet()
+                val current = Pending(token, invoke, DocumentPickerReplyGate { invoke.resolve(it) }, grant, writable, directory)
                 current.timeout = Runnable {
-                    if (pending === current) {
-                        current.gate.timedOut()
-                        // Keep quarantined until the old picker returns/destroys.
-                        // Otherwise its late result could reach a newer Tauri callback.
+                    if (pending === current && current.token == token) {
+                        finish(current, documentPickerFailure("file_unconfirmed"))
                     }
                 }
                 if (!requests.acquire(current)) {
@@ -231,6 +296,7 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
         handler.post {
             val current = pending ?: return@post
             if (current.invoke !== invoke) return@post
+            current.callbackReceived = true
             val reply = try {
                 val decoded = decodeDocumentPickerResult(result)
                 if (!current.gate.isResolved() && decoded.optString("status") == "selected") {
@@ -262,20 +328,30 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
         if (activity === ownerActivity) pending?.gate?.paused()
     }
 
-    override fun onResume(activity: AppCompatActivity) {
-        if (activity !== ownerActivity) return
-        val current = pending ?: return
-        if (!current.gate.hasPaused) return
-        if (activity.isInMultiWindowMode || !activity.hasWindowFocus()) return
+    private fun scheduleReturnCheck(current: Pending, token: Long, delayMs: Long, allowRetry: Boolean) {
         handler.postDelayed({
-            if (pending === current && !activity.isInMultiWindowMode && activity.hasWindowFocus()) {
+            if (pending !== current || current.token != token || current.callbackReceived) return@postDelayed
+            if (ownerActivity.isInMultiWindowMode) return@postDelayed
+            if (ownerActivity.hasWindowFocus()) {
                 // Normal Android activity results precede onResume. A small grace
                 // also allows the already queued plugin result to run first.
                 current.gate.returnedWithoutCallback()
                 handler.removeCallbacks(current.timeout)
                 requests.release(current)
+            } else if (allowRetry) {
+                scheduleReturnCheck(current, token, RETURN_FOCUS_RETRY_MS, allowRetry = false)
             }
-        }, RETURN_CALLBACK_GRACE_MS)
+        }, delayMs)
+    }
+
+    override fun onResume(activity: AppCompatActivity) {
+        if (activity !== ownerActivity) return
+        val current = pending ?: return
+        if (!current.gate.hasPaused || current.callbackReceived) return
+        if (activity.isInMultiWindowMode) return
+        // `hasWindowFocus()` is always false synchronously inside `Activity.onResume()`;
+        // post unconditionally and verify focus inside the delayed callback.
+        scheduleReturnCheck(current, current.token, RETURN_CALLBACK_GRACE_MS, allowRetry = true)
     }
 
     override fun onDestroy(activity: AppCompatActivity) {

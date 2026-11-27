@@ -4,6 +4,16 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { Repo } from "../../engine/db/repo";
 import type { Platform } from "../../platform";
 import { expectedHash, latestRelease, newer, platformPackage, type ReleaseInfo } from "./update";
+import {
+  hydrateReadyPackage,
+  invalidateReadyPackage,
+  isBackgroundSyncing,
+  snapshot as flowSnapshot,
+  syncBackgroundComplete,
+  syncBackgroundEvent,
+  syncBackgroundStart,
+  syncBackgroundStopped,
+} from "./updateFlow";
 
 const CHECK_COOLDOWN_MS = 86_400_000;
 const AUTO_PREPARE_POLL_MS = 15_000;
@@ -70,7 +80,12 @@ export function createUpdateStore(repo: Repo, platform: Platform, currentVersion
   let reading = Promise.resolve();
 
   const hydratePackage = async (target: ReleaseInfo | null, allowSumsFetch: boolean): Promise<void> => {
-    if (!platform.update) return;
+    if (platform.name !== "android" || !platform.update) {
+      if (state.readyRelease !== null || state.canInstall !== false) {
+        set({ readyRelease: null, canInstall: false });
+      }
+      return;
+    }
     if (!target || !newer(target.version, currentVersion)) {
       const canInstall = await platform.update.canInstall().catch(() => false);
       set({ readyRelease: null, canInstall });
@@ -84,14 +99,17 @@ export function createUpdateStore(repo: Repo, platform: Platform, currentVersion
     }
     const sha256 = asset.sha256 ?? (allowSumsFetch ? await expectedHash(platform, target, asset).catch(() => null) : null);
     if (!sha256 || !/^[0-9a-f]{64}$/i.test(sha256)) {
+      invalidateReadyPackage(target.version);
       const canInstall = await platform.update.canInstall().catch(() => false);
       set({ readyRelease: null, canInstall });
       return;
     }
     const pkg = await platform.update.packageStatus({ version: target.version, sha256 }).catch(() => null);
     if (pkg && pkg.downloaded && pkg.verified) {
+      hydrateReadyPackage({ version: target.version, url: asset.url, size: asset.size, sha256 });
       set({ readyRelease: target, canInstall: pkg.canInstall });
     } else {
+      invalidateReadyPackage(target.version);
       set({ readyRelease: null, canInstall: pkg?.canInstall ?? false });
     }
   };
@@ -182,12 +200,13 @@ export function createUpdateStore(repo: Repo, platform: Platform, currentVersion
     },
     async autoPrepare(opts?: { isBusy?: () => boolean }): Promise<boolean> {
       await load();
+      if (platform.name !== "android" || !platform.update) return false;
       if (preparing) return preparing;
       preparing = (async () => {
         // Gate 1: Default-OFF setting — MUST be strictly true.
         const autoUpdate = await repo.getSetting<unknown>("autoUpdate", false);
         if (autoUpdate !== true) return false;
-        if (!platform.update) return false;
+        if (platform.name !== "android" || !platform.update) return false;
         if (await checkBusy(opts?.isBusy)) return false;
 
         // Gate 2: Newer non-ignored release with a matching platform asset + valid SHA-256.
@@ -197,16 +216,32 @@ export function createUpdateStore(repo: Repo, platform: Platform, currentVersion
         if (typeof skipped === "string" && skipped === release.version) return false;
         const asset = platformPackage(platform, release);
         if (!asset || asset.size <= 0) return false;
+        const currentFlow = flowSnapshot();
+        if (
+          !isBackgroundSyncing() &&
+          currentFlow.version === release.version &&
+          (currentFlow.state.step === "preparing" ||
+            currentFlow.state.step === "downloading" ||
+            currentFlow.state.step === "verifying" ||
+            currentFlow.state.step === "permission" ||
+            currentFlow.state.step === "installing")
+        ) {
+          return false;
+        }
         const sha256 = await expectedHash(platform, release, asset).catch(() => null);
         if (!sha256 || !/^[0-9a-f]{64}$/i.test(sha256)) return false;
 
         // Already downloaded & verified on disk? Hydrate immediately without re-downloading.
+        let initialBytes = 0;
         if (platform.update.packageStatus) {
           const existing = await platform.update.packageStatus({ version: release.version, sha256 }).catch(() => null);
           if (existing?.downloaded && existing.verified) {
+            hydrateReadyPackage({ version: release.version, url: asset.url, size: asset.size, sha256 });
             set({ readyRelease: release, canInstall: existing.canInstall });
             return true;
           }
+          invalidateReadyPackage(release.version);
+          initialBytes = existing?.bytes ?? 0;
         }
 
         // Gate 3: Environment check — unmetered Wi-Fi + sufficient free disk space.
@@ -221,7 +256,15 @@ export function createUpdateStore(repo: Repo, platform: Platform, currentVersion
         // Silent background download with 15s guard polling; keeps .part on abort for HTTP Range resume.
         let aborted = false;
         let finished = false;
+        let receivedBytes = initialBytes;
         set({ preparing: true });
+        syncBackgroundStart({
+          version: release.version,
+          url: asset.url,
+          size: asset.size,
+          sha256,
+          received: initialBytes,
+        });
         const pollTimer = setInterval(() => {
           if (aborted || finished) return;
           void (async () => {
@@ -243,25 +286,36 @@ export function createUpdateStore(repo: Repo, platform: Platform, currentVersion
         try {
           await platform.update.download(
             { version: release.version, url: asset.url, size: asset.size, sha256 },
-            () => {},
+            (event) => {
+              if (event.type === "progress") receivedBytes = event.received;
+              syncBackgroundEvent(release.version, asset.size, event);
+            },
           );
           finished = true;
-          if (aborted) return false;
+          if (aborted) {
+            syncBackgroundStopped(release.version, asset.size, receivedBytes);
+            return false;
+          }
           // Re-verify packageStatus before marking readyRelease; NEVER auto-launch OS installer.
           if (platform.update.packageStatus) {
             const verified = await platform.update.packageStatus({ version: release.version, sha256 }).catch(() => null);
             if (!verified || !verified.downloaded || !verified.verified) {
+              syncBackgroundStopped(release.version, asset.size, verified?.bytes ?? 0);
+              invalidateReadyPackage(release.version);
               if (state.readyRelease?.version === release.version) set({ readyRelease: null });
               return false;
             }
+            syncBackgroundComplete({ version: release.version, url: asset.url, size: asset.size, sha256 });
             set({ readyRelease: release, canInstall: verified.canInstall });
           } else {
+            syncBackgroundComplete({ version: release.version, url: asset.url, size: asset.size, sha256 });
             const canInstall = await platform.update.canInstall().catch(() => false);
             set({ readyRelease: release, canInstall });
           }
           return true;
         } catch {
           finished = true;
+          syncBackgroundStopped(release.version, asset.size, receivedBytes);
           if (state.readyRelease?.version === release.version) set({ readyRelease: null });
           return false;
         } finally {

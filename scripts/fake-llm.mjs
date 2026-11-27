@@ -51,9 +51,17 @@ function modeFields(messages, turn) {
   if (last.includes("【剧本】（玩家定的骨架）") && turn % 2 === 0) fields.beat = "done";
   if (last.includes("\n【挑战】")) {
     const action = last.slice(last.lastIndexOf("\n\n【"));
-    fields.challenge = action.includes("达成") ? { progress: "目标达成了", result: "won", why: "主角做成了这件事" }
-      : action.includes("放弃抵抗") ? { progress: "撑不下去了", result: "lost", why: "主角放弃了抵抗" }
-        : { progress: `第 ${turn} 段：离目标又近了一步` };
+    if (action.includes("达成")) {
+      fields.challenge = { progress: "目标达成了", result: "won", why: "主角做成了这件事" };
+    } else if (action.includes("玩家以作者身份亲手写下") && action.includes("交到了他手里")) {
+      fields.challenge = { progress: "家书已亲手交到周老爷手中", result: "won", why: "阿满在角门外当面把家书交到了周老爷手里" };
+    } else if (action.includes("放弃抵抗")) {
+      fields.challenge = { progress: "撑不下去了", result: "lost", why: "主角放弃了抵抗" };
+    } else if (action.includes("我是冒名顶替") || action.includes("不是表少爷")) {
+      fields.challenge = { progress: "当众自曝冒名顶替，身份败露", result: "lost", why: "主角在接风家宴上当众承认冒名顶替，身份被揭穿" };
+    } else {
+      fields.challenge = { progress: `第 ${turn} 段：离目标又近了一步` };
+    }
   }
   return fields;
 }

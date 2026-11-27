@@ -65,6 +65,31 @@ function modelFor(profile: Profile, override: string, preferences?: AgentPrefere
 const PHASES: Record<string, string> = { closing: "正在核对已保存结果", waiting_model: "等待模型", reviewing: "复核进展", preparing: "准备修改", stopping: "正在停止", planning: "正在安排任务", reading: "正在查阅资料", tools: "正在处理资料", thinking: "深度思考中…", compacting: "正在整理记忆", validating: "正在核对修改", committing: "正在保存", waiting_user: "等待你补充", waiting_approval: "等待授权" };
 const TASK_NAMES: Record<string, string> = { ...TOOL_LABELS, browser_open:"打开资料网页",browser_read:"读取网页正文",browser_find:"查找网页内容",browser_follow:"阅读网页链接",browser_close:"关闭资料网页",list_documents:"查看资料文件",read_document:"读取资料文件",find_document:"查找资料文件",write_document:"写出资料笔记",call_tool_package:"运行工具包",draft_tool_package:"准备工具包草稿", discover_tools: "查找可用工具", read_tool_result: "读取已保存结果", update_plan: "更新任务进度", ask_user: "请你补充信息", search_agent_history: "查找助手对话", validate_changes: "检查修改影响", read_clock: "查看故事时间", stage_clock: "调整故事时间", stage_route: "准备故事路线", run_script: "处理资料", delegate_readonly: "分工查证", read_skill_resource: "读取技能资料", draft_skill: "准备常用技能", list_mcp_resources: "查看服务资料", read_mcp_resource: "读取服务资料" };
 const statusOf = agentTaskStatus;
+export function isAgentPreviewTaskStale(
+  status: string,
+  taskMeta: Pick<AgentTask, "id"> & { previewStale?: boolean; baseLineId?: string; baseHeadId?: string },
+  liveLineId?: string,
+  liveHeadId?: string | null,
+  forcePreviewStale?: boolean,
+): boolean {
+  return (
+    status === "previewed" &&
+    Boolean(
+      forcePreviewStale ||
+        taskMeta.previewStale === true ||
+        (liveLineId && taskMeta.baseLineId && taskMeta.baseLineId !== liveLineId) ||
+        (liveHeadId && taskMeta.baseHeadId && taskMeta.baseHeadId !== liveHeadId),
+    )
+  );
+}
+export function shouldRebindSessionToActiveLine(
+  sessionLineId: string | undefined,
+  latestWorldLineId: string,
+  taskCount?: number,
+): boolean {
+  if (!sessionLineId || !latestWorldLineId || sessionLineId === latestWorldLineId) return false;
+  return taskCount === undefined || taskCount === 0;
+}
 export const pendingQuestion = (task: AgentTask): AgentQuestion | undefined => task.status!=="waiting_user" ? undefined : task.question && !["answered", "cancelled", "done"].includes(task.question.status ?? "") ? task.question : task.questions?.find((question) => !["answered", "cancelled", "done"].includes(question.status ?? ""));
 const pendingInputs = (inputs: AgentInput[]) => inputs.filter((input) => ["steer", "queued"].includes(input.delivery ?? "") && typeof input.text === "string" && input.text.trim() && ["pending", "queued", "accepted"].includes(input.status ?? "pending"));
 const skillCompatibility = (value: AgentSkill["compatibility"]): string => typeof value === "string" ? value : Array.isArray(value) ? value.join("；") : value?.message ?? (value?.javascript ? "可使用手机内的受控 JavaScript" : "");
@@ -280,6 +305,22 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   const requestedSkills = useRef(route.skills ?? []);
   const selected = profiles.find((item) => item.id === prefs?.profileId) ?? profile ?? profiles[0] ?? null;
   const [worldTitle, setWorldTitle] = useState("");
+  const [activeLineId, setActiveLineId] = useState(route.lineId);
+  const activeLineRef = useRef(route.lineId);
+  const [liveHeadId, setLiveHeadId] = useState<string | null>(null);
+  const [stalePreviewIds, setStalePreviewIds] = useState<Set<string>>(() => new Set());
+  const syncActiveWorldLine = useCallback(async () => {
+    const world = await game.repo.getWorld(route.worldId).catch(() => null);
+    const nextLineId = world?.currentLineId || activeLineRef.current || route.lineId;
+    const lineRow = nextLineId ? await game.repo.getLine(nextLineId).catch(() => null) : null;
+    if (alive.current) {
+      if (world?.title !== undefined) setWorldTitle(world.title);
+      activeLineRef.current = nextLineId;
+      setActiveLineId(nextLineId);
+      setLiveHeadId(lineRow?.nodeId ?? null);
+    }
+    return { world, lineId: nextLineId, headId: lineRow?.nodeId ?? null };
+  }, [game, route.worldId, route.lineId]);
   const scroller = useRef<HTMLDivElement>(null);
   const prependPosition = useRef<{ sessionId: string; messageId?: string; offset: number; top: number; height: number } | null>(null);
   const follow = useRef(reading.autoScroll);
@@ -310,13 +351,14 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   const activeTasks = conversation?.tasks.filter((task) => inFlight(statusOf(task)) || task.status === "waiting_user") ?? [];
   const busy = activeTasks.length > 0;
   const completed = useRef(new Set<string>());
-  const readSessions = useCallback(async (query: string, offset = 0) => {
+  const readSessions = useCallback(async (query: string, offset = 0, explicitLineId?: string) => {
+    const targetLineId = explicitLineId ?? activeLineRef.current ?? route.lineId;
     const append = offset > 0;
     const revision = append ? sessionQueryRevision.current : ++sessionQueryRevision.current;
     if (!append) { setSessionQuery(query); setNextSessionOffset(null); }
     setSessionsLoading(true);
     try {
-      const page = await client.sessionList(route.worldId, route.lineId, query, offset);
+      const page = await client.sessionList(route.worldId, targetLineId, query, offset);
       if (alive.current && revision === sessionQueryRevision.current) {
         setSessions(current => append ? [...new Map([...current, ...page.sessions].map(session => [session.id, session])).values()] : page.sessions);
         setNextSessionOffset(page.nextOffset ?? null);
@@ -337,17 +379,25 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     void (async () => {
       // Settings do not depend on the assistant runtime: load them first, so the
       // settings sheet still opens when sessions cannot be read.
-      const [saved, available, world] = await Promise.all([getAgentPreferences(game), listProfiles(game.repo), game.repo.getWorld(route.worldId)]);
+      const [saved, available, worldState] = await Promise.all([getAgentPreferences(game), listProfiles(game.repo), syncActiveWorldLine()]);
       if (!live) return;
+      const effectiveLineId = worldState.lineId;
       saved.skills = [...new Set([...saved.skills, ...requestedSkills.current])];
-      setPrefs(saved); setProfiles(available); setWorldTitle(world?.title ?? "");
-      const existing = await readSessions("");
+      setPrefs(saved); setProfiles(available); setWorldTitle(worldState.world?.title ?? "");
+      const existing = await readSessions("", 0, effectiveLineId);
       if (!live) return;
-      const id = route.sessionId ?? existing[0]?.id ?? (await client.create(route.worldId, route.lineId)).id;
+      let id = route.sessionId ?? existing[0]?.id ?? (await client.create(route.worldId, effectiveLineId)).id;
       if (!live) return;
       sessionRef.current = id; setSessionId(id);
       if (route.initialText || inputRevision.current !== draftRevision) draftOwner.current = id;
-      const next = await refresh(id);
+      let next = await refresh(id);
+      if (live && route.sessionId && shouldRebindSessionToActiveLine(next.session.lineId, effectiveLineId, next.tasks.length)) {
+        id = existing[0]?.id ?? (await client.create(route.worldId, effectiveLineId)).id;
+        if (!live) return;
+        sessionRef.current = id; setSessionId(id);
+        if (route.initialText || inputRevision.current !== draftRevision) draftOwner.current = id;
+        next = await refresh(id);
+      }
       const lastModel = next.tasks.at(-1)?.model?.model;
       const chosenProfile = available.find((item) => item.id === saved.profileId) ?? profile ?? available[0];
       const validSavedModel = saved.profileId && !available.some((item) => item.id === saved.profileId) ? undefined : saved.modelName;
@@ -383,7 +433,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
       polling = true;
       const controlRevision=stopRevision.current;
       try {
-        const next = await client.pollSession(sessionId);
+        const [next] = await Promise.all([client.pollSession(sessionId), syncActiveWorldLine()]);
         if (!live || sessionRef.current !== sessionId) return;
         lastRead = Date.now();
         const watched = next.tasks.slice(-8).filter((task) => !task.runId.startsWith("imported:") && task.status !== "archived").map((task) => ({ id: task.runId, status: task.status, version: `${task.status}:${task.updatedAt ?? ""}` }));
@@ -476,7 +526,21 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
       const actualDelivery = draftRecipe || active.execution?.phase === "closing" ? "queued" : delivery;
       const accepted = await client.enqueue(active.id, input.trim(), actualDelivery, request);
       toast((accepted.delivery ?? delivery) === "queued" ? "已排队，当前任务完成后执行" : "补充已接收，将在下一步处理");
-    } else await client.start(request);
+    } else {
+      const { lineId: latestLineId } = await syncActiveWorldLine();
+      if (shouldRebindSessionToActiveLine(detail?.session.lineId, latestLineId)) {
+        const made = await client.create(route.worldId, latestLineId);
+        await readSessions("", 0, latestLineId);
+        sessionRef.current = made.id;
+        setSessionId(made.id);
+        setDetail(null);
+        setSnapshots({});
+        snapshotCache.current = {};
+        snapshotVersions.current = {};
+        request.sessionId = made.id;
+      }
+      await client.start(request);
+    }
     await clearSentInput();
   });
   const changeSession = async (id: string, savePreviousDraft = true) => {
@@ -493,8 +557,9 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     setSheet(null);
   };
   const newSession = () => void act(async () => {
-    const made = await client.create(route.worldId, route.lineId);
-    await readSessions("");
+    const { lineId: latestLineId } = await syncActiveWorldLine();
+    const made = await client.create(route.worldId, latestLineId);
+    await readSessions("", 0, latestLineId);
     await changeSession(made.id);
   });
   const tasks = conversation?.tasks ?? [];
@@ -556,9 +621,10 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     if (!deleted.deleted) throw new Error("对话尚未删除，请稍后重试");
     deletedSessions.current.add(session.id);
     await Promise.all([game.repo.setSetting(`agent:input:${session.id}`, ""), game.repo.setSetting(`agent:input-recipe:${session.id}`, null)]);
-    const remaining = await readSessions("");
+    const { lineId: latestLineId } = await syncActiveWorldLine();
+    const remaining = await readSessions("", 0, latestLineId);
     if (sessionRef.current === session.id) {
-      const next = remaining[0] ?? await client.create(route.worldId, route.lineId);
+      const next = remaining[0] ?? await client.create(route.worldId, latestLineId);
       await changeSession(next.id, false);
       if (!remaining.length) setSessions([next]);
     }
@@ -584,10 +650,20 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
     await client.continue(task.id,input.trim()||undefined,prefs?.limits,prefs?.inputTokens??DEFAULT_AGENT_INPUT_TOKENS,prefs&&selected?modelFor(selected,model,prefs):task.model,prefs?.modelUrl??"",check.needsRebase,selected?.id,prefs?.thinkingMode);
     await clearSentInput();
   });
-  const discardTaskDrafts = (task: AgentTask) => void act(async () => {
-    if (!await ask({ title: "清空未采用草稿？", message: "只清空这项任务尚未采用的修改草稿，已经生效的故事内容和累计用量不变。", confirm: "清空草稿", danger: true })) return;
+  const discardTaskDrafts = (task: AgentTask, isPreview = false) => void act(async () => {
+    if (!await ask(
+      isPreview
+        ? { title: "放弃这批修改预览？", message: "放弃后将清空本次暂存的修改草稿并结束预览，已经生效的故事内容和累计用量不变。", confirm: "放弃这批修改", danger: true }
+        : { title: "清空未采用草稿？", message: "只清空这项任务尚未采用的修改草稿，已经生效的故事内容和累计用量不变。", confirm: "清空草稿", danger: true }
+    )) return;
     await client.discardDrafts(task.id);
-    toast("已清空未采用草稿");
+    setStalePreviewIds((prev) => {
+      if (!prev.has(task.id)) return prev;
+      const next = new Set(prev);
+      next.delete(task.id);
+      return next;
+    });
+    toast(isPreview ? "已放弃这批修改预览" : "已清空未采用草稿");
   });
   const compactTask = (task: AgentTask) => void act(async () => { await client.compact(task.id, prefs?.inputTokens ?? DEFAULT_AGENT_INPUT_TOKENS, prefs && selected ? modelFor(selected, model, prefs) : task.model, prefs?.limits, prefs?.modelUrl ?? "", selected?.id, prefs?.thinkingMode); toast("已安排整理记忆"); });
   const inspectTask = (task: AgentTask) => {
@@ -623,7 +699,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
           <div className="agent-message-head"><small className="muted">{message.role === "user" ? "你" : "助手"}</small><button className="ghost" aria-label="从这条另起对话" onClick={() => forkAt(message)} disabled={pending}><Icon name="share" size={16} /></button></div>
           <MessageBody message={message} latest={message.id === conversation?.messages.filter(item => item.role === "assistant").at(-1)?.id} preserve={rememberPosition} />
         </div>)}
-        {turn.task && <TaskCard task={turn.task} snapshot={snapshots[turn.task.runId]} toolMessages={turn.toolMessages} replies={turn.messages.filter((message) => message.role === "assistant").map((message) => message.content)} pending={pending} onStop={() => void stopTask(turn.task!)} onApply={() => void act(async () => { await client.apply(turn.task!.id); game.notifyAgentChange(route.worldId); toast("修改已采用"); })} onUndo={() => void act(async () => { await client.undo(turn.task!.id); game.notifyAgentChange(route.worldId); toast("本次修改已撤回"); })} onContinue={() => continueTask(turn.task!)} onDiscardDrafts={() => discardTaskDrafts(turn.task!)} onQuestion={() => openQuestion(turn.task!)} onCompact={() => compactTask(turn.task!)} onInspect={() => inspectTask(turn.task!)} onSource={url => { setSourceUrl(url); setSheet("sources"); }} />}
+        {turn.task && <TaskCard task={turn.task} snapshot={snapshots[turn.task.runId]} toolMessages={turn.toolMessages} replies={turn.messages.filter((message) => message.role === "assistant").map((message) => message.content)} pending={pending} liveLineId={activeLineId} liveHeadId={liveHeadId} forcePreviewStale={stalePreviewIds.has(turn.task.id)} onStop={() => void stopTask(turn.task!)} onApply={() => void act(async () => { try { await client.apply(turn.task!.id); setStalePreviewIds((prev) => { if (!prev.has(turn.task!.id)) return prev; const next = new Set(prev); next.delete(turn.task!.id); return next; }); game.notifyAgentChange(route.worldId); toast("修改已采用"); } catch (failure) { const msg = errorText(failure); if (/已有新进展|已有变化|切换路线|路线已变|stale|重新核对|重新校对/i.test(msg)) { setStalePreviewIds((prev) => new Set(prev).add(turn.task!.id)); } throw failure; } })} onUndo={() => void act(async () => { await client.undo(turn.task!.id); game.notifyAgentChange(route.worldId); toast("本次修改已撤回"); })} onContinue={() => { setStalePreviewIds((prev) => { if (!prev.has(turn.task!.id)) return prev; const next = new Set(prev); next.delete(turn.task!.id); return next; }); continueTask(turn.task!); }} onDiscardDrafts={() => discardTaskDrafts(turn.task!, statusOf(turn.task!, snapshots[turn.task!.runId]) === "previewed")} onQuestion={() => openQuestion(turn.task!)} onCompact={() => compactTask(turn.task!)} onInspect={() => inspectTask(turn.task!)} onSource={url => { setSourceUrl(url); setSheet("sources"); }} />}
       </section>)}
       {error && <p className="field-hint warn" role="alert">{error}</p>}
     </div></div>{!atBottom && <button className="to-bottom" aria-label="回到底部 ↓" onClick={() => { follow.current = reading.autoScroll; scrollBottom(true); }}><Icon name="arrow-down" size={22} /></button>}</div>
@@ -667,7 +743,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
   </div>;
 }
 
-function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onApply, onUndo, onContinue, onDiscardDrafts, onQuestion, onCompact, onInspect, onSource }: { task: AgentTask; snapshot?: AgentSnapshot; toolMessages: AgentMessage[]; replies: string[]; pending: boolean; onStop: () => void; onApply: () => void; onUndo: () => void; onContinue: () => void; onDiscardDrafts: () => void; onQuestion: () => void; onCompact: () => void; onInspect: () => void; onSource: (url: string) => void }) {
+function TaskCard({ task, snapshot, toolMessages, replies, pending, liveLineId, liveHeadId, forcePreviewStale, onStop, onApply, onUndo, onContinue, onDiscardDrafts, onQuestion, onCompact, onInspect, onSource }: { task: AgentTask; snapshot?: AgentSnapshot; toolMessages: AgentMessage[]; replies: string[]; pending: boolean; liveLineId?: string; liveHeadId?: string | null; forcePreviewStale?: boolean; onStop: () => void; onApply: () => void; onUndo: () => void; onContinue: () => void; onDiscardDrafts: () => void; onQuestion: () => void; onCompact: () => void; onInspect: () => void; onSource: (url: string) => void }) {
   const { game, toast, devMode } = useApp();
   const prices = usePrices();
   const status = statusOf(task, snapshot), running = inFlight(status), budget = agentTaskProjection(task,snapshot).budget;
@@ -679,6 +755,8 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
   const hasChanges = Array.isArray(previewValue) ? previewValue.length > 0 : !!previewValue && typeof previewValue === "object" && Array.isArray(previewValue.changes) && previewValue.changes.length > 0;
   const links = sourceLinks({ result: task.result, events: snapshot?.events });
   const tools = [...new Map([...olderSteps,...(snapshot?.steps ?? [])].map(step=>[step.id,step])).values()].sort((a,b)=>a.seq-b.seq);
+  const taskMeta = agentTaskProjection(task, snapshot) as AgentTask & { previewStale?: boolean; baseLineId?: string; baseHeadId?: string };
+  const previewStale = isAgentPreviewTaskStale(status, taskMeta, liveLineId, liveHeadId, forcePreviewStale);
   const resumable = ["paused", "cancelled", "interrupted", "failed", "stale", "blocked"].includes(status);
   const stagedDrafts = Array.isArray(task.drafts) ? task.drafts : [];
   const draftCount = task.draftCount ?? stagedDrafts.length;
@@ -699,6 +777,7 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
     {dateNote && <p className="field-hint">{dateNote}</p>}
     {task.execution?.notice?.reason && <p className="field-hint" role="status">系统运行提示：{task.execution.notice.reason}</p>}
     {(task.error || snapshot?.error) && <p className="field-hint warn" role="status">{snapshot?.error ?? task.error}</p>}
+    {previewStale && <p className="field-hint warn" role="status">故事内容或路线已有新变化，旧预览不能直接覆盖当前进度。你可以按当前故事重新校对，或放弃这批修改。</p>}
     {hasChanges && <details className="agent-preview" open={status === "previewed"}><summary>{status === "previewed" ? "修改预览" : "本次修改"}</summary>{previewValue ? <ChangePreview value={Array.isArray(previewValue) ? { changes: previewValue } : previewValue} /> : <StoryText emphasizeDate={false} text={preview} />}</details>}
     {resumable && !hasChanges && draftCount > 0 && <details className="agent-preview"><summary>已准备 {draftCount} 项草稿（未采用）</summary><ChangePreview value={{ changes: stagedDrafts }} /></details>}
     {!!remaining.length && <details className="agent-preview"><summary>{adopted ? "待继续核对的草稿" : "尚待核对的草稿"} · {remaining.length}项</summary><p className="field-hint">{adopted ? "已采用的修改保留；以下部分尚未采用，继续时重新校对。" : "这些内容尚未核对通过，不会随已通过部分一起采用。"}</p><ChangePreview value={{changes:remaining}} /></details>}
@@ -725,7 +804,9 @@ function TaskCard({ task, snapshot, toolMessages, replies, pending, onStop, onAp
     <div className="row agent-task-actions">
       {(running || status === "waiting_user") && <button disabled={status === "stopping"} onClick={onStop}>{status === "stopping" ? "正在停止…" : "停止"}</button>}
       {question && <button className="primary" disabled={pending} onClick={onQuestion}>补充信息</button>}
-      {status === "previewed" && <button className="primary" disabled={pending} onClick={onApply}>采用这批修改</button>}
+      {status === "previewed" && !previewStale && <button className="primary" disabled={pending} onClick={onApply}>采用这批修改</button>}
+      {status === "previewed" && previewStale && <button className="primary" disabled={pending} onClick={onContinue}>按当前故事重新校对</button>}
+      {status === "previewed" && previewStale && <button disabled={pending} onClick={onDiscardDrafts}>放弃这批修改</button>}
       {!running && task.canUndo && <button disabled={pending} onClick={onUndo}>撤回最近一批</button>}
       {resumable && draftCount > 0 && <button disabled={pending} onClick={onDiscardDrafts}>清空草稿</button>}
       {resumable && <button disabled={pending} onClick={onContinue}>{status === "stale" ? "按当前故事重新校对" : "继续执行"}</button>}

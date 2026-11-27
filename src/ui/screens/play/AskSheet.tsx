@@ -74,7 +74,7 @@ export function AskSheet({ worldId, bookId, source, initialQuestion, autoAsk = f
             {x.a ? <CompanionMarkdown text={x.a} streaming={x.pending} /> : <p className="muted">查找中…</p>}
             {x.note && <p className="field-hint">{x.note}</p>}
             {!x.pending && x.a && <button className="ghost small" onClick={() => void navigator.clipboard?.writeText(x.a).then(() => toast("已复制"), () => toast("没能复制"))}>复制</button>}
-            {bookId && !x.pending && !x.incomplete && x.a && x.a !== "没有查到。" && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a, source?.through ?? null).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); }).catch((e) => toast(e instanceof Error ? e.message : "没能保存札记"))}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
+            {bookId && !x.pending && !x.incomplete && x.a && x.a !== "没有查到。" && <button className="ghost small" disabled={saved.includes(i)} onClick={() => void game.saveAnswerAsNote(worldId, bookId, x.q, x.a).then(() => { setSaved((s) => [...s, i]); toast("已存为原著札记，写作时会参考"); }).catch((e) => toast(e instanceof Error ? e.message : "没能保存札记"))}>{saved.includes(i) ? "已存为札记" : "存为札记"}</button>}
           </div>
         ))}
         {!pending && since && <RecentUsageLine worldId={worldId} purposes={["ask"]} since={since} refreshKey={usageTick} />}

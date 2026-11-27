@@ -243,7 +243,34 @@ fn task_metadata(request:&Value)->Result<Value> {
         if id.is_empty() || !names.insert(id.to_owned()) {return Err(invalid("技能标识缺失或重复，请重新选择技能"));}
     }
     if selected.iter().any(|id|!id.as_str().is_some_and(|id|names.contains(id))) {return Err(invalid("指定技能不在本次可用目录中"));}
-    Ok(json!({"capabilityPhase":"pi-tools","skills":selected,"skillSnapshots":snapshots,"customSkills":custom,"network":crate::pi_network::snapshot(&request["network"])? ,"limits":crate::pi_budget::limits(request)?,"target":request["target"],"queuedInputId":request["queuedInputId"],"enabledTools":[]}))
+    let mut meta = json!({"capabilityPhase":"pi-tools","skills":selected,"skillSnapshots":snapshots,"customSkills":custom,"network":crate::pi_network::snapshot(&request["network"])? ,"limits":crate::pi_budget::limits(request)?,"target":request["target"],"queuedInputId":request["queuedInputId"],"enabledTools":[]});
+    if let Some(req_scope) = request.get("referenceScope").filter(|v| v.is_object()) {
+        let book_id = text(req_scope, "bookId").trim();
+        if !book_id.is_empty() {
+            if req_scope.get("through").is_none_or(Value::is_null) {
+                meta["referenceScope"] = json!({"bookId": book_id, "through": null});
+            } else if let Some(through) = req_scope["through"].as_i64() {
+                let from = req_scope["from"].as_i64().unwrap_or(0);
+                if through < 0 || from < 0 || from > through {
+                    return Err(invalid("指定的原著章节范围无效"));
+                }
+                let mut clean_scope = json!({
+                    "bookId": book_id,
+                    "through": through,
+                    "explicitRange": true,
+                });
+                if req_scope.get("from").and_then(Value::as_i64).is_some()
+                    || req_scope["explicitRange"] == true
+                {
+                    clean_scope["from"] = from.into();
+                }
+                meta["referenceScope"] = clean_scope;
+            } else {
+                return Err(invalid("指定的原著章节范围无效"));
+            }
+        }
+    }
+    Ok(meta)
 }
 
 #[cfg(test)]
@@ -451,7 +478,7 @@ impl AgentHostService {
                     crate::maintenance::guard(&tx)?;
                     let row = crate::agent_workspace::rows(
                         &tx,
-                        "SELECT id,status,metadata_json,result_json FROM pi_tasks WHERE id=?",
+                        "SELECT id,status,base_json,metadata_json,result_json FROM pi_tasks WHERE id=?",
                         &[&id],
                     )?
                     .into_iter()
@@ -467,13 +494,17 @@ impl AgentHostService {
                     if status == "waiting_user" {
                         return Err(invalid("请先回答或取消当前等待的问题，再清空未采用草稿"));
                     }
-                    if status == "previewed" {
-                        return Err(invalid("当前修改预览已生成，请采用预览或继续任务修改，不能在此状态直接清空草稿"));
-                    }
-                    if !["paused", "cancelled", "interrupted", "failed", "stale", "blocked"]
+                    if !["paused", "cancelled", "interrupted", "failed", "stale", "blocked", "previewed"]
                         .contains(&status)
                     {
                         return Err(invalid("这项任务已结束，没有可清空的未采用草稿"));
+                    }
+                    if status == "previewed" {
+                        let base = crate::agent_workspace::parse(text(&row, "base_json"));
+                        let preview_stale = crate::agent_workspace::guard(&tx, &base).is_err();
+                        if !preview_stale && request["allowPreview"] != true {
+                            return Err(invalid("当前修改预览仍可直接采用，不能当作未完成草稿清空"));
+                        }
                     }
                     let discard_args = if !text(&request, "kind").is_empty() {
                         json!({"kind": request["kind"], "id": request["id"]})
@@ -484,6 +515,15 @@ impl AgentHostService {
                     let remaining_work = crate::agent_workspace::workspace(&tx, id)?;
                     let remaining_empty =
                         crate::agent_workspace::preview_changes(&remaining_work).is_empty();
+                    let next_status = if status == "previewed" {
+                        if remaining_empty {
+                            "cancelled"
+                        } else {
+                            "paused"
+                        }
+                    } else {
+                        status
+                    };
                     if let Some(obj) = meta.as_object_mut() {
                         obj.remove("rebase");
                         obj.remove("goalReport");
@@ -504,7 +544,17 @@ impl AgentHostService {
                             if parsed_res["status"] != "committed" {
                                 if let Some(ro) = parsed_res.as_object_mut() {
                                     ro.remove("goalResult");
-                                    if remaining_empty {
+                                    if status == "previewed" {
+                                        ro.remove("preview");
+                                        ro.insert("status".into(), next_status.into());
+                                        if remaining_empty {
+                                            ro.insert("changes".into(), json!([]));
+                                            ro.insert(
+                                                "summary".into(),
+                                                "已放弃本次修改预览，正式故事未改动。".into(),
+                                            );
+                                        }
+                                    } else if remaining_empty {
                                         ro.remove("preview");
                                         ro.insert("changes".into(), json!([]));
                                     }
@@ -514,8 +564,9 @@ impl AgentHostService {
                         }
                     }
                     tx.execute(
-                        "UPDATE pi_tasks SET metadata_json=?,result_json=?,updated_at=? WHERE id=?",
+                        "UPDATE pi_tasks SET status=?,metadata_json=?,result_json=?,updated_at=? WHERE id=?",
                         params![
+                            next_status,
                             meta.to_string(),
                             updated_result,
                             chrono::Utc::now().to_rfc3339(),
@@ -542,7 +593,21 @@ impl AgentHostService {
                     if !scoped["request"].is_object(){scoped["request"]=json!({});}
                     scoped["request"]["model"]=reference;
                     scoped["request"].as_object_mut().unwrap().remove("modelUrl");
-                    return crate::pi_control::enqueue(&self.0.gateway.0,&scoped);
+                    let res = crate::pi_control::enqueue(&self.0.gateway.0,&scoped)?;
+                    if let (Some(input_id), Some(ref_scope)) = (
+                        res["id"].as_str(),
+                        request["request"]
+                            .get("referenceScope")
+                            .filter(|v| v.is_object()),
+                    ) {
+                        if let Ok(db) = self.0.gateway.0 .0.lock() {
+                            let _ = db.execute(
+                                "UPDATE pi_inputs SET content_json=json_set(content_json,'$.request.referenceScope',json(?1)) WHERE id=?2",
+                                params![ref_scope.to_string(), input_id],
+                            );
+                        }
+                    }
+                    return Ok(res);
                 }
                 if request["delivery"]!="steer" {return Err(invalid("输入方式无效"));}
                 let host=self.task_host(id)?;
@@ -765,7 +830,7 @@ impl AgentHostService {
         Ok(json!({"session":session,"messages":messages,"tasks":tasks,"inputs":inputs,"projectionTruncated":remaining==0,"nextOffset":if more{Some(offset+limit)}else{None}}))
     }
     fn view_task(&self,id:&str)->Result<Value>{
-        let db=self.0.gateway.0.0.lock()?;let mut row=crate::agent_workspace::rows(&db,"SELECT id,session_id,world_id,line_id,text,status,policy,read_only,base_world_version,model_json,metadata_json,lease_json,plan_json,question_json,stop_revision,workspace_json,result_json,error,created_at,updated_at FROM pi_tasks WHERE id=?",&[&id])?.into_iter().next().ok_or_else(||invalid("这项助手记录不存在"))?;
+        let db=self.0.gateway.0.0.lock()?;let mut row=crate::agent_workspace::rows(&db,"SELECT id,session_id,world_id,line_id,text,status,policy,read_only,base_json,base_world_version,model_json,metadata_json,lease_json,plan_json,question_json,stop_revision,workspace_json,result_json,error,created_at,updated_at FROM pi_tasks WHERE id=?",&[&id])?.into_iter().next().ok_or_else(||invalid("这项助手记录不存在"))?;
         if let Some(object)=row.as_object_mut(){for(key,value)in object{if key.ends_with("_json")&&value.is_string(){*value=crate::agent_workspace::parse(value.as_str().unwrap());}}}Ok(row)
     }
     fn task_summary(&self, id: &str) -> Result<Value> {
@@ -778,6 +843,15 @@ impl AgentHostService {
             [id],
             |r| r.get(0),
         )?;
+        let preview_stale = if text(&row, "status") == "previewed" {
+            let db = self.0.gateway.0 .0.lock()?;
+            let base = &row["base_json"];
+            crate::agent_workspace::base(&db, text(&row, "world_id"), text(base, "lineId"))
+                .map(|cur| cur["fingerprint"] != base["fingerprint"])
+                .unwrap_or(true)
+        } else {
+            false
+        };
         let drafts = if ["committed", "completed"].contains(&text(&row, "status")) {
             vec![]
         } else {
@@ -785,7 +859,7 @@ impl AgentHostService {
         };
         let draft_count = drafts.len();
         Ok(
-            json!({"id":row["id"],"runId":row["id"],"sessionId":row["session_id"],"text":row["text"],"status":row["status"],"phase":if row["status"]=="running"&&row["metadata_json"]["activeOperation"]=="compact"{json!("compacting")}else{row["status"].clone()},"policy":row["policy"],"readOnly":row["read_only"]==1,"execution":execution,
+            json!({"id":row["id"],"runId":row["id"],"sessionId":row["session_id"],"lineId":row["line_id"],"baseLineId":row["base_json"]["lineId"],"baseHeadId":row["base_json"]["headId"],"previewStale":preview_stale,"text":row["text"],"status":row["status"],"phase":if row["status"]=="running"&&row["metadata_json"]["activeOperation"]=="compact"{json!("compacting")}else{row["status"].clone()},"policy":row["policy"],"readOnly":row["read_only"]==1,"execution":execution,
             "model":row["model_json"],"inputTokens":row["model_json"]["inputTokens"],"limits":budget["limits"],"budget":budget,"plan":row["plan_json"],"question":row["question_json"],"inputs":crate::pi_control::inputs(&self.0.gateway.0,text(&row,"session_id"),Some(id))?,
             "drafts":drafts,"draftCount":draft_count,
             "summary":result["summary"],"preview":result["preview"],"changes":result["changes"],"result":result,"error":row["error"],"canUndo":recovery,"contextCheckpoint":row["metadata_json"]["contextCheckpoint"],"contextState":row["metadata_json"]["contextState"],
@@ -934,10 +1008,12 @@ impl AgentHostService {
                         .map(str::to_owned);
                     if let Some(ref fh) = doc_file_hash {
                         if crate::pi_documents::matches_bound_book(&original, Some(fh), None) {
-                            if let (Some(sec), Some(through)) =
-                                (original["section"].as_u64(), original["through"].as_u64())
-                            {
-                                if sec > through {
+                            if let Some(sec) = original["section"].as_u64() {
+                                if original["from"].as_u64().is_some_and(|from| sec < from)
+                                    || original["through"]
+                                        .as_u64()
+                                        .is_some_and(|through| sec > through)
+                                {
                                     return Err(invalid("所选章节不存在或超出本次参考范围。"));
                                 }
                             }
@@ -954,6 +1030,7 @@ impl AgentHostService {
                         "boundBookHash",
                         "bookId",
                         "parserCachePrefix",
+                        "from",
                         "through",
                         "query",
                         "sectionOffset",

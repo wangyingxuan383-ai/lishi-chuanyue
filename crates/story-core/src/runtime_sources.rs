@@ -336,10 +336,21 @@ pub(crate) fn list_sections(db: &Connection, plan: &RunPlan, args: &Value) -> Re
 /// lives only in the request (`meta.sourceScope`), never in the story.
 pub(crate) fn scope_range(plan: &RunPlan) -> Option<(i64, i64)> {
     let scope = &plan.meta["sourceScope"];
-    match (scope["from"].as_i64(), scope["to"].as_i64()) {
-        (Some(from), Some(to)) if matches!(scope["mode"].as_str(), Some("chapters" | "notes")) => Some((from.max(0), to.max(from.max(0)))),
-        _ => None,
+    if let (Some(from), Some(to)) = (scope["from"].as_i64(), scope["to"].as_i64()) {
+        if matches!(scope["mode"].as_str(), Some("chapters" | "notes")) {
+            return Some((from.max(0), to.max(from.max(0))));
+        }
     }
+    let agent_scope = &plan.meta["agent"]["referenceScope"];
+    if agent_scope.is_object()
+        && (plan.reading_source()["bookId"].is_null()
+            || agent_scope["bookId"] == plan.reading_source()["bookId"])
+    {
+        if let (Some(from), Some(to)) = (agent_scope["from"].as_i64(), agent_scope["through"].as_i64()) {
+            return Some((from.max(0), to.max(from.max(0))));
+        }
+    }
+    None
 }
 /// Only the chosen notes: the original is not looked up at all (a correction keeps
 /// its lookups within what the notes cover, `lookups`).
@@ -1107,7 +1118,7 @@ pub(crate) fn read_db(db: &Connection, plan: &RunPlan, name: &str, args: &Value)
                 None => 1,
             };
             for (&id, &s) in &scope {
-                if s <= through && id.abs_diff(chunk) <= neighbors {
+                if s >= from && s <= through && id.abs_diff(chunk) <= neighbors {
                     scores.insert(id, 10.0 - id.abs_diff(chunk) as f64);
                 }
             }

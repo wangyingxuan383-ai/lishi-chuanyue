@@ -50,6 +50,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     private val pending: PendingExport? get() = requests.current
 
     private class PendingExport(
+        val token: Long,
         val invoke: Invoke,
         val gate: DocumentPickerReplyGate,
         val sourcePath: String?,
@@ -94,7 +95,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         val sourcePath = args.optString("sourcePath", "").takeIf { it.isNotBlank() }
         val bytesBase64 = args.optString("bytesBase64", "").takeIf { it.isNotEmpty() }
 
-        val safeName = sanitizeDocumentDisplayName(rawName) ?: "export.bin"
+        val safeName = sanitizeExportDisplayName(rawName, "export.bin")
         val resolvedMime = resolveBinaryExportMime(safeName, explicitMime)
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -114,11 +115,12 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
                 invoke.resolve(documentPickerFailure("file_unavailable"))
                 return@post
             }
-            val current = PendingExport(invoke, DocumentPickerReplyGate { invoke.resolve(it) }, sourcePath, bytesBase64)
+            val token = nextPickerRequestToken.incrementAndGet()
+            val current = PendingExport(token, invoke, DocumentPickerReplyGate { invoke.resolve(it) }, sourcePath, bytesBase64)
             current.timeout = Runnable {
-                if (pending === current) {
+                if (pending === current && current.token == token) {
                     cleanupSource(current.sourcePath)
-                    current.gate.timedOut()
+                    finish(current, documentPickerFailure("file_unconfirmed"))
                 }
             }
             if (!requests.acquire(current)) {
@@ -146,6 +148,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         mainHandler.post {
             val current = pending ?: return@post
             if (current.invoke !== invoke) return@post
+            val expectedToken = current.token
             current.callbackReceived = true
             val decoded = try {
                 decodeDocumentPickerResult(result)
@@ -204,7 +207,11 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
                 } finally {
                     cleanupSource(current.sourcePath)
                 }
-                mainHandler.post { finish(current, reply) }
+                mainHandler.post {
+                    if (pending === current && current.token == expectedToken) {
+                        finish(current, reply)
+                    }
+                }
             }
         }
     }
@@ -213,19 +220,29 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         if (activity === ownerActivity) pending?.gate?.paused()
     }
 
-    override fun onResume(activity: AppCompatActivity) {
-        if (activity !== ownerActivity) return
-        val current = pending ?: return
-        if (!current.gate.hasPaused) return
-        if (activity.isInMultiWindowMode || !activity.hasWindowFocus()) return
+    private fun scheduleReturnCheck(current: PendingExport, token: Long, delayMs: Long, allowRetry: Boolean) {
         mainHandler.postDelayed({
-            if (pending === current && !current.callbackReceived && !activity.isInMultiWindowMode && activity.hasWindowFocus()) {
+            if (pending !== current || current.token != token || current.callbackReceived) return@postDelayed
+            if (ownerActivity.isInMultiWindowMode) return@postDelayed
+            if (ownerActivity.hasWindowFocus()) {
                 cleanupSource(current.sourcePath)
                 current.gate.returnedWithoutCallback()
                 mainHandler.removeCallbacks(current.timeout)
                 releaseSlot(current)
+            } else if (allowRetry) {
+                scheduleReturnCheck(current, token, RETURN_FOCUS_RETRY_MS, allowRetry = false)
             }
-        }, 1_000L)
+        }, delayMs)
+    }
+
+    override fun onResume(activity: AppCompatActivity) {
+        if (activity !== ownerActivity) return
+        val current = pending ?: return
+        if (!current.gate.hasPaused || current.callbackReceived) return
+        if (activity.isInMultiWindowMode) return
+        // `hasWindowFocus()` is always false synchronously inside `Activity.onResume()`;
+        // check focus inside the delayed callback and retry once if focus transition is still settling.
+        scheduleReturnCheck(current, current.token, RETURN_CALLBACK_GRACE_MS, allowRetry = true)
     }
 
     override fun onDestroy(activity: AppCompatActivity) {

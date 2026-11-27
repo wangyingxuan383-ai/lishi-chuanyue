@@ -3,10 +3,11 @@
 :root[data-font="sans"] .story-text, :root[data-font="round"] .story-text { letter-spacing: var(--story-tracking, 0.015em); }
 
 *, *::before, *::after { box-sizing: border-box; }
-html, body, #root { height: 100%; max-width: 100%; overflow-x: clip; }
+html, body, #root { height: 100%; max-width: 100%; }
 body {
   margin: 0; overscroll-behavior: none;
   background-color: var(--bg); background-image: var(--glow), var(--grain);
+  overflow-x: clip;
 }
 ::selection { background: var(--accent-soft); }
 .story, .panel-body, .sheet, .choices { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }

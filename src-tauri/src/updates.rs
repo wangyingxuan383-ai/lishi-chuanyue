@@ -622,7 +622,7 @@ async fn environment_status<R: Runtime>(
         let dir = updates.dir.clone();
         let free_bytes = blocking(move || Ok(disk_free_bytes(&dir))).await?;
         Ok(EnvironmentStatus {
-            wifi_unmetered: true,
+            wifi_unmetered: false,
             free_bytes,
         })
     }

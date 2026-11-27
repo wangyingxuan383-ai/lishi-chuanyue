@@ -122,7 +122,7 @@ export interface CompanionMessage {
 }
 
 export type CompanionBookScope =
-  | { mode: "through" | "full" }
+  | { mode: "through" | "full" | "all" }
   | { mode: "chapters"; from: number; to: number };
 
 export interface CompanionSession {
@@ -1768,8 +1768,10 @@ export class CompanionClient {
               goals.length ? `进行中目标：${goals.join("；")}` : "",
             ].filter(Boolean).join("\n");
             if (st.source?.bookId) {
-              // Enforce world spoiler ceiling `st.source.through`!
-              effectiveBinding = { ...st.source };
+              effectiveBinding = {
+                ...st.source,
+                through: activeScope?.mode === "chapters" ? activeScope.to : null,
+              };
             }
           }
         }
@@ -2461,20 +2463,12 @@ function buildInheritedSourceBinding(context?: {
   bookScope?: CompanionBookScope | null;
 }): SourceBinding | null {
   if (!context) return null;
-  const { worldSource, bookId, bookScope } = context;
+  const { worldSource, bookId } = context;
   if (worldSource?.bookId && (!bookId || worldSource.bookId === bookId)) {
-    const through =
-      bookScope?.mode === "chapters"
-        ? worldSource.through === null
-          ? bookScope.to
-          : Math.min(worldSource.through, bookScope.to)
-        : worldSource.through;
-    const position =
-      through !== null ? Math.min(worldSource.position, through) : worldSource.position;
     return {
       ...structuredClone(worldSource),
-      through,
-      position,
+      through: null,
+      position: worldSource.position,
       fanfic: worldSource.fanfic,
       plot: worldSource.plot,
       instructions: worldSource.instructions,
@@ -2484,7 +2478,7 @@ function buildInheritedSourceBinding(context?: {
   if (!effectiveBookId) return null;
   return {
     bookId: effectiveBookId,
-    through: bookScope?.mode === "chapters" ? bookScope.to : null,
+    through: null,
     position: 0,
     fanfic: false,
     plot: "canon",
@@ -2494,8 +2488,8 @@ function buildInheritedSourceBinding(context?: {
 }
 
 /**
- * Resolves the spoiler-fenced `SourceBinding` for `"拿去开新局"` from a Companion session
- * or bound world, preserving `through`, `position`, `fanfic`, `plot`, and `instructions`.
+ * Resolves the `SourceBinding` for `"拿去开新局"` from a Companion session
+ * or bound world, preserving `position`, `fanfic`, `plot`, and `instructions`.
  */
 export async function resolveSessionDraftSource(
   game: Game,
@@ -2650,7 +2644,7 @@ export function draftSetupFromCompanionText(
 
 /**
  * Bridge 2 ("存进札记"): Saves a companion message as a `CanonNote` (`canon_notes` or
- * `story_notes`), strictly preserving the attached world's `through` spoiler ceiling!
+ * `story_notes`), recording chapter references across the full book (or chosen chapter scope).
  */
 export async function saveCompanionMessageAsNote(
   game: Game,
@@ -2682,8 +2676,11 @@ export async function saveCompanionMessageAsNote(
           [bookId],
         );
         const bookLast = meta?.last_sec == null ? 0 : Number(meta.last_sec);
-        const worldThrough = state.source.through;
-        const ceiling = worldThrough === null ? bookLast : Math.min(worldThrough, bookLast);
+        const scopedTo =
+          session.bookScope?.mode === "chapters" && typeof session.bookScope.to === "number"
+            ? Math.min(session.bookScope.to, bookLast)
+            : null;
+        const ceiling = scopedTo ?? bookLast;
         const citedSections = (message.citations ?? [])
           .filter((c) => c.kind === "book" && c.bookId === bookId && typeof c.section === "number")
           .map((c) => c.section!);
@@ -2693,7 +2690,6 @@ export async function saveCompanionMessageAsNote(
 
         const scope = {
           ...(kind === "question" ? { question: title } : { subject: title }),
-          ...(worldThrough !== null ? { through: ceiling } : {}),
           ...(kind === "plot" || kind === "timeline" ? { from: 0, to: ceiling } : {}),
         };
         const note: CanonNote = {
@@ -3008,6 +3004,21 @@ export async function escalateCompanionToAgent(
   // Atomic start: start the Pi agent run and bind `piSessionId` BEFORE writing
   // the user/card messages into `companion_messages`, so a failed start never
   // leaves a dead unclickable agent card in chat!
+  const worldBookId = start.state.source?.bookId ?? null;
+  const scope = detail.session.bookScope;
+  const referenceScope = worldBookId
+    ? scope?.mode === "chapters"
+      ? {
+          bookId: worldBookId,
+          from: scope.from,
+          through: scope.to,
+          explicitRange: true,
+        }
+      : {
+          bookId: worldBookId,
+          through: null,
+        }
+    : undefined;
   const startRequest = {
     ...sanitizedPrefs,
     ...(sanitizedPrefs.modelUrl?.trim() ? { modelUrl: sanitizedPrefs.modelUrl.trim() } : {}),
@@ -3015,6 +3026,7 @@ export async function escalateCompanionToAgent(
     sessionId: piSessionId,
     text: combinedPlayerText,
     model: resolvedModel,
+    ...(referenceScope ? { referenceScope } : {}),
     ...(input.target ? { target: input.target } : {}),
   };
   if (resolvedModel.profileId) {
@@ -3081,9 +3093,11 @@ export async function steerCompanionAgent(
   if (!requestText) throw new Error("请输入要补充给改档任务的说明。");
   if (!game.llm) throw new Error("请先在设置中配置 AI 服务与模型。");
 
-  const [prefs, policy] = await Promise.all([
+  const companion = new CompanionClient(game);
+  const [prefs, policy, detail] = await Promise.all([
     getAgentPreferences(game),
     resolveCompanionAgentPolicy(game, input.policy),
+    companion.getSessionDetail(input.sessionId).catch(() => null),
   ]);
   const resolvedModel = await resolveEscalatedAgentModel(game, prefs);
   const sanitizedPrefs = sanitizePrefsForResolvedModel(prefs, resolvedModel);
@@ -3091,6 +3105,29 @@ export async function steerCompanionAgent(
     input.phase === "closing" || input.phase === "committing"
       ? "queued"
       : (input.delivery ?? "steer");
+
+  let referenceScope:
+    | { bookId: string; from?: number; through: number | null; explicitRange?: boolean }
+    | undefined;
+  if (detail?.session.boundWorldId) {
+    const start = await game.repo.generationStart(detail.session.boundWorldId).catch(() => null);
+    const worldBookId = start?.state.source?.bookId ?? detail.session.boundBookId ?? null;
+    if (worldBookId) {
+      const scope = detail.session.bookScope;
+      referenceScope =
+        scope?.mode === "chapters"
+          ? {
+              bookId: worldBookId,
+              from: scope.from,
+              through: scope.to,
+              explicitRange: true,
+            }
+          : {
+              bookId: worldBookId,
+              through: null,
+            };
+    }
+  }
 
   const directSteer = (
     game.platform as Platform & {
@@ -3100,6 +3137,7 @@ export async function steerCompanionAgent(
           taskId: string;
           text: string;
           delivery: "steer" | "queued";
+          referenceScope?: { bookId: string; from?: number; through: number | null; explicitRange?: boolean };
         }) => Promise<{ delivery?: "steer" | "queued" } | void>;
       };
     }
@@ -3112,6 +3150,7 @@ export async function steerCompanionAgent(
       taskId: input.taskId,
       text: requestText,
       delivery: requestedDelivery,
+      ...(referenceScope ? { referenceScope } : {}),
     });
     if (res && (res.delivery === "steer" || res.delivery === "queued")) {
       actualDelivery = res.delivery;
@@ -3125,6 +3164,7 @@ export async function steerCompanionAgent(
       sessionId: input.piSessionId,
       text: requestText,
       model: resolvedModel,
+      ...(referenceScope ? { referenceScope } : {}),
     };
     if (resolvedModel.profileId) {
       enqueueRequest.profileId = resolvedModel.profileId;
@@ -3137,7 +3177,6 @@ export async function steerCompanionAgent(
     }
   }
 
-  const companion = new CompanionClient(game);
   const userMessage = (
     await companion.appendMessage(input.sessionId, {
       role: "user",

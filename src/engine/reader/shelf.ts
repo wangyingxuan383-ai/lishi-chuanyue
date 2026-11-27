@@ -2,6 +2,7 @@
 // and one-tap "save interactive world story into 书斋 library" helper (R36-T003).
 // Uses existing `settings` key-value storage + `reader_*` / `source_*` tables
 // so zero new SQLite schema tables are introduced and `empty_database()` stays untouched.
+import type { SqlStatement } from "../../platform";
 import { newId, type Repo } from "../db/repo";
 import { buildNovelBook } from "../novel";
 import {
@@ -9,12 +10,14 @@ import {
   chunkStatements,
   chunksOf,
   getBooksCharMetrics,
+  hasBookExternalReferences,
   indexChunksTermsAsync,
   saveBook,
   sectionStatements,
   slimBookJson,
   termStatements,
 } from "../sources/library";
+import { createSectionSnippetLocator } from "../sources/resplit";
 import type { SourceBook } from "../sources/types";
 import {
   ensureReaderSchema,
@@ -29,6 +32,7 @@ export interface BookShelfPref {
   author?: string;
   origin?: string;
   sourceWorldId?: string;
+  sourceLineId?: string;
 }
 
 export interface ReadingStatsStore {
@@ -64,6 +68,7 @@ export interface LibraryShelfItem {
   author: string;
   origin?: string;
   sourceWorldId?: string;
+  sourceLineId?: string;
   lastActiveAt: string;
 }
 
@@ -97,6 +102,9 @@ export async function getAllBookShelfPrefs(repo: Repo): Promise<Record<string, B
       ...(typeof item.sourceWorldId === "string" && item.sourceWorldId.trim()
         ? { sourceWorldId: item.sourceWorldId.trim().slice(0, 80) }
         : {}),
+      ...(typeof item.sourceLineId === "string" && item.sourceLineId.trim()
+        ? { sourceLineId: item.sourceLineId.trim().slice(0, 80) }
+        : {}),
     };
   }
   return out;
@@ -115,6 +123,10 @@ export async function updateBookShelfPref(
     patch.sourceWorldId !== undefined
       ? patch.sourceWorldId.trim().slice(0, 80)
       : (prev.sourceWorldId ?? "");
+  const nextSourceLineId =
+    patch.sourceLineId !== undefined
+      ? patch.sourceLineId.trim().slice(0, 80)
+      : (prev.sourceLineId ?? "");
   const next: BookShelfPref = {
     pinned: patch.pinned !== undefined ? !!patch.pinned : !!prev.pinned,
     coverTone:
@@ -130,6 +142,7 @@ export async function updateBookShelfPref(
         : (prev.author ?? ""),
     ...(nextOrigin ? { origin: nextOrigin } : {}),
     ...(nextSourceWorldId ? { sourceWorldId: nextSourceWorldId } : {}),
+    ...(nextSourceLineId ? { sourceLineId: nextSourceLineId } : {}),
   };
   all[bookId] = next;
   await repo.setSetting(BOOK_PREFS_KEY, all);
@@ -333,6 +346,7 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
       author: pref.author ?? "",
       ...(pref.origin ? { origin: pref.origin } : {}),
       ...(pref.sourceWorldId ? { sourceWorldId: pref.sourceWorldId } : {}),
+      ...(pref.sourceLineId ? { sourceLineId: pref.sourceLineId } : {}),
       lastActiveAt: progress?.updatedAt ?? createdAt,
     };
   });
@@ -345,12 +359,20 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
   return items;
 }
 
-/** Compiles an interactive world's current route into a clean novel and stores it in `书斋` (`source_books`). */
+/**
+ * Compiles an interactive world's active/specified route into a clean novel in `书斋` (`source_books`).
+ * Copy-on-write guarantees:
+ * - Reuses an existing `world-novel` book ONLY when `sourceWorldId` matches, `sourceLineId` matches
+ *   (or was legacy unset), AND `hasBookExternalReferences` is false; re-anchors existing reader
+ *   bookmarks, highlights, and progress on in-place update without mis-binding deleted snippets.
+ * - Allocates a brand-new `newId()` whenever the prior book is cited by any story/note/job or
+ *   when compiling a different route (`lineId`), labeling non-main route titles distinctly.
+ */
 export async function saveWorldNovelToLibrary(
   repo: Repo,
   worldId: string,
   opts?: { lineId?: string; author?: string },
-): Promise<{ bookId: string; title: string; sectionCount: number }> {
+): Promise<{ bookId: string; forked: boolean; title: string; sectionCount: number }> {
   const built = await buildNovelBook(repo, worldId, {
     lineId: opts?.lineId,
     includePreface: true,
@@ -360,22 +382,35 @@ export async function saveWorldNovelToLibrary(
   if (!built || !built.sections.length) {
     throw new Error("这部故事还没有可成书的正文段落");
   }
+  const targetLineId = built.lineId;
   const prefs = await getAllBookShelfPrefs(repo);
   let reusedBookId: string | null = null;
+  let hadProtectedOrOtherRouteCopy = false;
+
   for (const [candidateId, pref] of Object.entries(prefs)) {
-    if (pref.origin === "world-novel" && pref.sourceWorldId === worldId) {
-      if (await bookExists(repo, candidateId)) {
-        reusedBookId = candidateId;
-        break;
-      }
+    if (pref.origin !== "world-novel" || pref.sourceWorldId !== worldId) continue;
+    if (!(await bookExists(repo, candidateId))) continue;
+    const sameRoute = !pref.sourceLineId || pref.sourceLineId === targetLineId;
+    if (sameRoute && !(await hasBookExternalReferences(repo, candidateId))) {
+      reusedBookId = candidateId;
+      break;
     }
+    hadProtectedOrOtherRouteCopy = true;
   }
+
   const bookId = reusedBookId ?? newId();
   const existingPref = reusedBookId ? prefs[reusedBookId] : undefined;
   const nowIso = new Date().toISOString();
+
+  const cleanLineName = built.lineName?.trim() ?? "";
+  const resolvedTitle =
+    cleanLineName && cleanLineName !== "主线" && !built.title.includes(cleanLineName)
+      ? `${built.title} · ${cleanLineName}`
+      : built.title;
+
   const sourceBook: SourceBook = {
     id: bookId,
-    title: built.title,
+    title: resolvedTitle,
     format: "txt",
     createdAt: nowIso,
     sections: built.sections.map((sec, idx) => {
@@ -394,7 +429,95 @@ export async function saveWorldNovelToLibrary(
       };
     }),
   };
+
   if (reusedBookId) {
+    await ensureReaderSchema(repo.platform);
+    const [oldSecCountRow] = await repo.platform.sql
+      .query("SELECT COUNT(*) AS cnt FROM source_sections WHERE book_id = ?", [bookId])
+      .catch(() => []);
+    const oldSectionCount = Math.max(1, Number(oldSecCountRow?.cnt ?? 1));
+    const { maxSection, getParas, locateSnippet } = createSectionSnippetLocator(
+      sourceBook.sections,
+      oldSectionCount,
+    );
+
+    const reanchorStmts: SqlStatement[] = [];
+
+    const bmRows = await repo.platform.sql
+      .query(
+        "SELECT id, section_index, snippet FROM reader_bookmarks WHERE target_type = 'book' AND target_id = ?",
+        [bookId],
+      )
+      .catch(() => []);
+    for (const r of bmRows) {
+      const oldSec = Number(r.section_index ?? 0);
+      const hit = locateSnippet(String(r.snippet ?? ""), oldSec);
+      if (hit) {
+        reanchorStmts.push({
+          sql: "UPDATE reader_bookmarks SET section_index = ?, section_title = ?, paragraph_index = ? WHERE id = ?",
+          params: [hit.sectionIndex, hit.sectionTitle, hit.paragraphIndex, String(r.id)],
+        });
+      } else if (oldSec > maxSection) {
+        reanchorStmts.push({
+          sql: "UPDATE reader_bookmarks SET section_index = ?, section_title = ?, paragraph_index = 0 WHERE id = ?",
+          params: [maxSection, sourceBook.sections[maxSection]!.title, String(r.id)],
+        });
+      }
+    }
+
+    const hlRows = await repo.platform.sql
+      .query(
+        "SELECT id, section_index, selected_text FROM reader_highlights WHERE target_type = 'book' AND target_id = ?",
+        [bookId],
+      )
+      .catch(() => []);
+    for (const r of hlRows) {
+      const oldSec = Number(r.section_index ?? 0);
+      const hit = locateSnippet(String(r.selected_text ?? ""), oldSec);
+      if (hit) {
+        reanchorStmts.push({
+          sql: "UPDATE reader_highlights SET section_index = ?, section_title = ?, paragraph_index = ?, char_start = ?, char_end = ? WHERE id = ?",
+          params: [hit.sectionIndex, hit.sectionTitle, hit.paragraphIndex, hit.charStart, hit.charEnd, String(r.id)],
+        });
+      } else {
+        // Old highlighted text was rewritten or deleted: clear char_start/char_end so it never
+        // paints an unrelated sentence at the old offset, while retaining the excerpt record itself.
+        const clamped = Math.min(maxSection, Math.max(0, oldSec));
+        reanchorStmts.push({
+          sql: "UPDATE reader_highlights SET section_index = ?, section_title = ?, char_start = 0, char_end = 0 WHERE id = ?",
+          params: [clamped, sourceBook.sections[clamped]!.title, String(r.id)],
+        });
+      }
+    }
+
+    const progRows = await repo.platform.sql
+      .query(
+        "SELECT section_index, anchor_text FROM reader_progress WHERE target_type = 'book' AND target_id = ?",
+        [bookId],
+      )
+      .catch(() => []);
+    if (progRows[0]) {
+      const oldSec = Number(progRows[0].section_index ?? 0);
+      const hit = locateSnippet(String(progRows[0].anchor_text ?? ""), oldSec);
+      if (hit) {
+        const paras = getParas(hit.sectionIndex);
+        const approxRatio = paras.length > 1 ? Number((hit.paragraphIndex / (paras.length - 1)).toFixed(4)) : 0;
+        reanchorStmts.push({
+          sql: `UPDATE reader_progress
+                SET section_index = ?, page_index = 0, scroll_ratio = ?
+                WHERE target_type = 'book' AND target_id = ?`,
+          params: [hit.sectionIndex, approxRatio, bookId],
+        });
+      } else if (oldSec > maxSection) {
+        reanchorStmts.push({
+          sql: `UPDATE reader_progress
+                SET section_index = ?, page_index = 0, scroll_ratio = 0
+                WHERE target_type = 'book' AND target_id = ?`,
+          params: [maxSection, bookId],
+        });
+      }
+    }
+
     const chunks = chunksOf(sourceBook);
     const index = await indexChunksTermsAsync(chunks);
     await repo.platform.sql.batch([
@@ -408,18 +531,27 @@ export async function saveWorldNovelToLibrary(
       ...sectionStatements(bookId, sourceBook.sections),
       ...chunkStatements(bookId, chunks),
       ...termStatements(bookId, index),
+      ...reanchorStmts,
     ]);
   } else {
     await saveBook(repo, sourceBook);
   }
-  const defaultAuthor = built.author ? `${built.author} · 穿越成书` : "穿越成书";
+
+  const routeSuffix = cleanLineName && cleanLineName !== "主线" ? ` · ${cleanLineName}` : "";
+  const defaultAuthor = built.author ? `${built.author}${routeSuffix} · 穿越成书` : `穿越成书${routeSuffix}`;
   await updateBookShelfPref(repo, bookId, {
     author: opts?.author ?? (existingPref?.author ? existingPref.author : defaultAuthor),
     origin: "world-novel",
     sourceWorldId: worldId,
+    sourceLineId: targetLineId,
   });
   if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
     window.dispatchEvent(new CustomEvent("lishi:library-changed", { detail: { bookId } }));
   }
-  return { bookId, title: sourceBook.title, sectionCount: sourceBook.sections.length };
+  return {
+    bookId,
+    forked: !reusedBookId && hadProtectedOrOtherRouteCopy,
+    title: sourceBook.title,
+    sectionCount: sourceBook.sections.length,
+  };
 }

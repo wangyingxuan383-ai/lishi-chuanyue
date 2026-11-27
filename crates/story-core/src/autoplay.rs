@@ -349,6 +349,13 @@ impl Engine {
         plan.meta["autoplayTextHash"] = live.text_hash.into();
         plan.meta["settingsGuard"] = live.raw_settings;
         plan.meta["sourceGuard"] = plan.state.get("source").cloned().unwrap_or(Value::Null);
+        if plan.state["source"].is_object() {
+            let mut unlocked = plan.state["source"].clone();
+            unlocked["through"] = Value::Null;
+            plan.meta["readingSource"] = unlocked;
+        } else {
+            plan.meta["readingSource"] = Value::Null;
+        }
         plan.options["mode"] = "continue".into();
         plan.options["difficulty"] = plan.settings["difficulty"].clone();
         let fortune_mode = effective_fortune_mode(&plan.settings, &plan.state).to_owned();
@@ -715,7 +722,7 @@ fn dynamic_canon_notes(store: &Store, plan: &RunPlan, history: &[Value], directo
     // 2. Bound book's canon_notes within allowed reading scope.
     if let Some(book_id) = plan.state["source"]["bookId"].as_str().filter(|s| !s.is_empty()) {
         let position = plan.state["source"]["position"].as_i64().unwrap_or(0);
-        let through = plan.state["source"]["through"].as_i64();
+        let through = plan.reading_source()["through"].as_i64();
         let mut stmt = db.prepare(
             "SELECT kind, title, scope_json, content, refs_json, world_id
              FROM canon_notes

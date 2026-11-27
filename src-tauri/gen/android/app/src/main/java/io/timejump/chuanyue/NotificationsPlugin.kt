@@ -189,6 +189,19 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
         MainActivity.activeInstance?.get()?.emitWebEvent("lishi:tts-event", detailJson)
     }
 
+    private fun resetDeadTts(engine: TextToSpeech) {
+        if (tts === engine) {
+            tts = null
+            ttsReady = false
+            ttsChineseSupported = false
+            ttsInitializing = false
+        }
+        try {
+            engine.shutdown()
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun performSpeak(engine: TextToSpeech, args: TtsSpeakArgs, invoke: Invoke) {
         if (!ttsChineseSupported && !configureTtsLanguage(engine)) {
             invoke.resolve(JSObject().put("ok", false))
@@ -212,6 +225,9 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
             engine.speak(safeText, TextToSpeech.QUEUE_FLUSH, null, args.utteranceId) == TextToSpeech.SUCCESS
         } catch (_: Throwable) {
             false
+        }
+        if (!ok) {
+            resetDeadTts(engine)
         }
         invoke.resolve(JSObject().put("ok", ok))
     }
@@ -464,6 +480,10 @@ class NotificationsPlugin(private val activity: Activity) : Plugin(activity) {
 
                                     override fun onDone(utteranceId: String?) {
                                         emitTtsEvent(utteranceId, "done")
+                                    }
+
+                                    override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                                        emitTtsEvent(utteranceId, if (interrupted) "interrupted" else "stopped")
                                     }
 
                                     @Deprecated("Deprecated in Java")

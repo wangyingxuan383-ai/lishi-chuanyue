@@ -108,7 +108,7 @@ describe("external books", () => {
     expect(copied.sections).toEqual(book.sections);
     const results = await referenceContext(game.repo, copyState.source, "钥匙", 3000); expect(results?.passages.some((p) => p.kind === "analysis")).toBe(true);
     expect((await analysisJobs(game.repo, copied.id))[0].completed).toBe(2);
-    expect((await game.repo.getState(bound.head.id)).source).toEqual(binding);
+    expect((await game.repo.getState(bound.head.id)).source).toEqual({ ...binding, through: null });
     expect(JSON.stringify(llm.calls)).not.toContain("终章秘密");
   });
 

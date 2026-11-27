@@ -57,7 +57,7 @@ import { WorldSettingsSheet } from "./play/WorldSettingsSheet";
 import { DepthSheet } from "./play/DepthSheet";
 import { CanonNotesSheet, NoteEntry, type NoteStart } from "../components/CanonNotes";
 import { PassageUsageSheet, TurnUsageLine, WorldUsageSheet } from "../components/TurnUsage";
-import { listNotes, nextNoteReach, noteNearEnd } from "../../engine/sources/notes";
+import { LONG_BOOK_SECTION_THRESHOLD, RECOMMENDED_NOTE_SPAN, listNotes, nextNoteReach, noteNearEnd } from "../../engine/sources/notes";
 import { DEPTH_LABEL, DEPTH_MARK, depthOf } from "../../engine/depth";
 import { useGeneration } from "./play/useGeneration";
 import { usePlayDraft } from "./play/usePlayDraft";
@@ -98,6 +98,24 @@ function setPlayViewCache(repo: Repo, worldId: string, view: CachedPlayView): vo
     const oldest = playViewCache.keys().next().value;
     if (oldest !== undefined) playViewCache.delete(oldest);
   }
+}
+
+export interface MetaPromptState {
+  text: string;
+  mode: ActionMode;
+  directorNote: string | null;
+  fromComposer: boolean;
+  editNode?: StoryNode;
+}
+
+/** Detects any active modal sheet (including FailureSheet) or confirmation dialog on the document so volume keys are yielded. */
+export function hasModalDomOverlay(
+  doc: Pick<Document, "querySelector"> | null = typeof document !== "undefined" ? document : null,
+): boolean {
+  if (!doc) return false;
+  return !!doc.querySelector(
+    ".sheet-layer:not(.closing), .sheet-backdrop:not(.closing), .dialog-backdrop:not(.closing), .dialog:not(.closing)",
+  );
 }
 
 /** Detects out-of-character meta questions about the original book or current save state before sending a story turn. */
@@ -166,7 +184,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
   }, []);
   const [askInitial, setAskInitial] = useState("");
   const [askAuto, setAskAuto] = useState(false);
-  const [metaPromptText, setMetaPromptText] = useState<string | null>(null);
+  const [metaPrompt, setMetaPrompt] = useState<MetaPromptState | null>(null);
   const openAskFromComposer = useCallback(() => {
     const draftText = input.trim();
     setAskAuto(false);
@@ -429,14 +447,28 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     if (n >= 3) { setPressTip(true); await game.repo.setSetting("tip:longPress", true); }
   };
   const [modePicker, setModePicker] = useState(false);
+  const [domOverlayOpen, setDomOverlayOpen] = useState(() => hasModalDomOverlay());
+  useEffect(() => {
+    if (!active || typeof MutationObserver === "undefined" || typeof document === "undefined") return;
+    const syncOverlay = () => {
+      const open = hasModalDomOverlay();
+      setDomOverlayOpen((prev) => (prev === open ? prev : open));
+    };
+    syncOverlay();
+    const mo = new MutationObserver(syncOverlay);
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    return () => mo.disconnect();
+  }, [active]);
   const playOverlayOpen =
     !!sheet || (panel && !wide) || !!menuNode || !!menuMore || !!editing ||
     !!rawNode || !!context || !!remember || !!bookmark || !!cardNode ||
-    !!writing || !!factAsk || desk || modePicker || !!metaPromptText || !!usageNode || typing;
+    !!writing || !!factAsk || desk || modePicker || !!metaPrompt || !!usageNode || typing || domOverlayOpen;
   useEffect(() => {
     if (!active) return;
-    const enabled = isPaged && reading.volumeKeyTurn && !playOverlayOpen;
-    const sync = () => { void game.platform.system.setVolumePageTurn?.(enabled).catch(() => {}); };
+    const sync = () => {
+      const enabled = isPaged && reading.volumeKeyTurn && !playOverlayOpen && !hasModalDomOverlay();
+      void game.platform.system.setVolumePageTurn?.(enabled).catch(() => {});
+    };
     sync();
     window.addEventListener("lishi:app-resume", sync);
     return () => {
@@ -469,27 +501,45 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     return () => { live = false; };
   }, [fanficBook, worldId, notesRefreshTick]);
   const dismissNotesTip = () => { setNotesTip(false); void game.repo.setSetting(`tip:notes:${worldId}`, true); };
-  // 札记预备 (D178): the followed book position nears the end of a note; offer 续整理 once per note and reach.
-  const [notesAhead, setNotesAhead] = useState<{ id: string; title: string; to: number; reach: number } | null>(null);
-  const [notesOpen, setNotesOpen] = useState<{ id: string; source: "book" | "story" } | null>(null);
+  // 札记预备 (D178, D194): the followed book position nears the end of a note; offer 续整理 or next 100-chapter volume once per note and reach.
+  const [notesAhead, setNotesAhead] = useState<{ id: string; title: string; to: number; reach: number; preferNewVolume?: { from: number; to: number } } | null>(null);
+  const [notesOpen, setNotesOpen] = useState<{ id?: string; source: "book" | "story"; initialRange?: { from: number; to: number } } | null>(null);
   const bookPosition = state?.source?.position ?? -1;
-  const bookThrough = state?.source?.through ?? null;
   useEffect(() => {
     setNotesAhead(null);
     if (!fanficBook || bookPosition < 0) return;
     let live = true;
     void (async () => {
       const [row] = await game.repo.platform.sql.query("SELECT COUNT(*) AS n FROM source_sections WHERE book_id=?", [fanficBook]);
-      const last = Math.min(Number(row?.n ?? 0) - 1, bookThrough ?? Infinity);
-      for (const note of await listNotes(game.repo, fanficBook, worldId)) {
+      const last = Number(row?.n ?? 0) - 1;
+      const allNotes = await listNotes(game.repo, fanficBook, worldId);
+      for (const note of allNotes) {
         if (!noteNearEnd(note, bookPosition, last)) continue;
+        const nextSec = (note.scope.to ?? 0) + 1;
+        const hasNextCover = allNotes.some(
+          (other) =>
+            other.id !== note.id &&
+            other.kind === note.kind &&
+            other.status === "done" &&
+            other.active &&
+            Boolean(other.content.trim()) &&
+            !(other.progress.gaps ?? []).some((g) => g.sections.includes(nextSec)) &&
+            (other.scope.from ?? 0) <= nextSec &&
+            (other.scope.to ?? -1) >= nextSec,
+        );
+        if (hasNextCover) continue;
         if (await game.repo.getSetting(`tip:ahead:${note.id}:${note.scope.to}`, false)) continue;
-        if (live) setNotesAhead({ id: note.id, title: note.title, to: note.scope.to!, reach: nextNoteReach(note, bookPosition, last) });
+        const span = note.scope.to! - (note.scope.from ?? 0) + 1;
+        const preferNewVolume =
+          last + 1 >= LONG_BOOK_SECTION_THRESHOLD && span >= 85 && nextSec <= last
+            ? { from: nextSec, to: Math.min(last, nextSec + RECOMMENDED_NOTE_SPAN - 1) }
+            : undefined;
+        if (live) setNotesAhead({ id: note.id, title: note.title, to: note.scope.to!, reach: nextNoteReach(note, bookPosition, last), preferNewVolume });
         return;
       }
     })();
     return () => { live = false; };
-  }, [fanficBook, worldId, bookPosition, bookThrough, notesRefreshTick]);
+  }, [fanficBook, worldId, bookPosition, notesRefreshTick]);
   const dismissAhead = () => { if (notesAhead) void game.repo.setSetting(`tip:ahead:${notesAhead.id}:${notesAhead.to}`, true); setNotesAhead(null); };
   // The AI filed new cards or the independent assistant committed changes: invalidate cache and refresh when shown.
   useEffect(() => game.subscribe((id) => {
@@ -589,22 +639,32 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
     const candidateMode = override?.mode ?? (input.trim() ? currentMode.mode : "continue");
     const candidateText = override?.text ?? (candidateMode === "continue" ? "" : input.trim());
     if (!bypassMetaCheck && (candidateMode === "do" || candidateMode === "continue") && looksLikeMetaQuestion(candidateText)) {
-      setMetaPromptText(candidateText);
+      setMetaPrompt({
+        text: candidateText,
+        mode: candidateMode === "continue" ? "do" : candidateMode,
+        directorNote: overrideNote !== undefined ? overrideNote : draft.directorNote(),
+        fromComposer: !override,
+      });
       return;
     }
     void notifications.gate(() => {
       const mode = candidateMode;
       const text = candidateText;
-      // An open 幕后要求 goes with a typed action and with a tapped choice alike.
+      const usesComposerDraft = overrideNote === undefined;
+      // An open 幕后要求 goes with a typed action and with a tapped choice alike; historical action edits carry their own note.
       const directorNote = overrideNote !== undefined ? overrideNote : draft.directorNote();
-      // A tapped choice leaves what the player was typing in the box (R28-T009).
-      if (!override) setInput("");
-      draft.clearAfterSend(mode);
+      // A tapped choice leaves what the player was typing in the box (R28-T009); an editAction leaves the whole composer untouched.
+      if (!override) {
+        setInput("");
+        draft.clearAfterSend(mode, false);
+      } else if (usesComposerDraft) {
+        draft.clearAfterSend(mode, true);
+      }
       buzz(game.platform);
       generation.start({
         action: { mode, text },
         // A failure gives the words back to the box; 再试一次 sends them again without doubling them.
-        retry: () => { setInput(""); setNote(""); setNoteOpen(false); send({ mode, text }, directorNote, true); },
+        retry: () => { if (!override) { setInput(""); setNote(""); setNoteOpen(false); } send({ mode, text }, directorNote, true); },
         restore: (mode === "continue" || mode === "skip") && !directorNote ? null : { mode, text, note: directorNote ?? "" },
         run: (on) => game.play(worldId, { mode, text, directorNote }, on),
       });
@@ -689,11 +749,23 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
 
   const editAction = async (node: StoryNode, text: string) => {
     if (!cursor || !node.parentId || busy) return;
+    if (!game.llm) { push({ name: "setup" }); return; }
+    const mode: ActionMode = node.actionMode === "say" || node.actionMode === "write" || node.actionMode === "direct" ? node.actionMode : "do";
+    if (mode === "do" && looksLikeMetaQuestion(text)) {
+      setEditing(null);
+      setMetaPrompt({
+        text,
+        mode,
+        directorNote: node.directorNote ?? null,
+        fromComposer: false,
+        editNode: node,
+      });
+      return;
+    }
     setEditing(null);
     await tree.goBackTo(game.repo, cursor, node.parentId);
     await refresh();
-    const mode = node.actionMode === "say" || node.actionMode === "write" || node.actionMode === "direct" ? node.actionMode : "do";
-    send({ mode, text }, node.directorNote ?? null);
+    send({ mode, text }, node.directorNote ?? null, true);
   };
 
   const saveRewriteTextOnly = async (node: StoryNode, text: string) => {
@@ -1062,7 +1134,20 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
                       <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
                     )}
                     {isHead && notesAhead && !notesTip && !pressTip && (
-                      <div className="tip">原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
+                      <div className="tip">
+                        {notesAhead.preferNewVolume ? (
+                          <>
+                            原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”已涵盖到第 {notesAhead.to + 1} 节。新建第 {notesAhead.preferNewVolume.from + 1}～{notesAhead.preferNewVolume.to + 1} 节札记？
+                            <button className="ghost" onClick={() => { setNotesOpen({ source: "book", initialRange: notesAhead.preferNewVolume }); dismissAhead(); setSheet("notes"); }}>去新建</button>
+                          </>
+                        ) : (
+                          <>
+                            原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？
+                            <button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button>
+                          </>
+                        )}
+                        <button className="ghost" onClick={dismissAhead}>不用</button>
+                      </div>
                     )}
                     {isHead && pressTip && (
                       <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
@@ -1114,7 +1199,20 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
                       <div className="tip">先让 AI 整理一下原著主线？写作时带上札记，每段更快、更省，也更贴原著。<button className="ghost" onClick={() => { dismissNotesTip(); setSheet("notes"); }}>去整理</button><button className="ghost" onClick={dismissNotesTip}>不用</button></div>
                     )}
                     {isHead && notesAhead && !notesTip && !pressTip && (
-                      <div className="tip">原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？<button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button><button className="ghost" onClick={dismissAhead}>不用</button></div>
+                      <div className="tip">
+                        {notesAhead.preferNewVolume ? (
+                          <>
+                            原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”已涵盖到第 {notesAhead.to + 1} 节。新建第 {notesAhead.preferNewVolume.from + 1}～{notesAhead.preferNewVolume.to + 1} 节札记？
+                            <button className="ghost" onClick={() => { setNotesOpen({ source: "book", initialRange: notesAhead.preferNewVolume }); dismissAhead(); setSheet("notes"); }}>去新建</button>
+                          </>
+                        ) : (
+                          <>
+                            原著进度到了第 {bookPosition + 1} 节，札记“{notesAhead.title}”整理到第 {notesAhead.to + 1} 节。续整理到第 {notesAhead.reach + 1} 节？
+                            <button className="ghost" onClick={() => { setNotesOpen({ id: notesAhead.id, source: "book" }); dismissAhead(); setSheet("notes"); }}>去续整理</button>
+                          </>
+                        )}
+                        <button className="ghost" onClick={dismissAhead}>不用</button>
+                      </div>
                     )}
                     {isHead && pressTip && (
                       <div className="tip">{mouse ? "右键或长按" : "长按"}任意一段，可以改写、回到那里重来、记住这件事或加书签。<button className="ghost" onClick={() => setPressTip(false)}>知道了</button></div>
@@ -1238,19 +1336,20 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {modePicker && <InputModeSheet watch={watch} modeList={modeList} modeIndex={modeIndex} inputBox={inputBox} noteOpen={noteOpen}
         mode={mode} worldId={worldId} cursor={cursor} setModePicker={setModePicker} setModeIndex={setModeIndex}
         setNoteOpen={setNoteOpen} onOpenAsk={openAskFromComposer} captureReading={captureReading} push={push} />}
-      {metaPromptText !== null && (
+      {metaPrompt !== null && (
         <MenuSheet
           title="这句话像是在查原著或本局情况"
-          onClose={() => setMetaPromptText(null)}
+          onClose={() => setMetaPrompt(null)}
           items={[
             {
               label: "用「查一查」回答（不推进故事）",
               onSelect: () => {
-                const q = metaPromptText;
-                setMetaPromptText(null);
-                setInput("");
-                draft.clearAfterSend("do");
-                setAskInitial(q);
+                const pending = metaPrompt;
+                setMetaPrompt(null);
+                if (pending.fromComposer) {
+                  draft.clearInputOnly();
+                }
+                setAskInitial(pending.text);
                 setAskAuto(true);
                 setSheet("ask");
               },
@@ -1258,12 +1357,22 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
             {
               label: "仍作为主角行动写进故事",
               onSelect: () => {
-                const actText = metaPromptText;
-                setMetaPromptText(null);
-                const actMode = currentMode.mode === "continue" ? "do" : currentMode.mode;
-                const noteToUse = draft.directorNote();
-                setInput("");
-                send({ mode: actMode, text: actText }, noteToUse, true);
+                const pending = metaPrompt;
+                setMetaPrompt(null);
+                if (pending.editNode) {
+                  void (async () => {
+                    if (!cursor || !pending.editNode?.parentId || busyRef.current) return;
+                    await tree.goBackTo(game.repo, cursor, pending.editNode.parentId);
+                    await refresh();
+                    send({ mode: pending.mode, text: pending.text }, pending.directorNote, true);
+                  })();
+                  return;
+                }
+                if (pending.fromComposer) {
+                  setInput("");
+                  draft.clearAfterSend(pending.mode, false);
+                }
+                send({ mode: pending.mode, text: pending.text }, pending.directorNote, true);
               },
             },
           ]}
@@ -1302,7 +1411,7 @@ export default function Play({ worldId, active = true, resumeRunId }: { worldId:
       {sheet === "reference" && state.source && <ReferenceSheet worldId={worldId} binding={state.source} onClose={() => setSheet(null)} />}
       {sheet === "usage" && <WorldUsageSheet worldId={worldId} onClose={() => setSheet(null)} />}
       {usageNode && <PassageUsageSheet nodeId={usageNode} onClose={() => setUsageNode(null)} />}
-      {sheet === "notes" && <CanonNotesSheet bookId={state.source?.bookId ?? null} worldId={worldId} position={state.source?.position ?? 0} through={state.source?.through ?? null} start={notesStart ?? undefined} open={notesOpen ?? undefined} onClose={() => { setSheet(null); setNotesStart(null); setNotesOpen(null); setNotesRefreshTick((n) => n + 1); }} />}
+      {sheet === "notes" && <CanonNotesSheet bookId={state.source?.bookId ?? null} worldId={worldId} position={state.source?.position ?? 0} start={notesStart ?? undefined} open={notesOpen ?? undefined} onClose={() => { setSheet(null); setNotesStart(null); setNotesOpen(null); setNotesRefreshTick((n) => n + 1); }} />}
       {sheet === "toc" && <TocSheet worldId={worldId} headId={head.id} lineId={cursor.line.id} state={state} clock={era.clock} onClose={() => setSheet(null)}
         onJump={(nodeId) => { closeRecap(); void scrollToNode(nodeId); }}
         onBookmark={(line) => { if (busy) { toast("正在续写故事，等这一段写完再切换路线"); return; } void tree.jumpTo(game.repo, worldId, line.nodeId, `从书签“${line.name}”继续`).then(async () => { await refresh(); toast(`已回到书签“${line.name}”`); }); }} />}

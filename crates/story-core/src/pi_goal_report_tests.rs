@@ -406,12 +406,12 @@ fn validated_clock_change_can_commit_with_unresolved_readonly_canon_goal_as_part
     assert_eq!(after["protagonist"]["age"], before["protagonist"]["age"]);
     assert_eq!(after["era"]["mode"], "free");
     // Updating the opening state preserves the original route by copying its
-    // opening node. That storage copy is not a new narrative turn or elapsed
-    // story progress.
+    // opening node with a unique storage seq. That storage copy is not a new
+    // narrative turn or elapsed story progress.
     assert_eq!(f.count("SELECT COUNT(*) FROM nodes WHERE kind='turn'"), 0);
     assert_eq!(
         f.count("SELECT n.seq FROM nodes n JOIN lines l ON l.node_id=n.id WHERE l.id='line'"),
-        0
+        1
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM nodes WHERE id='opening'"), 1);
     assert_eq!(f.count("SELECT COUNT(*) FROM pi_model_requests"), 0);

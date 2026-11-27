@@ -15,12 +15,14 @@ import {
   addReaderBookmark,
   addReaderHighlight,
   getReaderProgress,
+  getWorldNovelProgress,
   listReaderBookmarks,
   listReaderHighlights,
   removeReaderBookmark,
   removeReaderHighlight,
   saveReaderProgress,
   updateReaderHighlight,
+  worldNovelProgressTargetId,
   type HighlightColor,
   type ReaderBookmark,
   type ReaderHighlight,
@@ -50,7 +52,13 @@ import { useShortcuts } from "../components/useShortcuts";
 import { ReadingQuickSheet } from "./play/ReadingQuick";
 import { ReaderAskSheet } from "./reader/ReaderAskSheet";
 import { ReaderResplitSheet } from "./reader/ReaderResplitSheet";
-import { TTS_RATES, TTS_SLEEP_OPTIONS, formatSleepRemaining, useReaderTts } from "./reader/readerTts";
+import {
+  TTS_RATES,
+  TTS_SLEEP_OPTIONS,
+  formatSleepRemaining,
+  useReaderTts,
+  type TtsJumpTarget,
+} from "./reader/readerTts";
 import "./reader.css";
 
 interface UnifiedTocItem {
@@ -58,7 +66,6 @@ interface UnifiedTocItem {
   title: string;
   subtitle?: string;
   chars: number;
-  locked?: boolean;
 }
 
 interface SelectionAnchorRect {
@@ -205,26 +212,54 @@ function measureSelectionAnchor(
   };
 }
 
-function renderHighlightedText(
+function safeCssEscape(id: string): string {
+  return typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(id)
+    : id.replace(/["\\]/g, "\\$&");
+}
+
+/**
+ * Resolves exact highlight ranges within `text` by verifying `selectedText` first,
+ * falling back to `text.indexOf(selectedText)` when offsets shifted, and returning
+ * nothing if `selectedText` does not appear in `text` (never painting stale offsets onto wrong words).
+ */
+export function resolveHighlightSpans(
   text: string,
   highlights: ReaderHighlight[],
-  onPickHighlight: (h: ReaderHighlight) => void,
-): ReactNode {
-  if (!highlights.length) return text;
-  const spans = highlights
+): { start: number; end: number; h: ReaderHighlight }[] {
+  if (!highlights.length || !text) return [];
+  return highlights
     .map((h) => {
-      if (h.charEnd > h.charStart && h.charStart < text.length) {
-        return { start: Math.max(0, h.charStart), end: Math.min(text.length, h.charEnd), h };
+      const sel = h.selectedText ?? "";
+      if (!sel) return null;
+      const clampedStart = Math.max(0, h.charStart);
+      const clampedEnd = Math.min(text.length, h.charEnd);
+      if (clampedEnd > clampedStart && text.slice(clampedStart, clampedEnd) === sel) {
+        return { start: clampedStart, end: clampedEnd, h };
       }
-      const idx = h.selectedText ? text.indexOf(h.selectedText) : -1;
+      const idx = text.indexOf(sel);
       if (idx >= 0) {
-        return { start: idx, end: idx + h.selectedText.length, h };
+        return { start: idx, end: idx + sel.length, h };
+      }
+      const trimmed = sel.trim();
+      if (trimmed) {
+        const tIdx = text.indexOf(trimmed);
+        if (tIdx >= 0) {
+          return { start: tIdx, end: tIdx + trimmed.length, h };
+        }
       }
       return null;
     })
     .filter((x): x is { start: number; end: number; h: ReaderHighlight } => !!x && x.end > x.start)
     .sort((a, b) => a.start - b.start || b.end - a.end);
+}
 
+export function renderHighlightedText(
+  text: string,
+  highlights: ReaderHighlight[],
+  onPickHighlight: (h: ReaderHighlight) => void,
+): ReactNode {
+  const spans = resolveHighlightSpans(text, highlights);
   if (!spans.length) return text;
   const parts: ReactNode[] = [];
   let cursor = 0;
@@ -255,6 +290,261 @@ function renderHighlightedText(
   return parts;
 }
 
+/** Classifies imported book paragraphs so `◇` dividers and `—— 本卷完 ——` colophons render centered. */
+export function classifyBookParagraph(text: string): NovelParagraph & { isColophon?: boolean } {
+  const trimmed = text.trim();
+  if (trimmed === "◇" || /^[◇✦◆]{1,3}$/.test(trimmed) || /^\*\s*\*\s*\*$/.test(trimmed)) {
+    return { kind: "divider", text: "◇" };
+  }
+  const labeledDivider = /^◇\s+(.+?)\s+◇$/.exec(trimmed);
+  if (labeledDivider) {
+    return { kind: "divider", text: labeledDivider[1]!.trim() };
+  }
+  const actionLine = /^◇\s+(.+)$/.exec(trimmed);
+  if (actionLine) {
+    return { kind: "action", text: actionLine[1]!.trim() };
+  }
+  if (/^——\s*(?:全书完(?:\s*·\s*这一世终)?|本卷完|未完待续)\s*——$/.test(trimmed)) {
+    return { kind: "prose", text: trimmed, isColophon: true };
+  }
+  return { kind: "prose", text };
+}
+
+export function collectNovelRouteNodeIds(novelBook: NovelBook | null): Set<string> {
+  const ids = new Set<string>();
+  if (!novelBook) return ids;
+  for (const sec of novelBook.sections) {
+    if (sec.firstNodeId) ids.add(sec.firstNodeId);
+    if (sec.lastNodeId) ids.add(sec.lastNodeId);
+    for (const p of sec.paragraphs) {
+      if (p.nodeId) ids.add(p.nodeId);
+    }
+  }
+  return ids;
+}
+
+export function filterWorldNovelBookmarks(
+  bookmarks: ReaderBookmark[],
+  routeNodeIds: ReadonlySet<string>,
+  sections: { title: string }[],
+): ReaderBookmark[] {
+  return bookmarks.filter((b) => {
+    if (b.nodeId) return routeNodeIds.has(b.nodeId);
+    return sections.some((s) => s.title === b.sectionTitle);
+  });
+}
+
+export function findCurrentSectionBookmark(
+  bookmarks: ReaderBookmark[],
+  targetType: ReaderTargetType,
+  sectionIndex: number,
+  currentSection: { title: string; paragraphs: NovelParagraph[] } | null,
+): ReaderBookmark | null {
+  if (!currentSection) return null;
+  if (targetType === "book") {
+    return bookmarks.find((b) => b.sectionIndex === sectionIndex) ?? null;
+  }
+  return (
+    bookmarks.find((b) => {
+      if (b.nodeId) {
+        return currentSection.paragraphs.some((p) => p.nodeId === b.nodeId);
+      }
+      return b.sectionIndex === sectionIndex && b.sectionTitle === currentSection.title;
+    }) ?? null
+  );
+}
+
+export function filterParagraphHighlights(
+  sectionHighlights: ReaderHighlight[],
+  para: NovelParagraph,
+  pIdx: number,
+  allParagraphs: NovelParagraph[],
+  targetType: ReaderTargetType,
+): ReaderHighlight[] {
+  if (targetType === "book") {
+    return sectionHighlights.filter((h) => h.paragraphIndex === pIdx);
+  }
+  const hasSnippet = (text: string, needle: string) => {
+    if (!needle) return true;
+    if (text.includes(needle)) return true;
+    const t = needle.trim();
+    return t.length > 0 && text.includes(t);
+  };
+  return sectionHighlights.filter((h) => {
+    if (h.nodeId) {
+      if ((para.nodeId ?? null) !== h.nodeId) return false;
+      if (!hasSnippet(para.text, h.selectedText)) return false;
+      if (h.paragraphIndex === pIdx) return true;
+      const exactSlot = allParagraphs[h.paragraphIndex];
+      if (
+        exactSlot &&
+        exactSlot.kind !== "divider" &&
+        (exactSlot.nodeId ?? null) === h.nodeId &&
+        hasSnippet(exactSlot.text, h.selectedText)
+      ) {
+        return false;
+      }
+      const firstIdx = allParagraphs.findIndex(
+        (cand) =>
+          cand.kind !== "divider" &&
+          (cand.nodeId ?? null) === h.nodeId &&
+          hasSnippet(cand.text, h.selectedText),
+      );
+      return firstIdx === pIdx;
+    }
+    if (para.nodeId) return false;
+    if (!hasSnippet(para.text, h.selectedText)) return false;
+    if (h.paragraphIndex === pIdx) return true;
+    const exactSlot = allParagraphs[h.paragraphIndex];
+    if (exactSlot && !exactSlot.nodeId && hasSnippet(exactSlot.text, h.selectedText)) return false;
+    const firstIdx = allParagraphs.findIndex(
+      (cand) => cand.kind !== "divider" && !cand.nodeId && hasSnippet(cand.text, h.selectedText),
+    );
+    return firstIdx === pIdx;
+  });
+}
+
+export function locateNovelNodeTarget(
+  novelBook: NovelBook,
+  nodeId: string,
+  preferredParaIdx?: number,
+  selectedText?: string,
+): { sectionIndex: number; paragraphIndex: number } | null {
+  const sec = novelBook.sections.find(
+    (s) =>
+      s.firstNodeId === nodeId ||
+      s.lastNodeId === nodeId ||
+      s.paragraphs.some((p) => p.nodeId === nodeId),
+  );
+  if (!sec) return null;
+  const cleanSel = selectedText?.trim() ?? "";
+  if (cleanSel) {
+    const byText = sec.paragraphs.findIndex(
+      (p) => p.nodeId === nodeId && p.kind !== "divider" && p.text.includes(cleanSel),
+    );
+    if (byText >= 0) return { sectionIndex: sec.index, paragraphIndex: byText };
+  }
+  if (
+    preferredParaIdx !== undefined &&
+    sec.paragraphs[preferredParaIdx]?.nodeId === nodeId &&
+    sec.paragraphs[preferredParaIdx]?.kind !== "divider"
+  ) {
+    return { sectionIndex: sec.index, paragraphIndex: preferredParaIdx };
+  }
+  const byNode = sec.paragraphs.findIndex((p) => p.nodeId === nodeId && p.kind !== "divider");
+  if (byNode >= 0) return { sectionIndex: sec.index, paragraphIndex: byNode };
+  const anyNode = sec.paragraphs.findIndex((p) => p.nodeId === nodeId);
+  return anyNode >= 0 ? { sectionIndex: sec.index, paragraphIndex: anyNode } : null;
+}
+
+export type PendingScrollAction =
+  | { section: number; kind: "para"; paraIndex: number; flash: boolean }
+  | { section: number; kind: "selector"; selector: string; flash: boolean }
+  | { section: number; kind: "ratio"; ratio: number }
+  | { section: number; kind: "top" };
+
+export interface ScrollableStageLike {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  querySelector<T extends Element = HTMLElement>(selector: string): T | null;
+}
+
+/**
+ * Single-consumption scroll positioning state machine for `ReaderScreen` scroll mode (E06).
+ * Consumes `pendingRef.current` at most once per jump/open and records `settledSectionRef.current`,
+ * ensuring subsequent React re-renders on the same chapter NEVER fall into `scrollTop = 0`.
+ */
+export function applyPendingScrollAction(params: {
+  scroller: ScrollableStageLike;
+  secIdx: number;
+  pendingRef: { current: PendingScrollAction | null };
+  settledSectionRef: { current: number | null };
+  lastVisibleParaRef: { current: number };
+  lastScrollTopRef: { current: number };
+  onScrollRatio: (ratio: number) => void;
+}): boolean {
+  const {
+    scroller,
+    secIdx,
+    pendingRef,
+    settledSectionRef,
+    lastVisibleParaRef,
+    lastScrollTopRef,
+    onScrollRatio,
+  } = params;
+  const pending = pendingRef.current;
+
+  if (pending && pending.section === secIdx) {
+    pendingRef.current = null;
+    settledSectionRef.current = secIdx;
+
+    if (pending.kind === "para") {
+      const el = scroller.querySelector<HTMLElement>(`[data-para-index="${pending.paraIndex}"]`);
+      if (el) {
+        el.scrollIntoView?.({ block: pending.flash ? "center" : "start" });
+        if (pending.flash && el.classList) {
+          el.classList.add("toc-flash");
+          setTimeout(() => el.classList.remove("toc-flash"), 1600);
+        }
+      }
+      lastVisibleParaRef.current = pending.paraIndex;
+      lastScrollTopRef.current = scroller.scrollTop;
+      if (scroller.scrollHeight > scroller.clientHeight) {
+        const max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+        onScrollRatio(Math.min(1, Math.max(0, scroller.scrollTop / max)));
+      }
+      return true;
+    }
+
+    if (pending.kind === "selector") {
+      const el = scroller.querySelector<HTMLElement>(pending.selector);
+      if (el) {
+        el.scrollIntoView?.({ block: pending.flash ? "center" : "start" });
+        if (pending.flash && el.classList) {
+          el.classList.add("toc-flash");
+          setTimeout(() => el.classList.remove("toc-flash"), 1600);
+        }
+        const rawP =
+          el.dataset?.paraIndex ?? el.closest?.<HTMLElement>("[data-para-index]")?.dataset?.paraIndex;
+        if (rawP !== undefined && Number.isFinite(Number(rawP))) {
+          lastVisibleParaRef.current = Math.max(0, Math.trunc(Number(rawP)));
+        }
+      }
+      lastScrollTopRef.current = scroller.scrollTop;
+      if (scroller.scrollHeight > scroller.clientHeight) {
+        const max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+        onScrollRatio(Math.min(1, Math.max(0, scroller.scrollTop / max)));
+      }
+      return true;
+    }
+
+    if (pending.kind === "ratio") {
+      const clampedRatio = Math.min(1, Math.max(0, pending.ratio));
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTop = Math.round(maxScroll * clampedRatio);
+      lastScrollTopRef.current = scroller.scrollTop;
+      onScrollRatio(clampedRatio);
+      return true;
+    }
+
+    scroller.scrollTop = 0;
+    lastScrollTopRef.current = 0;
+    onScrollRatio(0);
+    return true;
+  }
+
+  if (settledSectionRef.current !== secIdx) {
+    settledSectionRef.current = secIdx;
+    scroller.scrollTop = 0;
+    lastScrollTopRef.current = 0;
+    onScrollRatio(0);
+    return true;
+  }
+
+  return false;
+}
+
 export default function ReaderScreen({
   bookId,
   worldId,
@@ -262,9 +552,8 @@ export default function ReaderScreen({
   initialSection,
   initialParagraph,
   initialNodeId,
-  through: propThrough,
 }: ReaderRouteProps & { initialParagraph?: number }) {
-  const { game, pop, push, reading, setReading, toast, ask } = useApp();
+  const { game, pop, push, replace, reading, setReading, toast } = useApp();
   const targetType: ReaderTargetType = bookId ? "book" : "world_novel";
   const targetId = bookId ?? worldId ?? "";
 
@@ -272,6 +561,9 @@ export default function ReaderScreen({
   const [bookFormat, setBookFormat] = useState("");
   const [toc, setToc] = useState<UnifiedTocItem[]>([]);
   const [novelBook, setNovelBook] = useState<NovelBook | null>(null);
+  const [activeLineId, setActiveLineId] = useState<string | undefined>(lineId);
+  const activeLineIdRef = useRef<string | undefined>(lineId);
+  activeLineIdRef.current = activeLineId;
   const [sectionIndex, setSectionIndex] = useState(initialSection ?? 0);
   const [jumpNonce, setJumpNonce] = useState(0);
   const [entryPage, setEntryPage] = useState<number | "last">(0);
@@ -279,18 +571,16 @@ export default function ReaderScreen({
     initialParagraph !== undefined
       ? `[data-para-index="${initialParagraph}"]`
       : initialNodeId
-        ? `[data-node-id="${CSS.escape(initialNodeId)}"]`
+        ? `[data-node-id="${safeCssEscape(initialNodeId)}"]`
         : null,
   );
-  const [pendingScrollRatio, setPendingScrollRatio] = useState<number | null>(null);
   const [pendingFlashPara, setPendingFlashPara] = useState<number | null>(
     initialParagraph !== undefined ? initialParagraph : null,
   );
+  const [ttsJumpTarget, setTtsJumpTarget] = useState<TtsJumpTarget | null>(null);
   const [bookSection, setBookSection] = useState<BookSectionContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [spoilerCeiling, setSpoilerCeiling] = useState<number | null>(propThrough ?? null);
-  const [spoilerUnlocked, setSpoilerUnlocked] = useState(false);
 
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
   const [highlights, setHighlights] = useState<ReaderHighlight[]>([]);
@@ -351,7 +641,8 @@ export default function ReaderScreen({
   const lastReportedPageRef = useRef<{ section: number; page: number } | null>(null);
   const lastVisibleParaRef = useRef(initialParagraph ?? 0);
   const prevPageModeRef = useRef(reading.pageMode);
-  const modeSwitchRestoreRef = useRef(false);
+  const pendingScrollActionRef = useRef<PendingScrollAction | null>(null);
+  const settledScrollSectionRef = useRef<number | null>(null);
   const programmaticScrollUntilRef = useRef(0);
   const lastScrollTopRef = useRef(0);
   const mouse = useMouse();
@@ -359,6 +650,8 @@ export default function ReaderScreen({
   readingRef.current = reading;
   const tocRef = useRef(toc);
   tocRef.current = toc;
+  const sectionIndexRef = useRef(sectionIndex);
+  sectionIndexRef.current = sectionIndex;
 
   // Track document visibility, app resume & window blur/focus for volume-key release and accurate reading stats
   useEffect(() => {
@@ -489,20 +782,13 @@ export default function ReaderScreen({
   useEffect(() => {
     let live = true;
     sectionCache.current.clear();
+    settledScrollSectionRef.current = null;
+    pendingScrollActionRef.current = null;
     setLoading(true);
     setError("");
     void (async () => {
       try {
         if (bookId) {
-          let effectiveThrough = propThrough ?? null;
-          if (effectiveThrough == null && worldId) {
-            const w = await game.repo.getWorld(worldId);
-            const line = w?.currentLineId ? await game.repo.getLine(w.currentLineId) : null;
-            const st = line ? await game.repo.getState(line.nodeId).catch(() => null) : null;
-            if (st?.source?.bookId === bookId && st.source.through != null) {
-              effectiveThrough = st.source.through;
-            }
-          }
           const [header, fastSecs, saved] = await Promise.all([
             getBookHeader(game.repo, bookId),
             listBookSectionsFast(game.repo, bookId),
@@ -516,18 +802,12 @@ export default function ReaderScreen({
             setLoading(false);
             return;
           }
-          const maxInitial =
-            effectiveThrough != null ? Math.min(fastSecs.length - 1, effectiveThrough) : fastSecs.length - 1;
           const startSec = Math.max(
             0,
-            Math.min(
-              fastSecs.length - 1,
-              initialSection ?? Math.min(saved?.sectionIndex ?? 0, maxInitial),
-            ),
+            Math.min(fastSecs.length - 1, initialSection ?? saved?.sectionIndex ?? 0),
           );
           const firstChapter = await fetchSectionCached(startSec);
           if (!live) return;
-          setSpoilerCeiling(effectiveThrough);
           setBookTitle(header.title);
           setBookFormat(header.format.toLowerCase());
           setToc(
@@ -535,7 +815,6 @@ export default function ReaderScreen({
               index: item.section,
               title: item.title || `第 ${item.section + 1} 节`,
               chars: firstChapter && item.section === startSec ? firstChapter.text.length : 0,
-              locked: effectiveThrough != null && item.section > effectiveThrough,
             })),
           );
           setSectionIndex(startSec);
@@ -544,11 +823,24 @@ export default function ReaderScreen({
             setEntryPage(0);
             setEntrySelector(`[data-para-index="${initialParagraph}"]`);
             setPendingFlashPara(initialParagraph);
-            setPendingScrollRatio(null);
+            pendingScrollActionRef.current = {
+              section: startSec,
+              kind: "para",
+              paraIndex: initialParagraph,
+              flash: true,
+            };
             setJumpNonce((n) => n + 1);
           } else if (saved && initialSection === undefined && saved.sectionIndex === startSec) {
             setEntryPage(saved.pageIndex);
-            setPendingScrollRatio(saved.scrollRatio);
+            setScrollRatio(saved.scrollRatio);
+            pendingScrollActionRef.current = {
+              section: startSec,
+              kind: "ratio",
+              ratio: saved.scrollRatio,
+            };
+          } else {
+            setScrollRatio(0);
+            pendingScrollActionRef.current = { section: startSec, kind: "top" };
           }
           setLoading(false);
 
@@ -561,7 +853,6 @@ export default function ReaderScreen({
                   index: item.section,
                   title: item.title || `第 ${item.section + 1} 节`,
                   chars: item.chars,
-                  locked: effectiveThrough != null && item.section > effectiveThrough,
                 })),
               );
             }),
@@ -569,23 +860,30 @@ export default function ReaderScreen({
           ]).catch(() => {});
           return;
         } else if (worldId) {
-          const [built, saved] = await Promise.all([
-            buildNovelBook(game.repo, worldId, {
-              lineId,
-              includePreface: true,
-              includeChronicle: true,
-              includeActions: false,
-            }),
-            initialSection === undefined && initialParagraph === undefined && !initialNodeId
-              ? getReaderProgress(game.repo, "world_novel", worldId)
-              : Promise.resolve(null),
-          ]);
+          const built = await buildNovelBook(game.repo, worldId, {
+            lineId,
+            includePreface: true,
+            includeChronicle: true,
+            includeActions: false,
+          });
           if (!live) return;
           if (!built || !built.sections.length) {
             setError("这部故事还没有可阅读的章节。");
             setLoading(false);
             return;
           }
+          const builtRouteNodeIds = collectNovelRouteNodeIds(built);
+          const saved =
+            initialSection === undefined && initialParagraph === undefined && !initialNodeId
+              ? await getWorldNovelProgress(game.repo, worldId, built.lineId, {
+                  routeNodeIds: builtRouteNodeIds,
+                  sections: built.sections,
+                })
+              : null;
+          if (!live) return;
+
+          setActiveLineId(built.lineId);
+          activeLineIdRef.current = built.lineId;
           setNovelBook(built);
           setBookTitle(built.title);
           setBookFormat("novel");
@@ -597,30 +895,64 @@ export default function ReaderScreen({
               chars: s.chars,
             })),
           );
-          let startSec = initialSection ?? saved?.sectionIndex ?? 0;
+
           if (initialNodeId) {
-            const hitSec = built.sections.findIndex(
-              (s) =>
-                s.firstNodeId === initialNodeId ||
-                s.lastNodeId === initialNodeId ||
-                s.paragraphs.some((p) => p.nodeId === initialNodeId),
-            );
-            if (hitSec >= 0) startSec = hitSec;
-          }
-          startSec = Math.max(0, Math.min(built.sections.length - 1, startSec));
-          setSectionIndex(startSec);
-          if (initialParagraph !== undefined) {
+            const located = locateNovelNodeTarget(built, initialNodeId, initialParagraph);
+            if (located) {
+              setSectionIndex(located.sectionIndex);
+              setEntryPage(0);
+              setEntrySelector(`[data-para-index="${located.paragraphIndex}"]`);
+              setPendingFlashPara(located.paragraphIndex);
+              lastVisibleParaRef.current = located.paragraphIndex;
+              pendingScrollActionRef.current = {
+                section: located.sectionIndex,
+                kind: "para",
+                paraIndex: located.paragraphIndex,
+                flash: true,
+              };
+              setJumpNonce((n) => n + 1);
+            } else {
+              setSectionIndex(0);
+              setEntryPage(0);
+              setEntrySelector(null);
+              setPendingFlashPara(null);
+              setScrollRatio(0);
+              pendingScrollActionRef.current = { section: 0, kind: "top" };
+              toast("这段原文所在回合已被删改，无法定位到原处");
+            }
+          } else if (initialParagraph !== undefined) {
+            const startSec = Math.max(0, Math.min(built.sections.length - 1, initialSection ?? 0));
+            setSectionIndex(startSec);
             setEntryPage(0);
             setEntrySelector(`[data-para-index="${initialParagraph}"]`);
             setPendingFlashPara(initialParagraph);
-            setPendingScrollRatio(null);
+            lastVisibleParaRef.current = initialParagraph;
+            pendingScrollActionRef.current = {
+              section: startSec,
+              kind: "para",
+              paraIndex: initialParagraph,
+              flash: true,
+            };
             setJumpNonce((n) => n + 1);
-          } else if (initialNodeId) {
-            setEntrySelector(`[data-node-id="${CSS.escape(initialNodeId)}"]`);
-            setJumpNonce((n) => n + 1);
-          } else if (saved && initialSection === undefined && saved.sectionIndex === startSec) {
+          } else if (saved && initialSection === undefined) {
+            const nodeLoc = saved.nodeId ? locateNovelNodeTarget(built, saved.nodeId) : null;
+            const resolvedSec = Math.max(
+              0,
+              Math.min(built.sections.length - 1, nodeLoc ? nodeLoc.sectionIndex : saved.sectionIndex),
+            );
+            setSectionIndex(resolvedSec);
             setEntryPage(saved.pageIndex);
-            setPendingScrollRatio(saved.scrollRatio);
+            setScrollRatio(saved.scrollRatio);
+            pendingScrollActionRef.current = {
+              section: resolvedSec,
+              kind: "ratio",
+              ratio: saved.scrollRatio,
+            };
+          } else {
+            const startSec = Math.max(0, Math.min(built.sections.length - 1, initialSection ?? 0));
+            setSectionIndex(startSec);
+            setScrollRatio(0);
+            pendingScrollActionRef.current = { section: startSec, kind: "top" };
           }
           await refreshAnnotations();
         }
@@ -641,8 +973,8 @@ export default function ReaderScreen({
     initialParagraph,
     initialSection,
     lineId,
-    propThrough,
     refreshAnnotations,
+    toast,
     worldId,
   ]);
 
@@ -653,14 +985,14 @@ export default function ReaderScreen({
       if (!live) return;
       setBookSection(sec);
       const nextIdx = sectionIndex + 1;
-      if (nextIdx < toc.length && (spoilerUnlocked || spoilerCeiling == null || nextIdx <= spoilerCeiling)) {
+      if (nextIdx < toc.length) {
         void fetchSectionCached(nextIdx).catch(() => {});
       }
     });
     return () => {
       live = false;
     };
-  }, [bookId, fetchSectionCached, sectionIndex, spoilerCeiling, spoilerUnlocked, toc.length]);
+  }, [bookId, fetchSectionCached, sectionIndex, toc.length]);
 
   const reloadAfterResplit = useCallback(async () => {
     if (!bookId) return;
@@ -680,7 +1012,6 @@ export default function ReaderScreen({
         index: item.section,
         title: item.title || `第 ${item.section + 1} 节`,
         chars: item.chars,
-        locked: spoilerCeiling != null && item.section > spoilerCeiling,
       })),
     );
     const hasSavedInSec = !!prog && prog.sectionIndex === clampedSec;
@@ -705,15 +1036,21 @@ export default function ReaderScreen({
     setSectionIndex(clampedSec);
     setEntryPage(0);
     lastVisibleParaRef.current = paraIdx;
+    settledScrollSectionRef.current = null;
     if (fresh && fresh.paragraphs.length > 0) {
-      if (paraIdx === 0) modeSwitchRestoreRef.current = true;
       setEntrySelector(`[data-para-index="${paraIdx}"]`);
+      pendingScrollActionRef.current =
+        paraIdx > 0
+          ? { section: clampedSec, kind: "para", paraIndex: paraIdx, flash: false }
+          : { section: clampedSec, kind: "ratio", ratio: hasSavedInSec ? prog.scrollRatio : 0 };
     } else {
       setEntrySelector(null);
+      pendingScrollActionRef.current = { section: clampedSec, kind: "top" };
     }
-    setPendingScrollRatio(hasSavedInSec ? prog.scrollRatio : 0);
     setJumpNonce((n) => n + 1);
-  }, [bookId, fetchSectionCached, game.repo, refreshAnnotations, sectionIndex, spoilerCeiling]);
+  }, [bookId, fetchSectionCached, game.repo, refreshAnnotations, sectionIndex]);
+
+  const routeNodeIds = useMemo(() => collectNovelRouteNodeIds(novelBook), [novelBook]);
 
   const currentSection = useMemo(() => {
     if (bookId) {
@@ -723,7 +1060,7 @@ export default function ReaderScreen({
         title: bookSection.title || `第 ${bookSection.section + 1} 节`,
         subtitle: bookSection.page ? `第 ${bookSection.page} 页` : undefined,
         seal: undefined as string | undefined,
-        paragraphs: bookSection.paragraphs.map<NovelParagraph>((text) => ({ kind: "prose", text })),
+        paragraphs: bookSection.paragraphs.map(classifyBookParagraph),
         isLast: sectionIndex === toc.length - 1,
         statusLine: null as string | null,
       };
@@ -735,20 +1072,42 @@ export default function ReaderScreen({
       title: sec.title,
       subtitle: sec.subtitle,
       seal: sec.index === 0 ? novelBook.seal.slice(0, 2) : undefined,
-      paragraphs: sec.paragraphs,
+      paragraphs: sec.paragraphs as (NovelParagraph & { isColophon?: boolean })[],
       isLast: sectionIndex === novelBook.sections.length - 1,
       statusLine: sectionIndex === novelBook.sections.length - 1 ? novelBook.statusLine : null,
     };
   }, [bookId, bookSection, novelBook, sectionIndex, toc.length]);
 
-  const sectionHighlights = useMemo(
-    () => highlights.filter((h) => h.sectionIndex === sectionIndex),
-    [highlights, sectionIndex],
-  );
+  const visibleHighlights = useMemo(() => {
+    if (targetType !== "world_novel") return highlights;
+    return highlights.filter((h) => !h.nodeId || routeNodeIds.has(h.nodeId));
+  }, [highlights, routeNodeIds, targetType]);
+
+  const sectionHighlights = useMemo(() => {
+    if (targetType === "book") {
+      return highlights.filter((h) => h.sectionIndex === sectionIndex);
+    }
+    if (!currentSection) return [];
+    const secNodeIds = new Set(
+      currentSection.paragraphs.map((p) => p.nodeId).filter((id): id is string => !!id),
+    );
+    return visibleHighlights.filter((h) => {
+      if (h.nodeId) return secNodeIds.has(h.nodeId);
+      return (
+        h.sectionIndex === sectionIndex &&
+        (!h.sectionTitle || h.sectionTitle === currentSection.title)
+      );
+    });
+  }, [currentSection, highlights, sectionIndex, targetType, visibleHighlights]);
+
+  const visibleBookmarks = useMemo(() => {
+    if (targetType !== "world_novel") return bookmarks;
+    return filterWorldNovelBookmarks(bookmarks, routeNodeIds, novelBook?.sections ?? []);
+  }, [bookmarks, novelBook, routeNodeIds, targetType]);
 
   const sectionBookmark = useMemo(
-    () => bookmarks.find((b) => b.sectionIndex === sectionIndex) ?? null,
-    [bookmarks, sectionIndex],
+    () => findCurrentSectionBookmark(visibleBookmarks, targetType, sectionIndex, currentSection),
+    [currentSection, sectionIndex, targetType, visibleBookmarks],
   );
 
   const intraProgressRatio =
@@ -781,13 +1140,9 @@ export default function ReaderScreen({
   const nextChapterTailHint = useMemo(() => {
     const nextItem = toc[sectionIndex + 1];
     if (!nextItem) return null;
-    const locked = !spoilerUnlocked && spoilerCeiling != null && nextItem.index > spoilerCeiling;
-    if (locked) {
-      return `下一节：第 ${nextItem.index + 1} 节（防剧透保护中）`;
-    }
     const estMins = Math.max(1, Math.round((nextItem.chars || CHARS_PER_MINUTE) / CHARS_PER_MINUTE));
     return `下一节：〈${nextItem.title}〉（约 ${estMins} 分钟）`;
-  }, [sectionIndex, spoilerCeiling, spoilerUnlocked, toc]);
+  }, [sectionIndex, toc]);
 
   const bookProgressPct = useMemo(
     () => computeBookProgressPct(toc, sectionIndex, intraProgressRatio),
@@ -833,14 +1188,19 @@ export default function ReaderScreen({
     if (prevPageModeRef.current === reading.pageMode) return;
     prevPageModeRef.current = reading.pageMode;
     const pIdx = lastVisibleParaRef.current;
-    modeSwitchRestoreRef.current = true;
     setEntrySelector(`[data-para-index="${pIdx}"]`);
     if (reading.pageMode === "paged") {
+      settledScrollSectionRef.current = null;
       setJumpNonce((n) => n + 1);
     } else {
-      setPendingScrollRatio(scrollRatio);
+      settledScrollSectionRef.current = null;
+      pendingScrollActionRef.current =
+        pIdx > 0
+          ? { section: sectionIndex, kind: "para", paraIndex: pIdx, flash: false }
+          : { section: sectionIndex, kind: "ratio", ratio: scrollRatio };
+      setJumpNonce((n) => n + 1);
     }
-  }, [reading.pageMode, scrollRatio]);
+  }, [reading.pageMode, scrollRatio, sectionIndex]);
 
   // Dismiss selection popover on outside pointerdown
   useEffect(() => {
@@ -880,6 +1240,17 @@ export default function ReaderScreen({
     return tocRef.current[nextSection]?.title ?? "";
   }, []);
 
+  const resolveSectionNodeId = useCallback((nextSection: number, preferredParaIdx?: number): string | null => {
+    const cur = currentSectionRef.current;
+    if (cur && cur.index === nextSection) {
+      const p =
+        (preferredParaIdx !== undefined ? cur.paragraphs[preferredParaIdx] : undefined) ??
+        cur.paragraphs.find((item) => item.nodeId);
+      if (p?.nodeId) return p.nodeId;
+    }
+    return null;
+  }, []);
+
   const scheduleSaveProgress = useCallback(
     (
       nextSection: number,
@@ -889,14 +1260,22 @@ export default function ReaderScreen({
       preferredParaIdx?: number,
     ) => {
       if (!targetId) return;
+      const effectiveTargetId =
+        targetType === "world_novel"
+          ? worldNovelProgressTargetId(targetId, activeLineIdRef.current)
+          : targetId;
+      const effectiveNodeId =
+        targetType === "world_novel"
+          ? nodeId ?? resolveSectionNodeId(nextSection, preferredParaIdx)
+          : null;
       const payload: Parameters<typeof saveReaderProgress>[1] = {
         targetType,
-        targetId,
+        targetId: effectiveTargetId,
         sectionIndex: nextSection,
         pageIndex,
         scrollRatio: ratio,
         anchorText: resolveAnchorText(nextSection, preferredParaIdx),
-        nodeId,
+        nodeId: effectiveNodeId,
       };
       pendingProgressRef.current = payload;
       if (progressTimer.current) clearTimeout(progressTimer.current);
@@ -906,10 +1285,18 @@ export default function ReaderScreen({
         if (!latest) return;
         pendingProgressRef.current = null;
         const freshAnchor = resolveAnchorText(latest.sectionIndex, preferredParaIdx) || latest.anchorText;
-        void saveReaderProgress(game.repo, { ...latest, anchorText: freshAnchor }).catch(() => {});
+        const freshNodeId =
+          latest.targetType === "world_novel"
+            ? latest.nodeId ?? resolveSectionNodeId(latest.sectionIndex, preferredParaIdx)
+            : null;
+        void saveReaderProgress(game.repo, {
+          ...latest,
+          anchorText: freshAnchor,
+          nodeId: freshNodeId,
+        }).catch(() => {});
       }, 360);
     },
-    [game.repo, resolveAnchorText, targetId, targetType],
+    [game.repo, resolveAnchorText, resolveSectionNodeId, targetId, targetType],
   );
 
   useEffect(
@@ -945,69 +1332,50 @@ export default function ReaderScreen({
     }, 8000);
   }, [currentSection?.title, pageStats.page, scrollRatio, sectionIndex]);
 
-  // Restore scroll position or flash jumped paragraph in scroll mode
+  // Single-consumption ref-driven scroll positioning in scroll mode (prevents next-frame reset to 0)
   useEffect(() => {
     if (reading.pageMode !== "scroll" || !currentSection) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
-    programmaticScrollUntilRef.current = performance.now() + 280;
-    requestAnimationFrame(() => {
-      programmaticScrollUntilRef.current = performance.now() + 280;
-      if (pendingFlashPara !== null) {
-        const el = scroller.querySelector<HTMLElement>(`[data-para-index="${pendingFlashPara}"]`);
-        if (el) {
-          el.scrollIntoView({ block: "center" });
-          el.classList.add("toc-flash");
-          setTimeout(() => el.classList.remove("toc-flash"), 1600);
-        }
-        lastScrollTopRef.current = scroller.scrollTop;
-        setPendingFlashPara(null);
-        return;
-      }
-      if (entrySelector) {
-        const isModeRestore = modeSwitchRestoreRef.current;
-        modeSwitchRestoreRef.current = false;
-        const el = scroller.querySelector<HTMLElement>(entrySelector);
-        if (el) {
-          el.scrollIntoView({ block: isModeRestore ? "start" : "center" });
-          if (!isModeRestore) {
-            el.classList.add("toc-flash");
-            setTimeout(() => el.classList.remove("toc-flash"), 1600);
-          }
-        }
-        lastScrollTopRef.current = scroller.scrollTop;
-        setEntrySelector(null);
-        return;
-      }
-      if (pendingScrollRatio !== null && pendingScrollRatio > 0) {
-        const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-        scroller.scrollTop = Math.round(maxScroll * pendingScrollRatio);
-        lastScrollTopRef.current = scroller.scrollTop;
-        setPendingScrollRatio(null);
-      } else {
-        scroller.scrollTop = 0;
-        lastScrollTopRef.current = 0;
-        setScrollRatio(0);
-      }
+    const secIdx = currentSection.index;
+    const action = pendingScrollActionRef.current;
+    const needsSectionReset = settledScrollSectionRef.current !== secIdx;
+    if ((!action || action.section !== secIdx) && !needsSectionReset) {
+      return;
+    }
+
+    programmaticScrollUntilRef.current = performance.now() + 320;
+    const raf = requestAnimationFrame(() => {
+      const liveScroller = scrollerRef.current;
+      if (!liveScroller) return;
+      programmaticScrollUntilRef.current = performance.now() + 320;
+      applyPendingScrollAction({
+        scroller: liveScroller,
+        secIdx,
+        pendingRef: pendingScrollActionRef,
+        settledSectionRef: settledScrollSectionRef,
+        lastVisibleParaRef,
+        lastScrollTopRef,
+        onScrollRatio: setScrollRatio,
+      });
     });
-  }, [currentSection, entrySelector, pendingFlashPara, pendingScrollRatio, reading.pageMode]);
+    return () => cancelAnimationFrame(raf);
+  }, [currentSection, jumpNonce, reading.pageMode]);
 
   const goSection = useCallback(
     async (
       targetSec: number,
-      opts?: { page?: number | "last"; paraIndex?: number; selector?: string; scrollRatio?: number; recordUndo?: boolean },
+      opts?: {
+        page?: number | "last";
+        paraIndex?: number;
+        selector?: string;
+        scrollRatio?: number;
+        recordUndo?: boolean;
+        fromTtsSectionEnd?: boolean;
+      },
     ): Promise<boolean> => {
       if (!toc.length || targetSec < 0 || targetSec >= toc.length) return false;
       const clamped = Math.max(0, Math.min(toc.length - 1, targetSec));
-      if (bookId && spoilerCeiling != null && clamped > spoilerCeiling && !spoilerUnlocked) {
-        const ok = await ask({
-          title: "超出本局防剧透范围",
-          message: `本局当前设定的参考范围截至第 ${spoilerCeiling + 1} 节。提前翻阅第 ${clamped + 1} 节可能会看到后续原著剧情，确定要先看吗？`,
-          confirm: "继续翻阅",
-        });
-        if (!ok) return false;
-        setSpoilerUnlocked(true);
-      }
       if (opts?.recordUndo && (clamped !== sectionIndex || opts.paraIndex !== undefined)) {
         armJumpUndo();
         setHudHidden(true);
@@ -1017,14 +1385,56 @@ export default function ReaderScreen({
       }
       setSelection(null);
       setEntryPage(opts?.page ?? 0);
-      setEntrySelector(
+      const nextSelector =
         opts?.selector ??
-          (opts?.paraIndex !== undefined ? `[data-para-index="${opts.paraIndex}"]` : null),
-      );
+        (opts?.paraIndex !== undefined ? `[data-para-index="${opts.paraIndex}"]` : null);
+      setEntrySelector(nextSelector);
       lastVisibleParaRef.current = opts?.paraIndex ?? 0;
       if (opts?.paraIndex !== undefined) setPendingFlashPara(opts.paraIndex);
-      setPendingScrollRatio(opts?.scrollRatio ?? null);
+
+      if (opts?.paraIndex !== undefined) {
+        pendingScrollActionRef.current = {
+          section: clamped,
+          kind: "para",
+          paraIndex: opts.paraIndex,
+          flash: true,
+        };
+      } else if (opts?.selector) {
+        pendingScrollActionRef.current = {
+          section: clamped,
+          kind: "selector",
+          selector: opts.selector,
+          flash: true,
+        };
+      } else if (opts?.scrollRatio !== undefined) {
+        pendingScrollActionRef.current = {
+          section: clamped,
+          kind: "ratio",
+          ratio: opts.scrollRatio,
+        };
+      } else if (opts?.page === "last") {
+        pendingScrollActionRef.current = {
+          section: clamped,
+          kind: "ratio",
+          ratio: 1,
+        };
+      } else {
+        pendingScrollActionRef.current = {
+          section: clamped,
+          kind: "top",
+        };
+      }
+
+      if (!opts?.fromTtsSectionEnd) {
+        setTtsJumpTarget((prev) => ({
+          nonce: (prev?.nonce ?? 0) + 1,
+          sectionIndex: clamped,
+          paragraphIndex: opts?.paraIndex ?? 0,
+        }));
+      }
+
       setJumpNonce((n) => n + 1);
+      sectionIndexRef.current = clamped;
       setSectionIndex(clamped);
       scheduleSaveProgress(
         clamped,
@@ -1035,7 +1445,7 @@ export default function ReaderScreen({
       );
       return true;
     },
-    [armJumpUndo, ask, bookId, scheduleSaveProgress, sectionIndex, spoilerCeiling, spoilerUnlocked, toc.length],
+    [armJumpUndo, scheduleSaveProgress, sectionIndex, toc.length],
   );
 
   // Offline dual-engine TTS audiobook controller
@@ -1056,14 +1466,13 @@ export default function ReaderScreen({
     platform: game.platform,
     paragraphs: currentSection?.paragraphs ?? [],
     sectionIndex,
+    sectionReady: !!currentSection && currentSection.index === sectionIndex,
+    jumpTarget: ttsJumpTarget,
     onParagraphFocus: focusSpokenParagraph,
     onSectionEnd: async () => {
-      if (sectionIndex < toc.length - 1) {
-        if (bookId && !spoilerUnlocked && spoilerCeiling != null && sectionIndex + 1 > spoilerCeiling) {
-          toast(`已读至防剧透上限（第 ${spoilerCeiling + 1} 节），已自动停播`);
-          return false;
-        }
-        return await goSection(sectionIndex + 1, { page: 0 });
+      const cur = sectionIndexRef.current;
+      if (cur < tocRef.current.length - 1) {
+        return await goSection(cur + 1, { page: 0, fromTtsSectionEnd: true });
       }
       toast("整本书已朗读完毕");
       return false;
@@ -1208,12 +1617,6 @@ export default function ReaderScreen({
               toast("已自动读完全书");
               return;
             }
-            if (bookId && !spoilerUnlocked && spoilerCeiling != null && sectionIndex + 1 > spoilerCeiling) {
-              setAutoRead((prev) => ({ ...prev, paused: true }));
-              setAutoReadProgress(null);
-              toast(`已读至防剧透范围上限（第 ${spoilerCeiling + 1} 节），自动阅读已暂停`);
-              return;
-            }
             void goSection(sectionIndex + 1, { page: 0 });
             return;
           }
@@ -1228,7 +1631,7 @@ export default function ReaderScreen({
       };
     }
 
-    // Smooth rAF auto-scroll in scroll mode with minimum chapter dwell time & spoilerCeiling guard
+    // Smooth rAF auto-scroll in scroll mode with minimum chapter dwell time
     const pxPerSec = AUTO_READ_SCROLL_PX_PER_SEC[autoRead.speed - 1];
     const minDwellMs = Math.max(2600, Math.round(AUTO_READ_PAGE_MS[autoRead.speed - 1] * 0.55));
     const chapterEnteredAt = performance.now();
@@ -1247,11 +1650,6 @@ export default function ReaderScreen({
             if (sectionIndex >= toc.length - 1) {
               setAutoRead((prev) => ({ ...prev, active: false, paused: false }));
               toast("已自动读完全书");
-              return;
-            }
-            if (bookId && !spoilerUnlocked && spoilerCeiling != null && sectionIndex + 1 > spoilerCeiling) {
-              setAutoRead((prev) => ({ ...prev, paused: true }));
-              toast(`已读至防剧透范围上限（第 ${spoilerCeiling + 1} 节），自动阅读已暂停`);
               return;
             }
             advancing = true;
@@ -1274,15 +1672,12 @@ export default function ReaderScreen({
     autoRead.active,
     autoRead.paused,
     autoRead.speed,
-    bookId,
     currentSection,
     docVisible,
     goSection,
     hasOverlayOpen,
     reading.pageMode,
     sectionIndex,
-    spoilerCeiling,
-    spoilerUnlocked,
     toast,
     toc.length,
   ]);
@@ -1523,10 +1918,7 @@ export default function ReaderScreen({
       void (async () => {
         try {
           if (bookId) {
-            const hits = await searchBookFullText(game.repo, bookId, q, {
-              through: !spoilerUnlocked && spoilerCeiling != null ? spoilerCeiling : null,
-              limit: 80,
-            });
+            const hits = await searchBookFullText(game.repo, bookId, q, { limit: 80 });
             if (!live) return;
             setSearchHits(
               hits.map((h) => ({
@@ -1568,17 +1960,14 @@ export default function ReaderScreen({
       live = false;
       clearTimeout(timer);
     };
-  }, [bookId, drawerTab, game.repo, novelBook, searchQuery, spoilerCeiling, spoilerUnlocked]);
+  }, [bookId, drawerTab, game.repo, novelBook, searchQuery]);
 
   const filteredToc = useMemo(
     () =>
-      toc.filter((item) => {
-        if (!spoilerUnlocked && spoilerCeiling != null && item.index > spoilerCeiling && tocFilter.trim()) {
-          return false;
-        }
-        return localFind(tocFilter, item.title, item.subtitle ?? "", String(item.index + 1));
-      }),
-    [spoilerCeiling, spoilerUnlocked, toc, tocFilter],
+      toc.filter((item) =>
+        localFind(tocFilter, item.title, item.subtitle ?? "", String(item.index + 1)),
+      ),
+    [toc, tocFilter],
   );
 
   const proseBody = currentSection && (
@@ -1601,14 +1990,23 @@ export default function ReaderScreen({
             </div>
           );
         }
-        const paraHighlights = sectionHighlights.filter((h) => h.paragraphIndex === pIdx);
+        const paraHighlights = filterParagraphHighlights(
+          sectionHighlights,
+          para,
+          pIdx,
+          currentSection.paragraphs,
+          targetType,
+        );
         const notesWithText = paraHighlights.filter((h) => h.note.trim());
         const isSpeaking = tts.status !== "idle" && tts.speakingIndex === pIdx;
         const isSelected = selection?.paragraphIndex === pIdx;
+        const paraClassName = para.isColophon
+          ? `reader-colophon${isSpeaking ? " is-speaking" : ""}${isSelected ? " is-selected" : ""}`
+          : `reader-para is-${para.kind}${isSpeaking ? " is-speaking" : ""}${isSelected ? " is-selected" : ""}`;
         return (
           <Fragment key={pIdx}>
             <p
-              className={`reader-para is-${para.kind}${isSpeaking ? " is-speaking" : ""}${isSelected ? " is-selected" : ""}`}
+              className={paraClassName}
               data-para-index={pIdx}
               data-node-id={para.nodeId ?? undefined}
               onContextMenu={(e) => {
@@ -2026,7 +2424,7 @@ export default function ReaderScreen({
             }}
             onScroll={() => {
               const el = scrollerRef.current;
-              if (!el) return;
+              if (!el || pendingScrollActionRef.current) return;
               const max = Math.max(1, el.scrollHeight - el.clientHeight);
               const ratio = Math.min(1, Math.max(0, el.scrollTop / max));
               const pIdx = getCurrentParagraphIndex();
@@ -2209,7 +2607,7 @@ export default function ReaderScreen({
             <button
               type="button"
               className="ghost small"
-              aria-pressed={tts.sleepMode !== 0}
+              aria-pressed={tts.sleepMode !== 0 && tts.sleepMode !== "off"}
               onClick={() => setTtsTimerOpen((o) => !o)}
             >
               <Icon name="timer" size={15} />
@@ -2241,7 +2639,11 @@ export default function ReaderScreen({
                   key={String(mode)}
                   type="button"
                   className="ghost small"
-                  aria-pressed={tts.sleepMode === mode}
+                  aria-pressed={
+                    tts.sleepMode === mode ||
+                    (mode === "off" && tts.sleepMode === 0) ||
+                    (mode === 0 && tts.sleepMode === "off")
+                  }
                   onClick={() => {
                     tts.setSleepMode(mode);
                     setTtsTimerOpen(false);
@@ -2358,18 +2760,13 @@ export default function ReaderScreen({
       )}
 
       <div className="reader-dock">
-        {scrubSection !== null && toc[scrubSection] && (() => {
-          const scrubLocked = !spoilerUnlocked && spoilerCeiling != null && scrubSection > spoilerCeiling;
-          return (
-            <div className="reader-scrub-bubble" role="status" aria-live="polite">
-              <b>第 {scrubSection + 1} 节</b>
-              <span className="scrub-title">
-                {scrubLocked ? `第 ${scrubSection + 1} 章（未解锁）` : toc[scrubSection]!.title}
-              </span>
-              {scrubPct !== null && <span className="scrub-pct">{scrubPct.toFixed(1)}%</span>}
-            </div>
-          );
-        })()}
+        {scrubSection !== null && toc[scrubSection] && (
+          <div className="reader-scrub-bubble" role="status" aria-live="polite">
+            <b>第 {scrubSection + 1} 节</b>
+            <span className="scrub-title">{toc[scrubSection]!.title}</span>
+            {scrubPct !== null && <span className="scrub-pct">{scrubPct.toFixed(1)}%</span>}
+          </div>
+        )}
         {toc.length > 1 && (
           <div className="reader-progress-row">
             <button
@@ -2429,11 +2826,11 @@ export default function ReaderScreen({
           </button>
           <button type="button" className="reader-tool-btn" onClick={() => setDrawerTab("bookmarks")}>
             <Icon name="bookmark" size={19} />
-            <span>书签{bookmarks.length ? `(${bookmarks.length})` : ""}</span>
+            <span>书签{visibleBookmarks.length ? `(${visibleBookmarks.length})` : ""}</span>
           </button>
           <button type="button" className="reader-tool-btn" onClick={() => setExcerptsOpen(true)}>
             <Icon name="highlight" size={19} />
-            <span>摘录{highlights.length ? `(${highlights.length})` : ""}</span>
+            <span>摘录{visibleHighlights.length ? `(${visibleHighlights.length})` : ""}</span>
           </button>
           <button type="button" className="reader-tool-btn" onClick={() => setDrawerTab("search")}>
             <Icon name="search" size={19} />
@@ -2544,18 +2941,6 @@ export default function ReaderScreen({
                 )}
               </div>
             ) : null}
-            {spoilerCeiling != null && !spoilerUnlocked && (
-              <div className="row between wrap gap-1">
-                <small className="muted">防剧透保护开启：截至第 {spoilerCeiling + 1} 节</small>
-                <button
-                  type="button"
-                  className="ghost small"
-                  onClick={() => setSpoilerUnlocked(true)}
-                >
-                  临时显示全书
-                </button>
-              </div>
-            )}
             {toc.length > 6 && (
               <input
                 type="search"
@@ -2585,7 +2970,6 @@ export default function ReaderScreen({
                   : filteredToc.slice(tocRange.start, tocRange.end)
                 ).map((item) => {
                   const active = item.index === sectionIndex;
-                  const locked = !spoilerUnlocked && spoilerCeiling != null && item.index > spoilerCeiling;
                   return (
                     <button
                       key={item.index}
@@ -2598,13 +2982,11 @@ export default function ReaderScreen({
                       }}
                     >
                       <div className="grow">
-                        <b>{locked ? `第 ${item.index + 1} 章（未解锁）` : item.title}</b>
-                        {!locked && item.subtitle && <small>{item.subtitle}</small>}
+                        <b>{item.title}</b>
+                        {item.subtitle && <small>{item.subtitle}</small>}
                       </div>
                       <span className="person-side">
-                        {locked ? (
-                          <span className="tag">未解锁</span>
-                        ) : active ? (
+                        {active ? (
                           <span className="tag">在读</span>
                         ) : item.chars > 0 ? (
                           <small>{item.chars.toLocaleString()} 字</small>
@@ -2645,7 +3027,7 @@ export default function ReaderScreen({
               <Icon name={sectionBookmark ? "bookmark-fill" : "bookmark"} size={18} />
               {sectionBookmark ? "移除当前章节书签" : "给当前章节加书签"}
             </button>
-            {!bookmarks.length ? (
+            {!visibleBookmarks.length ? (
               <EmptyVignette
                 kind="book-stack"
                 title="还没有夹入书签"
@@ -2653,7 +3035,7 @@ export default function ReaderScreen({
                 compact
               />
             ) : (
-              bookmarks.map((bm) => (
+              visibleBookmarks.map((bm) => (
                 <div key={bm.id} className="item-row">
                   <button
                     type="button"
@@ -2661,6 +3043,13 @@ export default function ReaderScreen({
                     style={{ textAlign: "left", justifyContent: "flex-start" }}
                     onClick={() => {
                       setDrawerTab(null);
+                      if (targetType === "world_novel" && novelBook && bm.nodeId) {
+                        const loc = locateNovelNodeTarget(novelBook, bm.nodeId, bm.paragraphIndex, bm.snippet);
+                        if (loc) {
+                          void goSection(loc.sectionIndex, { paraIndex: loc.paragraphIndex, recordUndo: true });
+                          return;
+                        }
+                      }
                       void goSection(bm.sectionIndex, { paraIndex: bm.paragraphIndex, recordUndo: true });
                     }}
                   >
@@ -2698,9 +3087,6 @@ export default function ReaderScreen({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
-            {spoilerCeiling != null && !spoilerUnlocked && (
-              <small className="muted m-0">仅检索截至第 {spoilerCeiling + 1} 节的内容，避免剧透后文。</small>
-            )}
             {searching ? (
               <p className="muted m-0">正在检索书卷…</p>
             ) : searchQuery.trim() && !searchHits.length ? (
@@ -2933,9 +3319,30 @@ export default function ReaderScreen({
       {excerptsOpen && (
         <ExcerptsSheet
           worldId={targetType === "world_novel" ? targetId : worldId}
+          lineId={targetType === "world_novel" ? activeLineId : lineId}
           bookId={targetType === "book" ? targetId : null}
           onJumpHighlight={(h) => {
             if (h.targetType === targetType && h.targetId === targetId) {
+              if (targetType === "world_novel" && novelBook) {
+                if (h.nodeId) {
+                  const loc = locateNovelNodeTarget(
+                    novelBook,
+                    h.nodeId,
+                    h.paragraphIndex,
+                    h.selectedText,
+                  );
+                  if (!loc) {
+                    toast("这段原文所在回合已被删改，无法定位到原处");
+                    return;
+                  }
+                  void goSection(loc.sectionIndex, { paraIndex: loc.paragraphIndex, recordUndo: true });
+                  return;
+                }
+                const titleSec = novelBook.sections.findIndex((s) => s.title === h.sectionTitle);
+                const resolvedSec = titleSec >= 0 ? titleSec : h.sectionIndex;
+                void goSection(resolvedSec, { paraIndex: h.paragraphIndex, recordUndo: true });
+                return;
+              }
               void goSection(h.sectionIndex, { paraIndex: h.paragraphIndex, recordUndo: true });
             }
           }}
@@ -2948,7 +3355,7 @@ export default function ReaderScreen({
       {exportOpen && worldId && (
         <NovelExportSheet
           worldId={worldId}
-          lineId={lineId}
+          lineId={activeLineId ?? lineId}
           worldTitle={bookTitle}
           onClose={() => setExportOpen(false)}
         />
@@ -2957,7 +3364,11 @@ export default function ReaderScreen({
         <ReaderResplitSheet
           bookId={bookId}
           bookTitle={bookTitle}
-          onApplied={async () => {
+          onApplied={async (res) => {
+            if (res.forked || res.bookId !== bookId) {
+              replace({ name: "reader", bookId: res.bookId });
+              return;
+            }
             await reloadAfterResplit();
           }}
           onClose={() => setResplitOpen(false)}
@@ -2973,14 +3384,10 @@ export default function ReaderScreen({
           selectedText={askSheetState.selectedText}
           contextParagraphs={askSheetState.contextParagraphs}
           onOpenFullCompanion={({ prompt, asked, draftQuestion }) => {
-            const effectiveCeiling =
-              !spoilerUnlocked && spoilerCeiling != null
-                ? Math.max(0, Math.min(sectionIndex, spoilerCeiling))
-                : Math.max(0, sectionIndex);
             push({
               name: "companion",
               worldId,
-              lineId,
+              lineId: activeLineId ?? lineId,
               bookId,
               gear: "research",
               prompt,
@@ -2988,7 +3395,6 @@ export default function ReaderScreen({
               handoff: {
                 asked,
                 draftQuestion,
-                ...(bookId ? { sourceScope: { mode: "chapters", from: 0, to: effectiveCeiling } } : {}),
               },
             });
           }}

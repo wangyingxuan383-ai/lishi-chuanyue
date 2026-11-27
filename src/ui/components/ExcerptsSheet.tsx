@@ -3,6 +3,7 @@ import {
   exportHighlightsMarkdown,
   listReaderHighlights,
   removeReaderHighlight,
+  resolveHighlightRouteTarget,
   updateReaderHighlight,
   type HighlightColor,
   type ReaderHighlight,
@@ -23,13 +24,14 @@ const COLOR_META: { id: HighlightColor; label: string; dot: string }[] = [
 
 export interface ExcerptsSheetProps {
   worldId?: string | null;
+  lineId?: string | null;
   bookId?: string | null;
   onJumpHighlight?: (h: ReaderHighlight) => void;
   onClose: () => void;
 }
 
-export function ExcerptsSheet({ worldId, bookId, onJumpHighlight, onClose }: ExcerptsSheetProps) {
-  const { game, push, toast, ask } = useApp();
+export function ExcerptsSheet({ worldId, lineId, bookId, onJumpHighlight, onClose }: ExcerptsSheetProps) {
+  const { game, push, replace, toast, ask } = useApp();
   const hasScopedTarget = !!(worldId || bookId);
   const [scope, setScope] = useState<"current" | "all">(hasScopedTarget ? "current" : "all");
   const [colorFilter, setColorFilter] = useState<"all" | HighlightColor>("all");
@@ -92,22 +94,51 @@ export function ExcerptsSheet({ worldId, bookId, onJumpHighlight, onClose }: Exc
     titles[h.targetId] ??
     (h.targetType === "world_novel" ? "本局故事" : "书库藏书");
 
-  const jumpTo = (h: ReaderHighlight) => {
-    const matchesOpenTarget =
-      (h.targetType === "book" && !!bookId && h.targetId === bookId) ||
-      (h.targetType === "world_novel" && !bookId && !!worldId && h.targetId === worldId);
-    if (onJumpHighlight && matchesOpenTarget) {
+  const jumpTo = async (h: ReaderHighlight) => {
+    if (h.targetType === "book") {
+      if (onJumpHighlight && !!bookId && h.targetId === bookId) {
+        onJumpHighlight(h);
+        onClose();
+        return;
+      }
+      onClose();
+      push({
+        name: "reader",
+        bookId: h.targetId,
+        initialSection: h.sectionIndex,
+        initialParagraph: h.paragraphIndex,
+      });
+      return;
+    }
+
+    const resolved = await resolveHighlightRouteTarget(game.repo, h);
+    if (h.nodeId && !resolved.nodeExists) {
+      toast("这段原文所在回合已被删改或移入回收站，无法定位到原处");
+      return;
+    }
+
+    const matchesOpenWorld = !bookId && !!worldId && h.targetId === worldId;
+    const matchesOpenLine = !resolved.lineId || !lineId || resolved.lineId === lineId;
+    if (onJumpHighlight && matchesOpenWorld && matchesOpenLine) {
       onJumpHighlight(h);
       onClose();
       return;
     }
+
     onClose();
-    push({
-      name: "reader",
-      ...(h.targetType === "book" ? { bookId: h.targetId } : { worldId: h.targetId }),
+    const targetRoute = {
+      name: "reader" as const,
+      worldId: h.targetId,
+      ...(resolved.lineId ? { lineId: resolved.lineId } : {}),
       initialSection: h.sectionIndex,
       initialParagraph: h.paragraphIndex,
-    } as any);
+      ...(h.nodeId ? { initialNodeId: h.nodeId } : {}),
+    };
+    if (onJumpHighlight && matchesOpenWorld) {
+      replace(targetRoute);
+    } else {
+      push(targetRoute);
+    }
   };
 
   const saveNote = async (id: string) => {
@@ -320,7 +351,7 @@ export function ExcerptsSheet({ worldId, bookId, onJumpHighlight, onClose }: Exc
                       >
                         书摘卡
                       </button>
-                      <button type="button" className="ghost small" onClick={() => jumpTo(h)}>
+                      <button type="button" className="ghost small" onClick={() => void jumpTo(h)}>
                         去原文
                       </button>
                       <button type="button" className="ghost small danger-text" onClick={() => void removeOne(h)}>

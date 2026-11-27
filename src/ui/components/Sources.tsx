@@ -152,7 +152,7 @@ export function SourceSummary({ value, label = "参考书籍" }: { value: Source
   const selected = book?.id === value?.bookId ? book : null;
   const posText = value ? `第 ${value.position + 1} 节${posTitle ? `（${posTitle.slice(0, 16)}）` : ""}` : "";
   return <span className="source-name">{label}{value && <small className="muted" style={{ display: "block", lineHeight: 1.6 }}>
-    {selected?.title ?? (loaded ? "书籍暂不可读，请重新选择" : "正在读取书名…")} · 位置 {posText} · {value.through === null ? "全书" : `截至第 ${value.through + 1} 节`} · {!value.fanfic ? "只作资料" : value.plot === "canon" ? "尽量沿原剧情" : "允许改写原著"} · {value.method === "analysis" ? "通读整理与原文" : "直接检索引用"}
+    {selected?.title ?? (loaded ? "书籍暂不可读，请重新选择" : "正在读取书名…")} · 位置 {posText} · {!value.fanfic ? "只作资料" : value.plot === "canon" ? "尽量沿原剧情" : "允许改写原著"} · {value.method === "analysis" ? "通读整理与原文" : "直接检索引用"}
   </small>}</span>;
 }
 
@@ -217,7 +217,6 @@ export function BookPreview({
   bookId,
   initialBook,
   book,
-  through,
   initialSection = 0,
 }: {
   bookId?: string;
@@ -257,13 +256,11 @@ export function BookPreview({
 
   const allowed = useMemo(() => {
     if (effectiveBookId) {
-      return (toc ?? []).filter((s) => through == null || s.section <= through);
+      return toc ?? [];
     }
     if (!memBook) return [];
-    return memBook.sections
-      .map((s, i) => ({ section: i, title: s.title, page: s.page ?? null, chars: s.text.length, text: s.text }))
-      .filter((s) => through == null || s.section <= through);
-  }, [effectiveBookId, toc, memBook, through]);
+    return memBook.sections.map((s, i) => ({ section: i, title: s.title, page: s.page ?? null, chars: s.text.length, text: s.text }));
+  }, [effectiveBookId, toc, memBook]);
 
   const activeSecIndex = useMemo(() => {
     if (!allowed.length) return 0;
@@ -293,22 +290,22 @@ export function BookPreview({
     }
     let live = true;
     const timer = setTimeout(() => {
-      void searchBookFullText(game.repo, effectiveBookId, q, { through, limit: 30 }).then((hits) => {
+      void searchBookFullText(game.repo, effectiveBookId, q, { limit: 30 }).then((hits) => {
         if (live) setDbHits(hits);
       }).catch(() => {
         if (live) setDbHits([]);
       });
     }, 180);
     return () => { live = false; clearTimeout(timer); };
-  }, [game, effectiveBookId, query, through]);
+  }, [game, effectiveBookId, query]);
 
   const memMatches = useMemo(() => {
     const q = query.trim();
     if (effectiveBookId || !memBook || !q) return [];
     return memBook.sections
       .map((s, i) => ({ ...s, i }))
-      .filter((s) => (through == null || s.i <= through) && (s.title.includes(q) || s.text.includes(q)));
-  }, [effectiveBookId, memBook, query, through]);
+      .filter((s) => s.title.includes(q) || s.text.includes(q));
+  }, [effectiveBookId, memBook, query]);
 
   const useChapterSheet = allowed.length > 80;
   const pickerOutline = useMemo<OutlineBook>(() => ({
@@ -337,7 +334,6 @@ export function BookPreview({
           <ChapterPickSheet
             title="选择章节"
             book={pickerOutline}
-            maxSection={through ?? undefined}
             value={activeSecIndex}
             onSelect={(sec) => setSection(sec)}
             onClose={() => setPickingChapter(false)}
@@ -477,15 +473,15 @@ export function SourceLibrary({
 export function SourceSetup({ value, onChange, disabled = false, fanfic = false, worldId = null, onCloseSheet }: { value: SourceBinding | null | undefined; onChange: (b: SourceBinding | null) => void; disabled?: boolean; fanfic?: boolean; worldId?: string | null; onCloseSheet?: () => void }) {
   const { game, toast, push } = useApp();
   const [library, setLibrary] = useState(false), [book, setBook] = useState<BookOutline | null>(null), [analysis, setAnalysis] = useState(false), [browse, setBrowse] = useState(false), [notes, setNotes] = useState(false);
-  const [picking, setPicking] = useState<"position" | "through" | null>(null);
+  const [pickingPosition, setPickingPosition] = useState(false);
   useEffect(() => {
     let live = true;
     setBook(null);
     if (value) void getBookOutline(game.repo, value.bookId).then((b) => { if (live) setBook(b); });
     return () => { live = false; };
   }, [game, value?.bookId]);
-  useEffect(() => { if (!value) void game.repo.getSetting<SourceBinding | null>("source:pending", null).then(async (pending) => { if (pending) { onChange(pending); await game.repo.setSetting("source:pending", null); } }); }, []);
-  const set = (patch: Partial<SourceBinding>) => { if (value) onChange({ ...value, ...patch }); };
+  useEffect(() => { if (!value) void game.repo.getSetting<SourceBinding | null>("source:pending", null).then(async (pending) => { if (pending) { onChange({ ...pending, through: null }); await game.repo.setSetting("source:pending", null); } }); }, []);
+  const set = (patch: Partial<SourceBinding>) => { if (value) onChange({ ...value, ...patch, through: null }); };
   const sectionText = (sec: number) => {
     const raw = book?.sections[sec]?.title;
     const label = chapterLabel(sec, raw);
@@ -496,51 +492,32 @@ export function SourceSetup({ value, onChange, disabled = false, fanfic = false,
     {value && <p className="field-hint m-0">这里是当前表单中的选择，随开局或本局设置一起保存。</p>}
     {value && !book && <p className="muted">正在读取书籍，若已删除请重新选择。</p>}
     {value && book && <>
-      <button type="button" className="settings-entry scope-row" aria-label="原著位置" disabled={disabled} onClick={() => setPicking("position")}>
+      <button type="button" className="settings-entry scope-row" aria-label="原著位置" disabled={disabled} onClick={() => setPickingPosition(true)}>
         <span><b>原著位置</b><small>{sectionText(value.position)}</small></span>
         <span aria-hidden="true">第 {value.position + 1} 节 ›</span>
       </button>
-      {value.fanfic && value.plot === "canon" && <p className="field-hint m-0">沿原剧情时，每段写完会按内容自动往后跟（一次至多 2 节，不花请求）；跟错了在这一段的变化里点“改回”，或在这里改。</p>}
+      {value.fanfic && <p className="field-hint m-0">每段写完会按剧情自动往后跟进原著章节（不花请求）；跟错了可在那一段的变化里点“改回”，或在这里手动调整。</p>}
       <span className="muted">剧情关系</span><div className="segmented">{([["reference", "只作资料"], ["rewrite", "允许改写原著"], ["canon", "尽量沿原剧情"]] as const).map(([v, label]) => <button disabled={disabled} key={v} aria-pressed={v === "reference" ? !value.fanfic : value.fanfic && value.plot === v} onClick={() => set({ fanfic: v !== "reference", ...(v === "reference" ? {} : { plot: v }) })}>{label}</button>)}</div>
-      <span className="muted">参考范围</span><div className="segmented"><button disabled={disabled} aria-pressed={value.through === null} onClick={() => set({ through: null })}>全书</button><button disabled={disabled} aria-pressed={value.through !== null} onClick={() => {
-        const nextThrough = value.through ?? Math.min(Math.max(0, book.sections.length - 1), value.position);
-        set({ through: nextThrough, analysisId: undefined });
-        setPicking("through");
-      }}>截至指定章节</button></div>
-      {value.through !== null && (
-        <button type="button" className="settings-entry scope-row" aria-label="截至章节" disabled={disabled} onClick={() => setPicking("through")}>
-          <span><b>截至章节</b><small>{sectionText(value.through)}</small></span>
-          <span aria-hidden="true">第 {value.through + 1} 节 ›</span>
-        </button>
-      )}
-      {picking === "position" && (
+      {pickingPosition && (
         <ChapterPickSheet
           title="选择原著位置"
           book={book}
           value={value.position}
-          onSelect={(section) => {
-            if (value.through !== null && section > value.through) {
-              set({ position: section, through: section, analysisId: undefined });
-              toast("已同步将防剧透上限扩至该节");
-            } else {
-              set({ position: section });
-            }
-          }}
-          onClose={() => setPicking(null)}
+          onSelect={(section) => set({ position: section })}
+          onClose={() => setPickingPosition(false)}
         />
       )}
-      {picking === "through" && <ChapterPickSheet title="选择截至章节" book={book} value={value.through ?? Math.max(0, book.sections.length - 1)} onSelect={(section) => set({ through: section, position: Math.min(value.position, section), analysisId: undefined })} onClose={() => setPicking(null)} />}
       <SourcePresets key={value.bookId} disabled={disabled} value={value.instructions} onChange={(instructions) => { if (!disabled) set({ instructions }); }} />
       <label className="field">原著怎么用<textarea rows={4} maxLength={12000} disabled={disabled} aria-label="原著怎么用" value={value.instructions} onChange={(e) => set({ instructions: e.target.value })} /></label>
       <span className="muted">理解方式</span><div className="segmented"><button disabled={disabled} aria-pressed={value.method === "search"} onClick={() => set({ method: "search" })}>直接检索引用</button><button disabled={disabled} aria-pressed={value.method === "analysis"} onClick={() => set({ method: "analysis" })}>先让 AI 通读整理</button></div>
       <p className="muted m-0">直接检索无需预先调用 AI。未整理也可以先直接使用，以后再整理。修改用法不会自动重新整理，也不会自动产生费用。</p>
-      <div className="row wrap"><button onClick={() => { onCloseSheet?.(); push({ name: "reader", bookId: value.bookId, worldId: worldId ?? undefined, initialSection: value.position, through: value.through, fanfic: value.fanfic }); }}><Icon name="book-open" size={18} />沉浸阅读</button><button onClick={() => setBrowse(true)}>目录与正文</button><button onClick={() => setNotes(true)}>原著札记</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
+      <div className="row wrap"><button onClick={() => { onCloseSheet?.(); push({ name: "reader", bookId: value.bookId, worldId: worldId ?? undefined, initialSection: value.position, fanfic: value.fanfic }); }}><Icon name="book-open" size={18} />沉浸阅读</button><button onClick={() => setBrowse(true)}>目录与正文</button><button onClick={() => setNotes(true)}>原著札记</button>{value.method === "analysis" && <button disabled={disabled} onClick={() => setAnalysis(true)}>通读整理</button>}</div>
       <p className="muted m-0">原著札记：让 AI 先整理一段主线、一个人物或一个设定，写作时带上，比每段都翻原文更快更省。</p>
-      {notes && <CanonNotesSheet bookId={value.bookId} worldId={worldId} position={value.position} through={value.through} onClose={() => setNotes(false)} />}
+      {notes && <CanonNotesSheet bookId={value.bookId} worldId={worldId} position={value.position} onClose={() => setNotes(false)} />}
     </>}
     {library && <SourceLibrary defaultUsage={fanfic ? "fanfic" : "reference"} onClose={() => setLibrary(false)} onSelect={(b, use) => { onChange(newBinding(b.id, use === "fanfic" || fanfic || value?.fanfic)); toast(worldId ? "已选入，保存设置后生效" : `已选入《${b.title}》`); }} />}
-    {browse && book && value && <Sheet title={book.title} onClose={() => setBrowse(false)}><BookPreview bookId={value.bookId} through={value.through} initialSection={value.position} /></Sheet>}
-    {analysis && book && value && <SourceAnalysis bookId={value.bookId} binding={value} onChange={onChange} onClose={() => setAnalysis(false)} />}
+    {browse && book && value && <Sheet title={book.title} onClose={() => setBrowse(false)}><BookPreview bookId={value.bookId} initialSection={value.position} /></Sheet>}
+    {analysis && book && value && <SourceAnalysis bookId={value.bookId} binding={{ ...value, through: null }} onChange={onChange} onClose={() => setAnalysis(false)} />}
   </div>;
 }
 
@@ -559,9 +536,7 @@ function SourceAnalysis({ bookId, binding, onChange, onClose }: { bookId: string
       const active = list.find((j) => j.id === binding.analysisId);
       if (active) { setJob({ ...active, status: active.status === "running" ? "paused" : active.status }); current.current = active; }
     });
-    const statsPromise = binding.through === null
-      ? game.repo.platform.sql.query("SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(text)), 0) AS chars FROM source_chunks WHERE book_id = ?", [bookId])
-      : game.repo.platform.sql.query("SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(text)), 0) AS chars FROM source_chunks WHERE book_id = ? AND section <= ?", [bookId, binding.through]);
+    const statsPromise = game.repo.platform.sql.query("SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(text)), 0) AS chars FROM source_chunks WHERE book_id = ?", [bookId]);
     void Promise.all([statsPromise, readBudget(game.repo)]).then(([rows, prices]) => {
       if (!alive.current) return;
       const n = Number(rows[0]?.n ?? 0);
@@ -572,17 +547,18 @@ function SourceAnalysis({ bookId, binding, onChange, onClose }: { bookId: string
       }
     });
     return () => { alive.current = false; if (current.current) game.pauseSourceAnalysis(current.current.id); };
-  }, [game, bookId, binding.through, binding.instructions]);
+  }, [game, bookId, binding.instructions]);
   const start = async (fresh = false) => {
     if (!game.llm) { toast("请先连接 AI 服务"); return; }
     if (!await ask({ title: job && !fresh ? "继续通读整理？" : "开始通读整理？", message: `预计最多 ${job && !fresh ? Math.max(0, job.total - job.completed) : chunkCount} 次调用；${estimate}。按现有辅助模型整理，已成功的片段不重复处理。`, confirm: "开始" })) return;
     setRunning(true);
     try {
-      const result = await game.analyzeSource({ ...binding, analysisId: fresh ? undefined : job?.id }, (next) => { if (alive.current) { if (current.current?.id !== next.id) onChange({ ...binding, analysisId: next.id }); current.current = next; setJob(next); } });
-      if (alive.current) { onChange({ ...binding, analysisId: result.id }); setJobs(await analysisJobs(game.repo, bookId)); }
+      const fullBinding: SourceBinding = { ...binding, through: null };
+      const result = await game.analyzeSource({ ...fullBinding, analysisId: fresh ? undefined : job?.id }, (next) => { if (alive.current) { if (current.current?.id !== next.id) onChange({ ...fullBinding, analysisId: next.id }); current.current = next; setJob(next); } });
+      if (alive.current) { onChange({ ...fullBinding, analysisId: result.id }); setJobs(await analysisJobs(game.repo, bookId)); }
     } catch (e) { toast(e instanceof Error ? e.message : "没能开始整理"); } finally { setRunning(false); }
   };
-  return <Sheet title="通读整理" onClose={onClose}><div className="stack"><p className="muted">按章节分段整理人物、世界规则和剧情顺序，并保留出处。只整理选定范围；可以暂停，稍后继续。</p><p>预计 {chunkCount} 次调用 · {estimate}</p>
+  return <Sheet title="通读整理" onClose={onClose}><div className="stack"><p className="muted">按章节分段整理人物、世界规则和剧情顺序，并保留出处；可以暂停，稍后继续。</p><p>预计 {chunkCount} 次调用 · {estimate}</p>
     {job && <div className="notice">已整理 {job.completed}/{job.total} 段 · {running ? "正在整理" : job.status === "done" ? "已完成" : job.status === "failed" ? "可以重试" : "已暂停"}{job.error && <p>{job.error}</p>}</div>}
     {running ? <button onClick={() => { if (current.current) game.pauseSourceAnalysis(current.current.id); }}>暂停</button> : <div className="row"><button className="primary" disabled={job?.status === "done"} onClick={() => void start()}>{job ? "继续整理 / 重试" : "开始整理"}</button>{job && <button onClick={() => void start(true)}>按当前用法重新整理</button>}</div>}
     {jobs.map((j) => <button key={j.id} disabled={running} aria-pressed={binding.analysisId === j.id} onClick={() => { onChange({ ...binding, analysisId: j.id }); setJob(j); current.current = j; }}>{j.model} · 已整理 {j.completed}/{j.total} 段</button>)}

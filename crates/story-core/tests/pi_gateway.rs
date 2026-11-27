@@ -350,7 +350,7 @@ fn earlier_narrative_and_record_recompute_current_route_and_preserve_side_route(
     assert_eq!(
         db.query_row("SELECT MAX(seq) FROM nodes", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        4
     );
 }
 

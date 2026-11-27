@@ -5,11 +5,11 @@ import { normalizeContinuity, remapContinuity } from "./continuity";
 // is already there is either replaced or kept, with the import saved as a new
 // world under fresh ids.
 import { cleanReadablePi, cleanSource } from "./pi-readable";
-import type { Json, Row, SqlStatement } from "../platform";
+import type { Json, Platform, Row, SqlStatement } from "../platform";
 import { newId, type Repo } from "./db/repo";
 import { checkChallenge, checkScript } from "./modes";
 import { bookStatements, chunksOf, getBook } from "./sources/library";
-import { validBinding, type SourceBook, type AnalysisJob } from "./sources/types";
+import { validBinding, type SourceBook, type AnalysisJob, type BookSection } from "./sources/types";
 import { sourceAnalysisResult, structuredSourceAnalysis } from "./sources/facts";
 import { listNotes, listStoryNotes, type CanonNote } from "./sources/notes";
 
@@ -21,12 +21,40 @@ export const ARCHIVE_FORMAT = "lishi-world";
 // Old readers reject newer versions rather than silently losing their meaning.
 export const ARCHIVE_VERSION = 8;
 
+/** Strips path separators, Windows/Android illegal characters, control characters and reserved device names. */
+export function sanitizeArchiveFileTitle(title: string): string {
+  const cleaned = String(title ?? "")
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]+/g, "·")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.\s]+|[.\s]+$/g, "");
+  const base = cleaned || "世界存档";
+  return /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base) ? `_${base}` : base.slice(0, 120);
+}
+
 /** Export cancellation stays distinct from preparation/selection/write errors. */
 export async function exportWorldFile(repo: Repo, worldId: string, title: string): Promise<boolean> {
-  const name = `${title}.lishi.json`;
+  const name = `${sanitizeArchiveFileTitle(title)}.lishi.json`;
   if (repo.platform.files.exportWorld) return repo.platform.files.exportWorld(worldId, name);
   const archive = await exportWorld(repo, worldId);
   return repo.platform.files.exportText(name, JSON.stringify(archive));
+}
+
+/**
+ * Validates the archive and creates a mandatory `before-import` database backup
+ * before replacing an existing world. If backup creation fails, replacement is
+ * aborted and the existing world in SQLite remains untouched.
+ */
+export async function replaceWorldWithBackup(platform: Platform, repo: Repo, raw: unknown): Promise<string> {
+  const problems = archiveProblems(raw);
+  if (problems.length) throw new Error(problems.join("；"));
+  try {
+    await platform.sql.backup("before-import");
+  } catch (error) {
+    const detail = error instanceof Error && error.message.trim() ? `（${error.message.trim()}）` : "";
+    throw new Error(`自动备份失败${detail}，为保护现有进度未覆盖原世界`);
+  }
+  return importWorld(repo, raw, "replace");
 }
 export interface AgentHistory {
   plan?: { id?: string; title: string; status: string }[];
@@ -169,14 +197,56 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
   for (const row of nodes) for (const field of NODE_JSON_FIELDS) findBooks(JSON.parse(String(row[field])));
   const factSources=await q("SELECT * FROM story_fact_sources WHERE world_id=?");
   const factCorrections=await q("SELECT * FROM fact_corrections WHERE world_id=?");
+  const lines = await q("SELECT * FROM lines WHERE world_id=?");
+  const validLineIds = new Set(lines.map(l => String(l.id)));
+  const fallbackLineId = validLineIds.has(String(world.current_line_id))
+    ? String(world.current_line_id)
+    : (lines[0]?.id ? String(lines[0].id) : "");
   const pi:PiReadableArchive={engine:"pi",version:1,readOnly:true,sessions:[],tasks:[]};
-  for(const row of await q("SELECT * FROM pi_sessions WHERE world_id=?")) {
-    const tasks=await repo.platform.sql.query("SELECT * FROM pi_tasks WHERE session_id=? AND status IN ('completed','committed','undone','archived') ORDER BY created_at,id",[row.id]);
-    if(!tasks.length)continue;
-    pi.sessions.push({id:String(row.id),worldId,lineId:String(row.line_id),title:String(row.title),createdAt:String(row.created_at),updatedAt:String(row.updated_at)});
+  for(const row of await q("SELECT * FROM pi_sessions WHERE world_id=? ORDER BY created_at,id")) {
+    const inheritedRows = await repo.platform.sql
+      .query("SELECT seq, message_json FROM pi_session_messages WHERE session_id=? ORDER BY seq ASC LIMIT 500", [row.id])
+      .catch(() => []);
+    const tasks=await repo.platform.sql.query(
+      "SELECT * FROM pi_tasks WHERE session_id=? AND status IN ('completed','committed','undone','archived') AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$._nativeHostActive'),0)=0 ELSE 1 END ORDER BY created_at,id",
+      [row.id],
+    );
+    if(!tasks.length && !inheritedRows.length)continue;
+    const rawSessionLine = String(row.line_id ?? "");
+    const sessionLineId = validLineIds.has(rawSessionLine) ? rawSessionLine : fallbackLineId;
+    pi.sessions.push({id:String(row.id),worldId,lineId:sessionLineId,title:String(row.title || "助手对话"),createdAt:String(row.created_at),updatedAt:String(row.updated_at)});
+    if (inheritedRows.length) {
+      const messages = inheritedRows.flatMap((mRow) => {
+        const item = parseJson(mRow.message_json);
+        if (!["user", "assistant"].includes(String(item.role)) || typeof item.content !== "string" || !item.content.trim()) return [];
+        const msgId = typeof item.id === "string" && item.id.trim() ? item.id : `msg:${row.id}:${String(mRow.seq)}`;
+        return [{ id: msgId, role: String(item.role), content: item.content, ...(typeof item.createdAt === "string" ? { createdAt: item.createdAt } : {}) }];
+      });
+      pi.tasks.push({
+        id: `history:${String(row.id)}`,
+        sessionId: String(row.id),
+        text: "另起对话时保留的记录",
+        status: "archived",
+        policy: "auto",
+        createdAt: String(row.created_at),
+        updatedAt: String(row.created_at),
+        history: { messages, steps: [], plan: [], sources: [], result: { status: "inherited", summary: "另起对话时保留的记录；故事修改并未撤回。" }, truncated: false },
+      });
+    }
     for(const task of tasks) {
       const result=parseJson(task.result_json);
-      pi.tasks.push({id:String(task.id),sessionId:String(row.id),lineId:String(task.line_id),text:String(task.text),status:"archived",policy:String(task.policy),createdAt:String(task.created_at),updatedAt:String(task.updated_at),history:result.history??{messages:[],steps:[],plan:[],sources:[],result:{status:task.status,summary:result.summary??""},truncated:true}});
+      const rawTaskLine = task.line_id == null ? "" : String(task.line_id);
+      pi.tasks.push({
+        id:String(task.id),
+        sessionId:String(row.id),
+        ...(validLineIds.has(rawTaskLine) ? { lineId: rawTaskLine } : {}),
+        text:String(task.text),
+        status:"archived",
+        policy:["auto-reversible","preview","auto"].includes(String(task.policy)) ? String(task.policy) : "auto",
+        createdAt:String(task.created_at),
+        updatedAt:String(task.updated_at),
+        history:result.history??{messages:[],steps:[],plan:[],sources:[],result:{status:task.status,summary:result.summary??""},truncated:true},
+      });
     }
   }
   const readable=cleanReadablePi(pi);
@@ -193,7 +263,7 @@ export async function exportWorld(repo: Repo, worldId: string): Promise<WorldArc
   }
   return {
     format:ARCHIVE_FORMAT, version:ARCHIVE_VERSION, exportedAt:new Date().toISOString(), world,nodes,states,
-    lines:await q("SELECT * FROM lines WHERE world_id=?"),pins:await q("SELECT * FROM pins WHERE world_id=?"),chapters:await q("SELECT * FROM chapters WHERE world_id=?"),books,
+    lines,pins:await q("SELECT * FROM pins WHERE world_id=?"),chapters:await q("SELECT * FROM chapters WHERE world_id=?"),books,
     pi:readable,factSources,factCorrections,
     storyNotes:(await listStoryNotes(repo,worldId)).map((n)=>({...n,status:n.status==="running"?"paused":n.status})),
   };
@@ -225,10 +295,19 @@ function routeProblems(a: Pick<WorldArchive, "nodes" | "chapters">, nodeRows: Ma
   }
   const originals = roots.filter(id => {
     const node = nodeRows.get(id)!;
-    const revision = parseJson(node.meta_json).revision;
-    if (!revision) return true;
-    const prior = nodeRows.get(revision.nodeId);
-    return !prior || prior.parent_id != null || prior.kind !== "opening" || Number(prior.seq) >= Number(node.seq);
+    const meta = parseJson(node.meta_json);
+    const revision = meta.revision;
+    if (revision) {
+      const prior = nodeRows.get(revision.nodeId);
+      return !prior || prior.parent_id != null || prior.kind !== "opening" || Number(prior.seq) >= Number(node.seq);
+    }
+    if (typeof meta.agentOriginalNodeId === "string") {
+      const prior = nodeRows.get(meta.agentOriginalNodeId);
+      if (prior && prior.id !== id && prior.parent_id == null && prior.kind === "opening" && Number(prior.seq) <= Number(node.seq)) {
+        return false;
+      }
+    }
+    return true;
   });
   if (originals.length !== 1) problems.push("找不到唯一的原始开场");
   if (problems.length) return null;
@@ -254,6 +333,65 @@ function routeProblems(a: Pick<WorldArchive, "nodes" | "chapters">, nodeRows: Ma
   return ancestor;
 }
 
+/** Checks core `WorldState` fields required by gameplay & novel rendering across v1–v8 saves. */
+function validCoreState(raw: unknown): boolean {
+  if (!isObject(raw)) return false;
+  const p = raw.protagonist;
+  if (!isObject(p)) return false;
+  if (typeof p.name !== "string" || typeof p.gender !== "string" || typeof p.identity !== "string") return false;
+  if (p.age !== null && p.age !== undefined && (typeof p.age !== "number" || !Number.isFinite(p.age))) return false;
+  if (p.aliases !== undefined && (!Array.isArray(p.aliases) || p.aliases.some((a) => typeof a !== "string"))) return false;
+  if (p.origin !== undefined && typeof p.origin !== "string") return false;
+  if (p.cheat !== undefined && typeof p.cheat !== "string") return false;
+  const stats = p.stats;
+  if (!isObject(stats) || !["money", "debt", "health", "energy", "fame"].every((k) => typeof stats[k] === "number" && Number.isFinite(stats[k]))) return false;
+  if (!Array.isArray(p.statuses) || p.statuses.some((st) => !isObject(st) || typeof st.name !== "string")) return false;
+  if (!Array.isArray(p.items) || p.items.some((it) => !isObject(it) || typeof it.name !== "string" || typeof it.quantity !== "number" || !Number.isFinite(it.quantity))) return false;
+
+  const time = raw.time;
+  if (!isObject(time) || typeof time.start !== "string" || typeof time.elapsedMinutes !== "number" || !Number.isFinite(time.elapsedMinutes) || time.elapsedMinutes < 0) return false;
+
+  const era = raw.era;
+  if (!isObject(era) || (era.packId !== null && era.packId !== undefined && typeof era.packId !== "string")) return false;
+
+  if (raw.placeId !== null && raw.placeId !== undefined && typeof raw.placeId !== "string") return false;
+  if (!Array.isArray(raw.people) || raw.people.some((person) => !isObject(person) || typeof person.id !== "string" || typeof person.name !== "string" || typeof person.alive !== "boolean")) return false;
+  if (!Array.isArray(raw.goals) || raw.goals.some((g) => !isObject(g) || typeof g.id !== "string" || typeof g.name !== "string")) return false;
+  if (raw.places !== undefined && (!Array.isArray(raw.places) || raw.places.some((pl) => !isObject(pl) || typeof pl.id !== "string" || typeof pl.name !== "string"))) return false;
+  if (raw.cards !== undefined && (!Array.isArray(raw.cards) || raw.cards.some((c) => !isObject(c) || typeof c.id !== "string" || typeof c.name !== "string"))) return false;
+  if (raw.timeline !== undefined && (!Array.isArray(raw.timeline) || raw.timeline.some((ev) => !isObject(ev) || typeof ev.id !== "string" || typeof ev.title !== "string"))) return false;
+  if (raw.deviations !== undefined && (!Array.isArray(raw.deviations) || raw.deviations.some((d) => typeof d !== "string"))) return false;
+  if (raw.dismissed !== undefined && (!Array.isArray(raw.dismissed) || raw.dismissed.some((d) => typeof d !== "string"))) return false;
+  return true;
+}
+
+function validReadablePiHistory(h: unknown): boolean {
+  if (!isObject(h)) return false;
+  if (h.messages !== undefined) {
+    if (!Array.isArray(h.messages) || h.messages.length > 500) return false;
+    const msgIds = new Set<string>();
+    for (const m of h.messages) {
+      if (!isObject(m) || !validId(m.id) || msgIds.has(m.id) || !["user", "assistant"].includes(String(m.role)) || typeof m.content !== "string" || !m.content.trim()) return false;
+      msgIds.add(m.id);
+    }
+  }
+  if (h.steps !== undefined) {
+    if (!Array.isArray(h.steps) || h.steps.length > 1000) return false;
+    for (const st of h.steps) {
+      if (!isObject(st) || !validId(st.id) || !["running", "completed", "failed", "cancelled", "unknown"].includes(String(st.status))) return false;
+    }
+  }
+  if (h.plan !== undefined) {
+    if (!Array.isArray(h.plan) || h.plan.length > 1000) return false;
+    for (const pl of h.plan) {
+      if (!isObject(pl)) return false;
+      const title = pl.title ?? pl.step ?? pl.text;
+      if (typeof title !== "string" || !title.trim() || !["pending", "in_progress", "completed", "cancelled", "blocked", "done"].includes(String(pl.status))) return false;
+    }
+  }
+  return true;
+}
+
 /** What is wrong with a file, in the player's words; empty when it can be imported. */
 export function archiveProblems(raw: unknown): string[] {
   const a = raw as Partial<WorldArchive> | null;
@@ -271,7 +409,7 @@ export function archiveProblems(raw: unknown): string[] {
   if (a.nodes.some((n) => n.world_id !== a.world!.id)) problems.push("回合属于别的世界");
   const states = new Set(a.states.map((s) => s.node_id as string));
   if (a.nodes.some((n) => !states.has(n.id as string))) problems.push("有的回合缺少状态");
-  if (a.states.some(s => !nodes.has(s.node_id as string) || !isJsonObject(s.state_json))) problems.push("有的状态损坏了或不属于这个故事");
+  if (a.states.some(s => !nodes.has(s.node_id as string) || !isJsonObject(s.state_json) || !validCoreState(JSON.parse(String(s.state_json))))) problems.push("有的状态损坏了或不属于这个故事");
   if ([...a.lines, ...a.pins, ...a.chapters].some(row => row.world_id !== a.world!.id)) problems.push("有的路线、要点或章节属于别的世界");
   if (a.nodes.some(n => !isJsonObject(n.meta_json) || (n.record_json != null && n.record_json !== "null" && !isJsonObject(n.record_json)))) problems.push("有的回合附加信息损坏");
   if (a.lines.some((l) => !nodes.has(l.node_id as string))) problems.push("有的世界线指向不存在的回合");
@@ -299,7 +437,7 @@ export function archiveProblems(raw: unknown): string[] {
       const ids = new Set<string>();
       for (const bundle of a.books) {
         const b = bundle?.book;
-        if (!b || typeof b.id !== "string" || ids.has(b.id) || typeof b.title !== "string" || !["txt", "epub", "pdf", "docx"].includes(b.format) || !Array.isArray(b.sections) || !b.sections.length || b.sections.some((s) => !s || typeof s.title !== "string" || typeof s.text !== "string" || (s.page !== undefined && (!Number.isInteger(s.page) || s.page < 1)))) { problems.push("参考书籍损坏"); continue; }
+        if (!b || typeof b.id !== "string" || ids.has(b.id) || typeof b.title !== "string" || !["txt", "epub", "pdf", "docx"].includes(b.format) || !Array.isArray(b.sections) || !b.sections.length || b.sections.some((s) => !s || typeof s.title !== "string" || typeof s.text !== "string" || (s.page !== undefined && s.page !== null && (!Number.isInteger(s.page) || s.page < 1)))) { problems.push("参考书籍损坏"); continue; }
         ids.add(b.id);
         if (bundle.notes !== undefined) {
           if (!Array.isArray(bundle.notes)) problems.push("原著札记清单损坏");
@@ -384,9 +522,30 @@ export function archiveProblems(raw: unknown): string[] {
     if(pi!==undefined) {
       if(!pi || pi.engine!=="pi" || pi.version!==1 || pi.readOnly!==true || !Array.isArray(pi.sessions) || !Array.isArray(pi.tasks)) problems.push("助手只读历史格式无效");
       else {
-        const sessions=new Map(pi.sessions.map(item=>[item?.id,item]));
-        if(sessions.size!==pi.sessions.length || pi.sessions.some(item=>!item || typeof item.id!=="string" || item.worldId!==a.world!.id || !lines.has(item.lineId) || typeof item.title!=="string")) problems.push("助手会话不属于本故事或路线");
-        if(new Set(pi.tasks.map(item=>item?.id)).size!==pi.tasks.length || pi.tasks.some(item=>!item || typeof item.id!=="string" || !sessions.has(item.sessionId) || item.lineId !== undefined && !lines.has(item.lineId) || !["completed","committed","undone","archived"].includes(item.status) || !item.history || typeof item.history!=="object"))problems.push("助手历史含有无效或未完成任务");
+        const sessions = new Map(pi.sessions.map(item => [item?.id, item]));
+        const sequelSessions = new Set<string>();
+        const invalidSession = pi.sessions.some((item: any) => {
+          if (!item || !validId(item.id) || !validId(item.title)) return true;
+          const originWorld = typeof item.originWorldId === "string" ? item.originWorldId.trim() : "";
+          const isSequel = originWorld.length > 0 && (item.worldId === a.world!.id || item.worldId === originWorld);
+          const lineOk = lines.has(item.lineId) || (isSequel && lines.size > 0);
+          if ((!isSequel && item.worldId !== a.world!.id) || !lineOk) return true;
+          if (isSequel) sequelSessions.add(item.id);
+          return false;
+        });
+        if (sessions.size !== pi.sessions.length || invalidSession) problems.push("助手会话不属于本故事或路线");
+        const invalidTask = pi.tasks.some((item: any) => {
+          if (!item || !validId(item.id) || !sessions.has(item.sessionId)) return true;
+          const taskOrigin = typeof item.originWorldId === "string" ? item.originWorldId.trim() : "";
+          const isSequel = sequelSessions.has(item.sessionId) || taskOrigin.length > 0;
+          if (typeof item.worldId === "string" && item.worldId.trim() && item.worldId !== a.world!.id && (!isSequel || (taskOrigin.length > 0 && item.worldId !== taskOrigin))) return true;
+          if (item.lineId !== undefined && !isSequel && !lines.has(item.lineId)) return true;
+          if (!["completed", "committed", "undone", "archived"].includes(item.status)) return true;
+          if (!["auto-reversible", "preview", "auto"].includes(item.policy)) return true;
+          if (!validReadablePiHistory(item.history)) return true;
+          return false;
+        });
+        if (new Set(pi.tasks.map(item => item?.id)).size !== pi.tasks.length || invalidTask) problems.push("助手历史含有无效或未完成任务");
       }
     }
     if(a.factSources!==undefined && (!Array.isArray(a.factSources) || a.factSources.some(item=>!item || item.world_id!==a.world!.id || !lines.has(item.line_id) || item.node_id!=null&&!nodes.has(item.node_id as string) || !["original","player_setting","player_choice","local_custom","local_consistency","external","insufficient","legacyUnknown"].includes(String(item.basis)) || typeof item.claim!=="string" || typeof item.source_json!=="string")))problems.push("正式事实来源损坏或属于其他故事");
@@ -413,6 +572,7 @@ function remap(a: WorldArchive): WorldArchive {
     const meta = JSON.parse(String(text));
     if (meta.openingSeed) meta.openingSeed = mapState(meta.openingSeed);
     if (meta.revision) meta.revision = { ...meta.revision, nodeId: id(meta.revision.nodeId), lineId: id(meta.revision.lineId) };
+    if (typeof meta.agentOriginalNodeId === "string") meta.agentOriginalNodeId = id(meta.agentOriginalNodeId);
     if (Array.isArray(meta.carriedEdits)) for (const edit of meta.carriedEdits) if (edit.record?.continuity) edit.record.continuity = remapContinuity(edit.record.continuity, old => id(old)!);
     return JSON.stringify(meta);
   };
@@ -478,6 +638,41 @@ const insert = (table: string, fields: string[], row: Row): SqlStatement => ({
   params: fields.map((f) => (row[f] === undefined ? null : row[f]) as Json),
 });
 
+function cleanArchivedBook(b: SourceBook): SourceBook {
+  return {
+    ...b,
+    sections: b.sections.map((sec) => {
+      const { page, ...rest } = sec as BookSection & { page?: number | null };
+      return page == null ? rest : { ...rest, page };
+    }),
+  };
+}
+
+function booksIdentical(a: SourceBook, b: SourceBook): boolean {
+  if (a.title !== b.title || a.format !== b.format || a.sections.length !== b.sections.length) return false;
+  for (let i = 0; i < a.sections.length; i++) {
+    const sa = a.sections[i]!, sb = b.sections[i]!;
+    if (sa.title !== sb.title || (sa.page ?? null) !== (sb.page ?? null) || sa.text !== sb.text) return false;
+  }
+  return true;
+}
+
+async function findIdenticalExistingBook(repo: Repo, target: SourceBook): Promise<SourceBook | null> {
+  const byId = await getBook(repo, target.id);
+  if (byId && booksIdentical(cleanArchivedBook(byId), target)) return byId;
+  const candidates = await repo.platform.sql.query(
+    "SELECT id FROM source_books WHERE title = ? AND format = ? LIMIT 8",
+    [target.title, target.format],
+  );
+  for (const row of candidates) {
+    const cid = String(row.id);
+    if (cid === target.id) continue;
+    const found = await getBook(repo, cid);
+    if (found && booksIdentical(cleanArchivedBook(found), target)) return found;
+  }
+  return null;
+}
+
 /**
  * Writes an archive. `mode`: "new" always saves under fresh ids; "replace"
  * removes a world with the same id first. Returns the world's id. Throws with
@@ -492,12 +687,49 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
   // Parents before children, so every foreign key holds as rows go in.
   const nodes = [...archive.nodes].sort((a, b) => (a.seq as number) - (b.seq as number));
   const statements: SqlStatement[] = [];
-  // Always assign fresh book/job ids. Importing cannot rewrite immutable material
-  // referenced by a different world, even when replacing this world's tree.
+  // Never overwrite an existing book row in place. In "new" mode always allocate
+  // fresh book/job ids; in "replace" mode reuse an already stored book only when
+  // its chapters and text are byte-for-byte identical, avoiding multi-MB clones
+  // and keeping reader highlights/progress attached.
   const bookIds = new Map<string, string>(), jobIds = new Map<string, string>();
+  const reusedBookIds = new Set<string>(), reusedJobIds = new Set<string>();
+  const existingSharedNotesByBook = new Map<string, Set<string>>();
   for (const bundle of archive.books ?? []) {
-    bookIds.set(bundle.book.id, newId());
-    for (const job of bundle.jobs) jobIds.set(job.id, newId());
+    const normalized = cleanArchivedBook(bundle.book);
+    bundle.book = normalized;
+    const identical = mode === "replace" ? await findIdenticalExistingBook(repo, normalized) : null;
+    if (identical) {
+      bookIds.set(normalized.id, identical.id);
+      reusedBookIds.add(identical.id);
+      const existingJobs = await repo.platform.sql.query("SELECT id, json FROM source_jobs WHERE book_id = ?", [identical.id]);
+      const jobMap = new Map(existingJobs.map((r) => [String(r.id), String(r.json)]));
+      for (const job of bundle.jobs) {
+        const expectedStatus = job.status === "running" ? "paused" : job.status;
+        const candidateJson = jobMap.get(job.id);
+        if (candidateJson) {
+          try {
+            const parsed = JSON.parse(candidateJson);
+            if (parsed.bookId === identical.id && parsed.completed === job.completed && parsed.total === job.total && parsed.status === expectedStatus) {
+              jobIds.set(job.id, job.id);
+              reusedJobIds.add(job.id);
+              continue;
+            }
+          } catch { /* allocate fresh job id below */ }
+        }
+        jobIds.set(job.id, newId());
+      }
+      const sharedRows = await repo.platform.sql.query(
+        "SELECT kind, title, scope_json, content FROM canon_notes WHERE book_id = ? AND world_id IS NULL",
+        [identical.id],
+      );
+      existingSharedNotesByBook.set(
+        identical.id,
+        new Set(sharedRows.map((r) => `${String(r.kind)}\0${String(r.title)}\0${String(r.scope_json)}\0${String(r.content)}`)),
+      );
+    } else {
+      bookIds.set(normalized.id, newId());
+      for (const job of bundle.jobs) jobIds.set(job.id, newId());
+    }
   }
   const mapSource = (value: any) => {
     if (value?.bookId && bookIds.has(value.bookId)) return { ...value, bookId: bookIds.get(value.bookId), ...(value.analysisId ? { analysisId: jobIds.get(value.analysisId) } : {}) };
@@ -525,13 +757,17 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
     const bookId = bookIds.get(bundle.book.id)!;
     // A long novel can produce hundreds of thousands of index rows. Keep the
     // single import transaction without passing each row as a JS argument.
-    for (const statement of bookStatements({ ...bundle.book, id: bookId })) statements.push(statement);
+    if (!reusedBookIds.has(bookId)) {
+      for (const statement of bookStatements({ ...bundle.book, id: bookId })) statements.push(statement);
+    }
     for (const job of bundle.jobs) {
+      if (reusedJobIds.has(job.id)) continue;
       const mapped = { ...job, id: jobIds.get(job.id)!, bookId, status: job.status === "running" ? "paused" : job.status };
       statements.push({ sql: "INSERT INTO source_jobs(id,book_id,json,created_at) VALUES(?,?,?,?)", params: [mapped.id, bookId, JSON.stringify(mapped), new Date().toISOString()] });
     }
     const book = { ...bundle.book, id: bookId }, chunks = chunksOf(book);
     for (const part of bundle.analysis) {
+      if (reusedJobIds.has(part.jobId)) continue;
       const job = bundle.jobs.find((j) => j.id === part.jobId)!;
       const mappedJob = { ...job, id: jobIds.get(job.id)!, bookId };
       const result = sourceAnalysisResult(part.text, book, chunks[part.ordinal], mappedJob);
@@ -539,9 +775,34 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
       for (const statement of result.statements) statements.push(statement);
     }
   }
+  let optionalTables = new Set<string>();
+  let previousWorldBookId: string | null = null;
   if (mode === "replace") {
+    const tableRows = await repo.platform.sql.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('execution_runs','pi_external_effects','world_execution_leases','settings','reader_progress','reader_bookmarks','reader_highlights','companion_sessions')",
+    );
+    optionalTables = new Set(tableRows.map((r) => String(r.name)));
+    const [prevHeadState] = await repo.platform.sql
+      .query(
+        "SELECT s.state_json FROM worlds w JOIN lines l ON l.id = w.current_line_id JOIN states s ON s.node_id = l.node_id WHERE w.id = ?",
+        [worldId],
+      )
+      .catch(() => []);
+    if (prevHeadState?.state_json) {
+      const prevParsed = parseJson(prevHeadState.state_json);
+      if (typeof prevParsed.source?.bookId === "string") previousWorldBookId = prevParsed.source.bookId;
+    }
     // Acquire SQLite write transaction first, then reject a concurrent owner.
-    statements.push({sql:"INSERT INTO worlds(id,title,era_id,settings_json,created_at,updated_at,played_at) SELECT 'archive-guard',NULL,'','{}','','','' WHERE EXISTS(SELECT 1 FROM world_execution_leases WHERE world_id=? AND owner_id<>'' AND expires_at_ms>?)",params:[worldId,Date.now()]});
+    if (optionalTables.has("world_execution_leases")) {
+      statements.push({sql:"INSERT INTO worlds(id,title,era_id,settings_json,created_at,updated_at,played_at) SELECT 'archive-guard',NULL,'','{}','','','' WHERE EXISTS(SELECT 1 FROM world_execution_leases WHERE world_id=? AND owner_id<>'' AND expires_at_ms>?)",params:[worldId,Date.now()]});
+    }
+    if (optionalTables.has("execution_runs")) statements.push({ sql: "DELETE FROM execution_runs WHERE world_id = ?", params: [worldId] });
+    if (optionalTables.has("pi_external_effects")) statements.push({ sql: "DELETE FROM pi_external_effects WHERE world_id = ?", params: [worldId] });
+    if (optionalTables.has("world_execution_leases")) statements.push({ sql: "DELETE FROM world_execution_leases WHERE world_id = ? OR world_id LIKE ? || '#read:%'", params: [worldId, worldId] });
+    if (optionalTables.has("settings")) statements.push({ sql: "DELETE FROM settings WHERE key IN (?, ?)", params: [`autoplayUnusedNote:${worldId}`, `carriedDone:${worldId}`] });
+    if (optionalTables.has("reader_progress")) statements.push({ sql: "DELETE FROM reader_progress WHERE target_type = 'world_novel' AND (target_id = ? OR target_id LIKE ? || ':%')", params: [worldId, worldId] });
+    if (optionalTables.has("reader_bookmarks")) statements.push({ sql: "DELETE FROM reader_bookmarks WHERE target_type = 'world_novel' AND target_id = ?", params: [worldId] });
+    if (optionalTables.has("reader_highlights")) statements.push({ sql: "DELETE FROM reader_highlights WHERE (target_type = 'world_novel' AND target_id = ?) OR world_id = ?", params: [worldId, worldId] });
     statements.push(
       { sql: "DELETE FROM pins WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM chapters WHERE world_id = ?", params: [worldId] },
@@ -559,16 +820,49 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
   for (const l of archive.lines) statements.push(insert("lines", LINE_FIELDS, l));
   for (const p of archive.pins) statements.push(insert("pins", PIN_FIELDS, p));
   for (const c of archive.chapters) statements.push(insert("chapters", CHAPTER_FIELDS, c));
-  for (const bundle of archive.books ?? []) for (const note of bundle.notes ?? []) {
-    // Content/progress are data only: importing never starts a note worker.
-    statements.push({sql:"INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      params:[newId(),bookIds.get(bundle.book.id)!,note.worldId===null?null:worldId,note.kind,note.title,JSON.stringify(note.scope),note.content,note.previousContent??null,JSON.stringify(note.refs),note.model,note.status==="running"?"paused":note.status,note.active?1:0,JSON.stringify(note.progress),note.createdAt,note.updatedAt]});
+  for (const bundle of archive.books ?? []) {
+    const mappedBookId = bookIds.get(bundle.book.id)!;
+    const seenShared = existingSharedNotesByBook.get(mappedBookId);
+    for (const note of bundle.notes ?? []) {
+      const scopeStr = JSON.stringify(note.scope);
+      if (note.worldId === null && seenShared) {
+        const sig = `${note.kind}\0${note.title}\0${scopeStr}\0${note.content}`;
+        if (seenShared.has(sig)) continue;
+        seenShared.add(sig);
+      }
+      // Content/progress are data only: importing never starts a note worker.
+      statements.push({sql:"INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params:[newId(),mappedBookId,note.worldId===null?null:worldId,note.kind,note.title,scopeStr,note.content,note.previousContent??null,JSON.stringify(note.refs),note.model,note.status==="running"?"paused":note.status,note.active?1:0,JSON.stringify(note.progress),note.createdAt,note.updatedAt]});
+    }
   }
   if (archive.version >= 8) for (const note of archive.storyNotes ?? []) {
     statements.push({ sql: "INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,previous_content,refs_json,model,status,active,progress_json,origin_world_id,origin_title,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       params: [newId(), worldId, note.kind, note.title, JSON.stringify(note.scope), note.content, note.previousContent ?? null, JSON.stringify(note.refs), note.model, note.status === "running" ? "paused" : note.status, note.active ? 1 : 0, JSON.stringify(note.progress), note.originWorldId ?? null, note.originTitle ?? null, note.createdAt, note.updatedAt] });
   }
   statements.push({ sql: "UPDATE worlds SET current_line_id = ? WHERE id = ?", params: [archive.world.current_line_id as Json, worldId] });
+  if (mode === "replace" && optionalTables.has("companion_sessions")) {
+    const activeLines = archive.lines.filter((l) => l.deleted_at == null).map((l) => String(l.id));
+    const currentLineId = String(archive.world.current_line_id ?? activeLines[0] ?? "");
+    statements.push({ sql: "UPDATE companion_sessions SET pi_session_id = NULL WHERE bound_world_id = ?", params: [worldId] });
+    if (activeLines.length && currentLineId) {
+      statements.push({
+        sql: `UPDATE companion_sessions SET bound_line_id = ? WHERE bound_world_id = ? AND (bound_line_id IS NULL OR bound_line_id NOT IN (${activeLines.map(() => "?").join(",")}))`,
+        params: [currentLineId, worldId, ...activeLines],
+      });
+    }
+    const currentLineRow = archive.lines.find((l) => l.id === archive.world.current_line_id);
+    const restoredHeadState = currentLineRow ? archive.states.find((s) => s.node_id === currentLineRow.node_id) : undefined;
+    const rawRestoredBookId = restoredHeadState ? parseJson(restoredHeadState.state_json).source?.bookId : undefined;
+    const restoredBookId = typeof rawRestoredBookId === "string" ? (bookIds.get(rawRestoredBookId) ?? rawRestoredBookId) : null;
+    for (const [oldId, newBookId] of bookIds) {
+      if (oldId !== newBookId) {
+        statements.push({ sql: "UPDATE companion_sessions SET bound_book_id = ? WHERE bound_world_id = ? AND bound_book_id = ?", params: [newBookId, worldId, oldId] });
+      }
+    }
+    if (previousWorldBookId && restoredBookId && previousWorldBookId !== restoredBookId) {
+      statements.push({ sql: "UPDATE companion_sessions SET bound_book_id = ? WHERE bound_world_id = ? AND bound_book_id = ?", params: [restoredBookId, worldId, previousWorldBookId] });
+    }
+  }
   const mapBooksDeep=(value:any):any=>Array.isArray(value)?value.map(mapBooksDeep):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,k==="bookId"&&typeof v==="string"?bookIds.get(v)??v:mapBooksDeep(v)])):value;
   if(archive.version>=7 && archive.pi) {
     let pi=repo.platform.execution?.agent ? archive.pi : cleanReadablePi(archive.pi);

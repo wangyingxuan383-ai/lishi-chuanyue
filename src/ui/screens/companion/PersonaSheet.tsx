@@ -19,7 +19,8 @@ export interface PersonaSheetProps {
   personas: CompanionPersona[];
   activePersonaId: string;
   boundWorldId?: string | null;
-  onSelect: (persona: CompanionPersona) => void;
+  boundLineId?: string | null;
+  onSelect: (persona: CompanionPersona & { boundLineId?: string | null }) => void;
   onChanged: (personas: CompanionPersona[], selected?: CompanionPersona) => void;
   onClose: () => void;
 }
@@ -92,10 +93,59 @@ function safeFileName(name: string): string {
   return (name.trim().replace(/[\\/:*?"<>|]+/g, "-") || "角色卡").slice(0, 40);
 }
 
+export function extractNpcLineId(p: CompanionPersona & { boundLineId?: string | null }): string | null {
+  if (typeof p.boundLineId === "string" && p.boundLineId.trim()) return p.boundLineId.trim();
+  const metaLine = p.metadata?.boundLineId;
+  if (typeof metaLine === "string" && metaLine.trim()) return metaLine.trim();
+  if (p.id.startsWith("npc:")) {
+    const parts = p.id.split(":");
+    if (parts.length >= 4 && parts[2]) return parts[2];
+  }
+  return null;
+}
+
+export function formatNpcOriginLabel(
+  p: CompanionPersona,
+  worldTitles: Record<string, string>,
+  lineNames: Record<string, string>,
+): string {
+  if (p.roleKind !== "npc") return "";
+  const wid = p.sourceWorldId ?? "";
+  const lid = extractNpcLineId(p);
+  const metaTitle = typeof p.metadata?.worldTitle === "string" ? p.metadata.worldTitle : "";
+  const wTitle = (wid && worldTitles[wid]) || metaTitle || (wid ? "已移除故事" : "");
+  const lName =
+    (wid && lid && lineNames[`${wid}:${lid}`]) ||
+    (lid === "main" ? "主线" : lid ? `路线 ${lid.slice(0, 6)}` : "");
+  if (!wTitle && !lName) return "";
+  return `${wTitle ? `《${wTitle}》` : "未标注故事"}${lName ? ` · ${lName}` : ""}`;
+}
+
+export function groupNpcPersonasByWorld(
+  npcs: CompanionPersona[],
+  boundWorldId?: string | null,
+  targetLineId?: string | null,
+): { currentWorldNpcs: CompanionPersona[]; otherWorldNpcs: CompanionPersona[] } {
+  if (!boundWorldId) {
+    return { currentWorldNpcs: [], otherWorldNpcs: npcs };
+  }
+  const targetLine = targetLineId || "main";
+  const currentWorldNpcs = npcs
+    .filter((p) => p.sourceWorldId === boundWorldId)
+    .sort((a, b) => {
+      const aMatch = (extractNpcLineId(a) ?? "main") === targetLine ? 0 : 1;
+      const bMatch = (extractNpcLineId(b) ?? "main") === targetLine ? 0 : 1;
+      return aMatch - bMatch;
+    });
+  const otherWorldNpcs = npcs.filter((p) => p.sourceWorldId !== boundWorldId);
+  return { currentWorldNpcs, otherWorldNpcs };
+}
+
 export function PersonaSheet({
   personas,
   activePersonaId,
   boundWorldId,
+  boundLineId,
   onSelect,
   onChanged,
   onClose,
@@ -108,15 +158,59 @@ export function PersonaSheet({
   const [saving, setSaving] = useState(false);
   const [storyPeople, setStoryPeople] = useState<Person[]>([]);
   const [loadingPeople, setLoadingPeople] = useState(false);
+  const [effectiveLineId, setEffectiveLineId] = useState<string | null>(boundLineId ?? null);
+  const [worldTitles, setWorldTitles] = useState<Record<string, string>>({});
+  const [lineNames, setLineNames] = useState<Record<string, string>>({});
 
   const allPersonas = personas.length ? personas : BUILTIN_PERSONAS;
+
+  useEffect(() => {
+    let live = true;
+    const npcWorldIds = new Set<string>();
+    if (boundWorldId) npcWorldIds.add(boundWorldId);
+    for (const p of allPersonas) {
+      if (p.roleKind === "npc" && p.sourceWorldId) npcWorldIds.add(p.sourceWorldId);
+    }
+    if (npcWorldIds.size === 0) return;
+    void (async () => {
+      const worlds = await game.repo.listWorlds().catch(() => []);
+      const titles: Record<string, string> = {};
+      for (const w of worlds) titles[w.id] = w.title || "未命名故事";
+      const linesMap: Record<string, string> = {};
+      await Promise.all(
+        [...npcWorldIds].map(async (wid) => {
+          const lines = await game.repo.lines(wid).catch(() => []);
+          for (const l of lines) {
+            linesMap[`${wid}:${l.id}`] = l.name || "主线";
+          }
+        }),
+      );
+      if (!live) return;
+      setWorldTitles(titles);
+      setLineNames(linesMap);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [game, boundWorldId, allPersonas]);
+
+  const npcOriginText = (p: CompanionPersona): string =>
+    formatNpcOriginLabel(p, worldTitles, lineNames);
+
   const filtered = useMemo(
-    () => allPersonas.filter((p) => localFind(query, p.name, p.tagline, ROLE_LABELS[p.roleKind])),
-    [allPersonas, query],
+    () =>
+      allPersonas.filter((p) =>
+        localFind(query, p.name, p.tagline, ROLE_LABELS[p.roleKind], npcOriginText(p)),
+      ),
+    [allPersonas, query, worldTitles, lineNames],
   );
 
   const builtins = filtered.filter((p) => p.builtin);
   const npcs = filtered.filter((p) => !p.builtin && p.roleKind === "npc");
+  const { currentWorldNpcs, otherWorldNpcs } = useMemo(
+    () => groupNpcPersonasByWorld(npcs, boundWorldId, effectiveLineId ?? boundLineId),
+    [npcs, boundWorldId, effectiveLineId, boundLineId],
+  );
   const customs = filtered.filter((p) => !p.builtin && p.roleKind !== "npc");
 
   const dirty = view === "edit" && JSON.stringify(form) !== initialSnap;
@@ -124,13 +218,22 @@ export function PersonaSheet({
   useEffect(() => {
     if (!boundWorldId) {
       setStoryPeople([]);
+      setEffectiveLineId(null);
       return;
     }
     let live = true;
     setLoadingPeople(true);
     void (async () => {
       const world = await game.repo.getWorld(boundWorldId);
-      const line = world?.currentLineId ? await game.repo.getLine(world.currentLineId) : null;
+      const preferredId = boundLineId || world?.currentLineId || null;
+      const requested = preferredId ? await game.repo.getLine(preferredId).catch(() => null) : null;
+      const line =
+        requested && requested.worldId === boundWorldId && !requested.deletedAt
+          ? requested
+          : world?.currentLineId
+            ? await game.repo.getLine(world.currentLineId)
+            : null;
+      if (live) setEffectiveLineId(line?.id ?? world?.currentLineId ?? boundLineId ?? null);
       if (!line) return [];
       const state = await game.repo.getState(line.nodeId);
       return state.people ?? [];
@@ -147,7 +250,7 @@ export function PersonaSheet({
     return () => {
       live = false;
     };
-  }, [game, boundWorldId]);
+  }, [game, boundWorldId, boundLineId]);
 
   const startCreate = () => {
     const next = emptyForm();
@@ -264,7 +367,8 @@ export function PersonaSheet({
     if (!boundWorldId || saving) return;
     setSaving(true);
     try {
-      const invited = await personaFromStoryPerson(game, boundWorldId, person.id);
+      const targetLine = effectiveLineId ?? boundLineId ?? undefined;
+      const invited = await personaFromStoryPerson(game, boundWorldId, person.id, targetLine);
       const updated = await listPersonas(game);
       onChanged(updated, invited);
       onSelect(invited);
@@ -280,13 +384,19 @@ export function PersonaSheet({
   const renderCard = (p: CompanionPersona) => {
     const selected = p.id === activePersonaId;
     const badge = p.avatar?.trim() || [...p.name][0] || "灵";
+    const originLabel = npcOriginText(p);
+    const pLineId = extractNpcLineId(p);
+    const isCurrentRouteNpc =
+      p.roleKind === "npc" &&
+      Boolean(boundWorldId && p.sourceWorldId === boundWorldId) &&
+      (pLineId ?? "main") === (effectiveLineId ?? boundLineId ?? "main");
     return (
       <div key={p.id} className={`persona-card${selected ? " selected" : ""}`}>
         <button
           type="button"
           className="persona-card-main"
           onClick={() => {
-            onSelect(p);
+            onSelect(pLineId ? { ...p, boundLineId: pLineId } : p);
             onClose();
           }}
         >
@@ -297,8 +407,10 @@ export function PersonaSheet({
             <span className="persona-card-title">
               <b>{p.name}</b>
               <span className="companion-role-badge">{ROLE_LABELS[p.roleKind]}</span>
+              {isCurrentRouteNpc && <span className="tag">当前路线</span>}
               {selected && <span className="tag">当前</span>}
             </span>
+            {originLabel && <small className="muted">{originLabel}</small>}
             {p.tagline && <span className="persona-card-tagline">{p.tagline}</span>}
           </span>
         </button>
@@ -307,7 +419,7 @@ export function PersonaSheet({
             type="button"
             className="ghost"
             onClick={() => {
-              onSelect(p);
+              onSelect(pLineId ? { ...p, boundLineId: pLineId } : p);
               onClose();
             }}
           >
@@ -573,11 +685,28 @@ export function PersonaSheet({
           </>
         )}
 
-        {npcs.length > 0 && (
+        {boundWorldId ? (
           <>
-            <h3 className="settings-sub">故事人物化身</h3>
-            <div className="persona-grid">{npcs.map(renderCard)}</div>
+            {currentWorldNpcs.length > 0 && (
+              <>
+                <h3 className="settings-sub">本局人物化身</h3>
+                <div className="persona-grid">{currentWorldNpcs.map(renderCard)}</div>
+              </>
+            )}
+            {otherWorldNpcs.length > 0 && (
+              <>
+                <h3 className="settings-sub">其他故事人物化身</h3>
+                <div className="persona-grid">{otherWorldNpcs.map(renderCard)}</div>
+              </>
+            )}
           </>
+        ) : (
+          npcs.length > 0 && (
+            <>
+              <h3 className="settings-sub">故事人物化身</h3>
+              <div className="persona-grid">{npcs.map(renderCard)}</div>
+            </>
+          )
         )}
 
         {customs.length > 0 && (

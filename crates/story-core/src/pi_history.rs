@@ -12,16 +12,20 @@ fn invalid(message: &str) -> Error {
 // A historical transcript can contain quotations. With a chapter fence, a
 // session is readable only when every task used a provably narrower fence;
 // inherited messages lack per-task provenance, so are conservatively omitted.
-const SCOPE: &str = "(?=0 OR (NOT EXISTS(SELECT 1 FROM pi_session_messages hf WHERE hf.session_id=s.id) AND NOT EXISTS(SELECT 1 FROM pi_tasks tf WHERE tf.session_id=s.id AND (json_extract(tf.metadata_json,'$.referenceScope.bookId') IS NOT ? OR json_type(tf.metadata_json,'$.referenceScope.through') IS NOT 'integer' OR COALESCE(json_extract(tf.metadata_json,'$.referenceScope.through'),-1) NOT BETWEEN 0 AND ?))))";
-fn fence(plan: &RunPlan) -> (bool, &str, i64) {
+const SCOPE: &str = "(?=0 OR (NOT EXISTS(SELECT 1 FROM pi_session_messages hf WHERE hf.session_id=s.id) AND NOT EXISTS(SELECT 1 FROM pi_tasks tf WHERE tf.session_id=s.id AND (json_extract(tf.metadata_json,'$.referenceScope.bookId') IS NOT ? OR json_type(tf.metadata_json,'$.referenceScope.through') IS NOT 'integer' OR COALESCE(json_extract(tf.metadata_json,'$.referenceScope.from'),0) < ? OR COALESCE(json_extract(tf.metadata_json,'$.referenceScope.through'),-1) NOT BETWEEN ? AND ?))))";
+fn fence(plan: &RunPlan) -> (bool, &str, i64, i64) {
     let scope = &plan.meta["agent"]["referenceScope"];
+    let from = scope["from"]
+        .as_u64()
+        .map(|n| n.min(i64::MAX as u64) as i64);
     let through = scope["through"]
         .as_u64()
         .map(|n| n.min(i64::MAX as u64) as i64);
     (
-        through.is_some(),
+        from.is_some() || through.is_some(),
         ws::text(scope, "bookId"),
-        through.unwrap_or(0),
+        from.unwrap_or(0),
+        through.unwrap_or(i64::MAX),
     )
 }
 
@@ -43,9 +47,9 @@ pub(crate) fn search(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Va
     }
     let offset = args["offset"].as_u64().unwrap_or(0).min(i64::MAX as u64) as i64;
     let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 20) as i64;
-    let (limited, book, through) = fence(plan);
+    let (limited, book, from, through) = fence(plan);
     let mut statement=db.prepare(&format!("SELECT s.id,s.title,s.updated_at,(SELECT COUNT(*) FROM pi_tasks t WHERE t.session_id=s.id) FROM pi_sessions s WHERE s.world_id=? AND s.line_id=? AND (?='' OR instr(s.title,?)>0 OR EXISTS(SELECT 1 FROM pi_session_messages h WHERE h.session_id=s.id AND json_type(h.message_json,'$.content')='text' AND instr(json_extract(h.message_json,'$.content'),?)>0) OR EXISTS(SELECT 1 FROM pi_tasks t WHERE t.session_id=s.id AND (instr(t.text,?)>0 OR EXISTS(SELECT 1 FROM pi_inputs i WHERE i.task_id=t.id AND i.status IN ('delivered','applied') AND instr(json_extract(i.content_json,'$.text'),?)>0) OR EXISTS(SELECT 1 FROM pi_events e,json_each(CASE WHEN json_type(e.event_json,'$.event.message.content')='array' THEN json_extract(e.event_json,'$.event.message.content') ELSE '[]' END) p WHERE e.task_id=t.id AND json_extract(e.event_json,'$.event.type')='message_end' AND json_extract(e.event_json,'$.event.message.role')='assistant' AND COALESCE(json_extract(e.event_json,'$.childId'),'')='' AND COALESCE(json_extract(e.event_json,'$.event.childId'),'')='' AND json_extract(p.value,'$.type')='text' AND instr(json_extract(p.value,'$.text'),?)>0)))) AND {SCOPE} ORDER BY s.updated_at DESC,s.id LIMIT ? OFFSET ?"))?;
-    let rows=statement.query_map(params![plan.world_id,plan.line_id,query,query,query,query,query,query,limited,book,through,limit+1,offset],|r|Ok(json!({"sessionId":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"updatedAt":r.get::<_,String>(2)?,"taskCount":r.get::<_,i64>(3)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let rows=statement.query_map(params![plan.world_id,plan.line_id,query,query,query,query,query,query,limited,book,from,from,through,limit+1,offset],|r|Ok(json!({"sessionId":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"updatedAt":r.get::<_,String>(2)?,"taskCount":r.get::<_,i64>(3)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
     let more = rows.len() > limit as usize;
     let sessions = rows.into_iter().take(limit as usize).collect::<Vec<_>>();
     Ok(
@@ -55,8 +59,8 @@ pub(crate) fn search(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Va
 
 pub(crate) fn read(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Value> {
     let session = ws::text(args, "sessionId");
-    let (limited, book, through) = fence(plan);
-    let exists=db.query_row(&format!("SELECT 1 FROM pi_sessions s WHERE s.id=? AND s.world_id=? AND s.line_id=? AND {SCOPE}"),params![session,plan.world_id,plan.line_id,limited,book,through],|_|Ok(())).optional()?.is_some();
+    let (limited, book, from, through) = fence(plan);
+    let exists=db.query_row(&format!("SELECT 1 FROM pi_sessions s WHERE s.id=? AND s.world_id=? AND s.line_id=? AND {SCOPE}"),params![session,plan.world_id,plan.line_id,limited,book,from,from,through],|_|Ok(())).optional()?.is_some();
     if !exists {
         return Err(invalid("会话不存在、已删除、不属于当前路线，或其历史参考范围超出本次限章；请重新检索或读取当前资料"));
     }

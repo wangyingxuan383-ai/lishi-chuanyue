@@ -4,8 +4,8 @@
 //! - Zero Node.js cold start and zero `world_execution_leases` lock contention:
 //!   story turns and companion chats run concurrently without blocking each other.
 //! - Long-poll `snapshot(runId, afterSeq, waitMs)` wakes via `tokio::sync::Notify`.
-//! - `Research` gear strictly clamps `through` to the attached world's reading
-//!   ceiling so original-book RAG never leaks future-chapter spoilers.
+//! - `Research` gear reads the full bound book by default, or an explicit
+//!   chapter range (`bookScope.mode == "chapters"`) when requested by the user.
 
 use crate::{
     chat::{self, Completion, Model, TextSink},
@@ -383,7 +383,7 @@ fn build_system_prompt(
     } else if gear == "research" {
         let mut tool_notes = Vec::new();
         if has_book_tools {
-            tool_notes.push("可用 list_sections / search_original / read_original / read_canon_notes 检索允许范围内的原著目录、原文与札记（工具参数 section 为 0 起始内部索引，向用户提及节号时请使用 1 起始的 sectionNumber 即“第 N 节”或原章节标题；先查后答，引用真实原句，绝不剧透或编造超出允许范围的章节）");
+            tool_notes.push("可用 list_sections / search_original / read_original / read_canon_notes 检索所选范围内的原著目录、原文与札记（工具参数 section 为 0 起始内部索引，向用户提及节号时请使用 1 起始的 sectionNumber 即“第 N 节”或原章节标题；先查后答，引用真实原句，不编造原文没有的情节）");
         }
         if has_world_tool {
             tool_notes.push("可用 read_world_brief 查阅当前挂载故事的人物、设定、目标与近期摘要");
@@ -651,8 +651,10 @@ fn push_unique_citation(citations: &mut Vec<Value>, candidate: Value) {
     }
 }
 
-/// Builds the synthetic `RunPlan` for `runtime_sources::read_db`, strictly
-/// enforcing `world_source.through` whenever `bound_world_id` has a book binding.
+/// Builds the synthetic `RunPlan` for `runtime_sources::read_db`.
+/// Defaults to full-book access (`through: null`) even if a legacy world save
+/// still carries a historical `through` field; narrows only when `book_scope`
+/// explicitly selects `mode == "chapters"`.
 fn build_synthetic_source_plan(
     db: &Connection,
     model: &ModelConfig,
@@ -679,18 +681,18 @@ fn build_synthetic_source_plan(
         }
     }
 
-    let effective_source = if let Some(ws) = world_source {
-        // CRITICAL SPOILER FENCE: When attached to a world with a bound book,
-        // `ws["through"]` is the hard ceiling. `book_scope` can narrow it, NEVER widen it!
+    let scoped_to = match book_scope {
+        Some(scope) if scope["mode"] == "chapters" && scope["to"].is_i64() => scope["to"].clone(),
+        _ => Value::Null,
+    };
+
+    let effective_source = if let Some(mut ws) = world_source {
+        ws["through"] = scoped_to.clone();
         ws
     } else if let Some(bid) = bound_book_id.filter(|s| !s.is_empty()) {
-        let through = match book_scope {
-            Some(scope) if scope["mode"] == "chapters" && scope["to"].is_i64() => scope["to"].clone(),
-            _ => Value::Null,
-        };
         json!({
             "bookId": bid,
-            "through": through,
+            "through": scoped_to,
             "position": 0,
             "mode": "reference",
             "instructions": "",
@@ -699,19 +701,16 @@ fn build_synthetic_source_plan(
         return Ok(None);
     };
 
-    state["source"] = effective_source.clone();
+    state["source"] = effective_source;
     let mut meta = json!({ "budgetChars": 16_000 });
     if let Some(scope) = book_scope.filter(|v| v["mode"] == "chapters") {
         if let (Some(from), Some(to)) = (scope["from"].as_i64(), scope["to"].as_i64()) {
-            let clamped_to = match effective_source["through"].as_i64() {
-                Some(ceiling) => to.min(ceiling),
-                None => to,
-            };
-            let clamped_from = from.max(0).min(clamped_to.max(0));
+            let clamped_from = from.max(0);
+            let clamped_to = to.max(clamped_from);
             meta["sourceScope"] = json!({
                 "mode": "chapters",
                 "from": clamped_from,
-                "to": clamped_to.max(clamped_from),
+                "to": clamped_to,
             });
         }
     }
@@ -1182,7 +1181,9 @@ impl CompanionRuntime {
         {
             let active = lock_unpoison(&self.active);
             let compacting = lock_unpoison(&self.compacting);
-            if active.values().any(|r| r.session_id == session_id)
+            if active
+                .values()
+                .any(|r| r.session_id == session_id && !lock_unpoison(&r.live).settled_in_db)
                 || compacting.contains(&session_id)
             {
                 return Err(Error::Busy {
@@ -2059,6 +2060,37 @@ impl CompanionRuntime {
         }))
     }
 
+    pub(crate) fn cancel_session_runs(&self, raw_session_id: &str) {
+        let mut targets = HashSet::from([raw_session_id.to_owned()]);
+        if let Some(stripped) = raw_session_id.strip_prefix("legacy:") {
+            targets.insert(format!("pi:{stripped}"));
+        }
+        if let Ok(db) = self.store.0.lock() {
+            if let Ok(Some(sess)) = get_session_db(&db, raw_session_id) {
+                if let Some(id) = sess["id"].as_str() {
+                    targets.insert(id.to_owned());
+                }
+            }
+        }
+        let runs: Vec<Arc<ActiveCompanionRun>> = {
+            let mut active = lock_unpoison(&self.active);
+            let keys: Vec<String> = active
+                .iter()
+                .filter(|(_, r)| targets.contains(&r.session_id))
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.into_iter().filter_map(|k| active.remove(&k)).collect()
+        };
+        for run in runs {
+            run.cancel.cancel();
+            run.bump(|live| {
+                live.status = "cancelled".into();
+                live.phase = "done".into();
+                live.settled_in_db = true;
+            });
+        }
+    }
+
     async fn compact(&self, request: Value) -> Result<Value> {
         let session_id = request["sessionId"]
             .as_str()
@@ -2078,10 +2110,10 @@ impl CompanionRuntime {
             {
                 let active = lock_unpoison(&self.active);
                 let mut compacting = lock_unpoison(&self.compacting);
-                if active
-                    .values()
-                    .any(|r| r.session_id == real_id || r.session_id == session_id)
-                    || !compacting.insert(real_id.clone())
+                if active.values().any(|r| {
+                    (r.session_id == real_id || r.session_id == session_id)
+                        && !lock_unpoison(&r.live).settled_in_db
+                }) || !compacting.insert(real_id.clone())
                 {
                     return Err(Error::Busy {
                         holder: "companion".into(),
@@ -2385,6 +2417,7 @@ fn dispatch_store_op(rt: &CompanionRuntime, request: &Value) -> Result<Value> {
                 .as_str()
                 .or_else(|| request["sessionId"].as_str())
                 .ok_or_else(|| invalid("缺少会话标识"))?;
+            rt.cancel_session_runs(id);
             store.delete_session(id)
         }
         "message_append" => {
@@ -2699,7 +2732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn research_gear_clamps_world_spoiler_fence_and_records_steps_and_citations() {
+    async fn research_gear_reads_full_book_ignoring_legacy_through_and_honors_explicit_chapter_scope() {
         let store = setup_db();
         {
             let db = store.lock().unwrap();
@@ -2713,7 +2746,7 @@ mod tests {
                  INSERT INTO source_terms(book_id,term,postings) VALUES
                    ('b1','青竹','[0]'),('b1','竹剑','[0]'),('b1','孤岛','[2]'),('b1','海外','[2]');
                  INSERT INTO worlds(id,title,era_id,current_line_id,created_at,updated_at,played_at)
-                   VALUES('w-fenced','限章同人','free','l1','t','t','t');
+                   VALUES('w-fenced','同人世界','free','l1','t','t','t');
                  INSERT INTO nodes(id,world_id,seq,kind,created_at) VALUES('n1','w-fenced',0,'opening','t');
                  INSERT INTO states(node_id,state_json) VALUES('n1','{\"source\":{\"bookId\":\"b1\",\"through\":0,\"position\":0,\"mode\":\"fanfic\",\"instructions\":\"\"},\"protagonist\":{\"name\":\"林牧\",\"identity\":\"外门弟子\"},\"time\":{\"start\":\"第一日\"},\"places\":[],\"goals\":[]}');
                  INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l1','w-fenced','主线','n1','t');",
@@ -2725,13 +2758,22 @@ mod tests {
             ScriptedTurn::ToolCall {
                 calls: vec![
                     json!({"id":"c1","type":"function","function":{"name":"search_original","arguments":"{\"query\":\"青竹剑\"}"}}),
-                    json!({"id":"c2","type":"function","function":{"name":"read_original","arguments":"{\"section\":2}"}}),
+                    json!({"id":"c2","type":"function","function":{"name":"read_original","arguments":"{\"section\":2,\"chunk\":2}"}}),
                     json!({"id":"c3","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"天宝物价\"}"}}),
                 ],
             },
             ScriptedTurn::Chat {
                 thinking: "",
-                text: "第一章写到林牧拾得青竹剑；第三章超出本局进度未读取。",
+                text: "第一章写到林牧拾得青竹剑；第三章写到掌门隐居海外孤岛。",
+            },
+            ScriptedTurn::ToolCall {
+                calls: vec![
+                    json!({"id":"c4","type":"function","function":{"name":"read_original","arguments":"{\"section\":2,\"chunk\":2}"}}),
+                ],
+            },
+            ScriptedTurn::Chat {
+                thinking: "",
+                text: "按指定第 1～1 节范围未读取第三章。",
             },
         ]);
         let rt = Arc::new(CompanionRuntime::new(store.clone(), fake.clone()));
@@ -2745,13 +2787,14 @@ mod tests {
             .unwrap();
         let sid = created["session"]["id"].as_str().unwrap();
 
+        // 1. Default full-book mode reads section 2 even when legacy `state.source.through` was 0:
         let sent = rt
             .dispatch(json!({
                 "op": "send",
                 "sessionId": sid,
                 "gear": "research",
                 "text": "查一下青竹剑和第三章内容",
-                "bookScope": {"mode": "chapters", "from": 0, "to": 2},
+                "bookScope": {"mode": "full"},
                 "model": model_cfg(),
             }))
             .await
@@ -2767,20 +2810,41 @@ mod tests {
             if s["done"] == true {
                 assert_eq!(s["steps"].as_array().unwrap().len(), 3);
                 assert_eq!(s["steps"][0]["status"], "done");
-                assert_eq!(s["steps"][1]["status"], "failed", "section 2 past world through=0 must be blocked");
+                assert_eq!(s["steps"][1]["status"], "done");
                 assert_eq!(s["steps"][2]["status"], "done");
                 let cites = s["citations"].as_array().unwrap();
                 assert!(cites.iter().any(|c| c["kind"] == "book" && c["section"] == 0));
-                assert!(!cites.iter().any(|c| c["section"] == 2));
+                assert!(cites.iter().any(|c| c["kind"] == "book" && c["section"] == 2));
                 assert!(cites.iter().any(|c| c["kind"] == "web" && c["url"] == "https://example.org/tang"));
                 break;
             }
         }
-        let bodies = lock_unpoison(&fake.captured_bodies);
-        assert!(
-            !bodies[1].to_string().contains("隐居海外孤岛"),
-            "spoiler text from section 2 must never enter model context"
-        );
+
+        // 2. Explicit `bookScope: { mode: "chapters", from: 0, to: 0 }` restricts lookups to section 0:
+        let sent_scoped = rt
+            .dispatch(json!({
+                "op": "send",
+                "sessionId": sid,
+                "gear": "research",
+                "text": "只查第一节",
+                "bookScope": {"mode": "chapters", "from": 0, "to": 0},
+                "model": model_cfg(),
+            }))
+            .await
+            .unwrap();
+        let run_id2 = sent_scoped["runId"].as_str().unwrap();
+        let mut r_seq2 = 0u64;
+        loop {
+            let s = rt
+                .dispatch(json!({"op": "snapshot", "runId": run_id2, "afterSeq": r_seq2, "waitMs": 200}))
+                .await
+                .unwrap();
+            r_seq2 = s["seq"].as_u64().unwrap_or(r_seq2);
+            if s["done"] == true {
+                assert_eq!(s["steps"][0]["status"], "failed");
+                break;
+            }
+        }
     }
 
     #[tokio::test]
@@ -2892,5 +2956,120 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stopped["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn settled_run_never_blocks_send_or_compact_as_busy_and_session_delete_cancels_live_run() {
+        let store = setup_db();
+        let fake = FakeModel::new(vec![
+            ScriptedTurn::Chat {
+                thinking: "",
+                text: "停止后的立即重发回复",
+            },
+            ScriptedTurn::Chat {
+                thinking: "",
+                text: "压缩后的摘要内容",
+            },
+            ScriptedTurn::SlowHang,
+        ]);
+        let rt = Arc::new(CompanionRuntime::new(store.clone(), fake));
+        let created = rt
+            .dispatch(json!({"op": "session_create", "title": "停止与删会话测试"}))
+            .await
+            .unwrap();
+        let sid = created["session"]["id"].as_str().unwrap().to_owned();
+        for i in 1..=5 {
+            rt.dispatch(json!({
+                "op": "message_append",
+                "sessionId": sid,
+                "message": {"role": if i % 2 == 1 { "user" } else { "assistant" }, "content": format!("历史对话 {i}")}
+            }))
+            .await
+            .unwrap();
+        }
+
+        // Simulate a slow-cleanup run still present in `rt.active`, whose DB state has already settled:
+        let lingering_cancel = CancellationToken::new();
+        let lingering = Arc::new(ActiveCompanionRun {
+            run_id: "settled-lingering-run".into(),
+            session_id: sid.clone(),
+            gear: "chat".into(),
+            world_id: None,
+            model_name: "test-main".into(),
+            started: Instant::now(),
+            totals: Mutex::new(UsageTotals::default()),
+            cancel: lingering_cancel,
+            live: Mutex::new(LiveState {
+                seq: 3,
+                status: "cancelled".into(),
+                phase: "done".into(),
+                content: "已停止".into(),
+                thinking: String::new(),
+                steps: vec![],
+                citations: vec![],
+                usage: None,
+                error_text: None,
+                settled_in_db: true,
+            }),
+            notify: Notify::new(),
+        });
+        lock_unpoison(&rt.active).insert("settled-lingering-run".into(), lingering);
+
+        // 1. Immediate resend must NOT fail with Busy when `settled_in_db == true`:
+        let resent = rt
+            .dispatch(json!({
+                "op": "send",
+                "sessionId": sid,
+                "gear": "chat",
+                "text": "立刻重发",
+                "model": model_cfg(),
+            }))
+            .await
+            .unwrap();
+        let resend_run = resent["runId"].as_str().unwrap();
+        loop {
+            let s = rt
+                .dispatch(json!({"op": "snapshot", "runId": resend_run, "afterSeq": 0, "waitMs": 200}))
+                .await
+                .unwrap();
+            if s["done"] == true {
+                assert_eq!(s["content"], "停止后的立即重发回复");
+                break;
+            }
+        }
+
+        // 2. Compact must also NOT fail with Busy when `settled_in_db == true`:
+        let compacted = rt
+            .dispatch(json!({
+                "op": "compact",
+                "sessionId": sid,
+                "keepRecent": 2,
+                "model": model_cfg(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(compacted["summaryText"], "压缩后的摘要内容");
+
+        // 3. `session_delete` actively cancels in-flight background runs belonging to the session:
+        let hanging = rt
+            .dispatch(json!({
+                "op": "send",
+                "sessionId": sid,
+                "gear": "chat",
+                "text": "发起慢流然后直接删会话",
+                "model": model_cfg(),
+            }))
+            .await
+            .unwrap();
+        let hang_run_id = hanging["runId"].as_str().unwrap().to_owned();
+        let run_handle = lock_unpoison(&rt.active).get(&hang_run_id).cloned().unwrap();
+        assert!(!run_handle.cancel.is_cancelled());
+
+        let deleted = rt
+            .dispatch(json!({"op": "session_delete", "id": sid}))
+            .await
+            .unwrap();
+        assert_eq!(deleted["deleted"], true);
+        assert!(run_handle.cancel.is_cancelled(), "session_delete must cancel active background runs");
     }
 }

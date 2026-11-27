@@ -295,7 +295,8 @@ describe("R38 full-stack deep audit regression suite", () => {
       settings: { ...EMPTY.settings, mode: "history" },
       fanfic: true,
     } as unknown as Record<string, unknown>);
-    expect(fanficDraft.settings.mode).toBe("history");
+    expect(fanficDraft.settings.mode).toBe("free");
+    expect(fanficDraft.settings.clockStyle).toBe("elapsed");
     expect(fanficDraft.fanfic).toBe(true);
 
     const historyDraft = normalizeOpeningDraft({

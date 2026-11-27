@@ -130,7 +130,40 @@ impl Engine {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Store::guard(&tx, plan)?;
         let time = Utc::now().to_rfc3339();
-        let head: Option<String> = tx.query_row("SELECT node_id FROM lines WHERE id=? AND world_id=? AND deleted_at IS NULL", params![plan.line_id, plan.world_id], |r| r.get(0)).optional()?;
+        let world_active: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM worlds WHERE id=? AND archived=0)",
+            [&plan.world_id],
+            |r| r.get(0),
+        )?;
+        let head: Option<String> = if world_active {
+            tx.query_row(
+                "SELECT node_id FROM lines WHERE id=? AND world_id=? AND deleted_at IS NULL",
+                params![plan.line_id, plan.world_id],
+                |r| r.get(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let node_exists: bool = world_active
+            && !node.is_empty()
+            && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND world_id=?)",
+                params![node, plan.world_id],
+                |r| r.get(0),
+            )?;
+        if !world_active || head.is_none() || !node_exists {
+            tx.execute(
+                "UPDATE execution_runs SET status='committed',result_json=?,updated_at=? WHERE id=? AND status='running'",
+                params![
+                    json!({"worldId":plan.world_id,"nodeId":node,"skipped":true}).to_string(),
+                    time,
+                    plan.id
+                ],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
         // The 设定集 patch applies to the story as it was; once the player has
         // gone on, the next passage asks for it again.
         // A newer writer can already be using this head, before its commit changes it.
@@ -140,9 +173,14 @@ impl Engine {
             || Some(l.ticket.owner_id.as_str()) == plan.meta["passageRun"].as_str());
         // The passage's text when the tidy-up was asked for: an edit since then
         // means its results describe text that is gone (D183).
-        let text_now: Option<String> = tx.query_row("SELECT narrative FROM nodes WHERE id=?", [&node], |r| r.get(0)).optional()?;
+        let text_now: Option<String> = tx.query_row("SELECT narrative FROM nodes WHERE id=? AND world_id=?", params![node, plan.world_id], |r| r.get(0)).optional()?;
         let same_text = text_now.as_deref() == Some(plan.original.as_str());
-        let still_head = available && same_text && head.as_deref() == Some(plan.head_id.as_str())
+        let head_node_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND world_id=?)",
+            params![plan.head_id, plan.world_id],
+            |r| r.get(0),
+        )?;
+        let still_head = available && same_text && head_node_exists && head.as_deref() == Some(plan.head_id.as_str())
             && text_guard_matches(&tx, &plan.world_id, &plan.meta["upkeepTextGuard"])?;
         let mut upkeep_done = false;
         if still_head && c.draft["upkeepPatch"].is_object() {
@@ -155,21 +193,32 @@ impl Engine {
                 let seq: i64 = tx.query_row("SELECT COALESCE(MAX(seq),0)+1 FROM nodes WHERE world_id=?", [&plan.world_id], |r| r.get(0))?;
                 insert_node(&tx, &next_id, &plan.world_id, Some(&plan.head_id), seq, "edit", &json!({"text":"AI 整理了设定集"}), "", patch,
                     &json!({"by":"AI","promptVersion":plan.meta["upkeepVersion"],"chips":next["chips"],"upkeep":true}), &next["state"], &time)?;
-                tx.execute("UPDATE lines SET node_id=? WHERE id=?", params![next_id, plan.line_id])?;
+                tx.execute("UPDATE lines SET node_id=? WHERE id=? AND world_id=? AND deleted_at IS NULL", params![next_id, plan.line_id, plan.world_id])?;
             }
             upkeep_done = true;
         }
         if still_head && c.draft["upkeepAttempted"] == true && (upkeep_done || !c.draft["upkeepPatch"].is_object()) {
-            tx.execute("UPDATE nodes SET meta_json=json_set(meta_json,'$.upkeep',json('true')) WHERE id=?", [&node])?;
+            tx.execute("UPDATE nodes SET meta_json=json_set(meta_json,'$.upkeep',json('true')) WHERE id=? AND world_id=?", params![node, plan.world_id])?;
         }
         if c.draft["chapter"].is_object() {
             let chapter = &c.draft["chapter"];
             let first = plan.meta["chapterFirstId"].as_str().filter(|s| *s != "{{NODE_ID}}").unwrap_or(&node).to_owned();
+            let span_valid: bool = tx.query_row(
+                "WITH RECURSIVE up(id) AS (
+                     SELECT id FROM nodes WHERE id=?1 AND world_id=?2
+                     UNION ALL
+                     SELECT n.parent_id FROM nodes n JOIN up u ON n.id=u.id WHERE n.world_id=?2 AND n.parent_id IS NOT NULL
+                 )
+                 SELECT EXISTS(SELECT 1 FROM up WHERE id=?3)
+                    AND EXISTS(SELECT 1 FROM nodes WHERE id=?3 AND world_id=?2)",
+                params![node, plan.world_id, first],
+                |r| r.get(0),
+            )?;
             // A later passage may have summarized the same chapter first, on this route.
             // Another route sharing the first passage has a chapter of its own (D183).
-            let taken = tx.query_row("WITH RECURSIVE up(id) AS (SELECT ? UNION ALL SELECT n.parent_id FROM nodes n JOIN up u ON n.id=u.id WHERE n.parent_id IS NOT NULL)
+            let taken = span_valid && tx.query_row("WITH RECURSIVE up(id) AS (SELECT ? UNION ALL SELECT n.parent_id FROM nodes n JOIN up u ON n.id=u.id WHERE n.parent_id IS NOT NULL)
                 SELECT 1 FROM chapters WHERE world_id=? AND first_node_id=? AND last_node_id IN (SELECT id FROM up)", params![node, plan.world_id, first], |_| Ok(())).optional()?.is_some();
-            if !taken {
+            if span_valid && !taken {
                 let fresh = same_text && text_guard_matches(&tx, &plan.world_id, &plan.meta["chapterTextGuard"])?;
                 tx.execute("INSERT INTO chapters(id,world_id,first_node_id,last_node_id,title,gist,summary,model,prompt_version,created_at,stale) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![uuid::Uuid::new_v4().simple().to_string(),plan.world_id,first,node,chapter["title"].as_str().unwrap_or("未命名章节"),chapter["gist"].as_str().unwrap_or(""),chapter["summary"].as_str().unwrap_or(""),plan.model.aux_model.as_ref().unwrap_or(&plan.model.model),plan.meta["chapterVersion"].as_str().unwrap_or("chapter-2"),time,if fresh { None } else { Some(1) }])?;
             }
@@ -178,6 +227,15 @@ impl Engine {
             let (Some(id), Some(first), Some(last)) = (refresh["id"].as_str(), refresh["firstNodeId"].as_str(), refresh["lastNodeId"].as_str()) else { continue };
             let chapter = &c.draft["chapterRefreshed"][id];
             if !chapter.is_object() {
+                continue;
+            }
+            let refresh_nodes_valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?1 AND world_id=?3)
+                    AND EXISTS(SELECT 1 FROM nodes WHERE id=?2 AND world_id=?3)",
+                params![first, last, plan.world_id],
+                |r| r.get(0),
+            )?;
+            if !refresh_nodes_valid {
                 continue;
             }
             let fresh = if refresh["textGuard"].is_null() {

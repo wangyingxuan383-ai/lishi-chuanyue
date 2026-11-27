@@ -165,11 +165,157 @@ const hasFinePointer = () =>
 const BookPreviewCompat = BookPreview as unknown as (props: {
   bookId?: string;
   book?: SourceBook;
-  through?: number | null;
+  initialSection?: number;
 }) => ReturnType<typeof BookPreview>;
 
 const isNpcPersona = (p?: Pick<CompanionPersona, "id" | "roleKind"> | null): boolean =>
   Boolean(p && (p.roleKind === "npc" || p.id.startsWith("npc:")));
+
+export function isCompanionPreviewTaskStale(
+  status: string,
+  task: Pick<AgentTask, "id"> & {
+    previewStale?: boolean;
+    baseLineId?: string;
+    baseHeadId?: string;
+  },
+  liveLineId?: string | null,
+  liveHeadId?: string | null,
+  stalePreviewIds?: ReadonlySet<string>,
+): boolean {
+  return (
+    status === "previewed" &&
+    Boolean(
+      stalePreviewIds?.has(task.id) ||
+        task.previewStale === true ||
+        (liveLineId && task.baseLineId && task.baseLineId !== liveLineId) ||
+        (liveHeadId && task.baseHeadId && task.baseHeadId !== liveHeadId),
+    )
+  );
+}
+
+export function resolveAgentWorkspaceRoute(
+  session: Pick<CompanionSession, "boundWorldId" | "boundLineId" | "piSessionId">,
+  boundWorldBrief: { lineId: string | null } | null | undefined,
+  piDetail?: Pick<AgentSessionDetail, "session" | "tasks"> | null,
+): { worldId: string; lineId: string; sessionId?: string; syncSessionLineId?: string } | null {
+  if (!session.boundWorldId || !boundWorldBrief) return null;
+  const lineId = boundWorldBrief.lineId || session.boundLineId || "";
+  if (!lineId) return null;
+  const syncSessionLineId =
+    boundWorldBrief.lineId && session.boundLineId !== boundWorldBrief.lineId
+      ? boundWorldBrief.lineId
+      : undefined;
+  const keepPiSession = Boolean(
+    session.piSessionId &&
+      (!piDetail?.session ||
+        piDetail.session.lineId === lineId ||
+        (piDetail.tasks?.length ?? 0) > 0),
+  );
+  return {
+    worldId: session.boundWorldId,
+    lineId,
+    ...(keepPiSession && session.piSessionId ? { sessionId: session.piSessionId } : {}),
+    ...(syncSessionLineId ? { syncSessionLineId } : {}),
+  };
+}
+
+export function buildCitationBookPreview(
+  outline: { id: string; title: string },
+  cite: Pick<CompanionCitation, "quote" | "section">,
+): { bookId: string; title: string; quote?: string; section?: number } {
+  return {
+    bookId: outline.id,
+    title: outline.title,
+    quote: cite.quote,
+    ...(typeof cite.section === "number" && Number.isInteger(cite.section) && cite.section >= 0
+      ? { section: cite.section }
+      : {}),
+  };
+}
+
+export function resolvePersonaSwitchSessionPatch(input: {
+  persona: CompanionPersona & { boundLineId?: string | null };
+  session: Pick<
+    CompanionSession,
+    "activeGear" | "boundWorldId" | "boundLineId" | "boundBookId" | "bookScope"
+  >;
+  isEmptySession: boolean;
+  npcWorldBookId: string | null;
+  npcFallbackLineId: string | null;
+}): {
+  mode: "update" | "create";
+  personaId: string;
+  activeGear?: CompanionGear;
+  boundWorldId?: string | null;
+  boundLineId?: string | null;
+  boundBookId?: string | null;
+  bookScope?: CompanionBookScope | null;
+} {
+  const { persona, session, isEmptySession, npcWorldBookId, npcFallbackLineId } = input;
+  const npc = isNpcPersona(persona);
+  const personaLineId =
+    persona.boundLineId ??
+    (typeof persona.metadata?.boundLineId === "string" && persona.metadata.boundLineId.trim()
+      ? persona.metadata.boundLineId.trim()
+      : persona.id.startsWith("npc:") && persona.id.split(":").length >= 4
+        ? persona.id.split(":")[2] || null
+        : null);
+  if (isEmptySession) {
+    if (npc) {
+      const nextWorldId = persona.sourceWorldId ?? null;
+      const nextLineId = personaLineId ?? npcFallbackLineId;
+      const keepExistingBook = Boolean(
+        nextWorldId &&
+          session.boundWorldId === nextWorldId &&
+          npcWorldBookId &&
+          session.boundBookId === npcWorldBookId,
+      );
+      const nextBookId = keepExistingBook ? session.boundBookId : (npcWorldBookId ?? null);
+      const nextBookScope = keepExistingBook
+        ? session.bookScope
+        : nextBookId
+          ? ({ mode: "full" } as const)
+          : null;
+      return {
+        mode: "update",
+        personaId: persona.id,
+        activeGear: "chat",
+        boundWorldId: nextWorldId,
+        boundLineId: nextLineId,
+        boundBookId: nextBookId,
+        bookScope: nextBookScope,
+      };
+    }
+    return {
+      mode: "update",
+      personaId: persona.id,
+      ...(personaLineId ? { boundLineId: personaLineId } : {}),
+    };
+  }
+  const nextWorldId = npc ? (persona.sourceWorldId ?? null) : session.boundWorldId;
+  const nextLineId = npc ? (personaLineId ?? npcFallbackLineId) : (personaLineId ?? session.boundLineId);
+  const sameWorldBook = Boolean(
+    nextWorldId &&
+      session.boundWorldId === nextWorldId &&
+      npcWorldBookId &&
+      session.boundBookId === npcWorldBookId,
+  );
+  const nextBookId = npc
+    ? (sameWorldBook ? session.boundBookId : (npcWorldBookId ?? null))
+    : session.boundBookId;
+  const nextBookScope = npc
+    ? (sameWorldBook ? session.bookScope : (nextBookId ? ({ mode: "full" } as const) : null))
+    : session.bookScope;
+  return {
+    mode: "create",
+    personaId: persona.id,
+    activeGear: persona.roleKind === "roleplay" || npc ? "chat" : session.activeGear,
+    boundWorldId: nextWorldId,
+    boundLineId: nextLineId,
+    boundBookId: nextBookId,
+    bookScope: nextBookScope,
+  };
+}
 
 function defaultStarters(
   persona: CompanionPersona,
@@ -329,11 +475,12 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     | null
   >(null);
   const [menuSession, setMenuSession] = useState<CompanionSession | null>(null);
+  const [stalePreviewIds, setStalePreviewIds] = useState<Set<string>>(() => new Set());
   const [previewBook, setPreviewBook] = useState<{
     bookId: string;
     title: string;
-    through?: number | null;
     quote?: string;
+    section?: number;
   } | null>(null);
 
   const handleRef = useRef<CompanionHandle | null>(null);
@@ -1307,27 +1454,45 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       setLastPersonaId(persona.id);
       void game.repo.setSetting("companion:lastPersonaId", persona.id).catch(() => {});
     }
+    const npc = isNpcPersona(persona);
     const personaLineId =
       persona.boundLineId ??
       (typeof persona.metadata?.boundLineId === "string" && persona.metadata.boundLineId.trim()
         ? persona.metadata.boundLineId.trim()
-        : null);
-    if (messages.length === 0) {
-      const updated = await updateSession(game, session.id, {
-        personaId: persona.id,
-        ...(personaLineId ? { boundLineId: personaLineId } : {}),
-      });
+        : persona.id.startsWith("npc:") && persona.id.split(":").length >= 4
+          ? persona.id.split(":")[2] || null
+          : null);
+    let npcWorldBookId: string | null = null;
+    let npcFallbackLineId: string | null = null;
+    if (npc && persona.sourceWorldId) {
+      const brief = worlds.find((w) => w.world.id === persona.sourceWorldId);
+      npcFallbackLineId = brief?.lineId ?? null;
+      npcWorldBookId = brief?.source?.bookId ?? null;
+      if (!brief) {
+        const resolvedSrc = await resolveSessionDraftSource(game, {
+          boundWorldId: persona.sourceWorldId,
+          boundLineId: personaLineId,
+          boundBookId: null,
+          bookScope: null,
+        }).catch(() => null);
+        npcWorldBookId = resolvedSrc?.bookId ?? null;
+      }
+    }
+    const patch = resolvePersonaSwitchSessionPatch({
+      persona,
+      session,
+      isEmptySession: messages.length === 0,
+      npcWorldBookId,
+      npcFallbackLineId,
+    });
+    if (patch.mode === "update") {
+      const { mode: _mode, ...updateFields } = patch;
+      const updated = await updateSession(game, session.id, updateFields);
       setSession(updated);
       await refreshSessions();
     } else {
-      const created = await createSession(game, {
-        personaId: persona.id,
-        activeGear: persona.roleKind === "roleplay" || persona.roleKind === "npc" ? "chat" : session.activeGear,
-        boundWorldId: persona.sourceWorldId ?? session.boundWorldId,
-        boundLineId: personaLineId ?? session.boundLineId,
-        boundBookId: session.boundBookId,
-        bookScope: session.bookScope,
-      });
+      const { mode: _mode, ...createFields } = patch;
+      const created = await createSession(game, createFields);
       await refreshSessions();
       await loadActiveSession(created.id);
       toast(`已与「${persona.name}」新开对话`);
@@ -1492,10 +1657,12 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
         bookScope: session?.bookScope ?? null,
       });
       const draftSource = setup.source ?? fallbackSource ?? (bookId ? newBinding(bookId, false) : undefined);
+      const isFanfic = draftSource?.fanfic === true;
+      const isFreeMode = setup.mode === "free" || isFanfic;
       const draft = normalizeOpeningDraft({
         ...EMPTY,
         ...setup,
-        ...(draftSource ? { source: draftSource } : {}),
+        ...(draftSource ? { source: draftSource, fanfic: isFanfic } : {}),
         age: setup.age != null ? String(setup.age) : "",
         settings: {
           ...EMPTY.settings,
@@ -1508,8 +1675,8 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                 intensity: defaults.intensity,
               }
             : {}),
-          mode: setup.mode === "free" ? "free" : "history",
-          clockStyle: setup.mode === "free" ? "elapsed" : "era",
+          mode: isFreeMode ? "free" : "history",
+          clockStyle: isFreeMode ? "elapsed" : "era",
           essentials: setup.essentials || "",
           rules: setup.rules || defaults?.rules || "",
         },
@@ -1530,13 +1697,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     if (cite.kind === "book" && cite.bookId) {
       const outline = await getBookOutline(game.repo, cite.bookId).catch(() => null);
       if (outline) {
-        const through =
-          session?.bookScope?.mode === "full"
-            ? null
-            : session?.bookScope?.mode === "chapters"
-              ? session.bookScope.to
-              : boundWorldBrief?.source?.through ?? null;
-        setPreviewBook({ bookId: outline.id, title: outline.title, through, quote: cite.quote });
+        setPreviewBook(buildCitationBookPreview(outline, cite));
         return;
       }
       toast("这本参考书当前不在书库中");
@@ -1552,16 +1713,23 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       setSheet("context");
       return;
     }
-    const lineId = session.boundLineId ?? boundWorldBrief.lineId;
-    if (!lineId) {
+    const targetRoute = resolveAgentWorkspaceRoute(session, boundWorldBrief, piDetail);
+    if (!targetRoute) {
       toast("没有找到该故事的当前路线");
       return;
     }
+    if (targetRoute.syncSessionLineId) {
+      void updateSession(game, session.id, { boundLineId: targetRoute.syncSessionLineId })
+        .then((saved) => {
+          if (aliveRef.current && activeSessionRef.current === saved.id) setSession(saved);
+        })
+        .catch(() => {});
+    }
     push({
       name: "agent",
-      worldId: session.boundWorldId,
-      lineId,
-      ...(session.piSessionId ? { sessionId: session.piSessionId } : {}),
+      worldId: targetRoute.worldId,
+      lineId: targetRoute.lineId,
+      ...(targetRoute.sessionId ? { sessionId: targetRoute.sessionId } : {}),
     });
   };
 
@@ -1581,13 +1749,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
             missing: false,
           };
         }
-        if (scope?.mode === "full" || src.through === null || src.through === undefined) {
-          return { label: `🌍 《${title}》 · 读全书`, missing: false };
-        }
-        return {
-          label: `🌍 《${title}》 · 防剧透至第 ${src.through + 1} 节`,
-          missing: false,
-        };
+        return { label: `🌍 《${title}》 · 读全书`, missing: false };
       }
       return { label: `🌍 《${title}》`, missing: false };
     }
@@ -1598,7 +1760,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       const scope = session.bookScope;
       const suffix =
         scope?.mode === "chapters"
-          ? ` · 防剧透至第 ${scope.to + 1} 节`
+          ? ` · 第 ${scope.from + 1}～${scope.to + 1} 节`
           : " · 读全书";
       return { label: `📚 《${boundBookBrief.title}》${suffix}`, missing: false };
     }
@@ -1959,6 +2121,20 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
     const task = agentTaskProjection(rawTask, snap);
     const status = agentTaskStatus(task, snap);
     const running = isTaskInFlight(status);
+    const taskMeta = task as AgentTask & {
+      previewStale?: boolean;
+      baseLineId?: string;
+      baseHeadId?: string;
+      lineId?: string;
+    };
+    const briefWithHead = boundWorldBrief as (WorldBrief & { headId?: string }) | null;
+    const previewStale = isCompanionPreviewTaskStale(
+      status,
+      taskMeta,
+      briefWithHead?.lineId,
+      briefWithHead?.headId,
+      stalePreviewIds,
+    );
     const resumable = ["paused", "cancelled", "interrupted", "failed", "stale", "blocked"].includes(status);
     const question = pendingQuestion(task);
     const assistantEntry = piAssistantMsgsByTaskId.get(rawTask.id);
@@ -2013,6 +2189,11 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
 
         {(snap?.error || task.error) && (
           <p className="field-hint warn m-0">{snap?.error ?? task.error}</p>
+        )}
+        {previewStale && (
+          <p className="field-hint warn m-0">
+            故事内容或路线已有新变化，旧预览不能直接覆盖当前进度。你可以按当前故事重新校对，或放弃这批修改。
+          </p>
         )}
 
         {hasProcessDetails && (
@@ -2115,22 +2296,85 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
               {status === "stopping" ? "正在停止…" : "停止"}
             </button>
           )}
-          {status === "previewed" && (
+          {status === "previewed" && !previewStale && (
             <button
               type="button"
               className="primary"
+              disabled={agentBusy}
               onClick={() =>
                 void agentClient
                   .apply(task.id)
                   .then(async () => {
+                    setStalePreviewIds((prev) => {
+                      if (!prev.has(task.id)) return prev;
+                      const next = new Set(prev);
+                      next.delete(task.id);
+                      return next;
+                    });
                     if (session?.boundWorldId) game.notifyAgentChange(session.boundWorldId);
                     await refreshPiSessionNow();
                     toast("这批修改已采用");
                   })
-                  .catch((e) => toast(e instanceof Error ? e.message : "采用未成功"))
+                  .catch((e) => {
+                    const msg = e instanceof Error ? e.message : "采用未成功";
+                    if (/已有新进展|已有变化|切换路线|路线已变|stale|重新核对|重新校对/i.test(msg)) {
+                      setStalePreviewIds((prev) => new Set(prev).add(task.id));
+                      toast("故事已有新变化，请按当前故事重新校对或放弃这批修改");
+                    } else {
+                      toast(msg);
+                    }
+                  })
               }
             >
               采用这批修改
+            </button>
+          )}
+          {status === "previewed" && previewStale && (
+            <button
+              type="button"
+              className="primary"
+              disabled={agentBusy}
+              onClick={() => {
+                setStalePreviewIds((prev) => {
+                  if (!prev.has(task.id)) return prev;
+                  const next = new Set(prev);
+                  next.delete(task.id);
+                  return next;
+                });
+                void handleContinueAgentTask(task);
+              }}
+            >
+              按当前故事重新校对
+            </button>
+          )}
+          {status === "previewed" && previewStale && (
+            <button
+              type="button"
+              disabled={agentBusy}
+              onClick={async () => {
+                const ok = await ask({
+                  title: "放弃这批修改预览？",
+                  message: "放弃后将清空本次暂存的修改草稿并结束预览，正式故事内容不受影响。",
+                  confirm: "放弃这批修改",
+                  danger: true,
+                });
+                if (!ok) return;
+                try {
+                  await agentClient.discardDrafts(task.id);
+                  setStalePreviewIds((prev) => {
+                    if (!prev.has(task.id)) return prev;
+                    const next = new Set(prev);
+                    next.delete(task.id);
+                    return next;
+                  });
+                  await refreshPiSessionNow();
+                  toast("已放弃这批修改预览");
+                } catch (e) {
+                  toast(e instanceof Error ? e.message : "未能放弃修改预览");
+                }
+              }}
+            >
+              放弃这批修改
             </button>
           )}
           {!running && task.canUndo && (
@@ -3127,6 +3371,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           personas={personas}
           activePersonaId={activePersona.id}
           boundWorldId={!boundWorldMissing ? session?.boundWorldId : null}
+          boundLineId={!boundWorldMissing ? (session?.boundLineId ?? boundWorldBrief?.lineId ?? null) : null}
           onSelect={(p) => void handleSelectPersona(p)}
           onChanged={(updated, fallback) => {
             const nextList = updated.length ? updated : BUILTIN_PERSONAS;
@@ -3276,7 +3521,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
                 </div>
               </div>
             )}
-            <BookPreviewCompat bookId={previewBook.bookId} through={previewBook.through} />
+            <BookPreviewCompat bookId={previewBook.bookId} initialSection={previewBook.section} />
           </div>
         </Sheet>
       )}
@@ -3346,8 +3591,8 @@ function ContextAttachmentSheet({
   );
   const [selectedWorldId, setSelectedWorldId] = useState<string | null>(session.boundWorldId);
   const [selectedBookId, setSelectedBookId] = useState<string | null>(session.boundBookId);
-  const [scopeMode, setScopeMode] = useState<"through" | "full" | "chapters">(
-    session.bookScope?.mode ?? "through",
+  const [scopeMode, setScopeMode] = useState<"full" | "chapters">(
+    session.bookScope?.mode === "chapters" ? "chapters" : "full",
   );
   const [fromSec, setFromSec] = useState(
     String((session.bookScope?.mode === "chapters" ? session.bookScope.from : 0) + 1),
@@ -3359,14 +3604,13 @@ function ContextAttachmentSheet({
 
   const chosenWorld = worlds.find((w) => w.world.id === selectedWorldId) ?? null;
 
-  const buildScope = (hasWorldSource: boolean): CompanionBookScope | null => {
+  const buildScope = (): CompanionBookScope => {
     if (scopeMode === "chapters") {
       const a = Math.max(1, Math.trunc(Number(fromSec) || 1)) - 1;
       const b = Math.max(a, Math.trunc(Number(toSec) || a + 1) - 1);
       return { mode: "chapters", from: a, to: b };
     }
-    if (scopeMode === "full") return { mode: "full" };
-    return hasWorldSource ? { mode: "through" } : { mode: "full" };
+    return { mode: "full" };
   };
 
   const saveWorldSelection = async (w: WorldBrief | null) => {
@@ -3385,7 +3629,7 @@ function ContextAttachmentSheet({
         boundWorldId: w.world.id,
         boundLineId: w.lineId,
         boundBookId: w.source?.bookId ?? null,
-        bookScope: w.source ? buildScope(true) : null,
+        bookScope: w.source ? buildScope() : null,
       });
     } finally {
       setSaving(false);
@@ -3408,7 +3652,7 @@ function ContextAttachmentSheet({
         boundWorldId: null,
         boundLineId: null,
         boundBookId: bookId,
-        bookScope: scopeMode === "chapters" ? buildScope(false) : { mode: "full" },
+        bookScope: buildScope(),
       });
     } finally {
       setSaving(false);
@@ -3453,15 +3697,8 @@ function ContextAttachmentSheet({
             </p>
             {chosenWorld?.source && (
               <div className="stack gap-2">
-                <span className="field-label">原著防剧透范围</span>
+                <span className="field-label">原著查阅范围</span>
                 <div className="segmented">
-                  <button
-                    type="button"
-                    aria-pressed={scopeMode === "through"}
-                    onClick={() => setScopeMode("through")}
-                  >
-                    按故事进度防剧透
-                  </button>
                   <button
                     type="button"
                     aria-pressed={scopeMode === "full"}
@@ -3474,7 +3711,7 @@ function ContextAttachmentSheet({
                     aria-pressed={scopeMode === "chapters"}
                     onClick={() => setScopeMode("chapters")}
                   >
-                    指定章节
+                    指定章节区间
                   </button>
                 </div>
                 {scopeMode === "chapters" && (
@@ -3509,11 +3746,7 @@ function ContextAttachmentSheet({
             <div className="settings-list">
               {worlds.map((item) => {
                 const selected = item.world.id === selectedWorldId;
-                const sourceScopeLabel = item.source
-                  ? item.source.through !== null && item.source.through !== undefined
-                    ? `含参考书 · 防剧透至第 ${item.source.through + 1} 节`
-                    : "含参考书 · 读全书"
-                  : "原创 / 历史存档";
+                const sourceScopeLabel = item.source ? "含参考书 · 读全书" : "原创 / 历史存档";
                 return (
                   <button
                     key={item.world.id}
@@ -3568,7 +3801,7 @@ function ContextAttachmentSheet({
                 aria-pressed={scopeMode === "chapters"}
                 onClick={() => setScopeMode("chapters")}
               >
-                防剧透（指定章节上限）
+                指定章节区间
               </button>
             </div>
             {scopeMode === "chapters" && (

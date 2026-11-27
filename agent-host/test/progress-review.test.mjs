@@ -1,7 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {ProgressReview,parseReview} from "../src/progress-review.mjs";
-test("review decisions are structured and cannot invent a missing decision",()=>{assert.deepEqual(parseReview('```json\n{"decision":"replan","reason":"批量读取时间线"}\n```'),{decision:"replan",reason:"批量读取时间线"});assert.throws(()=>parseReview('已完成'));assert.throws(()=>parseReview('{"decision":"commit","reason":"猜测"}'));});
+test("review decisions are structured, strip think blocks/fences, extract first balanced JSON object and cannot invent a missing decision",()=>{
+ assert.deepEqual(parseReview('```json\n{"decision":"replan","reason":"批量读取时间线"}\n```'),{decision:"replan",reason:"批量读取时间线"});
+ assert.deepEqual(
+  parseReview('<think>\n先想一想，要不要 {"decision":"pause","reason":"草稿诱饵"}？不对，应该继续。\n</think>\n复核结论如下：\n```json\n{"decision":"continue","reason":"已批量读取 {timeline}，其中包含 \\"quote\\" 字段，正常推进"}\n```\n补充说明：{仅供参考}'),
+  {decision:"continue",reason:'已批量读取 {timeline}，其中包含 "quote" 字段，正常推进'}
+ );
+ assert.deepEqual(
+  parseReview('前置说明 {非JSON标记} 结论：{"decision":"ask_user","reason":"缺少主角籍贯信息"} 后续备注'),
+  {decision:"ask_user",reason:"缺少主角籍贯信息"}
+ );
+ assert.throws(()=>parseReview('<think>思考未闭合但含 {"decision":"continue","reason":"半截"}'));
+ assert.throws(()=>parseReview('已完成'));
+ assert.throws(()=>parseReview('{"decision":"commit","reason":"猜测"}'));
+});
 test("isolated review is bounded, tool-free, billed to root and persists pause/failure",async()=>{
  for(const fail of [false,true]){let captured,saved;const root={options:{directory:'.cache/review-fixture',model:{id:'same-model',inputTokens:475000,maxOutputTokens:8192},nativeModelHttp:true,invokeModelHttp:()=>{},invokeTool:async r=>{saved=r;return {ok:true,data:{paused:true,guidance:{reason:r.args.reason}}};}},taskId:'root',session:{sessionId:'session'},accountingWrites:new Set()};
  const review=new ProgressReview(root,async options=>{captured=options;return {prompt:async()=>{if(fail)throw Error('network');return {text:'{"decision":"pause","reason":"同一时钟反复读取，应保存进度后继续校准"}'};},close:async()=>{},abort:async()=>{}};});

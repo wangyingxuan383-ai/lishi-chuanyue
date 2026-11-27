@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../../platform/memory";
 import { Game } from "../game";
 import { saveBook } from "./library";
-import { askedAbout, deleteNote, draftFromParts, estimateNote, gapRanges, getNote, listNotes, newLocalNote, newNote, noteBatches, noteMaterials, noteProgressDetail, noteProgressLabel, noteReplyProblem, noteStepsDone, notesForTurn, readNoteText, renameNote, restorePrevious, runNote, saveNote, startNoteUpdate } from "./notes";
+import { askedAbout, deleteNote, draftFromParts, estimateNote, gapRanges, getNote, listNotes, newLocalNote, newNote, noteBatches, noteMaterials, noteProgressDetail, noteProgressLabel, noteReplyProblem, noteStepsDone, notesForTurn, readNoteText, renameNote, restorePrevious, runNote, saveNote, startNoteUpdate, suggestNextPlotRange } from "./notes";
 import { archiveProblems, exportWorld, importWorld } from "../archive";
 import { newBinding, type SourceBook } from "./types";
 import { sampleState } from "../testing/fixtures";
@@ -558,5 +558,156 @@ describe("原著札记 (D162)", () => {
     const savedAns = await game.saveAnswerAsNote(world.id, book.id, "沈青在哪修炼？", "沈青在第1章进入青云书院修炼。", 3);
     expect(savedAns.scope.through).toBe(3);
     expect(savedAns.refs).toEqual([0]);
+  });
+
+  it("suggests 100-chapter plot volumes for thousand-chapter books, auto-syncs & restores note titles on update, and reads full book on legacy saves (R40, D194)", async () => {
+    const { game, repo, book } = await setup();
+
+    // 1. suggestNextPlotRange on a 1,200-chapter novel:
+    expect(suggestNextPlotRange([], 1200, 0)).toMatchObject({
+      from: 0,
+      to: 99,
+      allCovered: false,
+      plotNoteCount: 0,
+    });
+    expect(suggestNextPlotRange([], 1200, 48)).toMatchObject({
+      from: 0,
+      to: 99,
+      allCovered: false,
+      plotNoteCount: 0,
+    });
+    expect(suggestNextPlotRange([], 1200, 235)).toMatchObject({
+      from: 200,
+      to: 299,
+      allCovered: false,
+      plotNoteCount: 0,
+    });
+
+    const vol1 = { ...newNote(book.id, "plot", { from: 0, to: 99 }, "主线：第 1～100 章"), status: "done" as const, content: "第一卷" };
+    const vol3 = { ...newNote(book.id, "plot", { from: 200, to: 299 }, "主线：第 201～300 章"), status: "done" as const, content: "第三卷" };
+    // Suggests sequential next volume after highest covered when no earlier gap precedes it:
+    expect(suggestNextPlotRange([vol1], 1200, 96)).toMatchObject({
+      from: 100,
+      to: 199,
+      allCovered: false,
+      plotNoteCount: 1,
+    });
+    // Fills uncovered 100-chapter gap between vol1 (0..99) and vol3 (200..299):
+    expect(suggestNextPlotRange([vol1, vol3], 1200, 120)).toMatchObject({
+      from: 100,
+      to: 199,
+      allCovered: false,
+      plotNoteCount: 2,
+    });
+    // Reports allCovered when all sections are covered:
+    const fullVolumes = Array.from({ length: 12 }, (_, idx) => ({
+      ...newNote(book.id, "plot", { from: idx * 100, to: idx * 100 + 99 }, `第${idx + 1}卷`),
+      status: "done" as const,
+      content: "已覆盖",
+    }));
+    expect(suggestNextPlotRange(fullVolumes, 1200, 0)).toMatchObject({
+      allCovered: true,
+      plotNoteCount: 12,
+    });
+
+    // 2. Auto-sync note title via AI `【标题】` header on `startNoteUpdate(..., syncTitle = true)` + symmetric `restorePrevious`:
+    const baseNote = {
+      ...newNote(book.id, "plot", { from: 0, to: 4 }, "主线：第 1～5 章 · 初入青云"),
+      status: "done" as const,
+      content: "前五章沈青拜入青云书院（第1～5章）。",
+      refs: [0, 4],
+    };
+    await saveNote(repo, baseNote);
+
+    const updatingWithAiTitle = startNoteUpdate(baseNote, 9, true);
+    expect(updatingWithAiTitle.progress.update?.syncTitle).toBe(true);
+    const syncedDone = await runNote(
+      repo,
+      updatingWithAiTitle,
+      book.title,
+      {
+        model: "mock-aux",
+        call: async (messages) => {
+          const prompt = messages.map((m) => m.content).join("\n");
+          if (prompt.includes("【原札记】")) {
+            expect(prompt).toContain("【标题】");
+            return "【标题】主线：第 1～10 章 · 初入青云至内门大比\n前五章拜师，后五章晋升内门（第1～10章）。";
+          }
+          return "新增第6～10章晋升内门（第6～10章）。";
+        },
+      },
+      new AbortController().signal,
+      () => {},
+    );
+    expect(syncedDone.status).toBe("done");
+    expect(syncedDone.title).toBe("主线：第 1～10 章 · 初入青云至内门大比");
+    expect(syncedDone.content).toBe("前五章拜师，后五章晋升内门（第1～10章）。");
+    expect(syncedDone.content).not.toContain("【标题】");
+    expect(syncedDone.scope.previous?.title).toBe("主线：第 1～5 章 · 初入青云");
+    expect((await getNote(repo, baseNote.id))?.title).toBe("主线：第 1～10 章 · 初入青云至内门大比");
+
+    // Restoring previous version restores BOTH content and title, and swapping again restores the updated title:
+    const rolledBack = await restorePrevious(repo, baseNote.id);
+    expect(rolledBack?.title).toBe("主线：第 1～5 章 · 初入青云");
+    expect(rolledBack?.content).toBe("前五章沈青拜入青云书院（第1～5章）。");
+    expect((await getNote(repo, baseNote.id))?.title).toBe("主线：第 1～5 章 · 初入青云");
+
+    const rolledForward = await restorePrevious(repo, baseNote.id);
+    expect(rolledForward?.title).toBe("主线：第 1～10 章 · 初入青云至内门大比");
+    expect((await getNote(repo, baseNote.id))?.title).toBe("主线：第 1～10 章 · 初入青云至内门大比");
+
+    // 3. Deterministic chapter-range fallback when model omits `【标题】`, vs `syncTitle = false` keeping old title:
+    const rangeNote = {
+      ...newNote(book.id, "plot", { from: 0, to: 2 }, "主线：第 1～3 章"),
+      status: "done" as const,
+      content: "前三章摘要（第1～3章）。",
+      refs: [0, 2],
+    };
+    await saveNote(repo, rangeNote);
+    const fallbackDone = await runNote(
+      repo,
+      startNoteUpdate(rangeNote, 5, true),
+      book.title,
+      { model: "mock-aux", call: async () => "合并后的一至六章摘要（第1～6章）。" },
+      new AbortController().signal,
+      () => {},
+    );
+    expect(fallbackDone.title).toBe("主线：第 1～6 章");
+    expect((await getNote(repo, rangeNote.id))?.title).toBe("主线：第 1～6 章");
+
+    const keepTitleDone = await runNote(
+      repo,
+      startNoteUpdate(fallbackDone, 8, false),
+      book.title,
+      { model: "mock-aux", call: async () => "合并后的一至九章摘要（第1～9章）。" },
+      new AbortController().signal,
+      () => {},
+    );
+    expect(keepTitleDone.title).toBe("主线：第 1～6 章");
+
+    // 4. Legacy world with `through: 0` in SQLite reads full-book notes & chapters without spoiler lock:
+    const latePlotNote = newLocalNote(
+      newNote(book.id, "plot", { from: 0, to: 11 }, "主线：第 1～12 章"),
+      "第1章入门，第10章揭晓青云禁地藏有古剑。",
+      12,
+    );
+    await saveNote(repo, latePlotNote);
+    const { world, line } = await repo.createWorld({
+      title: "旧档兼容",
+      eraId: "free",
+      opening: {
+        parentId: null,
+        kind: "opening",
+        narrative: "你在山门外醒来。",
+        state: {
+          ...sampleState(),
+          source: { bookId: book.id, through: 0, position: 0, fanfic: true, plot: "rewrite", method: "search", instructions: "" },
+        },
+      },
+    });
+    const ctx = await game.previewContext(world.id);
+    const refLayer = ctx.layers.find((l) => l.key === "reference");
+    expect(refLayer?.content).toContain("青云禁地藏有古剑");
+    expect(line.id).toBeTruthy();
   });
 });

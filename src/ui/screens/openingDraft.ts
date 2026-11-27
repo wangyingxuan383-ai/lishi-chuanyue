@@ -135,16 +135,18 @@ export function toNewWorld(d: Draft, defaults?: Partial<Pick<WorldSettings, "dif
   const pilot = draftPilot(d);
   const fortune = d.fortune ?? (d.play === "challenge" ? "on" : null);
   const beats = filledBeats(d.script);
+  const effectiveSource = d.source && d.fanfic === false && d.source.fanfic ? { ...d.source, fanfic: false } : d.source;
+  const isFree = d.settings.mode === "free" || d.fanfic === true || effectiveSource?.fanfic === true;
   return {
       title: d.title,
     titlePolicy: d.titlePolicy ?? (d.title.trim() ? "manual" : "auto"),
-    source: d.source && d.fanfic === false && d.source.fanfic ? { ...d.source, fanfic: false } : d.source,
-    eraId: d.settings.mode === "free" ? null : d.eraId,
+    source: effectiveSource,
+    eraId: isFree ? null : d.eraId,
     settings: {
       ...defaults, ...d.settings, premise: d.premise,
+      ...(isFree ? { mode: "free" as const, clockStyle: "elapsed" as const, tabooHints: false } : {}),
       ...(fortune ? { fortune } : {}),
       ...(pilot === "ai" ? { pilot } : {}),
-      ...(d.settings.mode === "free" ? { clockStyle: "elapsed" as const, tabooHints: false } : {}),
     },
     protagonist: { name: d.name.trim(), gender: d.lockedGender ?? d.gender, age: Number(d.age) || null, identity: d.identity.trim() },
     arrival: d.arrival,
@@ -248,6 +250,7 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
     rawSource && fanfic !== undefined && rawSource.fanfic !== fanfic
       ? { ...rawSource, fanfic }
       : rawSource;
+  const isFree = s.mode === "free" || fanfic === true || source?.fanfic === true;
   return {
     templateId: null,
     ...(source !== undefined ? { source } : {}),
@@ -262,7 +265,7 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
     lockedGender: locked,
     title: str(raw.title),
     titlePolicy: raw.titlePolicy === "auto" ? "auto" : str(raw.title).trim() ? "manual" : "auto",
-    eraId: ERAS.some((e) => e.id === raw.eraId) ? (raw.eraId as string) : null,
+    eraId: isFree ? null : (ERAS.some((e) => e.id === raw.eraId) ? (raw.eraId as string) : null),
     premise: str(raw.premise),
     name: str(raw.name),
     gender: locked ?? gender,
@@ -275,8 +278,8 @@ export function normalizeOpeningDraft(raw: Record<string, unknown>): Draft {
     openingText: str(raw.openingText),
     organize: raw.organize !== false,
     settings: {
-      mode: s.mode === "free" ? "free" : "history",
-      clockStyle: s.mode === "free" ? "elapsed" : "era",
+      mode: isFree ? "free" : "history",
+      clockStyle: isFree ? "elapsed" : "era",
       heroPanelEnabled: s.heroPanelEnabled === true,
       heroPanel: str(s.heroPanel),
       perspective: oneOf(s.perspective, ["你", "我", "他"] as Perspective[], EMPTY.settings.perspective),

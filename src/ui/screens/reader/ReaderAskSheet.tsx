@@ -1,6 +1,6 @@
-// Inline spoiler-safe "问伴聊" sheet inside ReaderScreen (R36-T005).
-// Answers literary, character, and historical questions about the selected passage
-// while strictly forbidding spoilers beyond the reader's current chapter (`sectionIndex`).
+// Inline "问伴聊" sheet inside ReaderScreen (R36-T005, D194).
+// Answers literary, character, and world-setting questions about the selected passage
+// with surrounding chapter context, and supports one-tap handoff to Companion research.
 import { useEffect, useRef, useState } from "react";
 import { fallbackEligible, type LlmConfig } from "../../../engine/game";
 import {
@@ -42,7 +42,7 @@ export interface ReaderAskSheetProps {
   onClose: () => void;
 }
 
-interface AskTurn {
+export interface AskTurn {
   q: string;
   a: string;
   pending: boolean;
@@ -51,7 +51,45 @@ interface AskTurn {
   note?: string;
 }
 
-function buildSpoilerSafeSystemPrompt(
+/**
+ * Pure handoff builder for transferring inline ReaderAskSheet Q&A into CompanionScreen:
+ * - Excludes `pending` and `incomplete` turns from `asked` so error banners or `"已停止。"`
+ *   are never imported as assistant answers.
+ * - Prioritizes `customQ?.trim()`, typed `question.trim()`, or the latest `pending || incomplete`
+ *   turn's `q` when filling `draftQuestion` so failed/interrupted questions are preserved in the input box.
+ */
+export function buildReaderAskHandoff(params: {
+  bookTitle: string;
+  sectionIndex: number;
+  sectionTitle: string;
+  selectedText: string;
+  turns: AskTurn[];
+  question: string;
+  customQ?: string;
+}): ReaderAskHandoff {
+  const { bookTitle, sectionIndex, sectionTitle, selectedText, turns, question, customQ } = params;
+  const lastUnresolvedQ = [...turns]
+    .reverse()
+    .find((t) => t.pending || t.incomplete)
+    ?.q?.trim();
+  const explicitOrPendingQ = customQ?.trim() || question.trim() || lastUnresolvedQ || "";
+  const qForPrompt = explicitOrPendingQ || "请结合这段原文帮我解读";
+  const excerpt = selectedText.slice(0, 320);
+  const prompt = `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}）。\n\n原文摘录：\n> ${excerpt}\n\n想聊的问题：${qForPrompt}`;
+  const asked = turns
+    .filter((t) => !t.pending && !t.incomplete && t.a.trim())
+    .map((t, idx) => ({
+      q:
+        idx === 0
+          ? `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}）。\n\n原文摘录：\n> ${excerpt}\n\n${t.q}`
+          : t.q,
+      a: t.a,
+    }));
+  const draftQuestion = asked.length > 0 ? explicitOrPendingQ : prompt;
+  return { prompt, asked, draftQuestion };
+}
+
+function buildReaderAskSystemPrompt(
   bookTitle: string,
   sectionIndex: number,
   sectionTitle: string,
@@ -65,8 +103,7 @@ function buildSpoilerSafeSystemPrompt(
     .slice(0, 2600);
   return [
     `你是“伴聊”读书知己，正在陪读者阅读《${bookTitle}》。`,
-    `【严格防剧透红线】：读者目前只读到《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}）。严禁透露、暗示或剧透第 ${sectionIndex + 1} 节之后的任何剧情走向、人物结局、隐藏身份或后文反转！如果读者的问题涉及后文才揭晓的谜团，请明确说明“读到当前章节尚未揭晓”，仅基于前文与本段线索做分析。`,
-    "请用通顺、温润、言简意赅的中文回答，重点清晰，不要堆砌空话。",
+    "请结合读者选中的原文与所在章节上下文，用通顺、温润、言简意赅的中文解答名物典故、人物关系、伏笔或写法问题；重点清晰，不编造原文没有的情节，不要堆砌空话。",
     "",
     `【当前章节】：第 ${sectionIndex + 1} 节 · ${sectionTitle}`,
     `【读者选中的原文】：\n${selectedText.slice(0, 1200)}`,
@@ -128,22 +165,16 @@ export function ReaderAskSheet({
     setTurns((prev) => prev.map((item, idx) => (idx === prev.length - 1 ? { ...item, ...patch } : item)));
   };
 
-  const buildCompanionHandoff = (customQ?: string): ReaderAskHandoff => {
-    const q = (customQ ?? question.trim()) || "请结合这段原文帮我解读";
-    const excerpt = selectedText.slice(0, 320);
-    const prompt = `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}），请勿剧透后续章节。\n\n原文摘录：\n> ${excerpt}\n\n想聊的问题：${q}`;
-    const asked = turns
-      .filter((t) => !t.pending && t.a.trim())
-      .map((t, idx) => ({
-        q:
-          idx === 0
-            ? `我正在读《${bookTitle}》第 ${sectionIndex + 1} 节（${sectionTitle}），请勿剧透后续章节。\n\n原文摘录：\n> ${excerpt}\n\n${t.q}`
-            : t.q,
-        a: t.a,
-      }));
-    const draftQuestion = asked.length > 0 ? question.trim() : prompt;
-    return { prompt, asked, draftQuestion };
-  };
+  const buildCompanionHandoff = (customQ?: string): ReaderAskHandoff =>
+    buildReaderAskHandoff({
+      bookTitle,
+      sectionIndex,
+      sectionTitle,
+      selectedText,
+      turns,
+      question,
+      customQ,
+    });
 
   const askQuestion = async (rawQ?: string) => {
     const q = (rawQ ?? question).trim();
@@ -170,7 +201,7 @@ export function ReaderAskSheet({
     if (!rawQ) setQuestion("");
     setTurns((prev) => [...prev, { q, a: "", pending: true, thinking: false }]);
 
-    const systemPrompt = buildSpoilerSafeSystemPrompt(
+    const systemPrompt = buildReaderAskSystemPrompt(
       bookTitle,
       sectionIndex,
       sectionTitle,
@@ -323,7 +354,7 @@ export function ReaderAskSheet({
       <div className="stack gap-3">
         <div className="reader-ask-excerpt">
           <small className="muted">
-            《{bookTitle}》第 {sectionIndex + 1} 节 · 防剧透保护中
+            《{bookTitle}》第 {sectionIndex + 1} 节{sectionTitle ? ` · ${sectionTitle}` : ""}
           </small>
           <blockquote>{selectedText.length > 180 ? `${selectedText.slice(0, 180)}…` : selectedText}</blockquote>
         </div>
@@ -401,13 +432,17 @@ export function ReaderAskSheet({
             ))}
 
             <div className="row between center">
-              <small className="muted">仅依据截至第 {sectionIndex + 1} 节的内容解答</small>
+              <small className="muted">结合选中段落与本章上下文解答</small>
               <button
                 type="button"
                 className="ghost small"
                 onClick={() => {
                   stopStream();
-                  const payload = buildCompanionHandoff(turns.at(-1)?.q);
+                  const unresolvedQ = [...turns]
+                    .reverse()
+                    .find((t) => t.pending || t.incomplete)
+                    ?.q?.trim();
+                  const payload = buildCompanionHandoff(question.trim() || unresolvedQ);
                   onClose();
                   onOpenFullCompanion(payload);
                 }}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { archiveProblems, exportWorldFile, importWorld } from "../../engine/archive";
+import { archiveProblems, exportWorldFile, importWorld, replaceWorldWithBackup } from "../../engine/archive";
 import { nowOf } from "../../engine/calendar/clock";
 import { worldClock } from "../../engine/era";
 import {
@@ -372,10 +372,11 @@ export default function Home() {
     importingRef.current = true;
     setImporting(true);
     try {
-      if (mode === "replace") await game.platform.sql.backup("before-import").catch(() => null);
-      await importWorld(game.repo, pending.file, mode);
       if (mode === "replace") {
+        await replaceWorldWithBackup(game.platform, game.repo, pending.file);
         (PlayModule as { invalidatePlayViewCache?: () => void }).invalidatePlayViewCache?.();
+      } else {
+        await importWorld(game.repo, pending.file, "new");
       }
       toast(mode === "new" ? "已另存为新的世界" : `已覆盖“${pending.title}”`);
       await loadWorlds();

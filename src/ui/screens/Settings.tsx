@@ -925,6 +925,7 @@ function AboutPage() {
     void game.repo.getSetting<boolean>("autoUpdate", false).then((v) => setAutoUpdate(v === true));
   }, []);
   const check = () => updates.check(true);
+  const canInAppUpdate = game.platform.name === "android" && !!game.platform.update;
   const hasNew = latest && newer(latest.version, __APP_VERSION__);
   const readySuperseded = Boolean(
     readyRelease &&
@@ -934,7 +935,7 @@ function AboutPage() {
       !newer(readyRelease.version, latest.version),
   );
   const ready =
-    readyRelease && newer(readyRelease.version, __APP_VERSION__) && !readySuperseded
+    canInAppUpdate && readyRelease && newer(readyRelease.version, __APP_VERSION__) && !readySuperseded
       ? readyRelease
       : null;
   return (
@@ -943,7 +944,7 @@ function AboutPage() {
         <Seal />
         <div><h2>穿越小说模拟</h2><p className="muted">版本 {__APP_VERSION__}</p></div>
       </div>
-      {ready && (
+      {canInAppUpdate && ready && (
         <div className="status-card ok">
           <b>新版本 {ready.version} 已准备好，校验无误</b>
           <small>安装包已提前下载并核对通过，点“立即安装”才会打开系统安装界面，不会自动安装。</small>
@@ -966,7 +967,7 @@ function AboutPage() {
       </div>
       <Choice label="打开时自动检查更新" note="每天最多查一次，离线失败不会计入冷却时间" value={autoCheck} options={[[true, "开"], [false, "关"]]}
         onChange={(v) => { setAutoCheck(v); void game.repo.setSetting("autoUpdateCheck", v); }} />
-      {!!game.platform.update && (
+      {canInAppUpdate && (
         <Choice label="Wi-Fi 下自动准备更新" note="默认关闭。打开后，连上不计流量的 Wi-Fi 且空间充足时，会在后台静默下载并校验新版安装包，准备好后提醒你手动安装" value={autoUpdate} options={[[false, "关"], [true, "开"]]}
           onChange={(v) => { setAutoUpdate(v); void game.repo.setSetting("autoUpdate", v).then(() => { if (v) void updates.autoPrepare(); }); }} />
       )}

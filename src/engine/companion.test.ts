@@ -299,7 +299,7 @@ describe("Companion engine (R33-T001..T003)", () => {
     expect(npcPersona.systemPrompt).not.toContain("安禄山");
   });
 
-  it("isolates persona vs global memories, preserves `through` spoiler fence on saveCompanionMessageAsNote, and bridges setup & Agent escalation", async () => {
+  it("isolates persona vs global memories, reads full book on saveCompanionMessageAsNote (honoring explicit chapter scope), and bridges setup & Agent escalation", async () => {
     const { game, world, openingNode, line } = await createWorldFixture();
     const client = new CompanionClient(game);
 
@@ -315,7 +315,7 @@ describe("Companion engine (R33-T001..T003)", () => {
     ]);
     expect(await client.activeMemoriesForPersona("builtin:lingxi", "off")).toEqual([]);
 
-    // 2. Bind a 3-chapter source book to the world with `through: 0` (Chapter 1 ceiling):
+    // 2. Bind a 3-chapter source book to the world (even if legacy `through: 0` exists, D194 reads full book unless explicit `chapters` scope is set):
     await saveBook(game.repo, {
       id: "book-1",
       title: "剑起陇右",
@@ -324,7 +324,7 @@ describe("Companion engine (R33-T001..T003)", () => {
       sections: [
         { title: "第一章 边城风雪", text: "陈玄在边城铁匠铺打造了一柄寒铁短刀。" },
         { title: "第二章 驿站夜袭", text: "驿站外马蹄声急。" },
-        { title: "第三章 幕后真凶", text: "全书结局大剧透：节度使才是幕后主使。" },
+        { title: "第三章 幕后真凶", text: "节度使才是幕后主使。" },
       ],
     });
     const curState = await game.repo.getState(openingNode.id);
@@ -344,26 +344,43 @@ describe("Companion engine (R33-T001..T003)", () => {
       boundLineId: line.id,
       activeGear: "research",
     });
-    // Message mentions "第三章" in text, plus a valid section 0 citation and an out-of-bounds section 2 citation:
     const savedNote = await saveCompanionMessageAsNote(
       game,
       bookSession.session,
       {
         id: "msg-note-1",
-        content: "# 寒铁短刀考据\n第一章陈玄打造了寒铁短刀（至于第三章还没读到）。",
+        content: "# 寒铁短刀考据\n第一章陈玄打造了寒铁短刀，第三章揭晓幕后线索。",
         citations: [
           { kind: "book", bookId: "book-1", title: "第一章 边城风雪", section: 0, chunk: 0, quote: "寒铁短刀" },
-          { kind: "book", bookId: "book-1", title: "第三章 幕后真凶", section: 2, chunk: 2, quote: "剧透" },
+          { kind: "book", bookId: "book-1", title: "第三章 幕后真凶", section: 2, chunk: 2, quote: "幕后主使" },
         ],
       },
     );
     expect(savedNote.bookId).toBe("book-1");
     expect(savedNote.worldId).toBe(world.id);
-    expect(savedNote.scope.through).toBe(0);
-    expect(savedNote.refs).toEqual([0]);
-    expect(noteWithinScope(savedNote, 0, true)).toBe(true);
+    expect(savedNote.scope.through).toBeUndefined();
+    expect(savedNote.refs).toEqual([0, 2]);
+    expect(noteWithinScope(savedNote, null, true)).toBe(true);
     const storedNote = await getNote(game.repo, savedNote.id);
-    expect(storedNote?.scope.through).toBe(0);
+    expect(storedNote?.refs).toEqual([0, 2]);
+
+    // Explicit `chapters` scope still caps chapter refs to the requested range:
+    const scopedSession = await client.createSession({
+      title: "单章考据",
+      boundBookId: "book-1",
+      bookScope: { mode: "chapters", from: 0, to: 0 },
+      activeGear: "research",
+    });
+    const scopedNote = await saveCompanionMessageAsNote(game, scopedSession.session, {
+      id: "msg-note-2",
+      content: "# 第一章考据\n第一章陈玄打造了寒铁短刀（第三章不计入）。",
+      citations: [
+        { kind: "book", bookId: "book-1", title: "第一章 边城风雪", section: 0, chunk: 0, quote: "寒铁短刀" },
+        { kind: "book", bookId: "book-1", title: "第三章 幕后真凶", section: 2, chunk: 2, quote: "幕后主使" },
+      ],
+    });
+    expect(scopedNote.scope.through).toBe(0);
+    expect(scopedNote.refs).toEqual([0]);
 
     // 3. Bridge 1: draftSetupFromCompanionText:
     const draft = draftSetupFromCompanionText(
@@ -697,7 +714,7 @@ describe("Companion engine (R33-T001..T003)", () => {
     expect(afterSteer.messages.at(-1)?.role).toBe("system_note");
   });
 
-  it("preserves spoiler ceiling `through`, `position`, `fanfic`, `plot`, and `instructions` when drafting a new game", async () => {
+  it("normalizes `through` to null while preserving `position`, `fanfic`, `plot`, and `instructions` when drafting a new game", async () => {
     const { game, world, line } = await createWorldFixture();
     const client = new CompanionClient(game);
 
@@ -718,7 +735,7 @@ describe("Companion engine (R33-T001..T003)", () => {
       fanfic: true,
       plot: "rewrite",
       method: "search",
-      instructions: "仅参考前五章设定，不照搬后续剧情",
+      instructions: "保留原著人物性格，自由展开",
     });
 
     const boundSession = await client.createSession({
@@ -726,17 +743,17 @@ describe("Companion engine (R33-T001..T003)", () => {
       boundWorldId: world.id,
       boundLineId: line.id,
       boundBookId: "book-ceiling",
-      bookScope: { mode: "through" },
+      bookScope: { mode: "full" },
     });
 
     const inheritedSource = await resolveSessionDraftSource(game, boundSession.session);
     expect(inheritedSource).toMatchObject({
       bookId: "book-ceiling",
-      through: 4,
+      through: null,
       position: 2,
       fanfic: true,
       plot: "rewrite",
-      instructions: "仅参考前五章设定，不照搬后续剧情",
+      instructions: "保留原著人物性格，自由展开",
     });
 
     const draft = draftSetupFromCompanionText(
@@ -746,11 +763,11 @@ describe("Companion engine (R33-T001..T003)", () => {
     );
     expect(draft.source).toMatchObject({
       bookId: "book-ceiling",
-      through: 4,
+      through: null,
       position: 2,
       fanfic: true,
       plot: "rewrite",
-      instructions: "仅参考前五章设定，不照搬后续剧情",
+      instructions: "保留原著人物性格，自由展开",
     });
   });
 

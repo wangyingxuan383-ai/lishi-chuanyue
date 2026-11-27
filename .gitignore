@@ -56,5 +56,5 @@ Desktop.ini
 *.tmp
 *.bak
 
-# Agent worktrees
-.claude/worktrees/
+# Local AI assistant configuration and worktrees
+.claude/

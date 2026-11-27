@@ -293,6 +293,9 @@ impl RunPlan {
     /// Rewriting settles against the previous turn's state, but reads the
     /// current route's reference binding from the captured start snapshot.
     pub(crate) fn reading_source(&self) -> &Value {
+        if let Some(source) = self.meta.get("readingSource") {
+            return source;
+        }
         if self.meta["generationSnapshot"] == true {
             if let Some(source) = self.meta.get("sourceGuard") {
                 return source;

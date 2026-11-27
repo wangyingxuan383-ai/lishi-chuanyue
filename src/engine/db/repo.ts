@@ -107,7 +107,7 @@ function rowJson(table: string, columns: string): string {
 
 /** The node and everything under it, for statements that remove a branch. */
 const SUBTREE = `WITH RECURSIVE down(id) AS (SELECT ? UNION SELECT n.id FROM nodes n JOIN down ON n.parent_id = down.id) SELECT id FROM down`;
-class ReferencedRoute extends Error {}
+export class ReferencedRoute extends Error {}
 
 export interface NewNode {
   id?: string;
@@ -327,10 +327,39 @@ export class Repo {
         await this.platform.execution.agent({ op: "delete", id: String(s.id) }).catch(() => null);
       }
     }
+    const readerTables = new Set(
+      (
+        await this.q(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('reader_progress', 'reader_bookmarks', 'reader_highlights')",
+        ).catch(() => [])
+      ).map((r) => String(r.name)),
+    );
+    const readerCleanups: SqlStatement[] = [];
+    for (const table of ["reader_progress", "reader_bookmarks", "reader_highlights"] as const) {
+      if (!readerTables.has(table)) continue;
+      const cols = await this.q(`PRAGMA table_info(${table})`).catch(() => []);
+      const hasWorldId = cols.some((c) => String(c.name) === "world_id");
+      if (hasWorldId) {
+        readerCleanups.push({
+          sql: `DELETE FROM ${table} WHERE (target_type = 'world_novel' AND target_id = ?) OR world_id = ?`,
+          params: [worldId, worldId],
+        });
+      } else {
+        readerCleanups.push({
+          sql: `DELETE FROM ${table} WHERE target_type = 'world_novel' AND target_id = ?`,
+          params: [worldId],
+        });
+      }
+    }
     // Pins point at their node without a cascade, so they go first; states and chapters cascade.
     await this.platform.sql.batch([
+      ...readerCleanups,
+      { sql: "DELETE FROM settings WHERE key IN (?, ?)", params: [`autoplayUnusedNote:${worldId}`, `carriedDone:${worldId}`] },
       { sql: "DELETE FROM pi_external_effects WHERE world_id = ?", params: [worldId] },
-      { sql: "DELETE FROM world_execution_leases WHERE world_id = ?", params: [worldId] },
+      {
+        sql: "DELETE FROM world_execution_leases WHERE world_id = ? OR (world_id LIKE ? || '#read:%' AND instr(world_id, ? || '#read:') = 1)",
+        params: [worldId, worldId, worldId],
+      },
       { sql: "DELETE FROM execution_runs WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM pins WHERE world_id = ?", params: [worldId] },
       { sql: "DELETE FROM lines WHERE world_id = ?", params: [worldId] },
@@ -504,31 +533,181 @@ export class Repo {
   }
 
   async addChapter(c: Omit<Chapter, "id" | "createdAt" | "edited">): Promise<Chapter> {
-    const chapter: Chapter = { ...c, id: newId(), edited: false, createdAt: now() };
-    await this.q(
-      `INSERT INTO chapters (id, world_id, first_node_id, last_node_id, title, gist, summary, model, prompt_version, edited, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-      [chapter.id, c.worldId, c.firstNodeId, c.lastNodeId, c.title, c.gist, c.summary, c.model, c.promptVersion, chapter.createdAt],
-    );
+    const { stale, ...rest } = c;
+    const chapter: Chapter = { ...rest, id: newId(), edited: false, ...(stale ? { stale: true } : {}), createdAt: now() };
+    if (stale) {
+      await this.q(
+        `INSERT INTO chapters (id, world_id, first_node_id, last_node_id, title, gist, summary, model, prompt_version, edited, stale, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)`,
+        [chapter.id, c.worldId, c.firstNodeId, c.lastNodeId, c.title, c.gist, c.summary, c.model, c.promptVersion, chapter.createdAt],
+      );
+    } else {
+      await this.q(
+        `INSERT INTO chapters (id, world_id, first_node_id, last_node_id, title, gist, summary, model, prompt_version, edited, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+        [chapter.id, c.worldId, c.firstNodeId, c.lastNodeId, c.title, c.gist, c.summary, c.model, c.promptVersion, chapter.createdAt],
+      );
+    }
     return chapter;
   }
 
+  /**
+   * Inserts a newly summarized chapter only if the world is still active (archived = 0),
+   * all summarized source nodes still exist, and no chapter with the same `first_node_id`
+   * already covers the route; marks `stale = 1` automatically if any source node's prose
+   * changed while the summary was in flight.
+   */
+  async addChapterGuarded(
+    c: Omit<Chapter, "id" | "createdAt" | "edited">,
+    guard: { headId: string; sourceNodes: { id: string; narrative: string }[] },
+  ): Promise<Chapter | null> {
+    if (!guard.sourceNodes.length) return null;
+    const id = newId();
+    const createdAt = now();
+    const sourceNarrativeChecks = guard.sourceNodes
+      .map(() => "OR NOT EXISTS (SELECT 1 FROM nodes WHERE id = ? AND narrative = ?)")
+      .join(" ");
+    const sourceExistChecks = guard.sourceNodes
+      .map(() => "AND EXISTS (SELECT 1 FROM nodes WHERE id = ? AND world_id = ?)")
+      .join(" ");
+    await this.q(
+      `WITH RECURSIVE route(id) AS (
+         SELECT id FROM nodes WHERE id = ? AND world_id = ?
+         UNION ALL
+         SELECT n.parent_id FROM nodes n JOIN route r ON n.id = r.id WHERE n.parent_id IS NOT NULL
+       ),
+       span_up(id) AS (
+         SELECT id FROM nodes WHERE id = ? AND world_id = ?
+         UNION ALL
+         SELECT n.parent_id FROM nodes n JOIN span_up s ON n.id = s.id WHERE n.parent_id IS NOT NULL
+       ),
+       span_down(id) AS (
+         SELECT ?
+         UNION ALL
+         SELECT n.id FROM nodes n JOIN span_down d ON n.parent_id = d.id
+       )
+       INSERT INTO chapters (id, world_id, first_node_id, last_node_id, title, gist, summary, model, prompt_version, edited, stale, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+         CASE WHEN ? = 1 ${sourceNarrativeChecks} THEN 1 ELSE NULL END,
+         ?
+       WHERE EXISTS (SELECT 1 FROM worlds WHERE id = ? AND archived = 0)
+         ${sourceExistChecks}
+         AND NOT EXISTS (
+           SELECT 1 FROM chapters existing
+           WHERE existing.world_id = ? AND existing.first_node_id = ?
+             AND (existing.last_node_id IN (SELECT id FROM route)
+                  OR existing.last_node_id IN (SELECT id FROM span_up)
+                  OR existing.last_node_id IN (SELECT id FROM span_down))
+         )`,
+      [
+        guard.headId,
+        c.worldId,
+        c.lastNodeId,
+        c.worldId,
+        c.lastNodeId,
+        id,
+        c.worldId,
+        c.firstNodeId,
+        c.lastNodeId,
+        c.title,
+        c.gist,
+        c.summary,
+        c.model,
+        c.promptVersion,
+        c.stale ? 1 : 0,
+        ...guard.sourceNodes.flatMap((s) => [s.id, s.narrative]),
+        createdAt,
+        c.worldId,
+        ...guard.sourceNodes.flatMap((s) => [s.id, c.worldId]),
+        c.worldId,
+        c.firstNodeId,
+      ],
+    );
+    const rows = await this.q("SELECT * FROM chapters WHERE id = ?", [id]);
+    return rows[0] ? toChapter(rows[0]) : null;
+  }
+
   /** A rewrite by the model (edited stays as it was) or by the player (edited = true). */
-  async updateChapter(id: string, fields: Pick<Chapter, "title" | "gist" | "summary"> & Partial<Pick<Chapter, "model" | "promptVersion" | "edited">>, expected?: Pick<Chapter, "title" | "gist" | "summary" | "edited">): Promise<boolean> {
+  async updateChapter(
+    id: string,
+    fields: Pick<Chapter, "title" | "gist" | "summary"> & Partial<Pick<Chapter, "model" | "promptVersion" | "edited">>,
+    expected?: Pick<Chapter, "title" | "gist" | "summary" | "edited"> & { stale?: boolean },
+    sourceNodes?: { id: string; narrative: string }[],
+  ): Promise<boolean> {
+    if (sourceNodes) {
+      if (!sourceNodes.length) return false;
+      if (new Set(sourceNodes.map((s) => s.id)).size !== sourceNodes.length) return false;
+    }
     // Any new summary, by the AI or the player, is of the text as it is now (D183).
     const sets = ["title = ?", "gist = ?", "summary = ?", "stale = NULL"];
     const params: Json[] = [fields.title, fields.gist, fields.summary];
     if (fields.model !== undefined) { sets.push("model = ?"); params.push(fields.model); }
     if (fields.promptVersion !== undefined) { sets.push("prompt_version = ?"); params.push(fields.promptVersion); }
     if (fields.edited !== undefined) { sets.push("edited = ?"); params.push(fields.edited ? 1 : 0); }
+    const cte = sourceNodes
+      ? `WITH RECURSIVE span(id, first_id, parent_id, kind, status) AS (
+           SELECT n.id, c.first_node_id, n.parent_id, n.kind, n.status
+           FROM chapters c JOIN nodes n ON n.id = c.last_node_id AND n.world_id = c.world_id
+           WHERE c.id = ?
+           UNION ALL
+           SELECT p.id, span.first_id, p.parent_id, p.kind, p.status
+           FROM span JOIN nodes p ON p.id = span.parent_id
+           WHERE span.id <> span.first_id
+         ) `
+      : "";
     const guard = expected ? " AND title=? AND gist=? AND summary=? AND edited=?" : "";
-    await this.q(`UPDATE chapters SET ${sets.join(", ")} WHERE id = ?${guard}`, [
-      ...params, id, ...(expected ? [expected.title, expected.gist, expected.summary, expected.edited ? 1 : 0] : []),
+    const sourceGuard = sourceNodes
+      ? ` AND EXISTS (SELECT 1 FROM worlds w WHERE w.id = chapters.world_id AND w.archived = 0)
+          AND EXISTS (SELECT 1 FROM span WHERE id = first_id)
+          AND (SELECT COUNT(*) FROM span WHERE kind = 'turn' AND status <> 'interrupted') = ?
+          ${sourceNodes
+            .map(
+              () =>
+                "AND EXISTS (SELECT 1 FROM span JOIN nodes n ON n.id = span.id WHERE span.id = ? AND span.kind = 'turn' AND span.status <> 'interrupted' AND n.narrative = ?)",
+            )
+            .join(" ")}`
+      : "";
+    await this.q(`${cte}UPDATE chapters SET ${sets.join(", ")} WHERE id = ?${guard}${sourceGuard}`, [
+      ...(sourceNodes ? [id] : []),
+      ...params,
+      id,
+      ...(expected ? [expected.title, expected.gist, expected.summary, expected.edited ? 1 : 0] : []),
+      ...(sourceNodes ? [sourceNodes.length, ...sourceNodes.flatMap((s) => [s.id, s.narrative])] : []),
     ]);
-    if (!expected) return true;
-    const [saved] = await this.q("SELECT title,gist,summary,edited FROM chapters WHERE id=?", [id]);
-    return !!saved && saved.title === fields.title && saved.gist === fields.gist && saved.summary === fields.summary
-      && (fields.edited === undefined || !!saved.edited === fields.edited);
+    if (!expected && !sourceNodes) return true;
+    if (sourceNodes) {
+      const [check] = await this.q(
+        `${cte}SELECT c.title, c.gist, c.summary, c.edited, c.stale,
+           (EXISTS (SELECT 1 FROM worlds w WHERE w.id = c.world_id AND w.archived = 0)
+            AND EXISTS (SELECT 1 FROM span WHERE id = first_id)
+            AND (SELECT COUNT(*) FROM span WHERE kind = 'turn' AND status <> 'interrupted') = ?
+            ${sourceNodes
+              .map(
+                () =>
+                  "AND EXISTS (SELECT 1 FROM span JOIN nodes n ON n.id = span.id WHERE span.id = ? AND span.kind = 'turn' AND span.status <> 'interrupted' AND n.narrative = ?)",
+              )
+              .join(" ")}
+           ) AS span_ok
+         FROM chapters c WHERE c.id = ?`,
+        [id, sourceNodes.length, ...sourceNodes.flatMap((s) => [s.id, s.narrative]), id],
+      );
+      if (!check || !check.span_ok || check.stale) return false;
+      return (
+        check.title === fields.title &&
+        check.gist === fields.gist &&
+        check.summary === fields.summary &&
+        (fields.edited === undefined || !!check.edited === fields.edited)
+      );
+    }
+    const [saved] = await this.q("SELECT title,gist,summary,edited,stale FROM chapters WHERE id=?", [id]);
+    return (
+      !!saved &&
+      !saved.stale &&
+      saved.title === fields.title &&
+      saved.gist === fields.gist &&
+      saved.summary === fields.summary &&
+      (fields.edited === undefined || !!saved.edited === fields.edited)
+    );
   }
 
   async deleteChapter(id: string): Promise<void> {
@@ -800,6 +979,8 @@ export class Repo {
           AND NOT EXISTS(SELECT 1 FROM story_fact_sources WHERE line_id IN routes OR node_id IN gone)
           AND NOT EXISTS(SELECT 1 FROM fact_corrections WHERE node_id IN gone OR original_node_id IN gone)
           AND NOT EXISTS(SELECT 1 FROM nodes WHERE json_extract(meta_json,'$.revision.nodeId') IN gone)
+          AND NOT EXISTS(SELECT 1 FROM nodes WHERE id NOT IN (SELECT id FROM gone WHERE id IS NOT NULL) AND json_extract(meta_json,'$.revision.lineId') IN routes)
+          AND NOT EXISTS(SELECT 1 FROM execution_runs WHERE line_id IN routes AND status IN ('running','committing'))
           AND NOT EXISTS(SELECT 1 FROM pi_sessions WHERE line_id IN routes)
           AND NOT EXISTS(SELECT 1 FROM pi_tasks WHERE line_id IN routes)`,
       params: [first?.id ?? null, lineId, lineId, line.worldId, line.nodeId, lineId],

@@ -664,12 +664,13 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
   const binding = current.source, reference = preview.reference;
   if (!validBinding(binding) || !reference || !validBinding(reference.binding) || reference.bookId !== binding.bookId
     || reference.binding.bookId !== binding.bookId || reference.binding.instructions !== binding.instructions
-    || reference.binding.through !== binding.through || reference.binding.plot !== binding.plot || reference.binding.fanfic !== binding.fanfic
+    || (reference.binding.through !== binding.through && reference.binding.through !== null)
+    || reference.binding.plot !== binding.plot || reference.binding.fanfic !== binding.fanfic
     || reference.binding.method !== binding.method || reference.binding.analysisId !== binding.analysisId) throw new WritingError("改稿引用的书籍用法无效，请重新生成。");
   const outline = await getBookOutline(game.repo, binding.bookId);
   if ((preview.outcome ?? "changed") !== "changed") throw new WritingError("这次核对没有要改的地方，不用采用。");
   if (!outline || !Array.isArray(preview.corrections) || !preview.corrections.length) throw new WritingError("还没有查到可以采用的原著依据。");
-  if (reference.binding.position >= outline.sections.length || reference.binding.through !== null && reference.binding.position > reference.binding.through) throw new WritingError("原著位置超出了参考范围。");
+  if (reference.binding.position >= outline.sections.length) throw new WritingError("原著位置超出了参考范围。");
   const citedOrdinals = [...new Set(preview.corrections.flatMap((c) => c.citations.map((cite) => cite.chunk)).filter((ord) => Number.isInteger(ord) && ord >= 0))];
   const chunkRows = citedOrdinals.length
     ? await game.platform.sql.query(
@@ -685,7 +686,7 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
       const sec = outline.sections[citation.section];
       if (citation.bookId !== binding.bookId || !chunk || !sec || chunk.section !== citation.section || !citation.quote.trim()
         || citation.title !== sec.title || citation.page !== sec.page
-        || binding.through !== null && citation.section > binding.through || !chunk.text.includes(citation.quote)
+        || !chunk.text.includes(citation.quote)
         || (citation.start !== undefined || citation.end !== undefined) && (!Number.isInteger(citation.start) || !Number.isInteger(citation.end) || citation.start! < 0 || citation.end! <= citation.start! || chunk.text.slice(citation.start, citation.end) !== citation.quote)
         || !reference.passages.some((p) => p.kind === "original" && p.chunk === citation.chunk && p.section === citation.section && p.text.includes(citation.quote))) {
         throw new WritingError("更正的原文出处不完整或超出参考范围，请重新查证。");
@@ -694,7 +695,7 @@ export async function adoptCanonCorrection(game: Game, preview: CanonCorrectionP
   }
   return commitRevision(game, {
     anchor, target, world, baseline: preview.baseline, correctionPatch: preview.correctionPatch, record: preview.record, narrative: preview.narrative,
-    source: reference.binding, sourceGuard: preview.sourceGuard,
+    source: { ...reference.binding, through: binding.through }, sourceGuard: preview.sourceGuard,
     checkSeed: (seed) => {
       for (const fact of preview.preservedPlayerFacts ?? []) {
         if (!seed.facts?.some((f) => f.origin === "player" && f.id === fact.id && f.detail === fact.detail)) throw new WritingError("玩家分支的来源已经改变，请重新查证。");

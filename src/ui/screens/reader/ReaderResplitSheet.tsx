@@ -4,10 +4,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getBook } from "../../../engine/sources/library";
 import {
+  DEFAULT_RESPLIT_TIMEOUT_MS,
   RESPLIT_PRESETS,
   applyBookResplit,
   reconstructBookText,
-  splitTextWithRule,
+  splitTextWithRuleAsync,
+  type ApplyBookResplitResult,
   type ResplitPresetId,
   type ResplitRule,
 } from "../../../engine/sources/resplit";
@@ -25,7 +27,7 @@ const FIXED_CHAR_CHOICES: [number, string][] = [
 export interface ReaderResplitSheetProps {
   bookId: string;
   bookTitle: string;
-  onApplied: (newSectionCount: number) => void | Promise<void>;
+  onApplied: (res: ApplyBookResplitResult) => void | Promise<void>;
   onClose: () => void;
 }
 
@@ -107,36 +109,44 @@ export function ReaderResplitSheet({
     const fullText = cachedFullTextRef.current;
     if (fullText === null) return;
     let live = true;
+    const previewCtrl = new AbortController();
     setPreviewBusy(true);
     setPreviewError("");
     const timer = setTimeout(() => {
-      try {
-        const sections = splitTextWithRule(fullText, rule);
-        if (!live) return;
-        previewSectionsRef.current = sections;
-        const orig = origSectionsMetaRef.current;
-        const unchanged =
-          !!orig &&
-          orig.length === sections.length &&
-          sections.every((s, idx) => s.title === orig[idx]!.title && s.text.length === orig[idx]!.len);
-        setPreview({
-          sectionCount: sections.length,
-          sampleTitles: sections.slice(0, 8).map((s) => s.title),
-          unchanged,
+      void splitTextWithRuleAsync(fullText, rule, {
+        signal: previewCtrl.signal,
+        timeoutMs: DEFAULT_RESPLIT_TIMEOUT_MS,
+      })
+        .then((sections) => {
+          if (!live || previewCtrl.signal.aborted) return;
+          previewSectionsRef.current = sections;
+          const orig = origSectionsMetaRef.current;
+          const unchanged =
+            !!orig &&
+            orig.length === sections.length &&
+            sections.every((s, idx) => s.title === orig[idx]!.title && s.text.length === orig[idx]!.len);
+          setPreview({
+            sectionCount: sections.length,
+            sampleTitles: sections.slice(0, 8).map((s) => s.title),
+            unchanged,
+          });
+          setPreviewError(sections.length === 0 ? "没有匹配到任何章节内容，请调整分章规则" : "");
+        })
+        .catch((err: unknown) => {
+          if (!live || previewCtrl.signal.aborted) return;
+          if (err instanceof Error && err.name === "AbortError") return;
+          previewSectionsRef.current = null;
+          setPreview(null);
+          setPreviewError(err instanceof Error ? err.message : "预览分章失败，请换个规则试试");
+        })
+        .finally(() => {
+          if (live && !previewCtrl.signal.aborted) setPreviewBusy(false);
         });
-        setPreviewError(sections.length === 0 ? "没有匹配到任何章节内容，请调整分章规则" : "");
-      } catch (err: unknown) {
-        if (!live) return;
-        previewSectionsRef.current = null;
-        setPreview(null);
-        setPreviewError(err instanceof Error ? err.message : "预览分章失败，请换个规则试试");
-      } finally {
-        if (live) setPreviewBusy(false);
-      }
     }, 120);
     return () => {
       live = false;
       clearTimeout(timer);
+      previewCtrl.abort();
     };
   }, [rule, textLoadedTick]);
 
@@ -149,12 +159,17 @@ export function ReaderResplitSheet({
     try {
       const res = await applyBookResplit(game.repo, bookId, rule, {
         signal: ctrl.signal,
+        timeoutMs: DEFAULT_RESPLIT_TIMEOUT_MS,
         precomputedSections: previewSectionsRef.current ?? undefined,
       });
       if (ctrl.signal.aborted) return;
-      await onApplied(res.sectionCount);
-      toast(`已重建《${bookTitle}》目录，共 ${res.sectionCount} 章`);
       onClose();
+      await onApplied(res);
+      if (res.forked || res.bookId !== bookId) {
+        toast("原书已被故事或札记引用，已另存为新目录书卷，原故事引用不受影响");
+      } else {
+        toast(`已重建《${bookTitle}》目录，共 ${res.sectionCount} 章`);
+      }
     } catch (err: unknown) {
       if (ctrl.signal.aborted) return;
       toast(err instanceof Error ? err.message : "重建目录失败，请重试");

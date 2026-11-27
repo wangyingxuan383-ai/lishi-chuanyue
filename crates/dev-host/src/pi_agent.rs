@@ -255,6 +255,52 @@ fn verify_node(node: &Path) -> Result<(), Value> {
     Ok(())
 }
 
+fn matches_expected_service_base(bound: &str, expected: &str) -> bool {
+    let b_trim = bound.trim();
+    let e_trim = expected.trim();
+    if b_trim.is_empty() || e_trim.is_empty() {
+        return false;
+    }
+    if (!b_trim.starts_with("http://") && !b_trim.starts_with("https://"))
+        || (!e_trim.starts_with("http://") && !e_trim.starts_with("https://"))
+    {
+        return false;
+    }
+    if crate::model::clean_raw_url_path(b_trim).is_none()
+        || crate::model::clean_raw_url_path(e_trim).is_none()
+    {
+        return false;
+    }
+    let (Ok(b_url), Ok(e_url)) = (reqwest::Url::parse(b_trim), reqwest::Url::parse(e_trim)) else {
+        return false;
+    };
+    if !matches!(b_url.scheme(), "http" | "https")
+        || !matches!(e_url.scheme(), "http" | "https")
+        || b_url.host_str().is_none()
+        || e_url.host_str().is_none()
+        || !b_url.username().is_empty()
+        || b_url.password().is_some()
+        || b_url.query().is_some()
+        || b_url.fragment().is_some()
+        || !e_url.username().is_empty()
+        || e_url.password().is_some()
+        || e_url.query().is_some()
+        || e_url.fragment().is_some()
+        || b_url.origin() != e_url.origin()
+    {
+        return false;
+    }
+    let pa = b_url.path().trim_end_matches('/');
+    let pb = e_url.path().trim_end_matches('/');
+    if pa == pb {
+        return true;
+    }
+    let is_dual = |short: &str, long: &str| {
+        long.strip_suffix("/openai") == Some(short) && short.ends_with("/v1beta")
+    };
+    is_dual(pa, pb) || is_dual(pb, pa)
+}
+
 /// Read the selected JSON only; never mutate the normal development key slot.
 fn authorize(file: &Path, slot: &str, expected: &str) -> story_core::Result<String> {
     let invalid =
@@ -267,7 +313,7 @@ fn authorize(file: &Path, slot: &str, expected: &str) -> story_core::Result<Stri
     let entry = &secrets[slot];
     // `expected` is derived from the current native profile, not caller input.
     let bound = entry["boundBaseUrl"].as_str().ok_or_else(invalid)?;
-    if bound.trim_end_matches('/') != expected {
+    if !matches_expected_service_base(bound, expected) {
         return Err(invalid());
     }
     let key = entry["value"]
@@ -279,4 +325,55 @@ fn authorize(file: &Path, slot: &str, expected: &str) -> story_core::Result<Stri
         })
         .ok_or_else(invalid)?;
     Ok(key.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorize_enforces_normalized_base_rejects_traversal_and_allows_gemini_dual_paths() {
+        let dir = std::env::temp_dir().join(format!("lishi-pi-agent-auth-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("dev-secrets.json");
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&json!({
+                "main": {
+                    "value": "test-dev-key-123",
+                    "boundBaseUrl": "https://relay.example.com/team-a/v1/"
+                },
+                "gem-oai": {
+                    "value": "gem-key-1",
+                    "boundBaseUrl": "https://generativelanguage.googleapis.com/v1beta/openai"
+                },
+                "gem-nat": {
+                    "value": "gem-key-2",
+                    "boundBaseUrl": "https://generativelanguage.googleapis.com/v1beta"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            authorize(&file, "main", "https://relay.example.com/team-a/v1").unwrap(),
+            "test-dev-key-123"
+        );
+        assert!(authorize(&file, "main", "https://relay.example.com/team-a/v1/../../other").is_err());
+        assert!(authorize(&file, "main", "https://relay.example.com/team-b/v1").is_err());
+
+        // Gemini `/v1beta/openai` <-> `/v1beta` bidirectional compatibility
+        assert_eq!(
+            authorize(&file, "gem-oai", "https://generativelanguage.googleapis.com/v1beta").unwrap(),
+            "gem-key-1"
+        );
+        assert_eq!(
+            authorize(&file, "gem-nat", "https://generativelanguage.googleapis.com/v1beta/openai").unwrap(),
+            "gem-key-2"
+        );
+        assert!(authorize(&file, "gem-oai", "https://generativelanguage.googleapis.com/v1alpha").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

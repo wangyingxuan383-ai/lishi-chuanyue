@@ -90,6 +90,9 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 // Back handlers form a stack: the most recently opened layer closes first.
 const backHandlers: Array<() => boolean> = [];
 const setNativeKeepAwake = orderedKeepAwake((enabled) => call<void>("plugin:notifications|set_keep_awake", { enabled }));
+const setNativeVolumePageTurn = orderedKeepAwake((enabled) =>
+  call<void>("plugin:notifications|set_volume_page_turn", { enabled }),
+);
 const setNativeSystemBars = coalescedSystemBars((background, dark) =>
   call<void>("plugin:notifications|set_system_bars", { background, dark }),
 );
@@ -276,7 +279,7 @@ export async function createTauriPlatform(): Promise<Platform> {
         openAutostart: () => call<void>("plugin:notifications|open_autostart_settings"),
         takeLaunchTarget: () => call<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>("plugin:notifications|take_launch_target"),
         openReminderSettings: () => call<void>("plugin:notifications|open_reminder_settings"),
-        setVolumePageTurn: (enabled: boolean) => call<void>("plugin:notifications|set_volume_page_turn", { enabled }),
+        setVolumePageTurn: (enabled: boolean) => setNativeVolumePageTurn(enabled),
         ttsSpeak: (payload: { utteranceId: string; text: string; rate: number }) =>
           call<{ ok: boolean }>("plugin:notifications|tts_speak", payload).then((r) => !!r?.ok).catch(() => false),
         ttsStop: () => call<void>("plugin:notifications|tts_stop").catch(() => {}),

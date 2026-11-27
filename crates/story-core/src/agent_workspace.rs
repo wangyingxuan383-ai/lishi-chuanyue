@@ -327,12 +327,23 @@ pub(crate) fn locators(db: &Connection, plan: &RunPlan) -> Result<Value> {
                 r.get(0)
             })
             .optional()?;
-        let through = if plan.meta["agent"]["referenceScope"]["bookId"] == id {
-            plan.meta["agent"]["referenceScope"]["through"].clone()
+        let (from, through) = if plan.meta["agent"]["referenceScope"]["bookId"] == id {
+            (
+                plan.meta["agent"]["referenceScope"]
+                    .get("from")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                plan.meta["agent"]["referenceScope"]["through"].clone(),
+            )
         } else {
-            binding["through"].clone()
+            (Value::Null, Value::Null)
         };
-        json!({"bookId":id,"title":title,"through":through,"position":binding["position"]})
+        let mut ref_obj =
+            json!({"bookId":id,"title":title,"through":through,"position":binding["position"]});
+        if !from.is_null() {
+            ref_obj["from"] = from;
+        }
+        ref_obj
     } else {
         Value::Null
     };
@@ -440,14 +451,98 @@ pub(crate) fn resource(
                 requested.to_string()
             };
             let mut row = decode(raw(db, "source_books", "id", &book)?);
-            row["sections"] = Value::Array(rows(
+            let sec_rows = rows(
                 db,
-                "SELECT * FROM source_sections WHERE book_id=? ORDER BY section",
+                "SELECT * FROM source_sections WHERE book_id=? ORDER BY section ASC",
                 &[&book],
-            )?);
+            )?;
+            let chunk_rows_by_sec = rows(
+                db,
+                "SELECT * FROM source_chunks WHERE book_id=? ORDER BY section ASC, ordinal ASC",
+                &[&book],
+            )?;
+            let mut by_section: HashMap<i64, String> = HashMap::new();
+            for chunk in &chunk_rows_by_sec {
+                if let Some(sec) = chunk["section"].as_i64() {
+                    by_section
+                        .entry(sec)
+                        .or_default()
+                        .push_str(text(chunk, "text"));
+                }
+            }
+            if !row["data"].is_object() {
+                row["data"] = json!({});
+            }
+            if !row["data"]["id"].is_string() {
+                row["data"]["id"] = row["id"].clone();
+            }
+            if !row["data"]["title"].is_string() {
+                row["data"]["title"] = row["title"].clone();
+            }
+            if !row["data"]["format"].is_string() {
+                row["data"]["format"] = row["format"].clone();
+            }
+            if !row["data"]["createdAt"].is_string() {
+                row["data"]["createdAt"] = row["created_at"].clone();
+            }
+            let raw_secs = row["data"]["sections"].as_array().cloned().unwrap_or_default();
+            let hydrated_sections: Vec<Value> = if !raw_secs.is_empty() {
+                raw_secs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, mut s)| {
+                        let sec_idx = idx as i64;
+                        let sec_row = sec_rows.iter().find(|r| r["section"].as_i64() == Some(sec_idx));
+                        if !s.is_object() {
+                            s = json!({});
+                        }
+                        if !s["title"].is_string() {
+                            s["title"] = sec_row
+                                .map(|r| r["title"].clone())
+                                .unwrap_or_else(|| json!(""));
+                        }
+                        if !s["text"].is_string() {
+                            s["text"] = by_section
+                                .get(&sec_idx)
+                                .cloned()
+                                .unwrap_or_default()
+                                .into();
+                        }
+                        let page = s["page"]
+                            .as_i64()
+                            .filter(|&p| p >= 1)
+                            .or_else(|| sec_row.and_then(|r| r["page"].as_i64()).filter(|&p| p >= 1));
+                        if let Some(obj) = s.as_object_mut() {
+                            if let Some(p) = page {
+                                obj.insert("page".into(), p.into());
+                            } else {
+                                obj.remove("page");
+                            }
+                        }
+                        s
+                    })
+                    .collect()
+            } else {
+                sec_rows
+                    .iter()
+                    .map(|r| {
+                        let sec_idx = r["section"].as_i64().unwrap_or(0);
+                        let mut sec_obj = json!({
+                            "title": text(r, "title"),
+                            "text": by_section.get(&sec_idx).cloned().unwrap_or_default(),
+                        });
+                        if let Some(p) = r["page"].as_i64().filter(|&p| p >= 1) {
+                            sec_obj["page"] = p.into();
+                        }
+                        sec_obj
+                    })
+                    .collect()
+            };
+            row["data"]["sections"] = Value::Array(hydrated_sections);
+            row["sections"] = Value::Array(sec_rows);
             row["chunks"] = Value::Array(rows(
                 db,
-                "SELECT * FROM source_chunks WHERE book_id=? ORDER BY ordinal",
+                "SELECT * FROM source_chunks WHERE book_id=? ORDER BY ordinal ASC",
                 &[&book],
             )?);
             Ok(row)
@@ -622,24 +717,36 @@ fn scope_book(plan: &RunPlan, value: &mut Value) {
     if binding["bookId"] != value["id"] {
         return;
     }
-    let Some(through) = binding["through"].as_u64() else {
+    let from = binding["from"].as_u64();
+    let through = binding["through"].as_u64();
+    if from.is_none() && through.is_none() {
         return;
-    };
+    }
+    let in_range = |n: u64| from.is_none_or(|f| n >= f) && through.is_none_or(|t| n <= t);
     for key in ["sections", "chunks"] {
         if let Some(items) = value[key].as_array_mut() {
-            items.retain(|s| s["section"].as_u64().is_some_and(|n| n <= through));
+            items.retain(|s| s["section"].as_u64().is_some_and(in_range));
         }
     }
     if let Some(items) = value["data"]["sections"].as_array_mut() {
-        items.truncate((through + 1) as usize);
+        let mut idx = 0u64;
+        items.retain(|_| {
+            let keep = in_range(idx);
+            idx += 1;
+            keep
+        });
     }
     if let Some(data) = value["data"].as_object_mut() {
         for key in ["summary", "analysis", "analyses", "synopsis"] {
             data.remove(key);
         }
     }
-    value["scope"] =
+    let mut scope_val =
         json!({"through":through,"message":"只返回本次允许范围，不读取后续或全书总结"});
+    if let Some(f) = from {
+        scope_val["from"] = f.into();
+    }
+    value["scope"] = scope_val;
 }
 pub(crate) fn workspace(db: &Connection, task: &str) -> Result<Value> {
     let table = task_table(db, task)?;
@@ -1694,10 +1801,51 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
                     text(edit, "id")
                 };
                 if after.is_null() {
-                    if kind == "line" && rid == plan.line_id {
-                        return Err(Error::Invalid(
-                            "请先切换到保留的路线，再删除当前路线".into(),
-                        ));
+                    if kind == "line" {
+                        let active_line: String = tx.query_row(
+                            "SELECT current_line_id FROM worlds WHERE id=?",
+                            [&plan.world_id],
+                            |r| r.get(0),
+                        )?;
+                        if rid == plan.line_id || rid == active_line {
+                            return Err(Error::Invalid(
+                                "请先切换到保留的路线，再删除当前路线".into(),
+                            ));
+                        }
+                        let referenced_by_revision: bool = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM nodes WHERE world_id=? AND CASE WHEN json_valid(meta_json) THEN json_extract(meta_json,'$.revision.lineId')=? ELSE 0 END)",
+                            params![plan.world_id, rid],
+                            |r| r.get(0),
+                        )? || node_edits.values().any(|n| {
+                            !n.is_null() && n["meta"]["revision"]["lineId"].as_str() == Some(rid)
+                        });
+                        if referenced_by_revision {
+                            return Err(Error::Invalid(
+                                "这条路线仍被历史修订节点引用，不能直接删除；可将其归档保留".into(),
+                            ));
+                        }
+                        if exists(tx, "story_fact_sources")
+                            && tx.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM story_fact_sources WHERE world_id=? AND line_id=?)",
+                                params![plan.world_id, rid],
+                                |r| r.get::<_, bool>(0),
+                            )?
+                        {
+                            return Err(Error::Invalid(
+                                "这条路线仍有关联的正式事实来源记录，不能直接删除；可将其归档保留".into(),
+                            ));
+                        }
+                        if exists(tx, "pi_sessions")
+                            && tx.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM pi_sessions WHERE world_id=? AND line_id=?)",
+                                params![plan.world_id, rid],
+                                |r| r.get::<_, bool>(0),
+                            )?
+                        {
+                            return Err(Error::Invalid(
+                                "这条路线仍有关联的助手对话记录，不能直接删除；可将其归档保留".into(),
+                            ));
+                        }
                     }
                     tx.execute(
                         &format!("DELETE FROM {table} WHERE id=? AND world_id=?"),
@@ -1784,6 +1932,11 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
         targets.insert(target.clone(), route);
     }
     let mut processed = HashSet::new();
+    let mut next_seq: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(seq), 0) FROM nodes WHERE world_id=?",
+        [&plan.world_id],
+        |r| r.get(0),
+    )?;
     for route in routes {
         let route_id = text(&route, "id");
         let local: HashSet<_> = targets
@@ -1859,7 +2012,16 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
                 changed["meta"]["agentStatePatch"] = json!(patch);
             }
             let new_id = id();
+            let old_seq = old["seq"].as_i64().unwrap_or(0);
+            let parent_seq: i64 = if let Some(ref p) = parent {
+                tx.query_row("SELECT seq FROM nodes WHERE id=?", [p], |r| r.get(0))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            next_seq = next_seq.max(old_seq).max(parent_seq).max(0) + 1;
             changed["id"] = new_id.clone().into();
+            changed["seq"] = next_seq.into();
             changed["parent_id"] = json!(parent);
             changed["last_child_id"] = Value::Null;
             changed["created_at"] = now().into();
@@ -2052,6 +2214,57 @@ fn derive_book(
     }
     if !["txt", "epub", "pdf", "docx"].contains(&text(&data, "format")) {
         return Err(Error::Invalid("参考书格式无效".into()));
+    }
+    let orig_book_id = text(&edit["original"], "id");
+    let mut fallback_by_section: HashMap<i64, String> = HashMap::new();
+    if !orig_book_id.is_empty()
+        && data["sections"]
+            .as_array()
+            .is_some_and(|secs| secs.iter().any(|s| !s["text"].is_string()))
+    {
+        for chunk in rows(
+            tx,
+            "SELECT section, text FROM source_chunks WHERE book_id=? ORDER BY section ASC, ordinal ASC",
+            &[&orig_book_id],
+        )? {
+            if let Some(sec) = chunk["section"].as_i64() {
+                fallback_by_section
+                    .entry(sec)
+                    .or_default()
+                    .push_str(text(&chunk, "text"));
+            }
+        }
+    }
+    if let Some(secs) = data["sections"].as_array_mut() {
+        for (idx, s) in secs.iter_mut().enumerate() {
+            let Some(obj) = s.as_object_mut() else {
+                return Err(Error::Invalid("参考书章节必须包含title和text文字".into()));
+            };
+            if !obj.get("title").is_some_and(Value::is_string) {
+                return Err(Error::Invalid("参考书章节必须包含title和text文字".into()));
+            }
+            if !obj.get("text").is_some_and(Value::is_string) {
+                if obj.get("text").is_none_or(Value::is_null) {
+                    if let Some(recovered) = fallback_by_section.get(&(idx as i64)) {
+                        obj.insert("text".into(), recovered.clone().into());
+                    }
+                }
+            }
+            if !obj.get("text").is_some_and(Value::is_string) {
+                return Err(Error::Invalid("参考书章节必须包含title和text文字".into()));
+            }
+            match obj.get("page") {
+                None => {}
+                Some(Value::Null) => {
+                    obj.remove("page");
+                }
+                Some(v) => {
+                    if !v.as_i64().is_some_and(|p| p >= 1) {
+                        return Err(Error::Invalid("参考书页码必须是正整数".into()));
+                    }
+                }
+            }
+        }
     }
     tx.execute(
         "INSERT INTO source_books(id,title,format,created_at,json) VALUES(?,?,?,?,?)",
@@ -2327,5 +2540,182 @@ mod cursor_tests {
   assert_ne!(fp_tx,fp3);
   drop(tx);
   assert_eq!(fingerprint(&db,"w1").unwrap(),fp3,"rolled-back write must restore prior fingerprint");
+ }
+
+ #[test]
+ fn r41_opening_clone_seq_line_delete_guards_and_slim_book_hydration_work() {
+  use crate::pi_gateway::StoryToolGateway;
+  use crate::pi_store::{NewSession, PiCallRequest};
+  use std::sync::{Arc, Mutex};
+
+  let mut db = Connection::open_in_memory().unwrap();
+  db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+  crate::migration::migrate(&mut db, None).unwrap();
+  let state_json = json!({
+      "version": 2,
+      "time": {"start": "第一天", "elapsedMinutes": 0, "startHour": 8},
+      "placeId": null,
+      "protagonist": {
+          "name": "李安",
+          "aliases": [],
+          "age": 20,
+          "gender": "男",
+          "identity": "旅人",
+          "origin": "现代",
+          "cheat": "",
+          "stats": {"money": 10, "debt": 0, "health": 100, "energy": 100, "fame": 0},
+          "statuses": [],
+          "items": []
+      },
+      "people": [],
+      "places": [],
+      "cards": [],
+      "goals": [],
+      "facts": [],
+      "era": {"packId": null, "mode": "free", "clockStyle": "elapsed"},
+      "deviations": [],
+      "source": {"bookId": "slim-book", "through": null, "position": 0, "method": "search", "instructions": ""}
+  });
+  // Insert a slim book (sections without `text`, `page: null`) + `source_chunks`:
+  db.execute(
+      "INSERT INTO source_books(id,title,format,created_at,json) VALUES('slim-book','精简原著','txt','test',?)",
+      [json!({"id":"slim-book","title":"精简原著","format":"txt","createdAt":"test","sections":[{"title":"楔子","page":null},{"title":"正篇","page":2}]}).to_string()],
+  ).unwrap();
+  db.execute_batch(
+      "INSERT INTO source_sections(book_id,section,title,page) VALUES('slim-book',0,'楔子',NULL),('slim-book',1,'正篇',2);
+       INSERT INTO source_chunks(book_id,ordinal,section,text) VALUES('slim-book',0,0,'楔子第一段。'),('slim-book',1,0,'楔子第二段。'),('slim-book',2,1,'正篇全文。');",
+  ).unwrap();
+  db.execute(
+      "INSERT INTO worlds(id,title,era_id,current_line_id,settings_json,created_at,updated_at,played_at) VALUES('w1','R41测试','free','l1','{\"autoUpkeep\":false,\"chapterEvery\":0}','t','t','t')",
+      [],
+  ).unwrap();
+  db.execute(
+      "INSERT INTO nodes(id,world_id,seq,kind,narrative,record_json,meta_json,created_at) VALUES('n0','w1',0,'opening','旧开场','{}',?,'t')",
+      [json!({"openingSeed": state_json}).to_string()],
+  ).unwrap();
+  db.execute("INSERT INTO states(node_id,state_json) VALUES('n0',?)", [state_json.to_string()]).unwrap();
+  db.execute_batch(
+      "INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('l1','w1','主线','n0','t'),
+       ('l-rev','w1','被修订引用线','n0','t'),
+       ('l-fact','w1','被事实引用线','n0','t'),
+       ('l-sess','w1','被会话引用线','n0','t'),
+       ('l-clean','w1','干净废线','n0','t');
+       INSERT INTO story_fact_sources(id,world_id,line_id,resource_kind,resource_id,batch_id,task_id,basis,claim,source_json,created_at) VALUES('fs1','w1','l-fact','settings','','b0','t0','original','测试依据','{}','t');
+       INSERT INTO pi_sessions(id,world_id,line_id,title,created_at,updated_at) VALUES('ps-ref','w1','l-sess','旧对话','t','t');",
+  ).unwrap();
+  db.execute(
+      "INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,meta_json,created_at) VALUES('n-rev','w1',NULL,1,'opening','手动修订开场',?,'t')",
+      [json!({"openingSeed": state_json, "revision": {"kind": "playerRevision", "nodeId": "n0", "lineId": "l-rev"}}).to_string()],
+  ).unwrap();
+  db.execute("INSERT INTO states(node_id,state_json) VALUES('n-rev',?)", [state_json.to_string()]).unwrap();
+
+  let store = crate::Store(Arc::new(Mutex::new(db)));
+  let gw = StoryToolGateway::new(store.clone());
+  gw.create_session(&NewSession {
+      id: "ps-main".into(),
+      world_id: "w1".into(),
+      line_id: "l1".into(),
+      title: "主线改档".into(),
+      session_file: None,
+  }).unwrap();
+  let started = gw.start_task("ps-main", "t1", "润色开场并修书删线", "auto-reversible", false, json!({"model":"m"}), json!({})).unwrap();
+  let permit = gw.permit("t1").unwrap();
+  let ver = started["base_world_version"].as_str().unwrap().to_owned();
+  let invoke = |cid: &str, tool: &str, args: Value| {
+      gw.invoke(&permit, PiCallRequest {
+          task_id: "t1".into(),
+          call_id: cid.into(),
+          tool: tool.into(),
+          args,
+          intent_revision: 0,
+          world_version: ver.clone(),
+          external_write: false,
+      }).unwrap()
+  };
+
+  // E10: Reading slim book rehydrates full text from chunks and omits `"page": null`:
+  let read_book = invoke("r-book", "read_resource", json!({"kind": "book", "id": "slim-book", "path": "/data/sections"}));
+  assert_eq!(read_book["ok"], true, "{read_book}");
+  assert_eq!(read_book["data"]["value"][0]["text"], "楔子第一段。楔子第二段。");
+  assert!(read_book["data"]["value"][0].get("page").is_none());
+  assert_eq!(read_book["data"]["value"][1]["page"], 2);
+
+  // E10: Editing section 1 title derives a new book keeping reconstructed section 0 text and never writing `"page": null`:
+  assert_eq!(invoke("e-book", "stage_edit", json!({
+      "kind": "book",
+      "id": "slim-book",
+      "path": "/data/sections/1/title",
+      "operation": "set",
+      "value": "正篇·修订",
+      "summary": "改章节标题"
+  }))["ok"], true);
+
+  // E01: Edit Turn-0 opening root `n0`:
+  assert_eq!(invoke("e-open", "stage_edit", json!({
+      "kind": "node",
+      "id": "n0",
+      "path": "/narrative",
+      "operation": "set",
+      "value": "全新润色开场。",
+      "summary": "润色开场"
+  }))["ok"], true);
+  assert_eq!(invoke("e-open-rec", "stage_edit", json!({
+      "kind": "node",
+      "id": "n0",
+      "path": "/record",
+      "operation": "set",
+      "value": {},
+      "summary": "核对开场记录"
+  }))["ok"], true);
+
+  // E02: Deleting referenced lines must fail validation, while deleting `l-clean` succeeds:
+  for bad_line in ["l-rev", "l-fact", "l-sess"] {
+      assert_eq!(invoke(&format!("del-{bad_line}"), "stage_edit", json!({
+          "kind": "line",
+          "id": bad_line,
+          "operation": "remove",
+          "summary": "尝试删被引用路线"
+      }))["ok"], true);
+      let checked = invoke(&format!("val-{bad_line}"), "validate_changes", json!({}));
+      assert_eq!(checked["ok"], false, "referenced line {bad_line} must not validate for deletion: {checked}");
+      // Revert the bad line delete from workspace:
+      let mut lock = store.lock().unwrap();
+      let tx = lock.transaction().unwrap();
+      discard_draft(&tx, "t1", &json!({"kind": "line", "id": bad_line})).unwrap();
+      tx.commit().unwrap();
+  }
+  assert_eq!(invoke("del-clean", "stage_edit", json!({
+      "kind": "line",
+      "id": "l-clean",
+      "operation": "remove",
+      "summary": "删除无引用废线"
+  }))["ok"], true);
+
+  let committed = invoke("fin", "finish_task", json!({"summary": "完成开场克隆、衍生书与清理废线"}));
+  assert_eq!(committed["ok"], true, "{committed}");
+
+  let lock = store.lock().unwrap();
+  let (new_head, new_seq, new_meta): (String, i64, String) = lock.query_row(
+      "SELECT n.id, n.seq, n.meta_json FROM lines l JOIN nodes n ON n.id=l.node_id WHERE l.id='l1'",
+      [],
+      |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+  ).unwrap();
+  assert_ne!(new_head, "n0");
+  assert!(new_seq >= 2, "cloned opening seq ({new_seq}) must exceed max existing seq (1)");
+  let parsed_meta: Value = serde_json::from_str(&new_meta).unwrap();
+  assert_eq!(parsed_meta["agentOriginalNodeId"], "n0");
+
+  let clean_left: i64 = lock.query_row("SELECT COUNT(*) FROM lines WHERE id='l-clean'", [], |r| r.get(0)).unwrap();
+  assert_eq!(clean_left, 0);
+
+  let derived_book_json: String = lock.query_row(
+      "SELECT json FROM source_books WHERE id<>'slim-book'",
+      [],
+      |r| r.get(0),
+  ).unwrap();
+  assert!(!derived_book_json.contains("\"page\":null"), "derived book json must never contain page:null: {derived_book_json}");
+  let derived_parsed: Value = serde_json::from_str(&derived_book_json).unwrap();
+  assert_eq!(derived_parsed["sections"][0]["text"], "楔子第一段。楔子第二段。");
+  assert_eq!(derived_parsed["sections"][1]["title"], "正篇·修订");
  }
 }

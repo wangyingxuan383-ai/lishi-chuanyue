@@ -19,9 +19,52 @@ import { Icon } from "./Icon";
 import { deletionPatch, selectionKey, type CodexKind, type CodexSelection } from "../../engine/writing/codex";
 import "./writing.css";
 
-type Editing =
+export type Editing =
   | { type: "card"; kind: CardKind; card: Card | null; /** A new card's suggested name. */ name?: string }
   | { type: "place"; place: Place | null };
+
+export function didEditedCodexChange(
+  editing: Editing | null,
+  prevState: WorldState,
+  nextState: WorldState,
+): boolean {
+  if (!editing) return false;
+  if (editing.type === "place") {
+    if (!editing.place) return false;
+    const p1 = prevState.places.find((p) => p.id === editing.place!.id);
+    const p2 = nextState.places.find((p) => p.id === editing.place!.id);
+    if (!p1 && !p2) return false;
+    if (!p1 || !p2) return true;
+    return (
+      p1.name !== p2.name ||
+      (p1.aliases ?? []).join("\u001f") !== (p2.aliases ?? []).join("\u001f") ||
+      p1.description !== p2.description ||
+      p1.source !== p2.source
+    );
+  }
+  if (!editing.card) {
+    if (editing.kind === "时代") {
+      return prevState.cards.some((c) => c.kind === "时代") !== nextState.cards.some((c) => c.kind === "时代");
+    }
+    if (editing.name) {
+      return !prevState.cards.some((c) => c.name === editing.name) && nextState.cards.some((c) => c.name === editing.name);
+    }
+    return false;
+  }
+  if (editing.card.id.startsWith("pack:")) {
+    return nextState.cards.some((c) => c.kind === "时代");
+  }
+  const c1 = prevState.cards.find((c) => c.id === editing.card!.id);
+  const c2 = nextState.cards.find((c) => c.id === editing.card!.id);
+  if (!c1 && !c2) return false;
+  if (!c1 || !c2) return true;
+  return (
+    c1.name !== c2.name ||
+    c1.keys.join("\u001f") !== c2.keys.join("\u001f") ||
+    c1.content !== c2.content ||
+    c1.source !== c2.source
+  );
+}
 
 const GROUPS: { kind: "地点" | CardKind; hint: string }[] = [
   { kind: "地点", hint: "身处其中或被提到时交给 AI" },
@@ -34,7 +77,7 @@ const SOURCE: Record<NonNullable<Card["source"]>, string> = { 卡组: "内置卡
 const splitNames = (text: string) => text.split(/[、，,\s]+/).map((n) => n.trim()).filter(Boolean);
 const preview = (text: string, max = 60) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
-function Editor({ editing, state, worldId, headId, onClose, onSave }: { editing: Editing; state: WorldState; worldId: string; headId: string; onClose: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void> }) {
+function Editor({ editing, state, worldId, headId, latestHeadId, upkeepChanged = false, onReloadLatest, onClose, onSave }: { editing: Editing; state: WorldState; worldId: string; headId: string; latestHeadId?: string; upkeepChanged?: boolean; onReloadLatest?: (nextEditing: Editing, nextHeadId: string) => void; onClose: () => void; onSave: (patch: TurnRecord, summary: string, expectedHeadId?: string) => Promise<void> }) {
   const { ask, toast, game } = useApp();
   const noteEntry = useContext(NoteEntry);
   const isEra = editing.type === "card" && editing.kind === "时代";
@@ -96,6 +139,45 @@ function Editor({ editing, state, worldId, headId, onClose, onSave }: { editing:
   return (
     <Sheet title={stored ? `修改${label}` : `新建${label}`} onClose={onClose}>
       <div className="stack gap-10">
+        {upkeepChanged && latestHeadId && (
+          <div className="stack gap-2">
+            <p className="field-hint warn m-0">AI 刚刚整理更新了这张{label}，请先查看最新内容再修改，避免覆盖 AI 刚整理的成果。</p>
+            <div className="row">
+              <button
+                type="button"
+                className="ghost small"
+                onClick={() => {
+                  if (editing.type === "place") {
+                    const latestPlace = editing.place ? state.places.find((p) => p.id === editing.place!.id) ?? null : null;
+                    if (latestPlace) {
+                      setName(latestPlace.name);
+                      setAliases((latestPlace.aliases ?? []).join("、"));
+                      setText(latestPlace.description);
+                    }
+                    onReloadLatest?.({ type: "place", place: latestPlace }, latestHeadId);
+                  } else {
+                    const latestCard = editing.card && !editing.card.id.startsWith("pack:")
+                      ? state.cards.find((c) => c.id === editing.card!.id) ?? null
+                      : editing.kind === "时代"
+                        ? state.cards.find((c) => c.kind === "时代") ?? editing.card
+                        : editing.name
+                          ? state.cards.find((c) => c.name === editing.name) ?? null
+                          : null;
+                    if (latestCard) {
+                      setName(latestCard.name);
+                      setAliases(latestCard.keys.join("、"));
+                      setText(latestCard.content);
+                      setAiKeeps(latestCard.source === "AI");
+                    }
+                    onReloadLatest?.({ ...editing, card: latestCard }, latestHeadId);
+                  }
+                }}
+              >
+                查看并载入最新内容
+              </button>
+            </div>
+          </div>
+        )}
         <label>名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder={isEra ? eraLabel === "世界卡" ? "如：云海群岛" : "如：唐 · 天宝七载 · 长安" : "名称"} /></label>
         {!isEra && <label>别名（提到这些名字时也会交给 AI，用顿号分开）<input value={aliases} onChange={(e) => setAliases(e.target.value)} placeholder="可不填" /></label>}
         <label>{editing.type === "place" ? "描述" : "内容"}
@@ -139,7 +221,10 @@ export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenS
   const { game, ask, toast } = useApp();
   const [builtin, setBuiltin] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const [expectedHeadId, setExpectedHeadId] = useState(headId);
+  const [upkeepChanged, setUpkeepChanged] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [organizing, setOrganizing] = useState(false);
   const [organizeSource, setOrganizeSource] = useState(true);
@@ -152,13 +237,19 @@ export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenS
   const live = useRef({ state, active: true, busy });
   live.current = { state, active: true, busy };
   useEffect(() => () => { live.current.active = false; }, []);
-  const prevAnchor = useRef({ worldId, headId });
+  const prevAnchor = useRef({ worldId, headId, state });
   useEffect(() => {
     const prev = prevAnchor.current;
-    if (prev.worldId === worldId && prev.headId === headId) return;
-    prevAnchor.current = { worldId, headId };
+    if (prev.worldId === worldId && prev.headId === headId) {
+      prevAnchor.current = { worldId, headId, state };
+      return;
+    }
+    const prevState = prev.state;
+    const prevHeadId = prev.headId;
+    prevAnchor.current = { worldId, headId, state };
     const resetAll = () => {
       setExpectedHeadId(headId);
+      setUpkeepChanged(false);
       setEditing(null);
       setBuiltin(false);
       setSelected([]);
@@ -168,9 +259,17 @@ export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenS
       resetAll();
       return;
     }
+    const applyUpkeepTransition = () => {
+      if (didEditedCodexChange(editingRef.current, prevState, state)) {
+        setUpkeepChanged(true);
+        toast("AI 刚整理更新了这张设定，请先查看最新内容再修改");
+        return;
+      }
+      setExpectedHeadId(headId);
+    };
     if (path) {
-      if (headFollowsUpkeep(path, prev.headId, headId)) {
-        setExpectedHeadId(headId);
+      if (headFollowsUpkeep(path, prevHeadId, headId)) {
+        applyUpkeepTransition();
       } else {
         resetAll();
       }
@@ -179,8 +278,8 @@ export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenS
     let alive = true;
     void game.repo.path(headId).then((loadedPath) => {
       if (!alive) return;
-      if (headFollowsUpkeep(loadedPath, prev.headId, headId)) {
-        setExpectedHeadId(headId);
+      if (headFollowsUpkeep(loadedPath, prevHeadId, headId)) {
+        applyUpkeepTransition();
       } else {
         resetAll();
       }
@@ -188,10 +287,10 @@ export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenS
       if (alive) resetAll();
     });
     return () => { alive = false; };
-  }, [game.repo, worldId, headId, path]);
+  }, [game.repo, worldId, headId, path, state, toast]);
   const eraCard = era.eraCard;
   const eraLabel = (state.era as { mode?: string }).mode === "free" ? "世界卡" : "时代卡";
-  const open = (next: Editing) => { if (!busy && !organizing) { setExpectedHeadId(headId); setEditing(next); } };
+  const open = (next: Editing) => { if (!busy && !organizing) { setExpectedHeadId(headId); setUpkeepChanged(false); setEditing(next); } };
   const organize = async () => {
     const own = eraCard?.source === "玩家";
     if (own && !await ask({ title: `让 AI 重新整理${eraLabel}？`, message: `会按故事设定重写，换掉你写的${eraLabel}。之后可以撤销。`, confirm: "重新整理" })) return;
@@ -317,7 +416,7 @@ export function Codex({ worldId, state, era, headId, path, busy, onSave, onOpenS
           <button className="danger-text" disabled={busy || deleting || !selected.length} onClick={() => void removeSelected()}>删除所选（{selected.length}）</button>
         </div>
       )}
-      {editing && <Editor editing={editing} state={state} worldId={worldId} headId={expectedHeadId} onClose={() => setEditing(null)} onSave={onSave} />}
+      {editing && <Editor editing={editing} state={state} worldId={worldId} headId={expectedHeadId} latestHeadId={headId} upkeepChanged={upkeepChanged} onReloadLatest={(nextEditing, nextHead) => { setEditing(nextEditing); setExpectedHeadId(nextHead); setUpkeepChanged(false); }} onClose={() => { setEditing(null); setUpkeepChanged(false); }} onSave={onSave} />}
     </div>
   );
 }

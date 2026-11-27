@@ -838,6 +838,46 @@ const STORED_BOOK_USES = `
 export async function bookUses(repo: Repo, id: string): Promise<{ id: string; title: string }[]> {
   return (await repo.platform.sql.query(STORED_BOOK_USES, [id])).map(row => ({ id: String(row.id), title: String(row.title) }));
 }
+
+/**
+ * Checks whether a book is referenced by any world snapshot, fact citation, revision,
+ * active/archived assistant task, `canon_notes`, `source_jobs`, `source_analysis`, or `canon_facts`.
+ * Used for copy-on-write protection during chapter re-splitting and world-novel re-compilation.
+ */
+export async function hasBookExternalReferences(
+  repo: Repo,
+  bookId: string,
+  opts?: { ignoreWorldId?: string },
+): Promise<boolean> {
+  if (!bookId) return false;
+  const uses = await bookUses(repo, bookId).catch(() => []);
+  const relevantUses = opts?.ignoreWorldId ? uses.filter((u) => u.id !== opts.ignoreWorldId) : uses;
+  if (relevantUses.length > 0) return true;
+
+  const [noteRows, jobRows, analysisRows, factRows] = await Promise.all([
+    opts?.ignoreWorldId
+      ? repo.platform.sql
+          .query(
+            "SELECT 1 AS ok FROM canon_notes WHERE book_id = ? AND (world_id IS NULL OR world_id <> ?) LIMIT 1",
+            [bookId, opts.ignoreWorldId],
+          )
+          .catch(() => [])
+      : repo.platform.sql
+          .query("SELECT 1 AS ok FROM canon_notes WHERE book_id = ? LIMIT 1", [bookId])
+          .catch(() => []),
+    repo.platform.sql
+      .query("SELECT 1 AS ok FROM source_jobs WHERE book_id = ? LIMIT 1", [bookId])
+      .catch(() => []),
+    repo.platform.sql
+      .query("SELECT 1 AS ok FROM source_analysis WHERE book_id = ? LIMIT 1", [bookId])
+      .catch(() => []),
+    repo.platform.sql
+      .query("SELECT 1 AS ok FROM canon_facts WHERE book_id = ? LIMIT 1", [bookId])
+      .catch(() => []),
+  ]);
+
+  return noteRows.length > 0 || jobRows.length > 0 || analysisRows.length > 0 || factRows.length > 0;
+}
 export async function deleteBook(repo: Repo, id: string) {
   // Read references inside the write transaction, so a new reference cannot
   // arrive after the check and before the cascading delete.

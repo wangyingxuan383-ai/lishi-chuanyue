@@ -37,6 +37,24 @@ import { SourceLibrary, SourceSetup, SourceSummary } from "../components/Sources
 import { newBinding, type SourceBinding } from "../../engine/sources/types";
 import { bookExists } from "../../engine/sources/library";
 
+/** Scrubs illegal file-name characters, control codes, trailing dots/spaces and Windows device names before constructing `开局-<title>.txt`. */
+export function sanitizeOpeningExportTitle(raw: string, fallback = "未命名"): string {
+  const cleaned = raw
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/[\\/:*?"<>|]+/g, "·")
+    .replace(/\s*·\s*/g, "·")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.·\s]+|[.·\s]+$/g, "")
+    .slice(0, 80)
+    .replace(/[.·\s]+$/g, "");
+  if (!cleaned) return fallback;
+  if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(cleaned)) {
+    return `_${cleaned}`;
+  }
+  return cleaned;
+}
+
 /** "唐 · 天宝七载" → "唐" */
 const dynastyOf = (t: OpeningTemplate) => t.era.split(" · ")[0];
 /** Filter chips: dynasties with at least three templates, the rest under 其他. */
@@ -512,7 +530,8 @@ export default function NewGame({ resumeRunId }: { resumeRunId?: string } = {}) 
   };
   const exportFile = async () => {
     try {
-      if (await game.platform.files.exportText(`开局-${draft.title || "未命名"}.txt`, shareText(draft))) toast("已保存");
+      const safeTitle = sanitizeOpeningExportTitle(draft.title, "未命名");
+      if (await game.platform.files.exportText(`开局-${safeTitle}.txt`, shareText(draft))) toast("已保存");
     } catch {
       toast("导出失败，请稍后再试");
     }

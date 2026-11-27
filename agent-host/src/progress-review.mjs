@@ -4,11 +4,58 @@ import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { auxModelSpec } from "./context-budget.mjs";
 export const PROGRESS_REVIEW_VERSION="1.0.0";
+function extractBalancedJsonObject(raw) {
+  for (let start = raw.indexOf("{"); start !== -1; start = raw.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < raw.length; i++) {
+      const ch = raw[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === "\"") inString = false;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = true;
+      } else if (ch === "{") {
+        depth++;
+      } else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(raw.slice(start, i + 1));
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+          } catch {
+            /* keep scanning for next candidate */
+          }
+          break;
+        }
+      }
+    }
+  }
+  return null;
+}
 export function parseReview(text) {
-  const raw=String(text??"").trim().replace(/^```(?:json)?\s*/u,"").replace(/\s*```$/u,"");
-  const value=JSON.parse(raw);
-  if(!["continue","replan","pause","ask_user"].includes(value.decision)||typeof value.reason!=="string"||!value.reason.trim()||value.reason.length>3000)throw Error("复核回复缺少有效决定、原因和继续建议");
-  return {decision:value.decision,reason:value.reason};
+  const withoutThink = String(text ?? "")
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/giu, "")
+    .replace(/<think\b[^>]*>[\s\S]*$/iu, "")
+    .replace(/<\/think>/giu, "")
+    .replace(/```(?:json)?\s*/giu, "")
+    .replace(/\s*```/gu, "")
+    .trim();
+  const value = extractBalancedJsonObject(withoutThink);
+  if (
+    !value ||
+    !["continue", "replan", "pause", "ask_user"].includes(value.decision) ||
+    typeof value.reason !== "string" ||
+    !value.reason.trim() ||
+    value.reason.length > 3000
+  ) {
+    throw Error("复核回复缺少有效决定、原因和继续建议");
+  }
+  return { decision: value.decision, reason: value.reason };
 }
 export class ProgressReview {
   constructor(root,createHost){this.root=root;this.createHost=createHost;this.active=null;}

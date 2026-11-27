@@ -5,9 +5,21 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react
 import { createPortal } from "react-dom";
 import { type UpdatePackageStatus } from "../../platform";
 import { useApp } from "../app/context";
-import { androidPackage, expectedHash, openLink, plainNotes, windowsPackage, type ReleaseInfo } from "../app/update";
+import { androidPackage, expectedHash, openLink, plainNotes, windowsPackage, type ReleaseAsset, type ReleaseInfo } from "../app/update";
 import { updateStore } from "../app/updateStore";
-import { hydrateReadyPackage, installUpdate, pauseDownload, resumePermissionInstall, snapshot, startDownload, stepFor, subscribe, type FailReason } from "../app/updateFlow";
+import {
+  hydrateReadyPackage,
+  installUpdate,
+  invalidateReadyPackage,
+  pauseDownload,
+  resumePermissionInstall,
+  snapshot,
+  startDownload,
+  stepFor,
+  subscribe,
+  type FailReason,
+  type UpdateStep,
+} from "../app/updateFlow";
 import { Sheet } from "./Sheet";
 import "./update.css";
 
@@ -40,14 +52,52 @@ function Panel({ tone, children }: { tone?: "ok" | "bad"; children: ReactNode })
   return <div className={tone ? `update-panel ${tone}` : "update-panel"} aria-live="polite">{children}</div>;
 }
 
+export function resolveSheetStep(
+  rawState: UpdateStep,
+  hydrated: (UpdatePackageStatus & { sha256: string }) | null,
+  asset: ReleaseAsset | null,
+  backgroundPreparing = false,
+): UpdateStep {
+  if ((rawState.step === "ready" || rawState.step === "permission") && hydrated !== null && !hydrated.verified) {
+    if (backgroundPreparing) {
+      return hydrated.bytes > 0 && asset
+        ? { step: "downloading", received: hydrated.bytes, total: asset.size, retrying: false }
+        : { step: "preparing" };
+    }
+    if (hydrated.bytes > 0 && asset && hydrated.bytes < asset.size) {
+      return { step: "paused", received: hydrated.bytes, total: asset.size };
+    }
+    return { step: "idle" };
+  }
+  if (rawState.step === "permission" && hydrated?.canInstall) {
+    return { step: "ready" };
+  }
+  if (rawState.step === "idle") {
+    if (backgroundPreparing) {
+      return hydrated && hydrated.bytes > 0 && asset
+        ? { step: "downloading", received: hydrated.bytes, total: asset.size, retrying: false }
+        : { step: "preparing" };
+    }
+    if (hydrated?.downloaded && hydrated.verified) {
+      return { step: "ready" };
+    }
+    if (hydrated && hydrated.bytes > 0 && asset && hydrated.bytes < asset.size) {
+      return { step: "paused", received: hydrated.bytes, total: asset.size };
+    }
+  }
+  return rawState;
+}
+
 export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClose: () => void }) {
   const { game, platform, toast } = useApp();
   const store = updateStore(game.repo, platform);
+  const storeState = useSyncExternalStore(store.subscribe, store.snapshot);
   useEffect(() => { void store.markRead(release.version).catch(() => {}); }, [store, release.version]);
   const flow = useSyncExternalStore(subscribe, snapshot);
   const rawState = stepFor(flow, release.version);
   // Android installs by itself; the browser dev harness simulates that path.
   const inApp = (platform.name === "android" || platform.name === "web-dev") && !!platform.update;
+  const canAutoPrepare = platform.name === "android" && !!platform.update;
   const asset = inApp ? androidPackage(release) : null;
   const desktopAsset = !inApp && platform.name === "windows" ? windowsPackage(release) : null;
   const [hydrated, setHydrated] = useState<(UpdatePackageStatus & { sha256: string }) | null>(null);
@@ -59,6 +109,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
 
   // Hydrate already-downloaded & SHA-256-verified package on open and refresh canInstall on app resume / split-screen return.
   useEffect(() => {
+    setHydrated(null);
     if (!inApp || !asset || !platform.update) return;
     let alive = true;
     const refresh = async () => {
@@ -70,7 +121,9 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
           if (!alive) return;
           setHydrated({ ...pkg, sha256 });
           if (pkg.downloaded && pkg.verified) {
-            hydrateReadyPackage({ version: release.version, size: asset.size, sha256 });
+            hydrateReadyPackage({ version: release.version, url: asset.url, size: asset.size, sha256 });
+          } else {
+            invalidateReadyPackage(release.version);
           }
           if (pkg.canInstall) {
             void resumePermissionInstall(platform);
@@ -103,7 +156,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
       window.removeEventListener("focus", onResume);
       document.removeEventListener("visibilitychange", onResume);
     };
-  }, [inApp, asset?.name, asset?.sha256, platform, release, store]);
+  }, [inApp, asset?.name, asset?.url, asset?.size, asset?.sha256, platform, release, store]);
 
   const notes = plainNotes(release.notes);
   const browser = () => void openLink(platform, toast, release.url);
@@ -112,12 +165,13 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
     if (asset) void startDownload(platform, release, asset);
   };
   const install = async () => {
+    const resolvedSha = asset?.sha256 ?? hydrated?.sha256 ?? (flow.version === release.version ? flow.sha256 : null);
     const pkg =
-      asset && (hydrated?.sha256 || (flow.version === release.version ? flow.sha256 : null))
+      asset && resolvedSha
         ? {
             version: release.version,
             size: asset.size,
-            sha256: (hydrated?.sha256 ?? flow.sha256)!,
+            sha256: resolvedSha,
           }
         : undefined;
     const status = await installUpdate(platform, pkg);
@@ -128,21 +182,8 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
     }
   };
 
-  // Derive effective step: recognize hydrated verified package when flow is idle, and clear permission prompt once canInstall is granted.
-  const effectiveState = (() => {
-    if (rawState.step === "permission" && hydrated?.canInstall) {
-      return { step: "ready" as const };
-    }
-    if (rawState.step === "idle") {
-      if (hydrated?.downloaded && hydrated.verified) {
-        return { step: "ready" as const };
-      }
-      if (hydrated && hydrated.bytes > 0 && asset && hydrated.bytes < asset.size) {
-        return { step: "paused" as const, received: hydrated.bytes, total: asset.size };
-      }
-    }
-    return rawState;
-  })();
+  const backgroundPreparing = storeState.preparing && storeState.release?.version === release.version;
+  const effectiveState = resolveSheetStep(rawState, hydrated, asset, backgroundPreparing);
 
   const displayAsset = asset ?? desktopAsset;
   const meta = [`当前 ${__APP_VERSION__}`, displayAsset && `安装包 ${mb(displayAsset.size)}`, day(release.publishedAt), release.prerelease && "预发布"].filter(Boolean).join(" · ");
@@ -254,7 +295,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
       <p className="update-meta">{meta}</p>
       {notes && <div className="update-notes">{notes}</div>}
       {body}
-      {inApp && (
+      {canAutoPrepare && (
         <label className="update-auto-toggle">
           <input type="checkbox" checked={autoUpdate} onChange={(e) => toggleAutoUpdate(e.target.checked)} className="check-20" />
           <span>

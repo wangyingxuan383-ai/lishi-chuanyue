@@ -1,9 +1,54 @@
-// 原著札记 (R29-T003, D162): digests of a bound book the player asks for once —
+// 原著札记 (R29-T003, D162, D194): digests of a bound book the player asks for once —
 // a chapter range's main plot, one person, one setting, a timeline, a question —
 // and then reads, edits, switches off or deletes. Each passage carries the ones
 // that matter at the reading position, instead of re-reading the original.
 import { createContext, useEffect, useRef, useState } from "react";
-import { NOTE_KINDS, NOTE_KIND_LABEL, STORY_NOTE_KINDS, NOTE_TEXT_LIMIT, deleteNote, draftFromParts, estimateNote, gapRanges, listNotes, listStoryNotes, localNoteContent, mentionedChapters, newLocalNote, newNote, newStoryNote, nextNoteReach, noteBehind, noteChapterRange, noteNearEnd, noteOffRoute, noteWithinScope, restartOnRoute, routeIds, noteProgressDetail, noteProgressLabel, noteStepsDone, noteUnit, readNoteText, renameNote, restorePrevious, saveNote, startNoteUpdate, storyLastTurn, suggestTitle, turnLabel, type CanonNote, type NoteEstimate, type NoteKind, type NoteResume, type NoteScope } from "../../engine/sources/notes";
+import {
+  LONG_BOOK_SECTION_THRESHOLD,
+  MAX_RECOMMENDED_NOTE_SPAN,
+  NOTE_KINDS,
+  NOTE_KIND_LABEL,
+  NOTE_TEXT_LIMIT,
+  RECOMMENDED_NOTE_SPAN,
+  STORY_NOTE_KINDS,
+  deleteNote,
+  draftFromParts,
+  estimateNote,
+  gapRanges,
+  listNotes,
+  listStoryNotes,
+  localNoteContent,
+  newLocalNote,
+  newNote,
+  newStoryNote,
+  nextNoteReach,
+  noteBehind,
+  noteChapterRange,
+  noteNearEnd,
+  noteOffRoute,
+  noteProgressDetail,
+  noteProgressLabel,
+  noteStepsDone,
+  noteUnit,
+  preflightNoteUpdate,
+  readNoteText,
+  renameNote,
+  resolveStoryNoteScope,
+  restartOnRoute,
+  restorePrevious,
+  routeIds,
+  saveNote,
+  startNoteUpdate,
+  storyLastTurn,
+  suggestNextPlotRange,
+  suggestTitle,
+  turnLabel,
+  type CanonNote,
+  type NoteEstimate,
+  type NoteKind,
+  type NoteResume,
+  type NoteScope,
+} from "../../engine/sources/notes";
 import { useApp } from "../app/context";
 import { EmptyVignette } from "./ChineseArt";
 import { Sheet } from "./Sheet";
@@ -12,7 +57,10 @@ import { RangeInputs } from "./RangeInputs";
 import { chapterLabel } from "../../engine/sources/scope";
 import { Switch } from "./Switch";
 
-type View = { name: "list" } | { name: "new"; draft?: CanonNote } | { name: "note"; id: string };
+type View =
+  | { name: "list" }
+  | { name: "new"; draft?: CanonNote; initialRange?: { from: number; to: number } }
+  | { name: "note"; id: string };
 
 const STORY_KIND_LABEL = Object.fromEntries(STORY_NOTE_KINDS.map(([k, l]) => [k, l])) as Record<NoteKind, string>;
 const kindLabel = (n: CanonNote) => (n.source === "story" ? STORY_KIND_LABEL : NOTE_KIND_LABEL)[n.kind];
@@ -33,10 +81,33 @@ export const NoteEntry = createContext<((start: NoteStart) => void) | null>(null
  * 札记: 本局 (this story's own, D174) and 原著 (the bound book, D162). A story
  * without a book has only 本局; the book's page has only 原著.
  */
-export function CanonNotesSheet({ bookId, worldId, position = 0, through = null, onClose, start, open }: { bookId: string | null; worldId: string | null; position?: number; through?: number | null; onClose: () => void; start?: NoteStart; /** Opens this note directly (札记预备). */ open?: { id: string; source: "book" | "story" } }) {
+export function CanonNotesSheet({
+  bookId,
+  worldId,
+  position = 0,
+  onClose,
+  start,
+  open,
+}: {
+  bookId: string | null;
+  worldId: string | null;
+  position?: number;
+  onClose: () => void;
+  start?: NoteStart;
+  /** Opens this note or a prefilled new-note volume directly (札记预备). */
+  open?: { id?: string; source: "book" | "story"; initialRange?: { from: number; to: number } };
+}) {
   const { game, toast, ask } = useApp();
   const [tab, setTab] = useState<"story" | "book">(open?.source ?? (worldId ? "story" : "book"));
-  const [view, setView] = useState<View>(start ? { name: "new" } : open ? { name: "note", id: open.id } : { name: "list" });
+  const [view, setView] = useState<View>(
+    start
+      ? { name: "new" }
+      : open?.id
+        ? { name: "note", id: open.id }
+        : open?.initialRange
+          ? { name: "new", initialRange: open.initialRange }
+          : { name: "list" },
+  );
   const [notes, setNotes] = useState<CanonNote[] | null>(null);
   const [sections, setSections] = useState<string[]>([]);
   const [totalBookSections, setTotalBookSections] = useState(0);
@@ -60,26 +131,36 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
       void storyLastTurn(game.repo, worldId).then((last) => { if (live) { setLastTurn(last); setSections(Array.from({ length: last + 1 }, (_, i) => turnLabel(i))); } });
       void routeIds(game.repo, worldId).then((ids) => { if (live) setRoute(ids); }).catch(() => { if (live) setRoute(null); });
     } else if (bookId) {
-      void Promise.all([
-        game.repo.platform.sql.query(
-          "SELECT section,title FROM source_sections WHERE book_id=? AND (? IS NULL OR section <= ?) ORDER BY section",
-          [bookId, through, through],
-        ),
-        game.repo.platform.sql.query("SELECT COUNT(*) AS n FROM source_sections WHERE book_id=?", [bookId]),
-      ]).then(([rows, countRows]) => {
+      void game.repo.platform.sql.query(
+        "SELECT section,title FROM source_sections WHERE book_id=? ORDER BY section",
+        [bookId],
+      ).then((rows) => {
         if (!live) return;
         setSections(rows.map((r) => String(r.title)));
-        setTotalBookSections(Number(countRows[0]?.n ?? rows.length));
+        setTotalBookSections(rows.length);
       });
     }
     return () => { live = false; };
-  }, [bookId, worldId, tab, through]);
+  }, [bookId, worldId, tab]);
   const run = (note: CanonNote, resume?: NoteResume) => {
-    void game.runCanonNote(note.id, (next) => { setNotes((list) => list?.map((n) => (n.id === next.id ? { ...next, title: n.title } : n)) ?? null); setTick((t) => t + 1); }, resume)
+    void game.runCanonNote(
+      note.id,
+      (next) => {
+        setNotes((list) =>
+          list?.map((n) => (n.id === next.id ? { ...next, title: next.status === "done" ? next.title : n.title } : n)) ?? null,
+        );
+        setTick((t) => t + 1);
+      },
+      resume,
+    )
       .then((done) => { if (done.status === "done") toast(`“${done.title}”整理好了`); reload(); })
       .catch((e) => { toast(e instanceof Error ? e.message : "没能开始整理"); reload(); });
   };
   const current = view.name === "note" ? notes?.find((n) => n.id === view.id) : undefined;
+  const suggestedVolume =
+    !story && sections.length >= LONG_BOOK_SECTION_THRESHOLD && notes !== null
+      ? suggestNextPlotRange(notes, sections.length, position)
+      : null;
   return (
     <Sheet title={view.name === "new" ? "新建札记" : current ? current.title : worldId ? "札记" : "原著札记"} onClose={onClose}>
       {view.name === "list" && worldId && bookId && <div className="tabs" role="tablist" aria-label="札记来源">
@@ -90,6 +171,34 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         <p className="muted m-0">{story
           ? "从这局已经写出的故事里整理：主线梗概、某个人物、地点或势力、一条时间线，或者一个问题。写作时会参考和眼下剧情有关的札记；剧情往前走了，可以一键更新。"
           : "可以让 AI 整理原著，也可以手写或导入 TXT。写作时会参考和当前剧情有关的札记。"}</p>
+        {suggestedVolume && (
+          <div className="note-volume-guide">
+            <b>长篇分段整理建议（全书共 {sections.length} 节）</b>
+            <p className="muted m-0">
+              上百章乃至千章的长篇小说，建议按每 {RECOMMENDED_NOTE_SPAN} 章新建一份「主线剧情」札记，保留的伏笔与细节远比把上千章滚进同一份札记丰富；写作与检索时会自动跨多份札记联合查用。
+            </p>
+            {!suggestedVolume.allCovered ? (
+              <>
+                <button
+                  type="button"
+                  className="note-volume-action"
+                  onClick={() => setView({ name: "new", initialRange: { from: suggestedVolume.from, to: suggestedVolume.to } })}
+                >
+                  {suggestedVolume.plotNoteCount === 0
+                    ? `新建首卷百章札记（第 ${suggestedVolume.from + 1}～${suggestedVolume.to + 1} 节）`
+                    : `新建下一百章札记（第 ${suggestedVolume.from + 1}～${suggestedVolume.to + 1} 节）`}
+                </button>
+                {(suggestedVolume.incompletePlotCount ?? 0) > 0 && (
+                  <small className="muted">
+                    另有 {suggestedVolume.incompletePlotCount} 份主线札记未整理完、已停用或含待补章节，暂未计入已覆盖范围。
+                  </small>
+                )}
+              </>
+            ) : (
+              <small className="muted">全书 {sections.length} 节已由 {suggestedVolume.plotNoteCount} 份主线札记完整覆盖。</small>
+            )}
+          </div>
+        )}
         {notes?.length === 0 && (
           <EmptyVignette
             kind="blank-bamboo"
@@ -100,19 +209,35 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         )}
         <ul className="note-list">
           {notes?.map((n) => {
-            const outOfScope = !story && n.status === "done" && through !== null && !noteWithinScope(n, through, !!worldId && n.worldId === worldId);
+            const nextSec = (n.scope.to ?? -1) + 1;
+            const hasNextCover =
+              !story &&
+              (n.kind === "plot" || n.kind === "timeline") &&
+              n.scope.to !== undefined &&
+              !!notes?.some(
+                (other) =>
+                  other.id !== n.id &&
+                  other.source !== "story" &&
+                  other.kind === n.kind &&
+                  other.status === "done" &&
+                  other.active &&
+                  Boolean(other.content.trim()) &&
+                  !(other.progress.gaps ?? []).some((g) => g.sections.includes(nextSec)) &&
+                  (other.scope.from ?? 0) <= nextSec &&
+                  (other.scope.to ?? -1) >= nextSec,
+              );
             return (
-            <li key={n.id}><button className="note-row" onClick={() => setView({ name: "note", id: n.id })}>
-              <span className="tag">{kindLabel(n)}</span><b>{n.title}</b>
-              <small className={`note-status ${game.canonNoteRunning(n.id) ? "running" : outOfScope ? "paused" : n.status}`}>{outOfScope ? "超出范围" : statusText(n, game.canonNoteRunning(n.id))}</small>
-              {!game.canonNoteRunning(n.id) && <NoteHint note={n} position={position} last={story ? lastTurn : sections.length - 1} offRoute={!!route && noteOffRoute(n, route)} outOfScope={outOfScope} />}
-            </button></li>
+              <li key={n.id}><button className="note-row" onClick={() => setView({ name: "note", id: n.id })}>
+                <span className="tag">{kindLabel(n)}</span><b>{n.title}</b>
+                <small className={`note-status ${game.canonNoteRunning(n.id) ? "running" : n.status}`}>{statusText(n, game.canonNoteRunning(n.id))}</small>
+                {!game.canonNoteRunning(n.id) && <NoteHint note={n} position={position} last={story ? lastTurn : sections.length - 1} offRoute={!!route && noteOffRoute(n, route)} hasNextCover={hasNextCover} />}
+              </button></li>
             );
           })}
         </ul>
         <button className="primary" onClick={() => setView({ name: "new" })}>新建札记</button>
       </div>}
-      {view.name === "new" && <NewNote bookId={bookId ?? ""} worldId={worldId} story={story} sections={sections} totalSections={story ? sections.length : (totalBookSections || sections.length)} position={story ? 0 : position} through={story ? null : through} draft={view.draft} start={start}
+      {view.name === "new" && <NewNote bookId={bookId ?? ""} worldId={worldId} story={story} sections={sections} totalSections={story ? sections.length : (totalBookSections || sections.length)} position={story ? 0 : position} draft={view.draft} initialRange={view.initialRange} existingNotes={notes ?? undefined} start={start}
         onCancel={() => setView({ name: "list" })}
         onStart={async (note, generate) => {
           await saveNote(game.repo, note);
@@ -123,6 +248,7 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         offRoute={!!route && noteOffRoute(current, route)}
         onRestart={async () => {
           const next = restartOnRoute(current, lastTurn);
+          await preflightNoteUpdate(game.repo, next, !!game.llm);
           await saveNote(game.repo, next, true);
           setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null);
           run(next);
@@ -130,15 +256,17 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
         last={story ? lastTurn : sections.length - 1}
         onBack={() => setView({ name: "list" })}
         onResume={(resume) => run(current, resume)} onPause={() => game.pauseCanonNote(current.id)}
-        onUpdate={async (to) => {
-          const next = startNoteUpdate(current, to);
+        onUpdate={async (to, syncTitle) => {
+          const next = startNoteUpdate(current, to, syncTitle);
+          await preflightNoteUpdate(game.repo, next, !!game.llm);
           await saveNote(game.repo, next, true);
           setNotes((list) => list?.map((n) => (n.id === next.id ? next : n)) ?? null);
           run(next);
         }}
+        onCreateNextVolume={(range) => setView({ name: "new", initialRange: range })}
         onRestore={async () => {
           const restored = await restorePrevious(game.repo, current.id);
-          if (restored) { setNotes((list) => list?.map((n) => (n.id === restored.id ? restored : n)) ?? null); toast("已恢复上一版", { label: "撤销", run: () => void restorePrevious(game.repo, current.id).then(reload) }); }
+          if (restored) { setNotes((list) => list?.map((n) => (n.id === restored.id ? restored : n)) ?? null); toast("已恢复上一版", restored.previousContent ? { label: "撤销", run: () => void restorePrevious(game.repo, current.id).then(reload) } : undefined); }
         }}
         onCopy={() => setView({ name: "new", draft: current })}
         onRename={async (title) => {
@@ -159,13 +287,18 @@ export function CanonNotesSheet({ bookId, worldId, position = 0, through = null,
   );
 }
 
-/** 札记预备 (D178) and stale 本局札记: one quiet line on the row. */
-function NoteHint({ note, position, last, offRoute, outOfScope = false }: { note: CanonNote; position: number; last: number; offRoute: boolean; outOfScope?: boolean }) {
+/** 札记预备 (D178, D194) and stale 本局札记: one quiet line on the row. */
+function NoteHint({ note, position, last, offRoute, hasNextCover = false }: { note: CanonNote; position: number; last: number; offRoute: boolean; hasNextCover?: boolean }) {
   if (offRoute) return <small className="note-hint">整理的是另一条路线，写作暂不使用</small>;
-  if (outOfScope) return <small className="note-hint">超出本局参考范围，写作暂不使用</small>;
   if (note.scope.staleFrom !== undefined) return <small className="note-hint">{turnLabel(note.scope.staleFrom)}之后的正文改过，札记可能过时</small>;
   if (last < 0) return null;
-  if (noteNearEnd(note, position, last)) return <small className="note-hint">剧情快到第 {(note.scope.to ?? 0) + 1} 节的末尾了，可以续整理</small>;
+  if (!hasNextCover && noteNearEnd(note, position, last)) {
+    const span = (note.scope.to ?? 0) - (note.scope.from ?? 0) + 1;
+    if (note.source !== "story" && last + 1 >= LONG_BOOK_SECTION_THRESHOLD && span >= 85) {
+      return <small className="note-hint">剧情快到第 {(note.scope.to ?? 0) + 1} 节末尾，建议新建下一百章札记</small>;
+    }
+    return <small className="note-hint">剧情快到第 {(note.scope.to ?? 0) + 1} 节的末尾了，可以续整理</small>;
+  }
   const behind = noteBehind(note, last);
   return behind >= 30 ? <small className="note-hint">落后 {behind} 回合，可以更新</small> : null;
 }
@@ -179,16 +312,31 @@ function storyTitle(kind: NoteKind, scope: NoteScope): string {
   return scope.question?.trim().slice(0, 24) || "问题";
 }
 
-function NewNote({ bookId, worldId, story, sections, totalSections, position, through, draft, start, onStart, onCancel }: {
-  bookId: string; worldId: string | null; story: boolean; sections: string[]; totalSections: number; position: number; through: number | null; draft?: CanonNote; start?: NoteStart;
+function NewNote({ bookId, worldId, story, sections, totalSections, position, draft, initialRange, existingNotes, start, onStart, onCancel }: {
+  bookId: string; worldId: string | null; story: boolean; sections: string[]; totalSections: number; position: number; draft?: CanonNote; initialRange?: { from: number; to: number }; existingNotes?: CanonNote[]; start?: NoteStart;
   onStart: (note: CanonNote, generate: boolean) => Promise<void>; onCancel: () => void;
 }) {
   const { game, toast } = useApp();
   const last = Math.max(0, sections.length - 1);
+  const computeInitialRange = () => {
+    if (draft?.scope.from !== undefined && draft?.scope.to !== undefined) {
+      return { from: Math.max(0, Math.min(draft.scope.from, last)), to: Math.min(last, draft.scope.to) };
+    }
+    if (!story && initialRange) {
+      return { from: Math.max(0, Math.min(initialRange.from, last)), to: Math.min(last, initialRange.to) };
+    }
+    if (!story && sections.length >= LONG_BOOK_SECTION_THRESHOLD && existingNotes) {
+      const sug = suggestNextPlotRange(existingNotes, sections.length, position);
+      if (sug) return { from: sug.from, to: sug.to };
+    }
+    const f = Math.max(0, Math.min(position, last));
+    return { from: f, to: story ? last : Math.min(last, f + RECOMMENDED_NOTE_SPAN - 1) };
+  };
+  const initRange = computeInitialRange();
   const [kind, setKind] = useState<NoteKind>(draft?.kind ?? start?.kind ?? "plot");
-  const [from, setFrom] = useState(Math.max(0, Math.min(draft?.scope.from ?? position, last)));
-  const [to, setTo] = useState(Math.min(last, draft?.scope.to ?? (story ? last : Math.max(position, 0) + 99)));
-  const rangeTouched = useRef(!!draft);
+  const [from, setFrom] = useState(initRange.from);
+  const [to, setTo] = useState(initRange.to);
+  const rangeTouched = useRef(!!draft || !!initialRange);
   const [subject, setSubject] = useState(draft?.scope.subject ?? start?.subject ?? ""), [aliases, setAliases] = useState(draft?.scope.aliases?.join("、") ?? start?.aliases?.join("、") ?? "");
   const [question, setQuestion] = useState(draft?.scope.question ?? "");
   const [title, setTitle] = useState(draft ? `${Array.from(draft.title).slice(0, 34).join("")}（已整理）` : "");
@@ -202,21 +350,23 @@ function NewNote({ bookId, worldId, story, sections, totalSections, position, th
   useEffect(() => {
     if (!sections.length) return;
     if (!rangeTouched.current) {
-      const nextFrom = Math.max(0, Math.min(position, last));
-      setFrom(nextFrom);
-      setTo(story ? last : Math.min(last, nextFrom + 99));
+      const next = computeInitialRange();
+      setFrom(next.from);
+      setTo(next.to);
     } else {
       setFrom((f) => Math.min(last, f));
       setTo((t) => (story ? last : Math.min(last, t)));
     }
   }, [last, sections.length, story, position]);
   const ranged = kind === "plot" || kind === "timeline";
-  const allowImplicitThrough = !story && through !== null && (generate || !importedExternal);
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const spanCount = hi - lo + 1;
   const scope: NoteScope = ranged
-    ? { from: Math.min(from, to), to: Math.max(from, to) }
+    ? { from: lo, to: hi }
     : kind === "question"
-      ? { question: question.trim(), ...(allowImplicitThrough ? { through } : {}) }
-      : { subject: subject.trim(), aliases: aliases.split(/[、，,\s]+/).map((s) => s.trim()).filter(Boolean), ...(allowImplicitThrough ? { through } : {}) };
+      ? { question: question.trim() }
+      : { subject: subject.trim(), aliases: aliases.split(/[、，,\s]+/).map((s) => s.trim()).filter(Boolean) };
   const ready = ranged ? sections.length > 0 : kind === "question" ? !!question.trim() : !!subject.trim();
   const key = JSON.stringify([kind, scope]);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -260,7 +410,59 @@ function NewNote({ bookId, worldId, story, sections, totalSections, position, th
           <button key={k} role="radio" aria-checked={kind === k} className="note-kind" onClick={() => setKind(k)}><b>{label}</b><small>{hint}</small></button>
         ))}
       </div>
-      {ranged && <RangeInputs last={last} from={from} to={to} setFrom={(n) => { rangeTouched.current = true; setFrom(n); }} setTo={(n) => { rangeTouched.current = true; setTo(n); }} story={story} describe={chapter} total={story ? `本局到${turnLabel(last)}` : through !== null ? `本局可参考到第 ${through + 1} 节（全书共 ${totalSections} 节）` : `全书共 ${totalSections} 节`} />}
+      {ranged && <>
+        <RangeInputs last={last} from={from} to={to} setFrom={(n) => { rangeTouched.current = true; setFrom(n); }} setTo={(n) => { rangeTouched.current = true; setTo(n); }} story={story} describe={chapter} total={story ? `本局到${turnLabel(last)}` : `全书共 ${totalSections} 节`} />
+        {!story && sections.length >= LONG_BOOK_SECTION_THRESHOLD && (
+          <div className="note-range-shortcuts">
+            <button
+              type="button"
+              className="ghost small"
+              disabled={lo <= 0}
+              onClick={() => {
+                rangeTouched.current = true;
+                const nextTo = Math.max(0, lo - 1);
+                const nextFrom = Math.max(0, nextTo - RECOMMENDED_NOTE_SPAN + 1);
+                setFrom(nextFrom);
+                setTo(nextTo);
+              }}
+            >
+              ← 上一百章
+            </button>
+            {spanCount > RECOMMENDED_NOTE_SPAN && (
+              <button
+                type="button"
+                className="ghost small"
+                onClick={() => {
+                  rangeTouched.current = true;
+                  setFrom(lo);
+                  setTo(Math.min(last, lo + RECOMMENDED_NOTE_SPAN - 1));
+                }}
+              >
+                按 {RECOMMENDED_NOTE_SPAN} 章收紧
+              </button>
+            )}
+            <button
+              type="button"
+              className="ghost small"
+              disabled={hi >= last}
+              onClick={() => {
+                rangeTouched.current = true;
+                const nextFrom = Math.min(last, hi + 1);
+                const nextTo = Math.min(last, nextFrom + RECOMMENDED_NOTE_SPAN - 1);
+                setFrom(nextFrom);
+                setTo(nextTo);
+              }}
+            >
+              下一百章 →
+            </button>
+          </div>
+        )}
+        {!story && spanCount > MAX_RECOMMENDED_NOTE_SPAN && (
+          <p className="field-hint warn m-0">
+            当前跨度共 {spanCount} 节。超过 {MAX_RECOMMENDED_NOTE_SPAN} 节会被多层压缩、损失细节，建议每 {RECOMMENDED_NOTE_SPAN} 章建一份札记。
+          </p>
+        )}
+      </>}
       {(kind === "person" || kind === "setting") && <div className="stack gap-2">
         <label>{kind === "person" ? "人物名字" : story ? "地点、势力或物件" : "设定名称"}<input value={subject} maxLength={40} onChange={(e) => setSubject(e.target.value)} placeholder={kind === "person" ? (story ? "如：主角的名字、王掌柜" : "如：林舟") : story ? "如：西市货栈、漕帮" : "如：机关傀儡、青云书院"} /></label>
         <label>别名（可不填，用顿号隔开）<input value={aliases} maxLength={120} onChange={(e) => setAliases(e.target.value)} placeholder="如：阿舟、林兄" /></label>
@@ -273,9 +475,6 @@ function NewNote({ bookId, worldId, story, sections, totalSections, position, th
         : `用辅助模型约 ${estimate.requests} 次请求，读约 ${(estimate.chars / 10000).toFixed(estimate.chars >= 100000 ? 0 : 1)} 万字${estimate.digests ? `（其中 ${estimate.digests} 段用通读整理的摘要，更省）` : ""}。可以随时暂停，已整理的部分保留。`}</p>
         : <>
           {draft && <p className="muted m-0">已把目前整理出的内容带进来。请核对范围和待补提示，保存后会多一份可用于写作的札记。</p>}
-          {!story && importedExternal && through !== null && !ranged && mentionedChapters(body).filter((s) => s < totalSections).length === 0 && (
-            <p className="field-hint m-0">导入的外部 TXT 未标明具体章节号，为防止剧透后文，仅在“全书参考”或标出章节号时用于写作。</p>
-          )}
           <label>札记内容<textarea aria-label="札记内容" className="note-text" rows={10} value={body} onChange={(event) => setBody(event.target.value)} /></label>
           <small className="muted">{body.length.toLocaleString()} / {NOTE_TEXT_LIMIT.toLocaleString()} 字{ranged ? " · 请确认上方章节范围" : ""}</small>
         </>}
@@ -283,26 +482,28 @@ function NewNote({ bookId, worldId, story, sections, totalSections, position, th
         <button className="ghost" onClick={onCancel}>返回</button>
         <button className="primary grow" disabled={!ready || starting || picking || (generate ? estimate?.pieces === 0 : !body.trim() || body.length > NOTE_TEXT_LIMIT)} onClick={() => {
           setStarting(true);
-          void Promise.resolve().then(() => {
+          void (async () => {
             const named = title || (story ? storyTitle(kind, scope) : suggestTitle(kind, scope));
-            const note = story && worldId ? newStoryNote(worldId, kind, scope, named) : newNote(bookId, kind, scope, named, kind === "question" ? worldId : null);
+            const finalScope = story && worldId && !generate ? await resolveStoryNoteScope(game.repo, worldId, scope) : scope;
+            const note = story && worldId ? newStoryNote(worldId, kind, finalScope, named) : newNote(bookId, kind, finalScope, named, kind === "question" ? worldId : null);
             return onStart(generate ? note : newLocalNote(note, body, totalSections), generate);
-          }).catch((error) => toast(error instanceof Error ? error.message : "没能保存札记")).finally(() => setStarting(false));
+          })().catch((error) => toast(error instanceof Error ? error.message : "没能保存札记")).finally(() => setStarting(false));
         }}>{generate ? "开始整理" : "保存札记"}</button>
       </div>
     </div>
   );
 }
 
-function NoteDetail({ note, worldId, running, last, position, offRoute, onRestart, onBack, onResume, onPause, onUpdate, onRestore, onCopy, onRename, onSave, onDelete }: {
+function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack, onResume, onPause, onUpdate, onCreateNextVolume, onRestore, onCopy, onRename, onSave, onDelete }: {
   note: CanonNote; worldId?: string | null; running: boolean; last: number; position: number; offRoute: boolean; onRestart: () => Promise<void>; onBack: () => void; onResume: (resume?: NoteResume) => void; onPause: () => void;
-  onUpdate: (to: number) => Promise<void>; onRestore: () => Promise<void>;
+  onUpdate: (to: number, syncTitle: boolean) => Promise<void>; onCreateNextVolume?: (range: { from: number; to: number }) => void; onRestore: () => Promise<void>;
   onCopy: () => void; onRename: (title: string) => Promise<void>;
   onSave: (patch: Partial<CanonNote>) => Promise<void>; onDelete: () => void;
 }) {
   const { toast, devMode } = useApp();
   const [text, setText] = useState(note.content);
   const [newTitle, setNewTitle] = useState<string | null>(null);
+  const [syncTitle, setSyncTitle] = useState(true);
   const [saving, setSaving] = useState(false);
   const [manual, setManual] = useState<{ batch: number; also: number[]; text: string } | null>(null);
   const [since, setSince] = useState<string | null>(null);
@@ -334,6 +535,18 @@ function NoteDetail({ note, worldId, running, last, position, offRoute, onRestar
   const carried = !!note.originWorldId;
   const hasRange = note.scope.to !== undefined;
   const updatable = note.status === "done" && !carried && !running && !offRoute && hasRange && covered < last && (note.model || note.kind === "plot" || story);
+  const currentSpan = covered - (note.scope.from ?? 0) + 1;
+  const targetSpan = target - (note.scope.from ?? 0) + 1;
+  const preferNextVolume =
+    !story &&
+    onCreateNextVolume &&
+    (note.kind === "plot" || note.kind === "timeline") &&
+    last + 1 >= LONG_BOOK_SECTION_THRESHOLD &&
+    covered >= 0 &&
+    covered < last &&
+    (currentSpan >= 85 || targetSpan > MAX_RECOMMENDED_NOTE_SPAN)
+      ? { from: covered + 1, to: Math.min(last, covered + RECOMMENDED_NOTE_SPAN) }
+      : null;
   const where = (n: number) => (story ? turnLabel(n) : `第 ${n + 1} 节`);
   const saveChange = async (save: () => Promise<void>, message: string) => {
     setSaving(true);
@@ -397,8 +610,23 @@ function NoteDetail({ note, worldId, running, last, position, offRoute, onRestar
         <button onClick={() => void onRestart().catch((e) => toast(e instanceof Error ? e.message : "没能开始整理"))}>按现在的路线重新整理</button>
       </div>}
       {updatable && <div className="stack gap-2">
+        {preferNextVolume && onCreateNextVolume && (
+          <div className="note-volume-guide">
+            <b>建议改为新建下一百章札记</b>
+            <p className="muted m-0">
+              当前札记已覆盖 {currentSpan} 节。长篇原著每 {RECOMMENDED_NOTE_SPAN} 章分卷新建一份札记，比继续滚入同一份札记更能保留章节细节。
+            </p>
+            <button
+              type="button"
+              className="note-volume-action"
+              onClick={() => onCreateNextVolume(preferNextVolume)}
+            >
+              新建第 {preferNextVolume.from + 1}～{preferNextVolume.to + 1} 节札记
+            </button>
+          </div>
+        )}
         {story
-          ? <button onClick={() => void onUpdate(last).catch((e) => toast(e instanceof Error ? e.message : "没能开始更新"))}>更新到现在（{turnLabel(last)}）</button>
+          ? <button onClick={() => void onUpdate(last, syncTitle).catch((e) => toast(e instanceof Error ? e.message : "没能开始更新"))}>更新到现在（{turnLabel(last)}）</button>
           : <div className="row">
             <label className="grow">续整理到第<input type="text" inputMode="numeric" pattern="[0-9]*" value={targetText}
               onChange={(e) => {
@@ -414,8 +642,14 @@ function NoteDetail({ note, worldId, running, last, position, offRoute, onRestar
                 setTarget(next);
                 setTargetText(String(next + 1));
               }} />节</label>
-            <button onClick={() => void onUpdate(target).catch((e) => toast(e instanceof Error ? e.message : "没能开始续整理"))}>续整理</button>
+            <button onClick={() => void onUpdate(target, syncTitle).catch((e) => toast(e instanceof Error ? e.message : "没能开始续整理"))}>续整理</button>
           </div>}
+        <Switch
+          label="同步更新札记标题"
+          note={story ? "随新进展更新标题，恢复上一版时一并还原" : "按合并后的章节范围与阶段自动更新标题，恢复上一版时一并还原"}
+          checked={syncTitle}
+          onChange={setSyncTitle}
+        />
         <small className="muted">只读新增的{story ? "回合" : "章节"}，再合进现有札记；你改过的内容会保留，可以恢复上一版。</small>
       </div>}
       {note.status === "done" && <>

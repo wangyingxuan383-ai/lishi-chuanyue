@@ -11,6 +11,83 @@ const IDB_STORE = "files";
 const DB_KEY = "game.sqlite";
 const MUTATING_SQL_RE = /^\s*(?:WITH\b[\s\S]*?\)\s*)?(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA\s+\w+\s*=)/i;
 
+function cleanRawUrlPath(rawUrl: string): string | null {
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.length > 8192 || /[\u0000-\u001f\u007f\\]/.test(trimmed)) return null;
+  const schemeSep = trimmed.indexOf("://");
+  if (schemeSep <= 0) return null;
+  const afterScheme = trimmed.slice(schemeSep + 3);
+  const pathStart = afterScheme.search(/[/?#]/);
+  const rawPath =
+    pathStart < 0
+      ? "/"
+      : afterScheme[pathStart] === "/"
+        ? afterScheme.slice(pathStart).split(/[?#]/, 1)[0]
+        : "/";
+
+  let current = rawPath;
+  for (let depth = 0; depth < 8; depth++) {
+    if (current.split("/").some((seg) => seg === "." || seg === "..")) return null;
+    let changed = false;
+    let decoded = "";
+    for (let i = 0; i < current.length; i++) {
+      if (current[i] !== "%") {
+        decoded += current[i];
+        continue;
+      }
+      const hex = current.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return null;
+      const byte = Number.parseInt(hex, 16);
+      if (byte === 0x2e || byte === 0x2f || byte === 0x5c || byte < 0x20 || byte === 0x7f) return null;
+      decoded += String.fromCharCode(byte);
+      i += 2;
+      changed = true;
+    }
+    current = decoded;
+    if (!changed) break;
+    if (depth === 7) return null;
+  }
+  if (current.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  return current;
+}
+
+function pathWithinPrefix(basePath: string, targetPath: string): boolean {
+  const normBase = basePath.replace(/\/+$/, "");
+  const normTarget = targetPath.replace(/\/+$/, "");
+  if (!normBase) return targetPath.startsWith("/");
+  return normTarget === normBase || targetPath.startsWith(`${normBase}/`);
+}
+
+export function assertBound(url: string, base: string): void {
+  const reject = (): never => {
+    throw new PlatformError("llm_url_not_bound", "请求地址与密钥绑定地址不符");
+  };
+  if (typeof url !== "string" || typeof base !== "string" || !url || !base) reject();
+  if (cleanRawUrlPath(base) === null || cleanRawUrlPath(url) === null) reject();
+  let baseUrl: URL;
+  let targetUrl: URL;
+  try {
+    baseUrl = new URL(base.trim());
+    targetUrl = new URL(url.trim());
+  } catch {
+    reject();
+  }
+  if (!/^https?:$/.test(baseUrl!.protocol) || !/^https?:$/.test(targetUrl!.protocol)) reject();
+  if (!baseUrl!.hostname || !targetUrl!.hostname) reject();
+  if (baseUrl!.username || baseUrl!.password || baseUrl!.search || baseUrl!.hash) reject();
+  if (targetUrl!.username || targetUrl!.password || targetUrl!.hash) reject();
+  if (baseUrl!.origin !== targetUrl!.origin) reject();
+
+  const basePath = baseUrl!.pathname.replace(/\/+$/, "");
+  const targetPath = targetUrl!.pathname;
+  if (pathWithinPrefix(basePath, targetPath)) return;
+  if (basePath.endsWith("/v1beta/openai")) {
+    const geminiNativePath = basePath.slice(0, -"/openai".length);
+    if (pathWithinPrefix(geminiNativePath, targetPath)) return;
+  }
+  reject();
+}
+
 function idb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(IDB_NAME, 1);
@@ -123,9 +200,7 @@ export async function createWebPlatform(): Promise<Platform> {
         // Match the native shell: an unbound URL is refused before any stream exists.
         const status = await bridge<{ configured: boolean; boundBaseUrl: string | null }>("secret/has", { slot: request.slot });
         const base = status.boundBaseUrl;
-        if (base && !(request.url.startsWith(base) && ["", "/", "?"].includes(request.url.charAt(base.length)))) {
-          throw new PlatformError("llm_url_not_bound", "请求地址与密钥绑定地址不符");
-        }
+        if (base) assertBound(request.url, base);
         const streamId = crypto.randomUUID().replace(/-/g, "");
         const controller = new AbortController();
         const entry = { events: [] as StreamEvent[], controller, active: true };

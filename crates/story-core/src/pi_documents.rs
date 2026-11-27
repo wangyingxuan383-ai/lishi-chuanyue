@@ -58,9 +58,19 @@ pub(crate) fn request(db:&Connection,task:&Value,plan:&RunPlan,args:&Value,writi
         result["fileHash"] = result["sha256"].clone();
     }
     let binding = &plan.meta["agent"]["referenceScope"];
-    if let (Some(book), Some(through)) = (binding["bookId"].as_str(), binding["through"].as_u64()) {
+    let from = binding["from"].as_u64();
+    let through = binding["through"].as_u64();
+    if let Some(book) = binding["bookId"]
+        .as_str()
+        .filter(|b| !b.is_empty() && (from.is_some() || through.is_some()))
+    {
         result["boundBookId"] = book.into();
-        result["through"] = through.into();
+        if let Some(f) = from {
+            result["from"] = f.into();
+        }
+        if let Some(t) = through {
+            result["through"] = t.into();
+        }
         let raw: Option<String> = db
             .query_row("SELECT json FROM source_books WHERE id=?", [book], |r| r.get(0))
             .optional()?;
@@ -74,17 +84,34 @@ pub(crate) fn request(db:&Connection,task:&Value,plan:&RunPlan,args:&Value,writi
             {
                 result["boundFileHash"] = fh.to_ascii_lowercase().into();
             }
-            let texts = json!(value["sections"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|s| ws::text(s, "text"))
-                .collect::<Vec<_>>());
+            let secs = value["sections"].as_array().cloned().unwrap_or_default();
+            let texts = if !secs.is_empty() && secs.iter().all(|s| s["text"].is_string()) {
+                json!(secs.iter().map(|s| ws::text(s, "text")).collect::<Vec<_>>())
+            } else {
+                let chunks = ws::rows(
+                    db,
+                    "SELECT section, text FROM source_chunks WHERE book_id=? ORDER BY section ASC, ordinal ASC",
+                    &[&book],
+                )?;
+                let mut by_sec = std::collections::BTreeMap::<i64, String>::new();
+                for c in &chunks {
+                    if let Some(sec) = c["section"].as_i64() {
+                        by_sec.entry(sec).or_default().push_str(ws::text(c, "text"));
+                    }
+                }
+                if !secs.is_empty() {
+                    json!((0..secs.len())
+                        .map(|i| by_sec.get(&(i as i64)).cloned().unwrap_or_default())
+                        .collect::<Vec<_>>())
+                } else {
+                    json!(by_sec.into_values().collect::<Vec<_>>())
+                }
+            };
             result["boundBookHash"] = crate::pi_store::arguments_hash(&texts).into();
         }
         if matches_bound_book(&result, result["fileHash"].as_str(), None) {
             if let Some(section) = result["section"].as_u64() {
-                if section > through {
+                if from.is_some_and(|f| section < f) || through.is_some_and(|t| section > t) {
                     return Err(Error::Invalid("所选章节不存在或超出本次参考范围。".into()));
                 }
             }
@@ -131,9 +158,11 @@ pub(crate) fn enforce_spoiler_fence(
     file_hash: Option<&str>,
     data: &mut Value,
 ) -> Result<()> {
-    let Some(through) = request["through"].as_u64() else {
+    let from = request["from"].as_u64();
+    let through = request["through"].as_u64();
+    if from.is_none() && through.is_none() {
         return Ok(());
-    };
+    }
     let fh = file_hash
         .or_else(|| data["fileHash"].as_str())
         .or_else(|| data["version"].as_str());
@@ -141,8 +170,9 @@ pub(crate) fn enforce_spoiler_fence(
     if !matches_bound_book(request, fh, nh) {
         return Ok(());
     }
+    let in_range = |idx: u64| from.is_none_or(|f| idx >= f) && through.is_none_or(|t| idx <= t);
     if let Some(section) = data["section"].as_u64().or_else(|| request["section"].as_u64()) {
-        if section > through {
+        if !in_range(section) {
             return Err(Error::Invalid("所选章节不存在或超出本次参考范围。".into()));
         }
     }
@@ -151,18 +181,20 @@ pub(crate) fn enforce_spoiler_fence(
             s["index"]
                 .as_u64()
                 .or_else(|| s["section"].as_u64())
-                .is_some_and(|idx| idx <= through)
+                .is_some_and(in_range)
         });
     }
-    if let Some(count) = data["sectionCount"].as_u64() {
-        let capped = count.min(through.saturating_add(1));
-        data["sectionCount"] = capped.into();
-        if data["nextSectionOffset"].as_u64().is_some_and(|next| next >= capped) {
-            data["nextSectionOffset"] = Value::Null;
+    if let Some(through) = through {
+        if let Some(count) = data["sectionCount"].as_u64() {
+            let capped = count.min(through.saturating_add(1));
+            data["sectionCount"] = capped.into();
+            if data["nextSectionOffset"].as_u64().is_some_and(|next| next >= capped) {
+                data["nextSectionOffset"] = Value::Null;
+            }
         }
     }
     if let Some(hits) = data["hits"].as_array_mut() {
-        hits.retain(|h| h["section"].as_u64().is_none_or(|idx| idx <= through));
+        hits.retain(|h| h["section"].as_u64().is_none_or(in_range));
     }
     Ok(())
 }

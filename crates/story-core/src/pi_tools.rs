@@ -202,11 +202,16 @@ pub(crate) fn call(
             let node=ws::text(args,"nodeId");let basis=ws::text(args,"basis");
             let rows=ws::rows(db,"SELECT id,line_id,node_id,resource_kind,resource_id,basis,claim,source_json,created_at FROM story_fact_sources WHERE world_id=? AND (?='' OR node_id=?) AND (?='' OR basis=?) ORDER BY created_at,id",&[&plan.world_id,&node,&node,&basis,&basis])?;
             let scope=&plan.meta["agent"]["referenceScope"];
+            let from_bound = scope["from"].as_u64();
+            let through_bound = scope["through"].as_u64();
             let value=json!(rows.into_iter().filter(|row|{
                 let source=ws::parse(ws::text(row,"source_json"));
                 !source["references"].as_array().into_iter().flatten().any(|reference|{
                     let location=reference.get("location").unwrap_or(reference);
-                    location["bookId"]==scope["bookId"] && scope["through"].as_u64().is_some_and(|through|location["section"].as_u64().is_none_or(|n|n>through))
+                    location["bookId"]==scope["bookId"] && (
+                        from_bound.is_some_and(|from|location["section"].as_u64().is_none_or(|n|n<from))
+                        || through_bound.is_some_and(|through|location["section"].as_u64().is_none_or(|n|n>through))
+                    )
                 })
             }).map(|mut r|{r["source"]=ws::parse(ws::text(&r,"source_json"));r.as_object_mut().unwrap().remove("source_json");r}).collect::<Vec<_>>());
             Ok(ws::page(value,args))
@@ -599,6 +604,17 @@ fn original(db: &Connection, plan: &RunPlan, args: &Value, name: &str) -> Result
     let scope = &plan.meta["agent"]["referenceScope"];
     if scope.is_object() && source.state["source"]["bookId"] == scope["bookId"] {
         source.state["source"]["through"] = scope["through"].clone();
+        if let (Some(from), Some(through)) = (scope["from"].as_i64(), scope["through"].as_i64()) {
+            let clamped_from = from.max(0);
+            let clamped_to = through.max(clamped_from);
+            source.meta["sourceScope"] = json!({
+                "mode": "chapters",
+                "from": clamped_from,
+                "to": clamped_to,
+            });
+        }
+    } else if source.state["source"].is_object() {
+        source.state["source"]["through"] = Value::Null;
     }
     source.meta["budgetChars"] = 32000.into();
     let mut scoped = args.clone();

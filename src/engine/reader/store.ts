@@ -248,6 +248,116 @@ export async function saveReaderProgress(
   return saved;
 }
 
+/** Canonical per-route progress key for `world_novel` so switching branches never overwrites main-line progress. */
+export function worldNovelProgressTargetId(worldId: string, lineId?: string | null): string {
+  const cleanLine = lineId?.trim() ?? "";
+  return cleanLine ? `${worldId}:${cleanLine}` : worldId;
+}
+
+/**
+ * Reads route-isolated `world_novel` progress for `(worldId, lineId)`, falling back to legacy
+ * unscoped `worldId` records ONLY when compatible with the current route's `nodeId` / sections.
+ */
+export async function getWorldNovelProgress(
+  repo: Repo,
+  worldId: string,
+  lineId?: string | null,
+  opts?: {
+    routeNodeIds?: ReadonlySet<string>;
+    sections?: { paragraphs: { text: string; nodeId?: string | null }[] }[];
+  },
+): Promise<ReaderProgress | null> {
+  if (!worldId) return null;
+  const cleanLine = lineId?.trim() ?? "";
+  if (cleanLine) {
+    const scoped = await getReaderProgress(repo, "world_novel", `${worldId}:${cleanLine}`);
+    if (scoped) {
+      if (opts?.routeNodeIds && scoped.nodeId && !opts.routeNodeIds.has(scoped.nodeId)) {
+        return null;
+      }
+      return scoped;
+    }
+  }
+
+  const legacy = await getReaderProgress(repo, "world_novel", worldId);
+  if (!legacy) return null;
+
+  if (legacy.nodeId) {
+    if (opts?.routeNodeIds && !opts.routeNodeIds.has(legacy.nodeId)) {
+      return null;
+    }
+    return legacy;
+  }
+
+  if (opts?.sections) {
+    if (legacy.sectionIndex < 0 || legacy.sectionIndex >= opts.sections.length) {
+      return null;
+    }
+    const cleanAnchor = legacy.anchorText.trim();
+    if (
+      cleanAnchor &&
+      !opts.sections[legacy.sectionIndex]!.paragraphs.some((p) => p.text.includes(cleanAnchor))
+    ) {
+      return null;
+    }
+  }
+  return legacy;
+}
+
+export async function saveWorldNovelProgress(
+  repo: Repo,
+  worldId: string,
+  lineId: string | null | undefined,
+  input: Omit<ReaderProgress, "targetType" | "targetId" | "updatedAt"> & { updatedAt?: string },
+): Promise<ReaderProgress> {
+  return saveReaderProgress(repo, {
+    ...input,
+    targetType: "world_novel",
+    targetId: worldNovelProgressTargetId(worldId, lineId),
+  });
+}
+
+/**
+ * Resolves the active or non-deleted branch `lineId` containing `h.nodeId` for a `world_novel`
+ * highlight so `ExcerptsSheet` ("去原文") opens the exact branch instead of mis-jumping on another route.
+ */
+export async function resolveHighlightRouteTarget(
+  repo: Repo,
+  h: Pick<ReaderHighlight, "targetType" | "targetId" | "worldId" | "nodeId">,
+): Promise<{ lineId?: string; nodeExists: boolean }> {
+  if (h.targetType !== "world_novel") return { nodeExists: true };
+  const wId = h.worldId || h.targetId;
+  if (!wId || !h.nodeId) return { nodeExists: true };
+
+  const rows = await repo.platform.sql
+    .query(
+      `WITH RECURSIVE down(id) AS (
+         SELECT id FROM nodes WHERE id = ? AND world_id = ?
+         UNION ALL
+         SELECT n.id FROM nodes n JOIN down d ON n.parent_id = d.id
+       )
+       SELECT l.id
+       FROM lines l
+       LEFT JOIN worlds w ON w.id = l.world_id
+       WHERE l.world_id = ?
+         AND l.deleted_at IS NULL
+         AND l.node_id IN (SELECT id FROM down)
+       ORDER BY
+         CASE WHEN l.id = w.current_line_id THEN 0 ELSE 1 END ASC,
+         l.archived ASC,
+         CASE WHEN l.kind = 'line' THEN 0 ELSE 1 END ASC,
+         l.created_at DESC
+       LIMIT 1`,
+      [h.nodeId, wId, wId],
+    )
+    .catch(() => []);
+
+  if (rows[0]?.id) {
+    return { lineId: String(rows[0].id), nodeExists: true };
+  }
+  return { lineId: undefined, nodeExists: false };
+}
+
 export async function listReaderBookmarks(
   repo: Repo,
   targetType: ReaderTargetType,

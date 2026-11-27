@@ -220,7 +220,7 @@ function buildSectionXhtml(section: NovelSection, isFinalNarrative: boolean, sta
     }
   }
   if (isFinalNarrative && statusLine) {
-    bodyLines.push(`    <p class="colophon">${escapeXml(statusLine)}</p>`);
+    bodyLines.push(`    <p class="colophon" epub:type="z3998:colophon">${escapeXml(statusLine)}</p>`);
   }
 
   return [

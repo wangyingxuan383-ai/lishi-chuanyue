@@ -112,8 +112,25 @@ pub(crate) fn save(db:&Connection,task:&Value,plan:&RunPlan,work:&Value,new_base
     let mut meta=ws::parse(ws::text(task,"metadata_json"));
     meta["goalReport"]=Value::Null;meta["goalResult"]=Value::Null;
     meta["rebase"]=json!({"at":ws::now(),"fromVersion":task["base_world_version"],"toVersion":new_base["fingerprint"],"requiresVerification":true});
+    let prior_scope = meta["referenceScope"].clone();
     let state=ws::resource(db,plan,"state",ws::text(new_base,"headId"))?;
-    meta["referenceScope"]=state["source"].clone();
+    let mut next_scope = state["source"].clone();
+    if next_scope.is_object() {
+        if prior_scope["explicitRange"] == true && prior_scope["bookId"] == next_scope["bookId"] {
+            next_scope["through"] = prior_scope["through"].clone();
+            if let Some(from) = prior_scope.get("from").filter(|v| v.is_i64()) {
+                next_scope["from"] = from.clone();
+            }
+            next_scope["explicitRange"] = true.into();
+        } else {
+            next_scope["through"] = Value::Null;
+            if let Some(obj) = next_scope.as_object_mut() {
+                obj.remove("from");
+                obj.remove("explicitRange");
+            }
+        }
+    }
+    meta["referenceScope"]=next_scope;
     db.execute("UPDATE pi_tasks SET line_id=?,base_json=?,base_world_version=?,metadata_json=?,updated_at=? WHERE id=?",params![ws::text(new_base,"lineId"),new_base.to_string(),ws::text(new_base,"fingerprint"),meta.to_string(),ws::now(),ws::text(task,"id")])?;
     db.execute("DELETE FROM pi_read_cache WHERE task_id=?",[ws::text(task,"id")])?;
     Ok(next)

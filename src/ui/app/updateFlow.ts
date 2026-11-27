@@ -23,13 +23,16 @@ export type UpdateStep =
 
 export interface UpdateFlow {
   version: string | null;
+  url: string | null;
   size: number;
   sha256: string | null;
   state: UpdateStep;
 }
 
-const IDLE: UpdateFlow = { version: null, size: 0, sha256: null, state: { step: "idle" } };
+const IDLE: UpdateFlow = { version: null, url: null, size: 0, sha256: null, state: { step: "idle" } };
+const BUSY_BACKOFF_MS = [300, 350, 450, 500, 600];
 let flow: UpdateFlow = IDLE;
+let backgroundSyncing = false;
 const listeners = new Set<() => void>();
 
 function set(next: Partial<UpdateFlow>) {
@@ -43,6 +46,7 @@ export function subscribe(listener: () => void): () => void {
 }
 
 export const snapshot = (): UpdateFlow => flow;
+export const isBackgroundSyncing = (): boolean => backgroundSyncing;
 
 /** What the sheet for `version` shows. */
 export function stepFor(current: UpdateFlow, version: string): UpdateStep {
@@ -52,6 +56,7 @@ export function stepFor(current: UpdateFlow, version: string): UpdateStep {
 /** Tests only. */
 export function resetUpdateFlow() {
   flow = IDLE;
+  backgroundSyncing = false;
   waitingPermission = false;
   clearReturnWatch?.();
   listeners.clear();
@@ -68,14 +73,95 @@ const REASONS: Record<string, FailReason> = {
 const running = (state: UpdateStep) => state.step === "preparing" || state.step === "downloading" || state.step === "verifying";
 
 /** Hydrates an already-downloaded and SHA-256-verified APK on disk without clobbering active download/permission/install steps. */
-export function hydrateReadyPackage(pkg: { version: string; size: number; sha256: string }) {
+export function hydrateReadyPackage(pkg: { version: string; size: number; sha256: string; url?: string | null }) {
   if (!pkg.version || !pkg.sha256) return;
   if (flow.version === pkg.version) {
-    if (running(flow.state) || flow.state.step === "permission" || flow.state.step === "installing" || flow.state.step === "ready") {
+    if (running(flow.state) || flow.state.step === "permission" || flow.state.step === "installing") {
+      return;
+    }
+    if (flow.state.step === "ready") {
+      if (pkg.sha256 !== flow.sha256 || pkg.size !== flow.size || (pkg.url !== undefined && pkg.url !== flow.url)) {
+        set({
+          size: pkg.size,
+          sha256: pkg.sha256,
+          ...(pkg.url !== undefined ? { url: pkg.url } : {}),
+        });
+      }
       return;
     }
   }
-  set({ version: pkg.version, size: pkg.size, sha256: pkg.sha256, state: { step: "ready" } });
+  set({
+    version: pkg.version,
+    url: pkg.url ?? (flow.version === pkg.version ? flow.url : null),
+    size: pkg.size,
+    sha256: pkg.sha256,
+    state: { step: "ready" },
+  });
+}
+
+/** Resets a stale `ready` (or `permission`) state back to `idle` when on-disk package verification fails. */
+export function invalidateReadyPackage(version?: string) {
+  if (version !== undefined && flow.version !== version) return;
+  if (flow.state.step === "ready" || flow.state.step === "permission") {
+    waitingPermission = false;
+    clearReturnWatch?.();
+    set({ url: null, sha256: null, state: { step: "idle" } });
+  }
+}
+
+/** Mirrors silent background `autoPrepare` progress into `updateFlow` so opening `UpdateSheet` shows live progress instead of "已暂停". */
+export function syncBackgroundStart(pkg: { version: string; url: string; size: number; sha256: string; received: number }) {
+  if (
+    !backgroundSyncing &&
+    flow.version === pkg.version &&
+    (running(flow.state) || flow.state.step === "permission" || flow.state.step === "installing")
+  ) {
+    return;
+  }
+  backgroundSyncing = true;
+  set({
+    version: pkg.version,
+    url: pkg.url,
+    size: pkg.size,
+    sha256: pkg.sha256,
+    state: { step: "downloading", received: pkg.received, total: pkg.size, retrying: false },
+  });
+}
+
+export function syncBackgroundEvent(version: string, totalSize: number, event: UpdateEvent) {
+  if (!backgroundSyncing || flow.version !== version || !running(flow.state)) return;
+  if (event.type === "progress") {
+    set({ state: { step: "downloading", received: event.received, total: event.total, retrying: false } });
+  } else if (event.type === "retrying") {
+    const received = "received" in flow.state ? flow.state.received : 0;
+    set({ state: { step: "downloading", received, total: totalSize, retrying: true } });
+  } else {
+    set({ state: { step: "verifying" } });
+  }
+}
+
+export function syncBackgroundComplete(pkg: { version: string; url: string; size: number; sha256: string }) {
+  backgroundSyncing = false;
+  if (flow.version === pkg.version && (flow.state.step === "permission" || flow.state.step === "installing")) {
+    return;
+  }
+  set({
+    version: pkg.version,
+    url: pkg.url,
+    size: pkg.size,
+    sha256: pkg.sha256,
+    state: { step: "ready" },
+  });
+}
+
+export function syncBackgroundStopped(version: string, totalSize: number, received: number) {
+  backgroundSyncing = false;
+  if (flow.version !== version || !running(flow.state)) return;
+  if (received > 0 && received < totalSize) {
+    set({ state: { step: "paused", received, total: totalSize } });
+  } else {
+    set({ state: { step: "idle" } });
+  }
 }
 
 /** Downloads (or resumes) the package; `ready` once its SHA-256 matches. */
@@ -83,12 +169,24 @@ export async function startDownload(platform: Platform, release: ReleaseInfo, as
   const update = platform.update;
   if (!update) return;
   const same = flow.version === release.version;
-  if (same && running(flow.state)) return;
+  if (same && running(flow.state) && !backgroundSyncing) return;
+  backgroundSyncing = false;
   waitingPermission = false;
   clearReturnWatch?.();
-  const before = same && "received" in flow.state ? flow.state.received : 0;
-  set({ version: release.version, size: asset.size, sha256: same ? flow.sha256 : null, state: { step: "preparing" } });
-  let sha256 = flow.sha256;
+  const staleFailure =
+    same &&
+    flow.state.step === "failed" &&
+    (flow.state.reason === "corrupt" || flow.state.reason === "nohash" || flow.state.reason === "unavailable");
+  const assetChanged =
+    !same ||
+    asset.url !== flow.url ||
+    asset.size !== flow.size ||
+    Boolean(asset.sha256 && asset.sha256 !== flow.sha256);
+  const mustRefreshHash = staleFailure || assetChanged;
+  const before = !mustRefreshHash && "received" in flow.state ? flow.state.received : 0;
+  const cachedSha = mustRefreshHash ? null : flow.sha256;
+  set({ version: release.version, url: asset.url, size: asset.size, sha256: cachedSha, state: { step: "preparing" } });
+  let sha256 = cachedSha;
   try {
     sha256 ??= await expectedHash(platform, release, asset);
   } catch (error) {
@@ -113,14 +211,21 @@ export async function startDownload(platform: Platform, release: ReleaseInfo, as
   };
   const request = { version: release.version, url: asset.url, size: asset.size, sha256 };
   try {
-    try {
-      await update.download(request, onEvent);
-    } catch (error) {
-      // A download this page lost track of (after a reload) still holds the slot: stop it, start again.
-      if (codeOf(error) !== "update_busy") throw error;
-      await update.cancel();
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      await update.download(request, onEvent);
+    let canceledBusySlot = false;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await update.download(request, onEvent);
+        break;
+      } catch (error) {
+        // A download this page lost track of (after a reload or background task) still holds the slot: stop it, poll-retry.
+        if (codeOf(error) !== "update_busy" || attempt >= BUSY_BACKOFF_MS.length) throw error;
+        if (!canceledBusySlot) {
+          canceledBusySlot = true;
+          await update.cancel();
+        }
+        await new Promise((resolve) => setTimeout(resolve, BUSY_BACKOFF_MS[attempt]));
+        if (flow.version !== release.version) return;
+      }
     }
     if (flow.version === release.version) set({ state: { step: "ready" } });
   } catch (error) {
@@ -190,8 +295,16 @@ export async function installUpdate(
   pkg?: { version: string; size: number; sha256: string },
 ): Promise<"started" | "permission" | "unsupported" | "failed"> {
   const update = platform.update;
-  if (pkg && pkg.version && pkg.sha256 && (flow.version !== pkg.version || !flow.sha256 || flow.state.step === "idle")) {
-    set({ version: pkg.version, size: pkg.size, sha256: pkg.sha256, state: { step: "ready" } });
+  if (pkg && pkg.version && pkg.sha256) {
+    if (flow.version !== pkg.version || !flow.sha256 || flow.state.step === "idle") {
+      set({ version: pkg.version, size: pkg.size, sha256: pkg.sha256, state: { step: "ready" } });
+    } else if (pkg.sha256 !== flow.sha256 || pkg.size !== flow.size) {
+      set({
+        size: pkg.size,
+        sha256: pkg.sha256,
+        state: flow.state.step === "failed" || flow.state.step === "paused" ? { step: "ready" } : flow.state,
+      });
+    }
   }
   const { version, size, sha256 } = flow;
   if (!update || !version || !sha256) return "failed";

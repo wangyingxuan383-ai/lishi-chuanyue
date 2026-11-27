@@ -79,7 +79,58 @@ impl StoryToolGateway {
             [ws::text(&base, "headId")],
             |r| r.get(0),
         )?;
-        metadata["referenceScope"] = ws::parse(&state)["source"].clone();
+        let state_source = ws::parse(&state)["source"].clone();
+        let mut resolved_scope = if state_source.is_object() {
+            let mut s = state_source;
+            s["through"] = Value::Null;
+            if let Some(obj) = s.as_object_mut() {
+                obj.remove("from");
+                obj.remove("explicitRange");
+            }
+            s
+        } else {
+            Value::Null
+        };
+        if let Some(req_scope) = metadata.get("referenceScope").cloned().filter(Value::is_object) {
+            let req_book = ws::text(&req_scope, "bookId");
+            let state_book = ws::text(&resolved_scope, "bookId");
+            let valid_unbound_book = state_book.is_empty()
+                && !req_book.is_empty()
+                && tx
+                    .query_row("SELECT 1 FROM source_books WHERE id=?", [req_book], |_| Ok(()))
+                    .optional()?
+                    .is_some();
+            if !req_book.is_empty() && (state_book == req_book || valid_unbound_book) {
+                let mut base_scope = if resolved_scope.is_object() {
+                    resolved_scope.clone()
+                } else {
+                    json!({ "bookId": req_book, "position": 0, "through": null })
+                };
+                if req_scope.get("through").is_none_or(Value::is_null) {
+                    base_scope["through"] = Value::Null;
+                    if let Some(obj) = base_scope.as_object_mut() {
+                        obj.remove("from");
+                        obj.remove("explicitRange");
+                    }
+                } else if let Some(through) = req_scope["through"].as_i64() {
+                    let from = req_scope["from"].as_i64().unwrap_or(0);
+                    if through < 0 || from < 0 || from > through {
+                        return Err(Error::Invalid("指定的原著章节范围无效".into()));
+                    }
+                    base_scope["through"] = through.into();
+                    if req_scope.get("from").and_then(Value::as_i64).is_some()
+                        || req_scope["explicitRange"] == true
+                    {
+                        base_scope["from"] = from.into();
+                    }
+                    base_scope["explicitRange"] = true.into();
+                } else {
+                    return Err(Error::Invalid("指定的原著章节范围无效".into()));
+                }
+                resolved_scope = base_scope;
+            }
+        }
+        metadata["referenceScope"] = resolved_scope;
         let request = NewTask {
             id: task_id.into(),
             session_id: session_id.into(),
@@ -769,6 +820,7 @@ impl StoryToolGateway {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         crate::maintenance::guard(&tx)?;
         let task = task_row(&tx, task_id)?;
+        let was_previewed = ws::text(&task, "status") == "previewed";
         if ![
             "interrupted",
             "cancelled",
@@ -777,6 +829,7 @@ impl StoryToolGateway {
             "blocked",
             "running",
             "stale",
+            "previewed",
         ]
         .contains(&ws::text(&task, "status"))
         {
@@ -792,12 +845,34 @@ impl StoryToolGateway {
         let old_base=ws::parse(ws::text(&task,"base_json"));
         let world = ws::text(&task, "world_id");
         let line = ws::text(&old_base, "lineId");
-        if !crate::pi_resume::route_available(&tx, world, line)? {
-            return Err(Error::Invalid("原路线已归档、删除或无法进入。请恢复后再继续。".into()));
-        }
-        let current=ws::base(&tx,world,line)?;
-        if current["fingerprint"]!=old_base["fingerprint"] {
+        let current_line_id: String = tx
+            .query_row("SELECT current_line_id FROM worlds WHERE id=?", [world], |r| r.get(0))
+            .unwrap_or_default();
+        let target_line = if was_previewed
+            && !current_line_id.is_empty()
+            && current_line_id != line
+            && crate::pi_resume::route_available(&tx, world, &current_line_id)?
+        {
+            current_line_id.as_str()
+        } else {
+            if !crate::pi_resume::route_available(&tx, world, line)? {
+                return Err(Error::Invalid("原路线已归档、删除或无法进入。请恢复后再继续。".into()));
+            }
+            line
+        };
+        let current=ws::base(&tx,world,target_line)?;
+        if current["fingerprint"]!=old_base["fingerprint"] || target_line != line {
             crate::pi_rebase::save(&tx,&task,&task_plan(&tx,&task)?,&ws::parse(ws::text(&task,"workspace_json")),&current)?;
+            if target_line != line {
+                tx.execute(
+                    "UPDATE pi_tasks SET line_id=? WHERE id=?",
+                    params![target_line, task_id],
+                )?;
+                tx.execute(
+                    "UPDATE pi_sessions SET line_id=? WHERE id=?",
+                    params![target_line, ws::text(&task, "session_id")],
+                )?;
+            }
         }
         let task=task_row(&tx,task_id)?;
         let ticket = lease::acquire_tx(
@@ -808,8 +883,17 @@ impl StoryToolGateway {
             now,
             lease::DEFAULT_TTL_MS,
         )?;
-        tx.execute("UPDATE pi_tasks SET status='running',stop_revision=0,error=NULL,lease_json=?,host_owner=?,updated_at=? WHERE id=?",
-            params![serde_json::to_string(&ticket)?,lease::process_instance(),ws::now(),task_id])?;
+        if was_previewed {
+            tx.execute(
+                "UPDATE pi_tasks SET status='running',result_json=NULL,stop_revision=0,error=NULL,lease_json=?,host_owner=?,updated_at=? WHERE id=?",
+                params![serde_json::to_string(&ticket)?,lease::process_instance(),ws::now(),task_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE pi_tasks SET status='running',stop_revision=0,error=NULL,lease_json=?,host_owner=?,updated_at=? WHERE id=?",
+                params![serde_json::to_string(&ticket)?,lease::process_instance(),ws::now(),task_id],
+            )?;
+        }
         let mut metadata=ws::parse(ws::text(&task,"metadata_json"));
         metadata.as_object_mut().map(|m|m.remove("stopReceipt"));
         metadata["executionPhase"]="starting".into();
