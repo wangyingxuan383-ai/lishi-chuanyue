@@ -208,37 +208,46 @@ export function useReaderTts({
     return null;
   }, []);
 
-  const advanceNextSectionOrStop = useCallback(() => {
-    if (!onSectionEndRef.current) {
-      stop();
-      return;
-    }
-    if (emptySectionStreakRef.current > MAX_CONSECUTIVE_EMPTY_SECTIONS) {
-      emptySectionStreakRef.current = 0;
-      stop();
-      toastRef.current("后续章节暂无可朗读正文");
-      return;
-    }
-    awaitingAdvanceFromSectionRef.current = sectionIndexRef.current;
-    pendingSectionContinueRef.current = true;
-    setStatus("playing");
-    statusRef.current = "playing";
-    setSpeakingIndex(null);
-    indexRef.current = null;
-    void Promise.resolve(onSectionEndRef.current())
-      .then((res) => {
-        if (res === false) {
+  const advanceNextSectionOrStop = useCallback(
+    (opts?: { skipEmptySection?: boolean }) => {
+      if (!opts?.skipEmptySection && sleepModeRef.current === "chapter") {
+        stop();
+        toastRef.current("已读完本章，定时朗读结束");
+        return;
+      }
+      if (!onSectionEndRef.current) {
+        stop();
+        return;
+      }
+      if (emptySectionStreakRef.current > MAX_CONSECUTIVE_EMPTY_SECTIONS) {
+        emptySectionStreakRef.current = 0;
+        stop();
+        toastRef.current("后续章节暂无可朗读正文");
+        return;
+      }
+      cancelEngines();
+      awaitingAdvanceFromSectionRef.current = sectionIndexRef.current;
+      pendingSectionContinueRef.current = true;
+      setStatus("playing");
+      statusRef.current = "playing";
+      setSpeakingIndex(null);
+      indexRef.current = null;
+      void Promise.resolve(onSectionEndRef.current())
+        .then((res) => {
+          if (res === false) {
+            pendingSectionContinueRef.current = false;
+            awaitingAdvanceFromSectionRef.current = null;
+            stop();
+          }
+        })
+        .catch(() => {
           pendingSectionContinueRef.current = false;
           awaitingAdvanceFromSectionRef.current = null;
           stop();
-        }
-      })
-      .catch(() => {
-        pendingSectionContinueRef.current = false;
-        awaitingAdvanceFromSectionRef.current = null;
-        stop();
-      });
-  }, [stop]);
+        });
+    },
+    [cancelEngines, stop],
+  );
 
   const speakAtRef = useRef<(idx: number) => void>(() => {});
 
@@ -368,7 +377,7 @@ export function useReaderTts({
         // automatically skip ahead to the next chapter up to MAX_CONSECUTIVE_EMPTY_SECTIONS.
         if (onSectionEndRef.current) {
           emptySectionStreakRef.current += 1;
-          advanceNextSectionOrStop();
+          advanceNextSectionOrStop({ skipEmptySection: true });
           return;
         }
         stop();
@@ -378,7 +387,7 @@ export function useReaderTts({
       if (!text) {
         if (onSectionEndRef.current) {
           emptySectionStreakRef.current += 1;
-          advanceNextSectionOrStop();
+          advanceNextSectionOrStop({ skipEmptySection: true });
           return;
         }
         stop();
@@ -445,12 +454,23 @@ export function useReaderTts({
   // Listen for Android native `lishi:tts-event` callbacks
   useEffect(() => {
     const onNativeTts = (ev: Event) => {
-      const detail = (ev as CustomEvent<{ utteranceId?: string; state?: "done" | "error" }>).detail;
+      const detail = (
+        ev as CustomEvent<{
+          utteranceId?: string;
+          state?: "done" | "error" | "interrupted" | "stopped";
+        }>
+      ).detail;
       if (!detail?.utteranceId || detail.utteranceId !== activeUtteranceIdRef.current) return;
       activeUtteranceIdRef.current = null;
       const curIdx = indexRef.current ?? 0;
       if (detail.state === "done") {
         handleParagraphFinished(curIdx);
+      } else if (detail.state === "interrupted" || detail.state === "stopped") {
+        if (statusRef.current === "playing") {
+          pendingSectionContinueRef.current = false;
+          statusRef.current = "paused";
+          setStatus("paused");
+        }
       } else {
         const text = paragraphsRef.current[curIdx]?.text?.trim() ?? "";
         if (text && hasWebSpeech()) {
@@ -665,21 +685,10 @@ export function useReaderTts({
     const next = findSpeakable(cur + 1, 1);
     if (next !== null) {
       speakAt(next);
-    } else if (onSectionEndRef.current) {
-      pendingSectionContinueRef.current = true;
-      void Promise.resolve(onSectionEndRef.current())
-        .then((res) => {
-          if (res === false) {
-            pendingSectionContinueRef.current = false;
-            stop();
-          }
-        })
-        .catch(() => {
-          pendingSectionContinueRef.current = false;
-          stop();
-        });
+    } else {
+      void advanceNextSectionOrStop();
     }
-  }, [findSpeakable, speakAt, stop]);
+  }, [advanceNextSectionOrStop, findSpeakable, speakAt]);
 
   const setRate = useCallback(
     (next: TtsRate) => {

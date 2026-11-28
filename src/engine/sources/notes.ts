@@ -44,8 +44,20 @@ export interface NoteScope {
   from?: number; to?: number; subject?: string; aliases?: string[]; question?: string; auto?: boolean; toNode?: string; staleFrom?: number;
   /** Legacy reading ceiling field retained for archive/JSON compatibility. */
   through?: number | null;
-  /** How far 上一版 (previousContent) reached (and its previous title), so 恢复上一版 brings back both. */
-  previous?: { to?: number; toNode?: string; refs?: number[]; title?: string };
+  /** How far 上一版 (previousContent) reached (and its previous title/stale/gaps), so 恢复上一版 brings back all of them. */
+  previous?: {
+    to?: number;
+    toNode?: string;
+    refs?: number[];
+    title?: string;
+    staleFrom?: number;
+    gaps?: NoteGap[];
+    parts?: string[];
+    batchSizes?: number[];
+    materialKeys?: string[];
+    updateFrom?: number;
+    syncTitle?: boolean;
+  };
 }
 /** `error`: one sentence for the player; `detail`: what actually went wrong, for 查看原因 (R30). */
 export interface NoteProgress {
@@ -65,8 +77,22 @@ export interface NoteProgress {
   gaps?: NoteGap[];
   /** Which parts the cached merges were made from; a filled gap starts the merge again. */
   mergeBasis?: string;
-  /** 续整理 / 更新到现在 (D174, D194): the note being extended, the new range read for it, and optional title sync. */
-  update?: { base: string; from: number; to: number; syncTitle?: boolean };
+  /** 续整理 / 更新到现在 (D174, D194): the note being extended, the new range read for it, and pre-update snapshot. */
+  update?: {
+    base: string;
+    from: number;
+    to: number;
+    syncTitle?: boolean;
+    baseTitle?: string;
+    baseTo?: number;
+    baseToNode?: string;
+    baseRefs?: number[];
+    baseStaleFrom?: number;
+    baseGaps?: NoteGap[];
+    baseParts?: string[];
+    baseBatchSizes?: number[];
+    baseMaterialKeys?: string[];
+  };
   /** Last passage of the immutable route read by an unfinished story note. */
   routeNode?: string;
   failure?: { kind: string; phase: "batch" | "merge"; batch?: number; sections?: number[]; configuration?: string };
@@ -298,43 +324,155 @@ export async function carryNotes(
   return carried;
 }
 
-/** 恢复上一版: the content (and synced title, if any) before the last AI update comes back. */
+function restoredProgress(
+  gaps?: NoteGap[],
+  savedParts?: string[],
+  savedBatchSizes?: number[],
+  savedMaterialKeys?: string[],
+): NoteProgress {
+  if (!gaps?.length) return { parts: [], total: 0 };
+  const gapSet = new Set(gaps.map((g) => g.batch));
+  const validSaved =
+    Boolean(savedParts?.length) &&
+    gaps.every((g) => Number.isInteger(g.batch) && g.batch >= 0 && savedParts![g.batch] === "") &&
+    !savedParts!.some((p, i) => p === "" && !gapSet.has(i));
+  const maxBatch = Math.max(...gaps.map((g) => g.batch));
+  const parts = validSaved
+    ? [...savedParts!]
+    : Array.from({ length: maxBatch + 1 }, (_, i) => (gapSet.has(i) ? "" : "（已整理）"));
+  return {
+    parts,
+    total: parts.length,
+    ...(validSaved && savedBatchSizes ? { batchSizes: [...savedBatchSizes] } : {}),
+    ...(validSaved && savedMaterialKeys ? { materialKeys: [...savedMaterialKeys] } : {}),
+    gaps: gaps.map((g) => ({ ...g, sections: [...g.sections] })),
+  };
+}
+
+function effectiveNoteUpdate(
+  note: Pick<CanonNote, "scope"> & Partial<Pick<CanonNote, "progress" | "previousContent">>,
+): NonNullable<NoteProgress["update"]> | undefined {
+  if (note.progress?.update) return note.progress.update;
+  const prev = note.scope.previous;
+  if (
+    note.progress?.gaps?.length &&
+    note.previousContent &&
+    prev?.updateFrom !== undefined &&
+    note.scope.to !== undefined &&
+    note.scope.to >= prev.updateFrom
+  ) {
+    return {
+      base: note.previousContent,
+      from: prev.updateFrom,
+      to: note.scope.to,
+      ...(prev.syncTitle ? { syncTitle: true } : {}),
+      ...(prev.title !== undefined ? { baseTitle: prev.title } : {}),
+      ...(prev.to !== undefined ? { baseTo: prev.to } : {}),
+      ...(prev.toNode !== undefined ? { baseToNode: prev.toNode } : {}),
+      ...(prev.refs !== undefined ? { baseRefs: prev.refs } : {}),
+      ...(prev.staleFrom !== undefined ? { baseStaleFrom: prev.staleFrom } : {}),
+      ...(prev.gaps?.length ? { baseGaps: prev.gaps } : {}),
+      ...(prev.parts?.length ? { baseParts: prev.parts } : {}),
+      ...(prev.batchSizes ? { baseBatchSizes: prev.batchSizes } : {}),
+      ...(prev.materialKeys ? { baseMaterialKeys: prev.materialKeys } : {}),
+    };
+  }
+  return undefined;
+}
+
+/** 恢复上一版 / 取消续整理: restores an aborted update's base version, recovers an incomplete restart, or swaps two completed versions symmetrically. */
 export async function restorePrevious(repo: Repo, id: string): Promise<CanonNote | null> {
   const note = await getNote(repo, id);
-  if (!note?.previousContent) return null;
-  // The reach and title go back with the words: otherwise 更新到现在 would start after the newer
-  // reach and skip what only the undone version had covered (Windows review, 0.17.0; D194).
+  if (!note) return null;
+
+  // (a) Aborting an incomplete 续整理 / 更新到现在: restore directly from progress.update back to V1,
+  // leaving note.previousContent (V0) and note.scope.previous (V0) untouched!
+  if (note.status !== "done" && note.progress.update?.base !== undefined) {
+    const u = note.progress.update;
+    const restoredTitle = u.baseTitle ?? note.title;
+    const titleChanged = restoredTitle !== note.title;
+    const baseTo = u.baseTo ?? note.scope.to;
+    const concurrentStaleInBase =
+      note.scope.staleFrom !== undefined && (baseTo === undefined || note.scope.staleFrom <= baseTo)
+        ? note.scope.staleFrom
+        : undefined;
+    const mergedStale = Math.min(u.baseStaleFrom ?? Infinity, concurrentStaleInBase ?? Infinity);
+    const nextScope: NoteScope = {
+      ...note.scope,
+      ...(baseTo !== undefined ? { to: baseTo } : {}),
+      toNode: u.baseToNode !== undefined ? u.baseToNode : note.scope.toNode,
+      staleFrom: Number.isFinite(mergedStale) ? mergedStale : undefined,
+    };
+    if (nextScope.toNode === undefined) delete nextScope.toNode;
+    if (nextScope.staleFrom === undefined) delete nextScope.staleFrom;
+    const restored: CanonNote = {
+      ...note,
+      status: "done",
+      title: restoredTitle,
+      content: u.base,
+      refs: u.baseRefs ? [...u.baseRefs] : note.refs,
+      scope: nextScope,
+      progress: restoredProgress(u.baseGaps, u.baseParts, u.baseBatchSizes, u.baseMaterialKeys),
+      updatedAt: new Date().toISOString(),
+    };
+    await saveNote(repo, restored, true, titleChanged);
+    return restored;
+  }
+
+  if (!note.previousContent) return null;
   const back = note.scope.previous;
   const restoredTitle = back?.title ?? note.title;
   const titleChanged = restoredTitle !== note.title;
-  const recoveringIncomplete =
-    note.status !== "done" || note.progress.update !== undefined || note.progress.failure !== undefined;
   const hasSwappableCurrent = Boolean(note.content.trim());
+  const nextPrevious: NoteScope["previous"] = hasSwappableCurrent
+    ? {
+        ...(note.scope.to !== undefined ? { to: note.scope.to } : {}),
+        ...(note.scope.toNode !== undefined ? { toNode: note.scope.toNode } : {}),
+        refs: [...note.refs],
+        title: note.title,
+        ...(note.scope.staleFrom !== undefined ? { staleFrom: note.scope.staleFrom } : {}),
+        ...(note.progress.gaps?.length
+          ? {
+              gaps: note.progress.gaps.map((g) => ({ ...g, sections: [...g.sections] })),
+              ...(note.progress.parts?.length ? { parts: [...note.progress.parts] } : {}),
+              ...(note.progress.batchSizes ? { batchSizes: [...note.progress.batchSizes] } : {}),
+              ...(note.progress.materialKeys ? { materialKeys: [...note.progress.materialKeys] } : {}),
+              ...(back?.updateFrom !== undefined ? { updateFrom: back.updateFrom } : {}),
+              ...(back?.syncTitle ? { syncTitle: true } : {}),
+            }
+          : {}),
+      }
+    : undefined;
+
+  const nextScope: NoteScope = back
+    ? {
+        ...note.scope,
+        to: back.to,
+        toNode: back.toNode,
+        staleFrom: back.staleFrom,
+        previous: nextPrevious,
+      }
+    : {
+        ...note.scope,
+        staleFrom: undefined,
+        ...(nextPrevious ? { previous: nextPrevious } : {}),
+      };
+  if (nextScope.to === undefined) delete nextScope.to;
+  if (nextScope.toNode === undefined) delete nextScope.toNode;
+  if (nextScope.staleFrom === undefined) delete nextScope.staleFrom;
+  if (nextScope.previous === undefined) delete nextScope.previous;
+
+  // Both (b) aborting an incomplete restartOnRoute and (c) swapping two completed versions restore `status: "done"` and back's gaps.
   const restored: CanonNote = {
     ...note,
+    status: "done",
     title: restoredTitle,
     content: note.previousContent,
     previousContent: hasSwappableCurrent ? note.content : null,
-    ...(recoveringIncomplete ? { status: "done" as const, progress: { parts: [], total: 0 } } : {}),
+    refs: back?.refs ? [...back.refs] : note.refs,
+    scope: nextScope,
+    progress: restoredProgress(back?.gaps, back?.parts, back?.batchSizes, back?.materialKeys),
     updatedAt: new Date().toISOString(),
-    ...(back
-      ? {
-          scope: {
-            ...note.scope,
-            to: back.to,
-            toNode: back.toNode,
-            previous: hasSwappableCurrent
-              ? {
-                  to: note.scope.to,
-                  toNode: note.scope.toNode,
-                  refs: note.refs,
-                  ...(titleChanged || back.title !== undefined ? { title: note.title } : {}),
-                }
-              : undefined,
-          },
-          refs: back.refs ?? note.refs,
-        }
-      : {}),
   };
   await saveNote(repo, restored, true, titleChanged);
   return restored;
@@ -378,12 +516,12 @@ export function suggestTitle(kind: NoteKind, scope: NoteScope): string {
 }
 
 /** Material for a note, in book order. Ranges read every chunk; subjects and questions the best matches. */
-export async function noteMaterials(repo: Repo, note: Pick<CanonNote, "bookId" | "kind" | "scope"> & Partial<Pick<CanonNote, "source" | "worldId" | "progress">>, path?: StoryNode[]): Promise<(NoteMaterial & { ordinal: number })[]> {
+export async function noteMaterials(repo: Repo, note: Pick<CanonNote, "bookId" | "kind" | "scope"> & Partial<Pick<CanonNote, "source" | "worldId" | "progress" | "previousContent">>, path?: StoryNode[]): Promise<(NoteMaterial & { ordinal: number })[]> {
   if (isStory(note)) return storyMaterials(repo, note, path);
   // 续整理 (D174): only the new range is read; the old note is merged in afterwards.
-  const update = note.progress?.update;
+  const update = effectiveNoteUpdate(note);
   if (update) {
-    const ranged = { ...note, scope: { ...note.scope, from: update.from, to: update.to }, progress: undefined };
+    const ranged = { ...note, scope: { ...note.scope, from: update.from, to: update.to }, progress: undefined, previousContent: undefined };
     const rows = await noteMaterials(repo, ranged);
     return note.kind === "plot" || note.kind === "timeline" ? rows : rows.filter((m) => m.section >= update.from && m.section <= update.to);
   }
@@ -481,11 +619,41 @@ export async function resolveStoryNoteScope(repo: Repo, worldId: string, scope: 
   const toNode = path[to]?.id;
   return { ...scope, to, ...(toNode ? { toNode } : {}) };
 }
-/** 按现在的路线重新整理: the note starts over on the current route; the old text and title stay as 上一版. */
+/** 按现在的路线重新整理: the note starts over on the current route; the old text, title, staleFrom and gaps stay as 上一版. */
 export function restartOnRoute(note: CanonNote, lastTurn: number): CanonNote {
-  return { ...note, content: "", previousContent: note.content || note.previousContent, status: "paused", scope: { ...note.scope, from: 0, to: lastTurn, toNode: undefined, staleFrom: undefined,
-    previous: note.content ? { to: note.scope.to, toNode: note.scope.toNode, refs: note.refs, title: note.title } : note.scope.previous },
-    progress: { parts: [], total: 0 }, updatedAt: new Date().toISOString() };
+  const hasCurrent = Boolean(note.content.trim());
+  return {
+    ...note,
+    content: "",
+    previousContent: hasCurrent ? note.content : note.previousContent,
+    status: "paused",
+    scope: {
+      ...note.scope,
+      from: 0,
+      to: lastTurn,
+      toNode: undefined,
+      staleFrom: undefined,
+      previous: hasCurrent
+        ? {
+            to: note.scope.to,
+            ...(note.scope.toNode !== undefined ? { toNode: note.scope.toNode } : {}),
+            refs: [...note.refs],
+            title: note.title,
+            ...(note.scope.staleFrom !== undefined ? { staleFrom: note.scope.staleFrom } : {}),
+            ...(note.progress.gaps?.length
+              ? {
+                  gaps: note.progress.gaps.map((g) => ({ ...g, sections: [...g.sections] })),
+                  ...(note.progress.parts?.length ? { parts: [...note.progress.parts] } : {}),
+                  ...(note.progress.batchSizes ? { batchSizes: [...note.progress.batchSizes] } : {}),
+                  ...(note.progress.materialKeys ? { materialKeys: [...note.progress.materialKeys] } : {}),
+                }
+              : {}),
+          }
+        : note.scope.previous,
+    },
+    progress: { parts: [], total: 0 },
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 /** 本局札记 that read turn `turn`, now edited: marked so writing and the notes page know (D183). */
@@ -523,11 +691,14 @@ export function turnLabel(index: number): string {
  * and the passages no chapter covers yet; a person, place or faction reads the
  * passages that name it; a question the passages that share its words.
  */
-async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"> & Partial<Pick<CanonNote, "worldId" | "progress">>, capturedPath?: StoryNode[]): Promise<(NoteMaterial & { ordinal: number })[]> {
+async function storyMaterials(repo: Repo, note: Pick<CanonNote, "kind" | "scope"> & Partial<Pick<CanonNote, "worldId" | "progress" | "previousContent">>, capturedPath?: StoryNode[]): Promise<(NoteMaterial & { ordinal: number })[]> {
   if (!note.worldId) return [];
   const path = capturedPath ?? await storyPath(repo, note.worldId);
   if (!path.length) return [];
-  const range = note.progress?.update ?? { from: Math.max(0, note.scope.from ?? 0), to: Math.min(path.length - 1, note.scope.to ?? path.length - 1) };
+  const activeUpdate = effectiveNoteUpdate(note);
+  const range = activeUpdate
+    ? { from: activeUpdate.from, to: Math.min(path.length - 1, activeUpdate.to) }
+    : { from: Math.max(0, note.scope.from ?? 0), to: Math.min(path.length - 1, note.scope.to ?? path.length - 1) };
   const splitLongText = (raw: string, limit = NOTE_BATCH_CHARS): string[] => {
     if (raw.length <= limit) return [raw];
     const chunks: string[] = [];
@@ -661,7 +832,29 @@ export function startNoteUpdate(note: CanonNote, to: number, syncTitle = false):
   return {
     ...note,
     status: "paused",
-    progress: { parts: [], total: 0, update: { base: note.content, from, to, ...(syncTitle ? { syncTitle: true } : {}) } },
+    progress: {
+      parts: [],
+      total: 0,
+      update: {
+        base: note.content,
+        from,
+        to,
+        ...(syncTitle ? { syncTitle: true } : {}),
+        baseTitle: note.title,
+        ...(note.scope.to !== undefined ? { baseTo: note.scope.to } : {}),
+        ...(note.scope.toNode !== undefined ? { baseToNode: note.scope.toNode } : {}),
+        baseRefs: [...note.refs],
+        ...(note.scope.staleFrom !== undefined ? { baseStaleFrom: note.scope.staleFrom } : {}),
+        ...(note.progress.gaps?.length
+          ? {
+              baseGaps: note.progress.gaps.map((g) => ({ ...g, sections: [...g.sections] })),
+              ...(note.progress.parts?.length ? { baseParts: [...note.progress.parts] } : {}),
+              ...(note.progress.batchSizes ? { baseBatchSizes: [...note.progress.batchSizes] } : {}),
+              ...(note.progress.materialKeys ? { baseMaterialKeys: [...note.progress.materialKeys] } : {}),
+            }
+          : {}),
+      },
+    },
     updatedAt: new Date().toISOString(),
   };
 }
@@ -1093,7 +1286,8 @@ export function noteFailure(error: unknown): { error: string; detail?: string } 
  */
 export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, runner: NoteRunner, signal: AbortSignal, onProgress: (note: CanonNote) => void, resume?: NoteResume): Promise<CanonNote> {
   const path = isStory(note) && note.worldId ? await storyPath(repo, note.worldId) : undefined;
-  const coveredTo = path ? Math.min(path.length - 1, note.progress.update?.to ?? note.scope.to ?? path.length - 1) : undefined;
+  const activeUpdate = effectiveNoteUpdate(note);
+  const coveredTo = path ? Math.min(path.length - 1, activeUpdate?.to ?? note.scope.to ?? path.length - 1) : undefined;
   const routeNode = coveredTo === undefined ? undefined : path?.[coveredTo]?.id;
   const initialPathSnapshots =
     path && coveredTo !== undefined && coveredTo >= 0
@@ -1108,14 +1302,24 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
   const materials = await noteMaterials(repo, note, path);
   if (!materials.length) {
     if (note.progress.update && !(note.progress.parts?.some(Boolean))) {
+      const u = note.progress.update;
+      const revertedTitle = u.baseTitle ?? note.title;
       const reverted: CanonNote = {
         ...note,
-        content: note.content || note.progress.update.base,
+        title: revertedTitle,
+        content: note.content || u.base,
+        refs: u.baseRefs ? [...u.baseRefs] : note.refs,
+        scope: {
+          ...note.scope,
+          ...(u.baseTo !== undefined ? { to: u.baseTo } : {}),
+          ...(u.baseToNode !== undefined ? { toNode: u.baseToNode } : {}),
+          ...(u.baseStaleFrom !== undefined ? { staleFrom: u.baseStaleFrom } : {}),
+        },
         status: "done",
-        progress: { parts: [], total: 0 },
+        progress: restoredProgress(u.baseGaps, u.baseParts, u.baseBatchSizes, u.baseMaterialKeys),
         updatedAt: new Date().toISOString(),
       };
-      await saveNote(repo, reverted, true);
+      await saveNote(repo, reverted, true, revertedTitle !== note.title);
       onProgress({ ...reverted });
     }
     throw new Error(emptyNoteMaterialMessage(note));
@@ -1145,7 +1349,8 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
       || resume.kind === "fill" && !resume.text.trim())) throw new Error("这批札记的进度已变，请重新打开后再试");
   const refs = [...new Set(materials.map((m) => m.section))];
   const merges = (note.progress.merges ?? []).map((level) => [...level]);
-  const update = note.progress.update;
+  const explicitUpdate = note.progress.update;
+  const update = effectiveNoteUpdate(note);
   const basis = () => parts.map((part) => (part ? "1" : "0")).join("");
   let mergeBasis = note.progress.mergeBasis ?? basis();
   const progress = (): NoteProgress => ({
@@ -1155,7 +1360,7 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     materialKeys,
     ...(gaps.length ? { gaps: [...gaps] } : {}),
     mergeBasis,
-    ...(update ? { update } : {}),
+    ...(explicitUpdate ? { update: explicitUpdate } : {}),
     ...(routeNode ? { routeNode } : {}),
     total: batchSizes.length + mergeRequests(batchSizes.length) + (update ? 1 : 0),
   });
@@ -1426,25 +1631,60 @@ export async function runNote(repo: Repo, note: CanonNote, bookTitle: string, ru
     // 上一版 preserves the previous saved text (and title) from before the update (V0) rather than overwriting it with V1_gap.
     const applied = !!update && !!note.scope.previous && (note.scope.to ?? -1) >= update.from;
     const titleUpdated = update ? !!update.syncTitle && nextTitle !== note.title : nextTitle !== current.title;
+    const prevBaseTo = update ? (update.baseTo ?? note.scope.to) : undefined;
+    const prevBaseStale = update
+      ? (update.baseStaleFrom ?? (note.scope.staleFrom !== undefined && (prevBaseTo === undefined || note.scope.staleFrom <= prevBaseTo) ? note.scope.staleFrom : undefined))
+      : undefined;
+    const cleanedExistingPrev: NoteScope["previous"] | undefined = applied && note.scope.previous
+      ? (() => {
+          const { updateFrom: _uf, syncTitle: _st, ...rest } = note.scope.previous;
+          return {
+            ...rest,
+            ...(titleUpdated && rest.title === undefined ? { title: note.title } : {}),
+            ...(gaps.length && update
+              ? { updateFrom: update.from, ...(update.syncTitle ? { syncTitle: true } : {}) }
+              : {}),
+          };
+        })()
+      : undefined;
     const scope = update
       ? {
           ...reached,
-          previous: applied
-            ? {
-                ...note.scope.previous,
-                ...(titleUpdated && note.scope.previous?.title === undefined ? { title: note.title } : {}),
-              }
+          previous: applied && cleanedExistingPrev
+            ? cleanedExistingPrev
             : {
-                to: note.scope.to,
-                toNode: note.scope.toNode,
-                refs: note.refs,
-                ...(titleUpdated ? { title: note.title } : {}),
+                ...(prevBaseTo !== undefined ? { to: prevBaseTo } : {}),
+                ...((update.baseToNode ?? note.scope.toNode) !== undefined ? { toNode: update.baseToNode ?? note.scope.toNode } : {}),
+                refs: [...(update.baseRefs ?? note.refs)],
+                title: update.baseTitle ?? note.title,
+                ...(prevBaseStale !== undefined ? { staleFrom: prevBaseStale } : {}),
+                ...(update.baseGaps?.length
+                  ? {
+                      gaps: update.baseGaps.map((g) => ({ ...g, sections: [...g.sections] })),
+                      ...(update.baseParts?.length ? { parts: [...update.baseParts] } : {}),
+                      ...(update.baseBatchSizes ? { batchSizes: [...update.baseBatchSizes] } : {}),
+                      ...(update.baseMaterialKeys ? { materialKeys: [...update.baseMaterialKeys] } : {}),
+                    }
+                  : {}),
+                ...(gaps.length
+                  ? { updateFrom: update.from, ...(update.syncTitle ? { syncTitle: true } : {}) }
+                  : {}),
               },
         }
       : reached;
-    // With gaps the parts stay, so a later retry of a gap merges again (and re-applies an update).
-    const settled: NoteProgress = gaps.length ? progress() : { parts: [], total: current.progress.total };
-    const updatedRefs = update && !isStory(note) ? [...new Set([...note.refs, ...refs])].sort((a, b) => a - b) : current.refs;
+    // Strip `update` and `failure` from final `done` progress; keep batch parts/keys only when gaps remain to retry.
+    const cur = progress();
+    const settled: NoteProgress = gaps.length
+      ? {
+          parts: cur.parts,
+          total: cur.total,
+          ...(cur.batchSizes ? { batchSizes: cur.batchSizes } : {}),
+          ...(cur.materialKeys ? { materialKeys: cur.materialKeys } : {}),
+          gaps: cur.gaps,
+        }
+      : { parts: [], total: current.progress.total };
+    const baseRefsForMerge = applied ? (note.scope.previous?.refs ?? []) : (update?.baseRefs ?? note.refs);
+    const updatedRefs = update && !isStory(note) ? [...new Set([...baseRefsForMerge, ...refs])].sort((a, b) => a - b) : current.refs;
     const prevSnapshot = update ? (applied ? (note.previousContent ?? update.base) : update.base) : undefined;
     await save(
       {

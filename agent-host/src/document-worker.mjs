@@ -6,8 +6,8 @@ import { parseBook } from "./document-parser.mjs";
 
 try {
   const {
-    path, name, version, operation, section = 0, offset = 0, charBudget = 4000,
-    through, boundBookHash, boundFileHash, fileHash, boundBookId, bookId, query,
+    path, name, version, operation, offset = 0, charBudget = 4000,
+    from, through, boundBookHash, boundFileHash, fileHash, boundBookId, bookId, query,
   } = workerData;
   const bytes = new Uint8Array(await fs.readFile(path));
   const actualFileHash = createHash("sha256").update(bytes).digest("hex");
@@ -26,19 +26,26 @@ try {
     await fs.rename(temporary, cachePath).catch(async () => { await fs.rm(temporary, { force: true }); });
   }
   const normalizedHash = createHash("sha256").update(JSON.stringify(book.sections.map(s => s.text))).digest("hex");
+  const hasBoundSpec = Boolean(
+    (typeof boundFileHash === "string" && boundFileHash)
+    || (typeof boundBookId === "string" && boundBookId)
+    || (typeof boundBookHash === "string" && boundBookHash),
+  );
   const matchesBoundBook = Boolean(
     (typeof boundFileHash === "string" && boundFileHash && (boundFileHash === actualFileHash || (typeof fileHash === "string" && fileHash && boundFileHash === fileHash)))
     || (typeof boundBookId === "string" && boundBookId && typeof bookId === "string" && bookId && boundBookId === bookId)
     || (typeof boundBookHash === "string" && boundBookHash && (boundBookHash === actualFileHash || boundBookHash === normalizedHash)),
   );
-  const sections = matchesBoundBook && Number.isSafeInteger(through) && through >= 0 ? book.sections.slice(0, through + 1) : book.sections;
+  const applyFence = matchesBoundBook || !hasBoundSpec;
+  const minSection = applyFence && Number.isSafeInteger(from) && from >= 0 ? from : 0;
+  const sections = applyFence && Number.isSafeInteger(through) && through >= 0 ? book.sections.slice(0, through + 1) : book.sections;
   const scalarLength = text => { let size = 0; for (const _ of text) size++; return size; };
   const take = (text, start, size) => { let pos = 0, result = ""; for (const ch of text) { if (pos >= start + size) break; if (pos >= start) result += ch; pos++; } return result; };
   let result = { title: book.title, format: book.format, version, fileHash: actualFileHash, normalizedHash, sectionCount: sections.length, untrusted: true };
   if (operation === "find") {
     if (typeof query !== "string" || !query || query.length > 512) throw new Error("请填写不超过512字的查找文字。");
     const hits = [];
-    for (let i = 0; i < sections.length && hits.length < 20; i++) {
+    for (let i = minSection; i < sections.length && hits.length < 20; i++) {
       const text = sections[i].text, found = text.indexOf(query);
       if (found < 0) continue;
       const at = scalarLength(text.slice(0, found)), start = Math.max(0, at - 160);
@@ -46,11 +53,12 @@ try {
     }
     result.hits = hits;
   } else {
-    if (!Number.isSafeInteger(section) || section < 0 || section >= sections.length) throw new Error("所选章节不存在或超出本次参考范围。");
+    const section = workerData.section == null ? (minSection > 0 ? minSection : 0) : workerData.section;
+    if (!Number.isSafeInteger(section) || section < minSection || section >= sections.length) throw new Error("所选章节不存在或超出本次参考范围。");
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("读取位置无效。");
     const current = sections[section], size = Math.min(24000, Math.max(1, Number(charBudget) || 4000));
     const text = take(current.text, offset, size), total = scalarLength(current.text);
-    const directoryOffset = Math.max(0, Math.floor(Number(workerData.sectionOffset) || 0)), directorySize = Math.min(100, Math.max(1, Number(workerData.pageSize) || 40));
+    const directoryOffset = Math.max(minSection, Math.floor(Number(workerData.sectionOffset) || 0)), directorySize = Math.min(100, Math.max(1, Number(workerData.pageSize) || 40));
     result = { ...result, section, sectionTitle: current.title, page: current.page, text, offset, total,
       nextOffset: Math.min(total, offset + scalarLength(text)), complete: offset + scalarLength(text) >= total,
       nextSectionOffset: directoryOffset + directorySize < sections.length ? directoryOffset + directorySize : null,

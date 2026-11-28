@@ -869,3 +869,136 @@ async fn queued_task_keeps_thinking_and_aux_model_and_discard_drafts_cleans_stal
     assert_eq!(after_task["result_json"]["pendingChanges"], json!([]));
     f.service.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn r42_queued_input_persists_reference_scope_atomically_and_auto_starts_with_it() {
+    let (f, mut peer) = Fixture::new();
+    {
+        let db = f.store.lock().unwrap();
+        db.execute(
+            "INSERT INTO source_books VALUES('b-q','排队原著','txt','test','{\"sections\":[{\"title\":\"一\",\"text\":\"甲\"},{\"title\":\"二\",\"text\":\"乙\"},{\"title\":\"三\",\"text\":\"丙\"}]}')",
+            [],
+        )
+        .unwrap();
+        db.execute_batch(
+            "INSERT INTO source_sections VALUES('b-q',0,'一',1),('b-q',1,'二',2),('b-q',2,'三',3);
+             INSERT INTO source_chunks VALUES('b-q',0,0,'甲'),('b-q',1,1,'乙'),('b-q',2,2,'丙');",
+        )
+        .unwrap();
+        let mut st: Value = serde_json::from_str(
+            &db.query_row("SELECT state_json FROM states WHERE node_id='node'", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+        )
+        .unwrap();
+        st["source"] = json!({"bookId": "b-q", "through": null, "position": 0, "method": "search", "instructions": ""});
+        db.execute("UPDATE states SET state_json=? WHERE node_id='node'", [st.to_string()]).unwrap();
+    }
+
+    let (prompt1_ready_tx, prompt1_ready_rx) = tokio::sync::oneshot::channel();
+    let (finish1_tx, finish1_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let peer_task = tokio::spawn(async move {
+        // Task 1: wait until queued input is inserted while Task 1 is active, then finish Task 1 so Task 2 auto-dequeues!
+        let create1 = peer.read().await;
+        let dir1 = std::path::PathBuf::from(create1["params"]["directory"].as_str().unwrap());
+        peer.reply(&create1, json!({"sessionId": "pi-continued", "sessionFile": dir1.join("sessions/owned.jsonl")})).await;
+        let prompt1 = peer.read().await;
+        assert_eq!(prompt1["method"], "prompt");
+        let task1 = prompt1["params"]["taskId"].as_str().unwrap().to_owned();
+        prompt1_ready_tx.send(()).unwrap();
+        finish1_rx.await.unwrap();
+        assert_eq!(peer.finish(&task1, "r42-fin-1").await["ok"], true);
+        peer.reply(&prompt1, json!({"text": "第一项完成"})).await;
+        let close1 = peer.read().await;
+        peer.reply(&close1, Value::Null).await;
+
+        // Task 2 (auto-started from queued input):
+        let create2 = peer.read().await;
+        let dir2 = std::path::PathBuf::from(create2["params"]["directory"].as_str().unwrap());
+        peer.reply(&create2, json!({"sessionId": "pi-continued", "sessionFile": dir2.join("sessions/owned.jsonl")})).await;
+        let prompt2 = peer.read().await;
+        assert_eq!(prompt2["method"], "prompt");
+        let task2 = prompt2["params"]["taskId"].as_str().unwrap().to_owned();
+        assert_eq!(peer.finish(&task2, "r42-fin-2").await["ok"], true);
+        peer.reply(&prompt2, json!({"text": "第二项完成"})).await;
+        let close2 = peer.read().await;
+        peer.reply(&close2, Value::Null).await;
+        done_tx.send(()).unwrap();
+        peer.eof().await;
+    });
+
+    let session = f.session().await;
+    let first = bounded(f.start(&session)).await;
+    let first_id = first["taskId"].as_str().unwrap().to_owned();
+    bounded(prompt1_ready_rx).await.unwrap();
+
+    // Invalid `referenceScope` (`from > through`) is rejected immediately:
+    assert!(
+        f.service
+            .request(json!({
+                "op": "enqueue_input",
+                "id": "queued-bad",
+                "taskId": first_id,
+                "delivery": "queued",
+                "text": "无效范围",
+                "request": {
+                    "referenceScope": {"bookId": "b-q", "from": 2, "through": 1, "explicitRange": true}
+                }
+            }))
+            .await
+            .is_err()
+    );
+
+    // Valid `referenceScope` is persisted atomically in the initial `pi_inputs` row:
+    let queued = f
+        .service
+        .request(json!({
+            "op": "enqueue_input",
+            "id": "queued-scoped",
+            "taskId": first_id,
+            "delivery": "queued",
+            "text": "只读第二至第三章",
+            "request": {
+                "readOnly": true,
+                "referenceScope": {"bookId": "b-q", "from": 1, "through": 2, "explicitRange": true}
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(queued["accepted"], true);
+    {
+        let db = f.store.lock().unwrap();
+        let saved: String = db
+            .query_row("SELECT content_json FROM pi_inputs WHERE id='queued-scoped'", [], |r| r.get(0))
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            parsed["request"]["referenceScope"],
+            json!({"bookId": "b-q", "from": 1, "through": 2, "explicitRange": true})
+        );
+    }
+
+    finish1_tx.send(()).unwrap();
+    bounded(done_rx).await.unwrap();
+    f.idle().await;
+
+    // Verify the auto-dequeued second task inherited `from: 1, through: 2` in `pi_tasks.metadata_json`:
+    {
+        let db = f.store.lock().unwrap();
+        let meta_raw: String = db
+            .query_row(
+                "SELECT metadata_json FROM pi_tasks WHERE session_id=? AND id<>?",
+                rusqlite::params![session, first_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let meta: Value = serde_json::from_str(&meta_raw).unwrap();
+        assert_eq!(meta["referenceScope"]["bookId"], "b-q");
+        assert_eq!(meta["referenceScope"]["from"], 1);
+        assert_eq!(meta["referenceScope"]["through"], 2);
+        assert_eq!(meta["referenceScope"]["explicitRange"], true);
+    }
+
+    bounded(f.service.shutdown()).await.unwrap();
+    bounded(peer_task).await.unwrap();
+}

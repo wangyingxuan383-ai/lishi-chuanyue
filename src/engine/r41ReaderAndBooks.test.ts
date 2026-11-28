@@ -46,15 +46,19 @@ import {
 } from "./sources/resplit";
 import { newBinding, type SourceBook } from "./sources/types";
 import { sampleState } from "./testing/fixtures";
+import { filterExcerptsForWorldRoute } from "../ui/components/ExcerptsSheet";
 import {
   applyPendingScrollAction,
   classifyBookParagraph,
   collectNovelRouteNodeIds,
+  encodeWorldNovelAnnotationNodeId,
   filterParagraphHighlights,
   filterWorldNovelBookmarks,
+  filterWorldNovelHighlights,
   findCurrentSectionBookmark,
   locateNovelNodeTarget,
   resolveHighlightSpans,
+  resolveWorldNovelBookmarkJump,
   type PendingScrollAction,
   type ScrollableStageLike,
 } from "../ui/screens/ReaderScreen";
@@ -1216,5 +1220,419 @@ describe("R41-T006: Lossless EPUB parsing & round-trip deduplication (E18)", () 
     expect(classified.some((p) => p.kind === "divider")).toBe(true);
     expect(classified.some((p) => p.isColophon === true && p.text === "—— 未完待续 ——")).toBe(true);
     expect(classifyBookParagraph("◇")).toEqual({ kind: "divider", text: "◇" });
+  });
+});
+
+describe("R42-T004: Copy-on-write fork polish, preface/appendix isolation, stale book notes & handoff", () => {
+  it("disambiguates forked resplit titles, moves pinned flag off old edition, and detaches world-novel origin on in-place resplit", async () => {
+    const raw = [
+      "【001】暮鼓初响\n长安西市灯火渐次点亮。",
+      "【002】夜渡渭水\n扁舟穿过寒雾直抵北岸。",
+    ].join("\n\n");
+    await saveBook(repo, {
+      id: "fork-src",
+      title: "渭水夜航录",
+      format: "txt",
+      createdAt: "2026-11-28T00:00:00.000Z",
+      sections: [{ title: "正文", text: raw }],
+    });
+    await updateBookShelfPref(repo, "fork-src", {
+      author: "关中客",
+      coverTone: 4,
+      pinned: true,
+    });
+
+    const st = sampleState();
+    st.source = newBinding("fork-src", false);
+    await repo.createWorld({
+      title: "渭水同人",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "渭水秋风急。", state: st },
+    });
+
+    const fork1 = await applyBookResplit(repo, "fork-src", { preset: "numbered" });
+    expect(fork1.forked).toBe(true);
+    expect(fork1.title).toBe("渭水夜航录（重分章）");
+    expect((await getBook(repo, fork1.bookId))?.title).toBe("渭水夜航录（重分章）");
+
+    // Pinned flag moved from old referenced edition to newly forked copy (no duplicate pinned cards!)
+    let prefs = await getAllBookShelfPrefs(repo);
+    expect(prefs["fork-src"]?.pinned).toBe(false);
+    expect(prefs[fork1.bookId]?.pinned).toBe(true);
+
+    // Forking a second time (or forking the already-suffixed copy once referenced) increments to （重分章 2）
+    const fork2 = await applyBookResplit(repo, "fork-src", { preset: "numbered" });
+    expect(fork2.forked).toBe(true);
+    expect(fork2.title).toBe("渭水夜航录（重分章 2）");
+
+    // Unreferenced world-novel TXT book resplit in-place detaches world-novel origin so later re-compile won't overwrite it!
+    const base = sampleState();
+    const { world } = await repo.createWorld({
+      title: "朔方烽燧记",
+      eraId: "tang-748",
+      opening: {
+        parentId: null,
+        kind: "opening",
+        narrative: "第1节 烽火初起\n\n塞上秋风猎猎。\n\n第2节 铁骑出关\n\n鼓角声震四野。",
+        state: base,
+      },
+    });
+    const compiled1 = await saveWorldNovelToLibrary(repo, world.id);
+    const resplitCustom = await applyBookResplit(repo, compiled1.bookId, {
+      preset: "custom",
+      customPattern: "^第\\d+节.*",
+    });
+    expect(resplitCustom.forked).toBe(false);
+    expect(resplitCustom.bookId).toBe(compiled1.bookId);
+
+    prefs = await getAllBookShelfPrefs(repo);
+    expect(prefs[compiled1.bookId]?.origin).toBe("imported");
+    expect(prefs[compiled1.bookId]?.sourceWorldId).toBeUndefined();
+
+    // Re-compiling the world allocates a fresh book instead of overwriting the user's custom split!
+    const compiled2 = await saveWorldNovelToLibrary(repo, world.id);
+    expect(compiled2.bookId).not.toBe(compiled1.bookId);
+    expect(compiled2.title).toBe("朔方烽燧记（新编）");
+    const customStillIntact = await getBook(repo, compiled1.bookId);
+    expect(customStillIntact?.sections.length).toBe(resplitCustom.sectionCount);
+  });
+
+  it("clones & re-anchors bookmarks/highlights/progress, moves pinned, and disambiguates title when saveWorldNovelToLibrary forks", async () => {
+    const base = sampleState();
+    const { world, node: opening, line: mainLine } = await repo.createWorld({
+      title: "汴梁风物志",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "州桥明月夜，汴水波光如练。", state: base },
+    });
+    const turn1 = await repo.appendNode(world.id, mainLine.id, {
+      parentId: opening.id,
+      kind: "turn",
+      actionMode: "do",
+      actionText: "步入夜市",
+      narrative: "马行街茶坊灯烛荧煌，琵琶声隔帘传来。",
+      state: { ...base, time: { ...base.time, elapsedMinutes: 60 } },
+    });
+
+    const v1 = await saveWorldNovelToLibrary(repo, world.id, { lineId: mainLine.id });
+    expect(v1.forked).toBe(false);
+    expect(v1.title).toBe("汴梁风物志");
+
+    await updateBookShelfPref(repo, v1.bookId, { pinned: true, coverTone: 6 });
+
+    const v1Book = (await getBook(repo, v1.bookId))!;
+    const chapIdx = v1Book.sections.findIndex((s) => s.text.includes("马行街茶坊灯烛荧煌"));
+    expect(chapIdx).toBeGreaterThanOrEqual(0);
+
+    await addReaderBookmark(repo, {
+      targetType: "book",
+      targetId: v1.bookId,
+      sectionIndex: chapIdx,
+      sectionTitle: v1Book.sections[chapIdx]!.title,
+      snippet: "马行街茶坊灯烛荧煌",
+      paragraphIndex: 0,
+      nodeId: null,
+    });
+    await addReaderHighlight(repo, {
+      targetType: "book",
+      targetId: v1.bookId,
+      worldId: null,
+      sectionIndex: chapIdx,
+      sectionTitle: v1Book.sections[chapIdx]!.title,
+      paragraphIndex: 0,
+      charStart: 0,
+      charEnd: 9,
+      selectedText: "马行街茶坊灯烛荧煌",
+      note: "夜市繁华",
+      color: "cinnabar",
+      nodeId: null,
+    });
+    await addReaderHighlight(repo, {
+      targetType: "book",
+      targetId: v1.bookId,
+      worldId: null,
+      sectionIndex: 1,
+      sectionTitle: v1Book.sections[1]!.title,
+      paragraphIndex: 0,
+      charStart: 0,
+      charEnd: 5,
+      selectedText: "州桥明月夜",
+      note: "旧开篇批注",
+      color: "amber",
+      nodeId: null,
+    });
+    await saveReaderProgress(repo, {
+      targetType: "book",
+      targetId: v1.bookId,
+      sectionIndex: chapIdx,
+      pageIndex: 1,
+      scrollRatio: 0.4,
+      anchorText: "马行街茶坊灯烛荧煌",
+      nodeId: null,
+    });
+
+    // Cite v1 in a sequel world so v1 becomes copy-on-write protected
+    const sequelState = sampleState();
+    sequelState.source = newBinding(v1.bookId, false);
+    await repo.createWorld({
+      title: "汴梁续集",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "旧事重提。", state: sequelState },
+    });
+
+    // Rewrite opening text and append more turns on mainLine, then re-compile -> forks v2!
+    await repo.updateNarrative(opening.id, "虹桥晓雾散尽，漕船千帆竞发。");
+    await repo.appendNode(world.id, mainLine.id, {
+      parentId: turn1.id,
+      kind: "turn",
+      actionMode: "do",
+      actionText: "登楼凭栏",
+      narrative: "樊楼高处俯瞰全城烟火。",
+      state: { ...base, time: { ...base.time, elapsedMinutes: 120 } },
+    });
+
+    const v2 = await saveWorldNovelToLibrary(repo, world.id, { lineId: mainLine.id });
+    expect(v2.forked).toBe(true);
+    expect(v2.bookId).not.toBe(v1.bookId);
+    expect(v2.title).toBe("汴梁风物志（新编）");
+
+    // Pinned moved from v1 -> v2, coverTone inherited!
+    const prefs = await getAllBookShelfPrefs(repo);
+    expect(prefs[v1.bookId]?.pinned).toBe(false);
+    expect(prefs[v2.bookId]?.pinned).toBe(true);
+    expect(prefs[v2.bookId]?.coverTone).toBe(6);
+
+    // Bookmarks, highlights, and progress cloned & re-anchored onto v2!
+    const v2Bms = await listReaderBookmarks(repo, "book", v2.bookId);
+    expect(v2Bms).toHaveLength(1);
+    expect(v2Bms[0]?.snippet).toBe("马行街茶坊灯烛荧煌");
+
+    const v2Hls = await listReaderHighlights(repo, { targetType: "book", targetId: v2.bookId });
+    expect(v2Hls).toHaveLength(2);
+    const kept = v2Hls.find((h) => h.note === "夜市繁华")!;
+    const rewritten = v2Hls.find((h) => h.note === "旧开篇批注")!;
+    expect(kept.charEnd).toBeGreaterThan(kept.charStart);
+    expect(rewritten.charStart).toBe(0);
+    expect(rewritten.charEnd).toBe(0);
+
+    // Fix A: orphan `book` highlight whose text was rewritten MUST NOT match unrelated paragraph 0!
+    const rewrittenPara = { kind: "prose" as const, text: "虹桥晓雾散尽，漕船千帆竞发。" };
+    expect(filterParagraphHighlights([rewritten], rewrittenPara, 0, [rewrittenPara], "book")).toEqual([]);
+    const matchingPara = { kind: "prose" as const, text: "马行街茶坊灯烛荧煌，琵琶声隔帘传来。" };
+    expect(filterParagraphHighlights([kept], matchingPara, 0, [matchingPara], "book")).toHaveLength(1);
+
+    const v2Prog = await getReaderProgress(repo, "book", v2.bookId);
+    expect(v2Prog?.sectionIndex).toBe(kept.sectionIndex);
+
+    // Citing v2 and re-compiling again increments title to （新编 2）!
+    const sequelState2 = sampleState();
+    sequelState2.source = newBinding(v2.bookId, false);
+    await repo.createWorld({
+      title: "汴梁三编引用",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "再续前缘。", state: sequelState2 },
+    });
+    const v3 = await saveWorldNovelToLibrary(repo, world.id, { lineId: mainLine.id });
+    expect(v3.forked).toBe(true);
+    expect(v3.title).toBe("汴梁风物志（新编 2）");
+  });
+
+  it("isolates world_novel preface/appendix line:${lineId} & legacy null-nodeId bookmarks/highlights across branches and relocates shifted sections", async () => {
+    const base = sampleState();
+    const { world, node: opening, line: lineA } = await repo.createWorld({
+      title: "陇右双线传",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "陇山积雪初融。", state: base },
+    });
+
+    // Branch A has exclusive cast member & historical deviation in preface/appendix
+    const stateA = {
+      ...base,
+      time: { ...base.time, elapsedMinutes: 60 },
+      people: [
+        ...base.people,
+        {
+          id: "p-exclusive-a",
+          name: "哥舒翰",
+          aliases: [],
+          role: "陇右节度副使",
+          attitude: "亲近" as const,
+          notes: "镇守临洮要塞。",
+          alive: true,
+          lastSeenMinute: 60,
+        },
+      ],
+      deviations: ["主线独有变迁：提前收复石堡城"],
+    };
+    let tailA = await repo.appendNode(world.id, lineA.id, {
+      parentId: opening.id,
+      kind: "turn",
+      actionMode: "do",
+      actionText: "拜谒军帐",
+      narrative: "主线军帐议事，旌旗蔽空。",
+      state: stateA,
+    });
+
+    // Branch B diverges from opening without Branch A's cast/deviation
+    const lineB = await repo.createLine(world.id, opening.id, "河西支线", false);
+    await repo.appendNode(world.id, lineB.id, {
+      parentId: opening.id,
+      kind: "turn",
+      actionMode: "do",
+      actionText: "西出阳关",
+      narrative: "支线驼铃悠扬，大漠孤烟直。",
+      state: { ...base, time: { ...base.time, elapsedMinutes: 90 } },
+    });
+
+    const novelA1 = (await buildNovelBook(repo, world.id, { lineId: lineA.id }))!;
+    const novelB = (await buildNovelBook(repo, world.id, { lineId: lineB.id }))!;
+    const routeIdsA1 = collectNovelRouteNodeIds(novelA1);
+    const routeIdsB = collectNovelRouteNodeIds(novelB);
+
+    const prefaceA = novelA1.sections.find((s) => s.kind === "preface")!;
+    const appendixA1 = novelA1.sections.find((s) => s.kind === "appendix")!;
+    const prefaceB = novelB.sections.find((s) => s.kind === "preface")!;
+    const appendixB = novelB.sections.find((s) => s.kind === "appendix")!;
+
+    // 1. Tagging helper produces `line:${lineId}` ONLY when targetType === "world_novel" & para.nodeId == null
+    expect(encodeWorldNovelAnnotationNodeId("world_novel", null, lineA.id)).toBe(`line:${lineA.id}`);
+    expect(encodeWorldNovelAnnotationNodeId("world_novel", tailA.id, lineA.id)).toBe(tailA.id);
+    expect(encodeWorldNovelAnnotationNodeId("book", null, lineA.id)).toBeNull();
+
+    // Create a `line:${lineA.id}` bookmark & highlight on Preface (shared text "开局纪事" / protagonist bio)
+    // AND a legacy `nodeId: null` bookmark & highlight on Appendix ("提前收复石堡城")
+    const bmPrefaceTagged = await addReaderBookmark(repo, {
+      targetType: "world_novel",
+      targetId: world.id,
+      sectionIndex: prefaceA.index,
+      sectionTitle: prefaceA.title,
+      snippet: prefaceA.paragraphs[0]!.text.slice(0, 24),
+      paragraphIndex: 0,
+      nodeId: `line:${lineA.id}`,
+    });
+    const bmAppendixLegacy = await addReaderBookmark(repo, {
+      targetType: "world_novel",
+      targetId: world.id,
+      sectionIndex: appendixA1.index,
+      sectionTitle: appendixA1.title,
+      snippet: "提前收复石堡城",
+      paragraphIndex: appendixA1.paragraphs.length - 1,
+      nodeId: null,
+    });
+
+    const hlPrefaceTagged = await addReaderHighlight(repo, {
+      targetType: "world_novel",
+      targetId: world.id,
+      worldId: world.id,
+      sectionIndex: prefaceA.index,
+      sectionTitle: prefaceA.title,
+      paragraphIndex: 0,
+      charStart: 0,
+      charEnd: 6,
+      selectedText: prefaceA.paragraphs[0]!.text.slice(0, 6),
+      note: "主线卷首批注",
+      color: "cinnabar",
+      nodeId: `line:${lineA.id}`,
+    });
+    const hlAppendixLegacy = await addReaderHighlight(repo, {
+      targetType: "world_novel",
+      targetId: world.id,
+      worldId: world.id,
+      sectionIndex: appendixA1.index,
+      sectionTitle: appendixA1.title,
+      paragraphIndex: appendixA1.paragraphs.length - 1,
+      charStart: 0,
+      charEnd: 7,
+      selectedText: "提前收复石堡城",
+      note: "旧版附录批注",
+      color: "bamboo",
+      nodeId: null,
+    });
+
+    const allBms = [bmPrefaceTagged, bmAppendixLegacy];
+    const allHls = [hlPrefaceTagged, hlAppendixLegacy];
+
+    // On Branch B: NEITHER `line:${lineA.id}` NOR legacy `null` Branch-A-only snippet may leak!
+    expect(filterWorldNovelBookmarks(allBms, routeIdsB, novelB.sections, lineB.id)).toEqual([]);
+    expect(findCurrentSectionBookmark(allBms, "world_novel", prefaceB.index, prefaceB, lineB.id)).toBeNull();
+    expect(findCurrentSectionBookmark(allBms, "world_novel", appendixB.index, appendixB, lineB.id)).toBeNull();
+    expect(filterWorldNovelHighlights(allHls, routeIdsB, novelB.sections, lineB.id)).toEqual([]);
+    expect(
+      filterParagraphHighlights(allHls, prefaceB.paragraphs[0]!, 0, prefaceB.paragraphs, "world_novel", lineB.id),
+    ).toEqual([]);
+
+    // ExcerptsSheet route filter matches ReaderScreen visibleHighlights count on both branches!
+    const sheetHlsOnB = await filterExcerptsForWorldRoute(repo, allHls, world.id, {
+      lineId: lineB.id,
+      routeNodeIds: routeIdsB,
+    });
+    expect(sheetHlsOnB).toEqual([]);
+    const sheetHlsOnA = await filterExcerptsForWorldRoute(repo, allHls, world.id, {
+      lineId: lineA.id,
+      routeNodeIds: routeIdsA1,
+    });
+    expect(sheetHlsOnA).toHaveLength(2);
+
+    // On Branch A: append 12 more turns so chapter count grows and Appendix `sectionIndex` shifts!
+    for (let i = 1; i <= 12; i++) {
+      tailA = await repo.appendNode(world.id, lineA.id, {
+        parentId: tailA.id,
+        kind: "turn",
+        actionMode: "do",
+        actionText: `行军第${i}程`,
+        narrative: `第${i}程军报频传，烽火连天。`,
+        state: { ...stateA, time: { ...stateA.time, elapsedMinutes: 60 + i * 60 } },
+      });
+    }
+    const novelA2 = (await buildNovelBook(repo, world.id, { lineId: lineA.id }))!;
+    const routeIdsA2 = collectNovelRouteNodeIds(novelA2);
+    const appendixA2 = novelA2.sections.find((s) => s.kind === "appendix")!;
+    expect(appendixA2.index).toBeGreaterThan(appendixA1.index);
+
+    // Shifted Appendix bookmark & highlight still match on Branch A and relocate cleanly by `sectionTitle`!
+    expect(filterWorldNovelBookmarks(allBms, routeIdsA2, novelA2.sections, lineA.id)).toHaveLength(2);
+    expect(filterWorldNovelHighlights(allHls, routeIdsA2, novelA2.sections, lineA.id)).toHaveLength(2);
+    expect(
+      findCurrentSectionBookmark(allBms, "world_novel", appendixA2.index, appendixA2, lineA.id)?.id,
+    ).toBe(bmAppendixLegacy.id);
+
+    const tocA2 = novelA2.sections.map((s) => ({ title: s.title }));
+    const jumpLegacy = resolveWorldNovelBookmarkJump(novelA2, tocA2, bmAppendixLegacy);
+    expect(jumpLegacy.sectionIndex).toBe(appendixA2.index);
+    expect(novelA2.sections[jumpLegacy.sectionIndex]!.paragraphs[jumpLegacy.paragraphIndex]!.text).toContain(
+      "提前收复石堡城",
+    );
+
+    const bmAppendixTagged = { ...bmAppendixLegacy, nodeId: `line:${lineA.id}` };
+    const jumpTagged = resolveWorldNovelBookmarkJump(novelA2, tocA2, bmAppendixTagged);
+    expect(jumpTagged.sectionIndex).toBe(appendixA2.index);
+  });
+
+  it("ignores superseded failed turns in buildReaderAskHandoff when a subsequent turn succeeded", () => {
+    const turns: AskTurn[] = [
+      {
+        q: "早期连接失败的问题",
+        a: "连接中断，请重试。",
+        pending: false,
+        incomplete: true,
+      },
+      {
+        q: "后续成功回答的问题",
+        a: "这段典出《汉书·西域传》。",
+        pending: false,
+        incomplete: false,
+      },
+    ];
+    const handoff = buildReaderAskHandoff({
+      bookTitle: "陇右行",
+      sectionIndex: 0,
+      sectionTitle: "第一回",
+      selectedText: "阳关大道尘土飞扬。",
+      turns,
+      question: "",
+    });
+    expect(handoff.asked).toHaveLength(1);
+    expect(handoff.asked[0]?.a).toBe("这段典出《汉书·西域传》。");
+    // Must NOT resurrect "早期连接失败的问题" into draftQuestion after a later turn succeeded!
+    expect(handoff.draftQuestion).toBe("");
   });
 });

@@ -745,3 +745,104 @@ fn workspace_allows_abc_b_edits_repeated_remove_zero_soft_pin_rebase_and_checks_
     }));
     assert_eq!(f.gateway.finish_readonly_reply(&ro.permit, "目前资料不足，无法确认。").unwrap(), false);
 }
+
+#[test]
+fn r42_fresh_preview_blocks_resume_and_cross_route_rebase_rewires_edit_route_id() {
+    let f = Fixture::new();
+    // Create a branch `branch2` advancing from `n1` -> `n3`:
+    {
+        let db = f.store.lock().unwrap();
+        db.execute(
+            "INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,record_json,created_at) VALUES('n3','world','n1',3,'turn','支线买茶花了四文',?,'test')",
+            [json!({"money": -4, "time": 5}).to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO states(node_id,state_json) VALUES('n3',?)",
+            [state(4, 15).to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO lines(id,world_id,name,node_id,kind,created_at) VALUES('branch2','world','茶肆支线','n3','line','test')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let task = f.start("preview-cross-route", "preview", false);
+    // Stage an edit on `n1` explicitly bound to `routeId: "line"` (the active line when staged):
+    f.call(
+        &task,
+        "edit-n1-narr",
+        "stage_edit",
+        json!({
+            "kind": "node",
+            "id": "n1",
+            "routeId": "line",
+            "path": "/narrative",
+            "operation": "set",
+            "value": "借了一文（已校订）",
+            "summary": "校订第一段正文"
+        }),
+    );
+    f.call(
+        &task,
+        "edit-n1-rec",
+        "stage_edit",
+        json!({
+            "kind": "node",
+            "id": "n1",
+            "routeId": "line",
+            "path": "/record",
+            "operation": "set",
+            "value": {"money": -1, "time": 5},
+            "summary": "校订第一段扣款"
+        }),
+    );
+    let previewed = f.finish(&task, "mk-preview");
+    assert_eq!(previewed["data"]["status"], "previewed");
+
+    // 1) Calling `resume_task` on a fresh, un-diverged `previewed` task MUST fail without clearing `result_json`:
+    assert!(
+        f.gateway.resume_task(&task.id).is_err(),
+        "fresh previewed task must not be resumable or lose result_json"
+    );
+    let intact = f.gateway.0.task(&task.id).unwrap();
+    assert_eq!(intact["status"], "previewed");
+    assert_eq!(intact["result_json"]["status"], "previewed");
+
+    // 2) Switch active route to `branch2`, then `resume_task` rebases onto `branch2` and rewires `edit.routeId`:
+    f.store
+        .lock()
+        .unwrap()
+        .execute("UPDATE worlds SET current_line_id='branch2' WHERE id='world'", [])
+        .unwrap();
+    let resumed_permit = f.gateway.resume_task(&task.id).unwrap();
+    let rebased_row = f.gateway.0.task(&task.id).unwrap();
+    assert_eq!(rebased_row["line_id"], "branch2");
+    assert_eq!(
+        rebased_row["workspace_json"]["edits"][0]["routeId"],
+        "branch2",
+        "cross-route rebase must update edit.routeId from old_line to target_line"
+    );
+
+    // Re-finish preview on `branch2` and adopt: `branch2` replays `n1 -> n3` (money: 10 - 1 - 4 = 5) while `line` stays untouched (`n2`, money = 5):
+    let resumed_task = Task {
+        id: task.id.clone(),
+        world_version: rebased_row["base_world_version"].as_str().unwrap().into(),
+        permit: resumed_permit,
+    };
+    let repreview = f.finish(&resumed_task, "re-preview");
+    assert_eq!(repreview["data"]["status"], "previewed");
+    let adopted = f.gateway.adopt_preview(&task.id).unwrap();
+    assert_eq!(adopted["status"], "committed");
+
+    let line_head: String = f
+        .store
+        .lock()
+        .unwrap()
+        .query_row("SELECT node_id FROM lines WHERE id='line'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(line_head, "n2", "old route `line` must not be mutated after cross-route rebase onto `branch2`");
+    assert_eq!(f.head_state("branch2")["protagonist"]["stats"]["money"].as_f64(), Some(5.0));
+}

@@ -436,7 +436,7 @@ export default function AgentConversation({ route }: { route: AgentRoute }) {
         const [next] = await Promise.all([client.pollSession(sessionId), syncActiveWorldLine()]);
         if (!live || sessionRef.current !== sessionId) return;
         lastRead = Date.now();
-        const watched = next.tasks.slice(-8).filter((task) => !task.runId.startsWith("imported:") && task.status !== "archived").map((task) => ({ id: task.runId, status: task.status, version: `${task.status}:${task.updatedAt ?? ""}` }));
+        const watched = next.tasks.slice(-8).filter((task) => !task.runId.startsWith("imported:") && task.status !== "archived").map((task) => ({ id: task.runId, status: task.status, version: `${task.status}:${task.updatedAt ?? ""}:${task.previewStale === true ? "1" : "0"}` }));
         const read = await Promise.all(watched.map(async ({ id, status, version }) => {
           const previous = snapshotCache.current[id];
           if (!agentSnapshotNeedsRead(previous, status, snapshotVersions.current[id] === version)) return [id, previous!] as const;

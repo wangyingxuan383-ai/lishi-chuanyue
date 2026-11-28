@@ -677,3 +677,178 @@ fn stage_edits_supports_empty_path_dash_append_and_collection_element_ref_append
     let prot = f.call(&task, "read-prot", "read_resource", json!({"kind": "protagonist"}));
     assert_eq!(prot["value"]["items"], json!(["北柴胡护心散"]));
 }
+
+#[test]
+fn r42_scoped_book_from_gt_zero_preserves_true_indices_fences_edits_keeps_story_notes_and_guards_original_opening_lines() {
+    let f = Fixture::new(json!({
+        "bookId": "book4",
+        "through": null,
+        "position": 2,
+        "method": "search",
+        "instructions": ""
+    }));
+    {
+        let db = f.store.lock().unwrap();
+        let sections_json = json!({
+            "id": "book4",
+            "title": "四章原著",
+            "format": "txt",
+            "createdAt": "test",
+            "summary": "FORBIDDEN_SUMMARY",
+            "sections": [
+                {"title": "第一章", "text": "第一章禁读前文 FORBIDDEN_SEC0"},
+                {"title": "第二章", "text": "第二章禁读前文 FORBIDDEN_SEC1"},
+                {"title": "第三章", "text": "第三章允许正文 ALLOWED_SEC2"},
+                {"title": "第四章", "text": "第四章禁读后文 FORBIDDEN_SEC3"}
+            ]
+        });
+        db.execute(
+            "INSERT INTO source_books VALUES('book4','四章原著','txt','test',?)",
+            [sections_json.to_string()],
+        )
+        .unwrap();
+        db.execute_batch(
+            "INSERT INTO source_sections VALUES('book4',0,'第一章',1),('book4',1,'第二章',2),('book4',2,'第三章',3),('book4',3,'第四章',4);
+             INSERT INTO source_chunks VALUES('book4',0,0,'第一章禁读前文 FORBIDDEN_SEC0'),('book4',1,1,'第二章禁读前文 FORBIDDEN_SEC1'),('book4',2,2,'第三章允许正文 ALLOWED_SEC2'),('book4',3,3,'第四章禁读后文 FORBIDDEN_SEC3');
+             INSERT INTO canon_notes(id,book_id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES
+               ('cn-early','book4',NULL,'person','早章札记','{}','第一章秘密 FORBIDDEN_SEC0','[0]','','done',1,'{}','t','t'),
+               ('cn-allowed','book4',NULL,'person','三章札记','{}','第三章线索 ALLOWED_NOTE2','[2]','','done',1,'{}','t','t'),
+               ('cn-late','book4',NULL,'person','晚章札记','{}','第四章剧透 FORBIDDEN_SEC3','[3]','','done',1,'{}','t','t');
+             INSERT INTO story_notes(id,world_id,kind,title,scope_json,content,refs_json,model,status,active,progress_json,created_at,updated_at) VALUES
+               ('sn-route','world','plot','本局推进札记',json_object('toNode','opening'),'本局札记：主角带着暗号线索','[]','','done',1,'{}','t','t');",
+        )
+        .unwrap();
+    }
+
+    let row = f
+        .gateway
+        .start_task(
+            "session",
+            "r42-book-task",
+            "只校对第三章并查本局札记",
+            "preview",
+            false,
+            json!({"model": "no-model-request"}),
+            json!({"referenceScope": {"bookId": "book4", "from": 2, "through": 2, "explicitRange": true}}),
+        )
+        .unwrap();
+    let task = Task {
+        id: "r42-book-task".into(),
+        version: row["base_world_version"].as_str().unwrap().into(),
+        permit: f.gateway.permit("r42-book-task").unwrap(),
+    };
+
+    // 1) `read_canon_notes` under `agent.referenceScope` (from=2, through=2) preserves `story_notes` while fencing `canon_notes` to section 2:
+    let notes = f.call(&task, "read-notes", "read_canon_notes", json!({"query": ""}));
+    let note_ids: Vec<&str> = notes["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert!(note_ids.contains(&"sn-route"), "story_notes must survive agent.referenceScope: {notes}");
+    assert!(note_ids.contains(&"cn-allowed"), "in-range canon_note must remain readable: {notes}");
+    assert!(!note_ids.contains(&"cn-early") && !note_ids.contains(&"cn-late"), "out-of-range canon_notes must be excluded: {notes}");
+
+    // 2) `read_resource` on `/data/sections` with `from = 2` starts at offset 2, returns true index 2 + ref `/data/sections/2`, and leaks nothing:
+    let sec_list = f.call(&task, "read-secs", "read_resource", json!({"kind": "book", "id": "book4", "path": "/data/sections"}));
+    assert_eq!(sec_list["offset"], 2);
+    assert_eq!(sec_list["value"].as_array().unwrap().len(), 1);
+    assert_eq!(sec_list["value"][0]["section"], 2);
+    assert_eq!(sec_list["value"][0]["editPath"], "/data/sections/2");
+    assert_eq!(sec_list["items"][0]["index"], 2);
+    assert_eq!(sec_list["items"][0]["ref"]["path"], "/data/sections/2");
+    assert!(!sec_list.to_string().contains("FORBIDDEN"));
+
+    // Reading `/data/sections/0` or `/data/sections/3` fails; reading `/data/sections/2/text` succeeds:
+    assert_eq!(f.invoke(&task, "read-sec0", "read_resource", json!({"kind": "book", "id": "book4", "path": "/data/sections/0/text"}))["ok"], false);
+    assert_eq!(f.invoke(&task, "read-sec3", "read_resource", json!({"kind": "book", "id": "book4", "path": "/data/sections/3/text"}))["ok"], false);
+    let sec2_text = f.call(&task, "read-sec2", "read_resource", json!({"kind": "book", "id": "book4", "path": "/data/sections/2/text"}));
+    assert_eq!(sec2_text["text"], "第三章允许正文 ALLOWED_SEC2");
+
+    // 3) `stage_edit` rejects out-of-range section 0/3, whole-array replacement, section removal, and book title on a chapter-fenced task:
+    for (cid, bad_args) in [
+        ("bad-sec0", json!({"kind":"book","id":"book4","path":"/data/sections/0/text","operation":"set","value":"误改第一章","summary":"误改0"})),
+        ("bad-sec3", json!({"kind":"book","id":"book4","path":"/data/sections/3/text","operation":"set","value":"误改第四章","summary":"误改3"})),
+        ("bad-whole", json!({"kind":"book","id":"book4","path":"/data/sections","operation":"set","value":[{"title":"三","text":"只剩一章"}],"summary":"整组覆盖"})),
+        ("bad-rm", json!({"kind":"book","id":"book4","path":"/data/sections/2","operation":"remove","summary":"删章"})),
+        ("bad-title", json!({"kind":"book","id":"book4","path":"/title","operation":"set","value":"改整书标题","summary":"改书名"})),
+    ] {
+        let rejected = f.invoke(&task, cid, "stage_edit", bad_args);
+        assert_eq!(rejected["ok"], false, "{cid} must be rejected: {rejected}");
+        assert!(
+            rejected["error"]["message"].as_str().unwrap_or("").contains("/data/sections/2..=2"),
+            "error must guide agent to true allowed section range: {rejected}"
+        );
+    }
+
+    // Staging via `/data/sections/2/text` AND via `items[0].ref` + `/title` edits ONLY section 2:
+    let sec2_ref = sec_list["items"][0]["ref"].clone();
+    f.call(&task, "edit-sec2-title", "stage_edit", json!({
+        "ref": sec2_ref,
+        "path": "/title",
+        "operation": "set",
+        "value": "第三章·校订",
+        "summary": "校订第三章标题"
+    }));
+    f.call(&task, "edit-sec2-text", "stage_edit", json!({
+        "kind": "book",
+        "id": "book4",
+        "path": "/data/sections/2/text",
+        "operation": "set",
+        "value": "第三章校订后正文。",
+        "summary": "校订第三章正文"
+    }));
+
+    let previewed = f.call(&task, "fin-preview", "finish_task", json!({"summary": "完成第三章校订预览"}));
+    assert_eq!(previewed["status"], "previewed");
+    let preview_str = previewed["preview"].to_string();
+    assert!(!preview_str.contains("FORBIDDEN"), "scoped preview must never leak out-of-range chapters: {preview_str}");
+    assert_eq!(previewed["preview"]["changes"][0]["after"]["data"]["sections"][0]["section"], 2);
+    assert_eq!(previewed["preview"]["changes"][0]["after"]["data"]["sections"][0]["text"], "第三章校订后正文。");
+
+    let adopted = f.gateway.adopt_preview("r42-book-task").unwrap();
+    assert_eq!(adopted["status"], "committed");
+    {
+        let db = f.store.lock().unwrap();
+        let derived_raw: String = db
+            .query_row("SELECT json FROM source_books WHERE id<>'book4'", [], |r| r.get(0))
+            .unwrap();
+        let derived: Value = serde_json::from_str(&derived_raw).unwrap();
+        let secs = derived["sections"].as_array().unwrap();
+        assert_eq!(secs.len(), 4);
+        assert_eq!(secs[0]["text"], "第一章禁读前文 FORBIDDEN_SEC0", "Chapter 0 must remain untouched");
+        assert_eq!(secs[1]["text"], "第二章禁读前文 FORBIDDEN_SEC1", "Chapter 1 must remain untouched");
+        assert_eq!(secs[2]["title"], "第三章·校订");
+        assert_eq!(secs[2]["text"], "第三章校订后正文。");
+        assert_eq!(secs[3]["text"], "第四章禁读后文 FORBIDDEN_SEC3", "Chapter 3 must remain untouched");
+    }
+
+    // 4) `delete_line` blocks deleting a route whose exclusive opening node is referenced by `agentOriginalNodeId`:
+    {
+        let db = f.store.lock().unwrap();
+        let st: String = db.query_row("SELECT state_json FROM states WHERE node_id='opening'", [], |r| r.get(0)).unwrap();
+        db.execute(
+            "INSERT INTO lines(id,world_id,name,node_id,created_at) VALUES('line-orig-only','world','保留原开场线','opening','test')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO nodes(id,world_id,parent_id,seq,kind,narrative,meta_json,created_at) VALUES('opening-cloned','world',NULL,2,'opening','润色后的新开场',?,'test')",
+            [json!({"agentOriginalNodeId": "opening"}).to_string()],
+        )
+        .unwrap();
+        db.execute("INSERT INTO states(node_id,state_json) VALUES('opening-cloned',?)", [st]).unwrap();
+        db.execute("UPDATE lines SET node_id='opening-cloned' WHERE id='line'", []).unwrap();
+    }
+    let del_task = f.start("r42-del-orig-line", json!({}), false);
+    f.call(&del_task, "rm-orig-line", "stage_edit", json!({
+        "kind": "line",
+        "id": "line-orig-only",
+        "operation": "remove",
+        "summary": "尝试删除唯一持有原始开场的旧线"
+    }));
+    let val = f.invoke(&del_task, "val-orig-line", "validate_changes", json!({}));
+    assert_eq!(val["ok"], false, "must forbid deleting route holding exclusive agentOriginalNodeId node: {val}");
+    assert!(val["error"]["message"].as_str().unwrap_or("").contains("历史修订节点引用"));
+}

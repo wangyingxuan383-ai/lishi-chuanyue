@@ -153,6 +153,7 @@ impl Engine {
                 |r| r.get(0),
             )?;
         if !world_active || head.is_none() || !node_exists {
+            write_usage(&tx, &plan.id, &plan.world_id, None, "ok")?;
             tx.execute(
                 "UPDATE execution_runs SET status='committed',result_json=?,updated_at=? WHERE id=? AND status='running'",
                 params![

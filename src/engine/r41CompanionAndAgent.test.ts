@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createMemoryPlatform } from "../platform/memory";
 import { archiveProblems, exportWorld, importWorld } from "./archive";
-import { AgentClient } from "./agent";
+import {
+  AgentClient,
+  agentSessionProjection,
+  agentTaskProjection,
+  type AgentSnapshot,
+  type AgentTask,
+} from "./agent";
 import {
   CompanionClient,
   draftSetupFromCompanionText,
@@ -451,5 +457,77 @@ describe("R41 Companion, Agent state machine, and archive invariants (R41-T005)"
     });
     expect(companionNormalized.settings.mode).toBe("free");
     expect(companionNormalized.settings.clockStyle).toBe("elapsed");
+  });
+
+  it("R42-T003: agentTaskProjection & agentSessionProjection preserve dynamic previewStale=true from pollSession without clobbering cached snapshot messages", () => {
+    const t0 = "2026-11-29T00:00:00.000Z";
+    const cachedSnapshot: AgentSnapshot = {
+      id: "run-1",
+      worldId: "w-1",
+      status: "previewed",
+      result: null,
+      error: null,
+      task: {
+        id: "task-1",
+        runId: "run-1",
+        sessionId: "sess-1",
+        status: "previewed",
+        policy: "preview",
+        limits: { modelRequests: 0, toolCalls: 0, activeMs: 0 },
+        previewStale: false,
+        baseLineId: "line-main",
+        baseHeadId: "node-1",
+        preview: { summary: "润色第一段正文" },
+        updatedAt: t0,
+      },
+      messages: [
+        { id: "msg-u1", taskId: "task-1", role: "user", content: "润色这一段", createdAt: t0 },
+        { id: "msg-a1", taskId: "task-1", role: "assistant", content: "已为你生成修改预览。", createdAt: t0 },
+      ],
+      steps: [],
+      events: [],
+    };
+
+    // pollSession dynamically computes `previewStale: true` (e.g. after in-place narrative edit) without bumping `updatedAt`!
+    const polledTask: AgentTask = {
+      id: "task-1",
+      runId: "run-1",
+      sessionId: "sess-1",
+      status: "previewed",
+      policy: "preview",
+      limits: { modelRequests: 0, toolCalls: 0, activeMs: 0 },
+      previewStale: true,
+      baseLineId: "line-main",
+      baseHeadId: "node-1",
+      updatedAt: t0,
+    };
+
+    const projected = agentTaskProjection(polledTask, cachedSnapshot);
+    expect(projected.previewStale).toBe(true);
+    expect(projected.preview).toEqual({ summary: "润色第一段正文" });
+
+    const sessionProjected = agentSessionProjection(
+      {
+        session: {
+          id: "sess-1",
+          worldId: "w-1",
+          lineId: "line-main",
+          title: "改档对话",
+          createdAt: t0,
+          updatedAt: t0,
+        },
+        messages: [],
+        tasks: [polledTask],
+      },
+      { "run-1": cachedSnapshot },
+    );
+    expect(sessionProjected.tasks[0]?.previewStale).toBe(true);
+    // Projected assistant messages from snapshot MUST remain intact even when task object was merged!
+    expect(sessionProjected.messages.map((m) => m.id)).toEqual(["msg-u1", "msg-a1"]);
+
+    // Second-pass projection inside CompanionScreen / AgentConversation TaskCard keeps previewStale = true even with unchanged lineId & headId!
+    const cardTaskMeta = agentTaskProjection(sessionProjected.tasks[0]!, cachedSnapshot);
+    expect(isCompanionPreviewTaskStale("previewed", cardTaskMeta, "line-main", "node-1")).toBe(true);
+    expect(isAgentPreviewTaskStale("previewed", cardTaskMeta, "line-main", "node-1", false)).toBe(true);
   });
 });

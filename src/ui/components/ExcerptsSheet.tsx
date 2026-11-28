@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Repo } from "../../engine/db/repo";
+import { buildNovelBook } from "../../engine/novel";
 import {
   exportHighlightsMarkdown,
   listReaderHighlights,
@@ -7,6 +9,7 @@ import {
   updateReaderHighlight,
   type HighlightColor,
   type ReaderHighlight,
+  type ReaderTargetType,
 } from "../../engine/reader/store";
 import { listBooks } from "../../engine/sources/library";
 import { useApp } from "../app/context";
@@ -22,15 +25,117 @@ const COLOR_META: { id: HighlightColor; label: string; dot: string }[] = [
   { id: "bamboo", label: "竹青", dot: "#3f7a58" },
 ];
 
+const LINE_NODE_PREFIX = "line:";
+
+function isLineScopedNode(nodeId: string | null | undefined): nodeId is string {
+  return typeof nodeId === "string" && nodeId.startsWith(LINE_NODE_PREFIX);
+}
+
+function hasTextSnippet(text: string, needle: string): boolean {
+  if (!needle) return true;
+  if (text.includes(needle)) return true;
+  const t = needle.trim();
+  return t.length > 0 && text.includes(t);
+}
+
+function resolveSectionByTitle(
+  sections: { title: string }[],
+  sectionIndex: number,
+  sectionTitle: string,
+): number {
+  if (
+    sectionIndex >= 0 &&
+    sectionIndex < sections.length &&
+    (!sectionTitle || sections[sectionIndex]?.title === sectionTitle)
+  ) {
+    return sectionIndex;
+  }
+  if (sectionTitle) {
+    const byTitle = sections.findIndex((s) => s.title === sectionTitle);
+    if (byTitle >= 0) return byTitle;
+  }
+  return -1;
+}
+
+export async function filterExcerptsForWorldRoute(
+  repo: Repo,
+  rows: ReaderHighlight[],
+  worldId: string,
+  opts?: {
+    lineId?: string | null;
+    routeNodeIds?: ReadonlySet<string>;
+  },
+): Promise<ReaderHighlight[]> {
+  if (!rows.some((h) => h.targetType === "world_novel" && h.targetId === worldId)) {
+    return rows;
+  }
+  const built = await buildNovelBook(repo, worldId, {
+    lineId: opts?.lineId ?? undefined,
+    includePreface: true,
+    includeChronicle: true,
+    includeActions: false,
+  }).catch(() => null);
+
+  let effectiveLineId = built?.lineId ?? opts?.lineId?.trim() ?? "";
+  if (!effectiveLineId) {
+    const w = await repo.getWorld(worldId).catch(() => null);
+    effectiveLineId = w?.currentLineId ?? "";
+  }
+
+  const nodeSet = new Set<string>();
+  if (built) {
+    for (const sec of built.sections) {
+      if (sec.firstNodeId) nodeSet.add(sec.firstNodeId);
+      if (sec.lastNodeId) nodeSet.add(sec.lastNodeId);
+      for (const p of sec.paragraphs) {
+        if (p.nodeId) nodeSet.add(p.nodeId);
+      }
+    }
+  } else if (opts?.routeNodeIds) {
+    for (const id of opts.routeNodeIds) nodeSet.add(id);
+  }
+
+  return rows.filter((h) => {
+    if (h.targetType !== "world_novel" || h.targetId !== worldId) {
+      return true;
+    }
+    if (isLineScopedNode(h.nodeId)) {
+      if (!effectiveLineId || h.nodeId !== `${LINE_NODE_PREFIX}${effectiveLineId}`) {
+        return false;
+      }
+      return built ? resolveSectionByTitle(built.sections, h.sectionIndex, h.sectionTitle) >= 0 : true;
+    }
+    if (h.nodeId) {
+      return nodeSet.has(h.nodeId);
+    }
+    if (!built) return true;
+    const secIdx = resolveSectionByTitle(built.sections, h.sectionIndex, h.sectionTitle);
+    if (secIdx < 0 || !h.sectionTitle || built.sections[secIdx]?.title !== h.sectionTitle) {
+      return false;
+    }
+    return built.sections[secIdx]!.paragraphs.some((p) => hasTextSnippet(p.text, h.selectedText));
+  });
+}
+
 export interface ExcerptsSheetProps {
   worldId?: string | null;
   lineId?: string | null;
+  routeNodeIds?: ReadonlySet<string>;
+  targetType?: ReaderTargetType;
   bookId?: string | null;
   onJumpHighlight?: (h: ReaderHighlight) => void;
   onClose: () => void;
 }
 
-export function ExcerptsSheet({ worldId, lineId, bookId, onJumpHighlight, onClose }: ExcerptsSheetProps) {
+export function ExcerptsSheet({
+  worldId,
+  lineId,
+  routeNodeIds,
+  targetType,
+  bookId,
+  onJumpHighlight,
+  onClose,
+}: ExcerptsSheetProps) {
   const { game, push, replace, toast, ask } = useApp();
   const hasScopedTarget = !!(worldId || bookId);
   const [scope, setScope] = useState<"current" | "all">(hasScopedTarget ? "current" : "all");
@@ -51,14 +156,23 @@ export function ExcerptsSheet({ worldId, lineId, bookId, onJumpHighlight, onClos
           ? bookId
             ? { targetType: "book" as const, targetId: bookId }
             : worldId
-              ? { worldId }
+              ? targetType === "world_novel"
+                ? { targetType: "world_novel" as const, targetId: worldId }
+                : { worldId }
               : undefined
           : undefined;
-      const [rows, worlds, books] = await Promise.all([
+      const [rawRows, worlds, books] = await Promise.all([
         listReaderHighlights(game.repo, filter),
         game.repo.listWorlds().catch(() => []),
         listBooks(game.repo).catch(() => []),
       ]);
+      const rows =
+        scope === "current" && !bookId && worldId
+          ? await filterExcerptsForWorldRoute(game.repo, rawRows, worldId, {
+              lineId,
+              routeNodeIds,
+            })
+          : rawRows;
       const map: Record<string, string> = {};
       for (const w of worlds) {
         map[w.id] = w.title;
@@ -73,7 +187,7 @@ export function ExcerptsSheet({ worldId, lineId, bookId, onJumpHighlight, onClos
     } finally {
       setLoading(false);
     }
-  }, [bookId, game.repo, scope, worldId]);
+  }, [bookId, game.repo, lineId, routeNodeIds, scope, targetType, worldId]);
 
   useEffect(() => {
     void load();
@@ -108,6 +222,66 @@ export function ExcerptsSheet({ worldId, lineId, bookId, onJumpHighlight, onClos
         initialSection: h.sectionIndex,
         initialParagraph: h.paragraphIndex,
       });
+      return;
+    }
+
+    if (isLineScopedNode(h.nodeId)) {
+      const hlLineId = h.nodeId.slice(LINE_NODE_PREFIX.length);
+      const wId = h.worldId || h.targetId;
+      const lineRows = await game.repo.platform.sql
+        .query("SELECT id FROM lines WHERE id = ? AND world_id = ? AND deleted_at IS NULL", [
+          hlLineId,
+          wId,
+        ])
+        .catch(() => []);
+      if (!lineRows[0]?.id) {
+        toast("这段原文所在回合已被删改或移入回收站，无法定位到原处");
+        return;
+      }
+
+      const matchesOpenWorld = !bookId && !!worldId && h.targetId === worldId;
+      if (onJumpHighlight && matchesOpenWorld && !!lineId && hlLineId === lineId) {
+        onJumpHighlight(h);
+        onClose();
+        return;
+      }
+
+      const built = await buildNovelBook(game.repo, h.targetId, {
+        lineId: hlLineId,
+        includePreface: true,
+        includeChronicle: true,
+        includeActions: false,
+      }).catch(() => null);
+      let targetSec = h.sectionIndex;
+      let targetPara = h.paragraphIndex;
+      if (built) {
+        const resolvedSec = resolveSectionByTitle(built.sections, h.sectionIndex, h.sectionTitle);
+        if (resolvedSec >= 0) targetSec = resolvedSec;
+        const fullSec = built.sections[targetSec];
+        if (fullSec && h.selectedText.trim()) {
+          const curP = fullSec.paragraphs[targetPara];
+          if (!curP || !hasTextSnippet(curP.text, h.selectedText)) {
+            const pHit = fullSec.paragraphs.findIndex(
+              (p) => p.kind !== "divider" && hasTextSnippet(p.text, h.selectedText),
+            );
+            if (pHit >= 0) targetPara = pHit;
+          }
+        }
+      }
+
+      onClose();
+      const targetRoute = {
+        name: "reader" as const,
+        worldId: h.targetId,
+        lineId: hlLineId,
+        initialSection: targetSec,
+        initialParagraph: targetPara,
+      };
+      if (onJumpHighlight && matchesOpenWorld && !!lineId) {
+        replace(targetRoute);
+      } else {
+        push(targetRoute);
+      }
       return;
     }
 

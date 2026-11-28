@@ -23,8 +23,18 @@ pub(crate) fn map_node(db:&Connection,world:&str,line:&str,old:&str)->Result<Str
 }
 pub(crate) fn workspace(db:&Connection,task:&Value,plan:&RunPlan,work:&Value,new_base:&Value)->Result<Value> {
     let mut next=work.clone();let mut fresh_plan=plan.clone();
+    let old_base=task["base_json"].as_str().map(ws::parse).unwrap_or_else(||task["base_json"].clone());
+    let old_line = {
+        let from_base = ws::text(&old_base, "lineId");
+        if from_base.is_empty() {
+            plan.line_id.as_str()
+        } else {
+            from_base
+        }
+    };
+    let target_line=ws::text(new_base,"lineId").to_owned();
     let new_head=ws::text(new_base,"headId").to_owned();
-    fresh_plan.line_id=ws::text(new_base,"lineId").into();fresh_plan.head_id=new_head.clone();
+    fresh_plan.line_id=target_line.clone();fresh_plan.head_id=new_head.clone();
     for edit in next["edits"].as_array_mut().into_iter().flatten() {
         let kind=ws::text(edit,"kind").to_owned();let old_id=ws::text(edit,"id").to_owned();
         let mapped=if ["node","state","protagonist","people","places","cards","goals","facts"].contains(&kind.as_str())&&!old_id.is_empty(){
@@ -74,6 +84,13 @@ pub(crate) fn workspace(db:&Connection,task:&Value,plan:&RunPlan,work:&Value,new
             }
         }
         edit["id"] = rid.into();
+        if !old_line.is_empty()
+            && target_line != old_line
+            && ["node","state","protagonist","people","places","cards","goals","facts"].contains(&kind.as_str())
+            && edit["routeId"].as_str() == Some(old_line)
+        {
+            edit["routeId"] = target_line.clone().into();
+        }
         edit["original"] = latest;
         edit["after"] = merged;
         edit["rebaseConflicts"] = json!(conflicts);
@@ -97,7 +114,6 @@ pub(crate) fn workspace(db:&Connection,task:&Value,plan:&RunPlan,work:&Value,new
         }
     }
     // Staged story turns depend on the route head; mark them conflicted if the story moved on.
-    let old_base=task["base_json"].as_str().map(ws::parse).unwrap_or_else(||task["base_json"].clone());
     let old_head=ws::text(&old_base,"headId");
     if !old_head.is_empty() && old_head != new_head {
         for turn in next["turns"].as_array_mut().into_iter().flatten() {

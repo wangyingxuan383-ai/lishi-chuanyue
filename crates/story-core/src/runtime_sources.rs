@@ -667,6 +667,11 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
     let through = plan.reading_source()["through"].as_u64();
     let range = scope_range(plan);
     let chosen = chosen_notes(plan);
+    let source_mode = plan.meta["sourceScope"]["mode"].as_str();
+    let agent_scoped = plan.meta["agent"].is_object();
+    let story_only_scope = source_mode == Some("story");
+    let book_only_scope =
+        source_mode == Some("book") || (source_mode == Some("chapters") && !agent_scoped);
     let rows: Vec<_> = rows.into_iter().filter(|(id,kind,_,scope,_,refs,world,source,_)| {
         if let Some(ids) = &chosen {
             if !ids.contains(id) { return false; }
@@ -674,7 +679,8 @@ pub fn read_notes(db: &Connection, plan: &RunPlan, query: &str) -> Result<Value>
             return source == "story"
                 || note_within_scope(kind,scope,refs,through,world.as_deref()==Some(plan.world_id.as_str()));
         }
-        if source == "story" { return range.is_none(); }
+        if source == "story" { return !book_only_scope; }
+        if story_only_scope { return false; }
         note_within_scope(kind,scope,refs,through,world.as_deref()==Some(plan.world_id.as_str()))
             && range.is_none_or(|(from, to)| note_within_range(kind,scope,refs,from,to))
     }).collect();

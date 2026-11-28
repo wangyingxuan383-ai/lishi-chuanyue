@@ -3,7 +3,8 @@
 // while cleanly showing release notes when only an Android .apk is published.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { type UpdatePackageStatus } from "../../platform";
+import type { Repo } from "../../engine/db/repo";
+import { type Platform, type UpdatePackageStatus } from "../../platform";
 import { useApp } from "../app/context";
 import { androidPackage, expectedHash, openLink, plainNotes, windowsPackage, type ReleaseAsset, type ReleaseInfo } from "../app/update";
 import { updateStore } from "../app/updateStore";
@@ -18,6 +19,7 @@ import {
   stepFor,
   subscribe,
   type FailReason,
+  type UpdateFlow,
   type UpdateStep,
 } from "../app/updateFlow";
 import { Sheet } from "./Sheet";
@@ -88,11 +90,42 @@ export function resolveSheetStep(
   return rawState;
 }
 
-export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClose: () => void }) {
-  const { game, platform, toast } = useApp();
-  const store = updateStore(game.repo, platform);
+export function resolveInstallSha(
+  release: ReleaseInfo,
+  asset: ReleaseAsset | null,
+  flow: UpdateFlow,
+  hydrated: (UpdatePackageStatus & { sha256: string }) | null,
+): string | null {
+  return (
+    asset?.sha256 ??
+    (flow.version === release.version && flow.sha256 ? flow.sha256 : null) ??
+    hydrated?.sha256 ??
+    null
+  );
+}
+
+type HydratedSnapshot = UpdatePackageStatus & {
+  sha256: string;
+  version: string;
+  checkedAtReady: boolean;
+};
+
+export function useUpdateSheetController({
+  repo,
+  platform,
+  release,
+  toast,
+}: {
+  repo: Repo;
+  platform: Platform;
+  release: ReleaseInfo;
+  toast: (message: string) => void;
+}) {
+  const store = updateStore(repo, platform);
   const storeState = useSyncExternalStore(store.subscribe, store.snapshot);
-  useEffect(() => { void store.markRead(release.version).catch(() => {}); }, [store, release.version]);
+  useEffect(() => {
+    void store.markRead(release.version).catch(() => {});
+  }, [store, release.version]);
   const flow = useSyncExternalStore(subscribe, snapshot);
   const rawState = stepFor(flow, release.version);
   // Android installs by itself; the browser dev harness simulates that path.
@@ -100,29 +133,56 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
   const canAutoPrepare = platform.name === "android" && !!platform.update;
   const asset = inApp ? androidPackage(release) : null;
   const desktopAsset = !inApp && platform.name === "windows" ? windowsPackage(release) : null;
-  const [hydrated, setHydrated] = useState<(UpdatePackageStatus & { sha256: string }) | null>(null);
-  const [autoUpdate, setAutoUpdate] = useState(false);
+  const [hydrated, setHydrated] = useState<HydratedSnapshot | null>(null);
 
-  useEffect(() => {
-    void game.repo.getSetting<boolean>("autoUpdate", false).then((v) => setAutoUpdate(v === true)).catch(() => {});
-  }, [game.repo]);
+  const isRunningStep =
+    rawState.step === "preparing" || rawState.step === "downloading" || rawState.step === "verifying";
+  const isReadyOrPerm = rawState.step === "ready" || rawState.step === "permission";
+  const flowSha = flow.version === release.version ? flow.sha256 : null;
 
-  // Hydrate already-downloaded & SHA-256-verified package on open and refresh canInstall on app resume / split-screen return.
+  // Hydrate already-downloaded & SHA-256-verified package on open, re-sync when download completes,
+  // and refresh canInstall on app resume / split-screen return.
   useEffect(() => {
-    setHydrated(null);
-    if (!inApp || !asset || !platform.update) return;
+    if (!inApp || !asset || !platform.update) {
+      setHydrated(null);
+      return;
+    }
+    if (isRunningStep) {
+      setHydrated(null);
+      return;
+    }
     let alive = true;
+    let reqSeq = 0;
     const refresh = async () => {
+      const seq = ++reqSeq;
+      const stepAtStart = stepFor(snapshot(), release.version).step;
+      if (stepAtStart === "preparing" || stepAtStart === "downloading" || stepAtStart === "verifying") {
+        return;
+      }
+      const checkedAtReady = stepAtStart === "ready" || stepAtStart === "permission";
       try {
         const sha256 = asset.sha256 ?? await expectedHash(platform, release, asset).catch(() => null);
-        if (!alive) return;
+        if (!alive || seq !== reqSeq) return;
+        const stepAfterHash = stepFor(snapshot(), release.version).step;
+        if (stepAfterHash === "preparing" || stepAfterHash === "downloading" || stepAfterHash === "verifying") {
+          return;
+        }
         if (sha256 && platform.update?.packageStatus) {
           const pkg = await platform.update.packageStatus({ version: release.version, sha256 });
-          if (!alive) return;
-          setHydrated({ ...pkg, sha256 });
+          if (!alive || seq !== reqSeq) return;
+          const stepAfterPkg = stepFor(snapshot(), release.version).step;
+          if (stepAfterPkg === "preparing" || stepAfterPkg === "downloading" || stepAfterPkg === "verifying") {
+            return;
+          }
+          setHydrated({
+            ...pkg,
+            sha256,
+            version: release.version,
+            checkedAtReady: checkedAtReady || (pkg.downloaded && pkg.verified),
+          });
           if (pkg.downloaded && pkg.verified) {
             hydrateReadyPackage({ version: release.version, url: asset.url, size: asset.size, sha256 });
-          } else {
+          } else if (checkedAtReady) {
             invalidateReadyPackage(release.version);
           }
           if (pkg.canInstall) {
@@ -131,7 +191,7 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
           void store.refreshStatus().catch(() => {});
         } else if (platform.update?.canInstall) {
           const allowed = await platform.update.canInstall();
-          if (!alive) return;
+          if (!alive || seq !== reqSeq) return;
           setHydrated((prev) => (prev ? { ...prev, canInstall: allowed } : null));
           if (allowed) {
             void resumePermissionInstall(platform);
@@ -147,31 +207,63 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
         void refresh();
       }
     };
-    window.addEventListener("lishi:app-resume", onResume);
-    window.addEventListener("focus", onResume);
-    document.addEventListener("visibilitychange", onResume);
+    if (typeof window !== "undefined") {
+      window.addEventListener("lishi:app-resume", onResume);
+      window.addEventListener("focus", onResume);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onResume);
+    }
     return () => {
       alive = false;
-      window.removeEventListener("lishi:app-resume", onResume);
-      window.removeEventListener("focus", onResume);
-      document.removeEventListener("visibilitychange", onResume);
+      if (typeof window !== "undefined") {
+        window.removeEventListener("lishi:app-resume", onResume);
+        window.removeEventListener("focus", onResume);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onResume);
+      }
     };
-  }, [inApp, asset?.name, asset?.url, asset?.size, asset?.sha256, platform, release, store]);
+  }, [
+    inApp,
+    isRunningStep,
+    isReadyOrPerm,
+    flowSha,
+    asset?.name,
+    asset?.url,
+    asset?.size,
+    asset?.sha256,
+    platform,
+    release,
+    store,
+  ]);
 
-  const notes = plainNotes(release.notes);
-  const browser = () => void openLink(platform, toast, release.url);
-  const downloadDesktop = () => void openLink(platform, toast, desktopAsset ? desktopAsset.url : release.url);
+  const activeHydrated: HydratedSnapshot | null =
+    !hydrated ||
+    hydrated.version !== release.version ||
+    isRunningStep ||
+    (Boolean(asset?.sha256) && hydrated.sha256 !== asset!.sha256) ||
+    (isReadyOrPerm && !hydrated.checkedAtReady)
+      ? null
+      : hydrated;
+
   const download = () => {
-    if (asset) void startDownload(platform, release, asset);
+    if (asset) {
+      setHydrated(null);
+      void startDownload(platform, release, asset);
+    }
   };
+
+  const resolvedSha = resolveInstallSha(release, asset, flow, activeHydrated ?? hydrated);
+
   const install = async () => {
-    const resolvedSha = asset?.sha256 ?? hydrated?.sha256 ?? (flow.version === release.version ? flow.sha256 : null);
+    const sha256 = resolveInstallSha(release, asset, flow, activeHydrated ?? hydrated);
     const pkg =
-      asset && resolvedSha
+      asset && sha256
         ? {
             version: release.version,
             size: asset.size,
-            sha256: resolvedSha,
+            sha256,
           }
         : undefined;
     const status = await installUpdate(platform, pkg);
@@ -180,10 +272,46 @@ export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClos
     } else if (status === "unsupported") {
       toast(platform.name === "web-dev" ? "开发台只模拟下载，安装请在手机上试" : "这里不能直接安装，请用浏览器下载");
     }
+    return status;
   };
 
   const backgroundPreparing = storeState.preparing && storeState.release?.version === release.version;
-  const effectiveState = resolveSheetStep(rawState, hydrated, asset, backgroundPreparing);
+  const effectiveState = resolveSheetStep(rawState, activeHydrated, asset, backgroundPreparing);
+
+  return {
+    store,
+    inApp,
+    canAutoPrepare,
+    asset,
+    desktopAsset,
+    effectiveState,
+    resolvedSha,
+    download,
+    install,
+  };
+}
+
+export function UpdateSheet({ release, onClose }: { release: ReleaseInfo; onClose: () => void }) {
+  const { game, platform, toast } = useApp();
+  const {
+    store,
+    inApp,
+    canAutoPrepare,
+    asset,
+    desktopAsset,
+    effectiveState,
+    download,
+    install,
+  } = useUpdateSheetController({ repo: game.repo, platform, release, toast });
+  const [autoUpdate, setAutoUpdate] = useState(false);
+
+  useEffect(() => {
+    void game.repo.getSetting<boolean>("autoUpdate", false).then((v) => setAutoUpdate(v === true)).catch(() => {});
+  }, [game.repo]);
+
+  const notes = plainNotes(release.notes);
+  const browser = () => void openLink(platform, toast, release.url);
+  const downloadDesktop = () => void openLink(platform, toast, desktopAsset ? desktopAsset.url : release.url);
 
   const displayAsset = asset ?? desktopAsset;
   const meta = [`当前 ${__APP_VERSION__}`, displayAsset && `安装包 ${mb(displayAsset.size)}`, day(release.publishedAt), release.prerelease && "预发布"].filter(Boolean).join(" · ");

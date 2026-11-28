@@ -166,7 +166,7 @@ export function ReaderResplitSheet({
       onClose();
       await onApplied(res);
       if (res.forked || res.bookId !== bookId) {
-        toast("原书已被故事或札记引用，已另存为新目录书卷，原故事引用不受影响");
+        toast("原书已被故事引用，已另存为新书卷以免影响旧存档");
       } else {
         toast(`已重建《${bookTitle}》目录，共 ${res.sectionCount} 章`);
       }

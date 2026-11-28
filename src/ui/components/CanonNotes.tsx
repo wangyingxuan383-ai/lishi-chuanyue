@@ -265,8 +265,16 @@ export function CanonNotesSheet({
         }}
         onCreateNextVolume={(range) => setView({ name: "new", initialRange: range })}
         onRestore={async () => {
+          const wasIncompleteUpdate = current.status !== "done" && Boolean(current.progress.update?.base);
           const restored = await restorePrevious(game.repo, current.id);
-          if (restored) { setNotes((list) => list?.map((n) => (n.id === restored.id ? restored : n)) ?? null); toast("已恢复上一版", restored.previousContent ? { label: "撤销", run: () => void restorePrevious(game.repo, current.id).then(reload) } : undefined); }
+          if (restored) {
+            setNotes((list) => list?.map((n) => (n.id === restored.id ? restored : n)) ?? null);
+            if (wasIncompleteUpdate) {
+              toast("已恢复续整理前的札记");
+            } else {
+              toast("已恢复上一版", restored.previousContent ? { label: "撤销", run: () => void restorePrevious(game.repo, current.id).then(reload) } : undefined);
+            }
+          }
         }}
         onCopy={() => setView({ name: "new", draft: current })}
         onRename={async (title) => {
@@ -660,7 +668,11 @@ function NoteDetail({ note, running, last, position, offRoute, onRestart, onBack
           <button disabled={saving || text === note.content} onClick={() => void saveChange(() => onSave({ content: localNoteContent(text) }), "札记已保存")}>保存修改</button>
         </div>
       </>}
-      {note.previousContent && !running && <button className="ghost" onClick={() => void onRestore()}>恢复上一版</button>}
+      {(Boolean(note.previousContent) || (note.status !== "done" && Boolean(note.progress.update?.base))) && !running && (
+        <button className="ghost" onClick={() => void onRestore()}>
+          {note.status !== "done" && Boolean(note.progress.update?.base) ? "取消续整理，恢复原札记" : "恢复上一版"}
+        </button>
+      )}
       {!running && since && <RecentUsageLine worldId={note.worldId ?? null} purposes={["canon-notes"]} since={since} refreshKey={usageTick} />}
       <div className="row">
         <button className="ghost" onClick={onBack}>全部札记</button>

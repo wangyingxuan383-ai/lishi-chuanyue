@@ -87,6 +87,24 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   }
 }
 
+export function createOrderedTtsQueue(
+  speak: (payload: { utteranceId: string; text: string; rate: number }) => Promise<boolean>,
+  stop: () => Promise<void>,
+) {
+  let tail: Promise<unknown> = Promise.resolve();
+  const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = tail.catch(() => {}).then(fn);
+    tail = next;
+    return next;
+  };
+  return {
+    ttsSpeak: (payload: { utteranceId: string; text: string; rate: number }): Promise<boolean> =>
+      enqueue(() => speak(payload).catch(() => false)),
+    ttsStop: (): Promise<void> =>
+      enqueue(() => stop().catch(() => {})),
+  };
+}
+
 // Back handlers form a stack: the most recently opened layer closes first.
 const backHandlers: Array<() => boolean> = [];
 const setNativeKeepAwake = orderedKeepAwake((enabled) => call<void>("plugin:notifications|set_keep_awake", { enabled }));
@@ -95,6 +113,10 @@ const setNativeVolumePageTurn = orderedKeepAwake((enabled) =>
 );
 const setNativeSystemBars = coalescedSystemBars((background, dark) =>
   call<void>("plugin:notifications|set_system_bars", { background, dark }),
+);
+const nativeTts = createOrderedTtsQueue(
+  (payload) => call<{ ok: boolean }>("plugin:notifications|tts_speak", payload).then((r) => !!r?.ok),
+  () => call<void>("plugin:notifications|tts_stop"),
 );
 let backListening = false;
 let escapeListening = false;
@@ -280,9 +302,8 @@ export async function createTauriPlatform(): Promise<Platform> {
         takeLaunchTarget: () => call<{ worldId: string | null; action: "read" | "resume" | null; runId?: string | null }>("plugin:notifications|take_launch_target"),
         openReminderSettings: () => call<void>("plugin:notifications|open_reminder_settings"),
         setVolumePageTurn: (enabled: boolean) => setNativeVolumePageTurn(enabled),
-        ttsSpeak: (payload: { utteranceId: string; text: string; rate: number }) =>
-          call<{ ok: boolean }>("plugin:notifications|tts_speak", payload).then((r) => !!r?.ok).catch(() => false),
-        ttsStop: () => call<void>("plugin:notifications|tts_stop").catch(() => {}),
+        ttsSpeak: (payload: { utteranceId: string; text: string; rate: number }) => nativeTts.ttsSpeak(payload),
+        ttsStop: () => nativeTts.ttsStop(),
       } : {}),
       setSystemBars: (background, dark) =>
         name === "android" ? setNativeSystemBars(background, dark) : Promise.resolve(),

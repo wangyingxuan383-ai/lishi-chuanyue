@@ -6,7 +6,6 @@ import type { SqlStatement } from "../../platform";
 import { newId, type Repo } from "../db/repo";
 import { buildNovelBook } from "../novel";
 import {
-  bookExists,
   chunkStatements,
   chunksOf,
   getBooksCharMetrics,
@@ -359,6 +358,21 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
   return items;
 }
 
+function disambiguateShelfTitle(
+  baseTitle: string,
+  suffixLabel: string,
+  usedTitles: ReadonlySet<string>,
+): string {
+  if (!usedTitles.has(baseTitle)) return baseTitle;
+  const firstCandidate = `${baseTitle}（${suffixLabel}）`;
+  if (!usedTitles.has(firstCandidate)) return firstCandidate;
+  let n = 2;
+  while (usedTitles.has(`${baseTitle}（${suffixLabel} ${n}）`)) {
+    n += 1;
+  }
+  return `${baseTitle}（${suffixLabel} ${n}）`;
+}
+
 /**
  * Compiles an interactive world's active/specified route into a clean novel in `书斋` (`source_books`).
  * Copy-on-write guarantees:
@@ -366,7 +380,8 @@ export async function listLibraryShelfItems(repo: Repo): Promise<LibraryShelfIte
  *   (or was legacy unset), AND `hasBookExternalReferences` is false; re-anchors existing reader
  *   bookmarks, highlights, and progress on in-place update without mis-binding deleted snippets.
  * - Allocates a brand-new `newId()` whenever the prior book is cited by any story/note/job or
- *   when compiling a different route (`lineId`), labeling non-main route titles distinctly.
+ *   when compiling a different route (`lineId`), cloning & re-anchoring annotations, moving `pinned`,
+ *   and disambiguating colliding titles cleanly.
  */
 export async function saveWorldNovelToLibrary(
   repo: Repo,
@@ -383,30 +398,49 @@ export async function saveWorldNovelToLibrary(
     throw new Error("这部故事还没有可成书的正文段落");
   }
   const targetLineId = built.lineId;
-  const prefs = await getAllBookShelfPrefs(repo);
-  let reusedBookId: string | null = null;
-  let hadProtectedOrOtherRouteCopy = false;
+  const [prefs, existingBookRows] = await Promise.all([
+    getAllBookShelfPrefs(repo),
+    repo.platform.sql
+      .query("SELECT id, title, created_at FROM source_books ORDER BY created_at DESC, rowid DESC")
+      .catch(() => []),
+  ]);
 
-  for (const [candidateId, pref] of Object.entries(prefs)) {
-    if (pref.origin !== "world-novel" || pref.sourceWorldId !== worldId) continue;
-    if (!(await bookExists(repo, candidateId))) continue;
+  let reusedBookId: string | null = null;
+  let priorSameRouteBookId: string | null = null;
+
+  for (const row of existingBookRows) {
+    const candidateId = String(row.id);
+    const pref = prefs[candidateId];
+    if (!pref || pref.origin !== "world-novel" || pref.sourceWorldId !== worldId) continue;
     const sameRoute = !pref.sourceLineId || pref.sourceLineId === targetLineId;
-    if (sameRoute && !(await hasBookExternalReferences(repo, candidateId))) {
+    if (!sameRoute) continue;
+    if (!(await hasBookExternalReferences(repo, candidateId))) {
       reusedBookId = candidateId;
       break;
     }
-    hadProtectedOrOtherRouteCopy = true;
+    if (!priorSameRouteBookId) {
+      priorSameRouteBookId = candidateId;
+    }
   }
 
   const bookId = reusedBookId ?? newId();
   const existingPref = reusedBookId ? prefs[reusedBookId] : undefined;
+  const priorPref = !reusedBookId && priorSameRouteBookId ? prefs[priorSameRouteBookId] : undefined;
   const nowIso = new Date().toISOString();
 
+  const otherBookTitles = new Set<string>();
+  for (const row of existingBookRows) {
+    if (String(row.id) !== bookId) {
+      otherBookTitles.add(String(row.title ?? ""));
+    }
+  }
+
   const cleanLineName = built.lineName?.trim() ?? "";
-  const resolvedTitle =
+  const baseTitle =
     cleanLineName && cleanLineName !== "主线" && !built.title.includes(cleanLineName)
       ? `${built.title} · ${cleanLineName}`
       : built.title;
+  const resolvedTitle = disambiguateShelfTitle(baseTitle, "新编", otherBookTitles);
 
   const sourceBook: SourceBook = {
     id: bookId,
@@ -535,12 +569,165 @@ export async function saveWorldNovelToLibrary(
     ]);
   } else {
     await saveBook(repo, sourceBook);
+
+    if (priorSameRouteBookId) {
+      await ensureReaderSchema(repo.platform);
+      const [oldSecCountRow] = await repo.platform.sql
+        .query("SELECT COUNT(*) AS cnt FROM source_sections WHERE book_id = ?", [priorSameRouteBookId])
+        .catch(() => []);
+      const oldSectionCount = Math.max(1, Number(oldSecCountRow?.cnt ?? 1));
+      const { maxSection, getParas, locateSnippet } = createSectionSnippetLocator(
+        sourceBook.sections,
+        oldSectionCount,
+      );
+
+      const cloneStmts: SqlStatement[] = [];
+
+      const bmRows = await repo.platform.sql
+        .query(
+          "SELECT section_index, section_title, snippet, paragraph_index, node_id, created_at FROM reader_bookmarks WHERE target_type = 'book' AND target_id = ?",
+          [priorSameRouteBookId],
+        )
+        .catch(() => []);
+      for (const r of bmRows) {
+        const oldSec = Number(r.section_index ?? 0);
+        const snippet = String(r.snippet ?? "");
+        const hit = locateSnippet(snippet, oldSec);
+        const clamped = Math.min(maxSection, Math.max(0, oldSec));
+        const nextSec = hit ? hit.sectionIndex : clamped;
+        const nextTitle = hit
+          ? hit.sectionTitle
+          : oldSec > maxSection
+            ? sourceBook.sections[maxSection]!.title
+            : (sourceBook.sections[clamped]?.title ?? String(r.section_title ?? ""));
+        const nextPara = hit
+          ? hit.paragraphIndex
+          : oldSec > maxSection
+            ? 0
+            : Number(r.paragraph_index ?? 0);
+        cloneStmts.push({
+          sql: `INSERT INTO reader_bookmarks (
+                  id, target_type, target_id, section_index, section_title, snippet, paragraph_index, node_id, created_at
+                ) VALUES (?, 'book', ?, ?, ?, ?, ?, ?, ?)`,
+          params: [
+            newId(),
+            bookId,
+            nextSec,
+            nextTitle,
+            snippet,
+            nextPara,
+            r.node_id == null ? null : String(r.node_id),
+            String(r.created_at ?? nowIso),
+          ],
+        });
+      }
+
+      const hlRows = await repo.platform.sql
+        .query(
+          "SELECT world_id, section_index, paragraph_index, selected_text, note, color, node_id, created_at, updated_at FROM reader_highlights WHERE target_type = 'book' AND target_id = ?",
+          [priorSameRouteBookId],
+        )
+        .catch(() => []);
+      for (const r of hlRows) {
+        const oldSec = Number(r.section_index ?? 0);
+        const sel = String(r.selected_text ?? "");
+        const hit = locateSnippet(sel, oldSec);
+        const clamped = Math.min(maxSection, Math.max(0, oldSec));
+        const nextSec = hit ? hit.sectionIndex : clamped;
+        const nextTitle = hit ? hit.sectionTitle : sourceBook.sections[clamped]!.title;
+        const nextPara = hit ? hit.paragraphIndex : Number(r.paragraph_index ?? 0);
+        const nextStart = hit ? hit.charStart : 0;
+        const nextEnd = hit ? hit.charEnd : 0;
+        cloneStmts.push({
+          sql: `INSERT INTO reader_highlights (
+                  id, target_type, target_id, world_id, section_index, section_title,
+                  paragraph_index, char_start, char_end, selected_text, note, color,
+                  node_id, created_at, updated_at
+                ) VALUES (?, 'book', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          params: [
+            newId(),
+            bookId,
+            r.world_id == null ? null : String(r.world_id),
+            nextSec,
+            nextTitle,
+            nextPara,
+            nextStart,
+            nextEnd,
+            sel,
+            String(r.note ?? ""),
+            String(r.color ?? "cinnabar"),
+            r.node_id == null ? null : String(r.node_id),
+            String(r.created_at ?? nowIso),
+            String(r.updated_at ?? nowIso),
+          ],
+        });
+      }
+
+      const progRows = await repo.platform.sql
+        .query(
+          "SELECT section_index, page_index, scroll_ratio, anchor_text, node_id FROM reader_progress WHERE target_type = 'book' AND target_id = ?",
+          [priorSameRouteBookId],
+        )
+        .catch(() => []);
+      if (progRows[0]) {
+        const pRow = progRows[0];
+        const oldSec = Number(pRow.section_index ?? 0);
+        const anchor = String(pRow.anchor_text ?? "");
+        const hit = locateSnippet(anchor, oldSec);
+        const paras = hit ? getParas(hit.sectionIndex) : [];
+        const nextSec = hit ? hit.sectionIndex : Math.min(maxSection, Math.max(0, oldSec));
+        const nextPage = hit || oldSec > maxSection ? 0 : Number(pRow.page_index ?? 0);
+        const nextRatio = hit
+          ? paras.length > 1
+            ? Number((hit.paragraphIndex / (paras.length - 1)).toFixed(4))
+            : 0
+          : oldSec > maxSection
+            ? 0
+            : Number(pRow.scroll_ratio ?? 0);
+        cloneStmts.push({
+          sql: `INSERT INTO reader_progress (
+                  target_type, target_id, section_index, page_index, scroll_ratio, anchor_text, node_id, updated_at
+                ) VALUES ('book', ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(target_type, target_id) DO UPDATE SET
+                  section_index = excluded.section_index,
+                  page_index = excluded.page_index,
+                  scroll_ratio = excluded.scroll_ratio,
+                  anchor_text = excluded.anchor_text,
+                  node_id = excluded.node_id,
+                  updated_at = excluded.updated_at`,
+          params: [
+            bookId,
+            nextSec,
+            nextPage,
+            nextRatio,
+            anchor,
+            pRow.node_id == null ? null : String(pRow.node_id),
+            nowIso,
+          ],
+        });
+      }
+
+      if (cloneStmts.length > 0) {
+        await repo.platform.sql.batch(cloneStmts);
+      }
+    }
+  }
+
+  if (!reusedBookId && priorSameRouteBookId && priorPref?.pinned) {
+    await updateBookShelfPref(repo, priorSameRouteBookId, { pinned: false });
   }
 
   const routeSuffix = cleanLineName && cleanLineName !== "主线" ? ` · ${cleanLineName}` : "";
   const defaultAuthor = built.author ? `${built.author}${routeSuffix} · 穿越成书` : `穿越成书${routeSuffix}`;
+  const inheritedAuthor = existingPref?.author || priorPref?.author || defaultAuthor;
   await updateBookShelfPref(repo, bookId, {
-    author: opts?.author ?? (existingPref?.author ? existingPref.author : defaultAuthor),
+    author: opts?.author ?? inheritedAuthor,
+    ...(priorPref
+      ? {
+          coverTone: priorPref.coverTone ?? null,
+          pinned: !!priorPref.pinned,
+        }
+      : {}),
     origin: "world-novel",
     sourceWorldId: worldId,
     sourceLineId: targetLineId,
@@ -550,7 +737,7 @@ export async function saveWorldNovelToLibrary(
   }
   return {
     bookId,
-    forked: !reusedBookId && hadProtectedOrOtherRouteCopy,
+    forked: !reusedBookId && !!priorSameRouteBookId,
     title: sourceBook.title,
     sectionCount: sourceBook.sections.length,
   };

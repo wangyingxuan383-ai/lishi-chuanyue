@@ -141,6 +141,7 @@ export function syncBackgroundEvent(version: string, totalSize: number, event: U
 }
 
 export function syncBackgroundComplete(pkg: { version: string; url: string; size: number; sha256: string }) {
+  if (!backgroundSyncing) return;
   backgroundSyncing = false;
   if (flow.version === pkg.version && (flow.state.step === "permission" || flow.state.step === "installing")) {
     return;
@@ -155,6 +156,7 @@ export function syncBackgroundComplete(pkg: { version: string; url: string; size
 }
 
 export function syncBackgroundStopped(version: string, totalSize: number, received: number) {
+  if (!backgroundSyncing) return;
   backgroundSyncing = false;
   if (flow.version !== version || !running(flow.state)) return;
   if (received > 0 && received < totalSize) {

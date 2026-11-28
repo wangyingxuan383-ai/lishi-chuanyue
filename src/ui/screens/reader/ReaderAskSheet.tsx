@@ -55,8 +55,9 @@ export interface AskTurn {
  * Pure handoff builder for transferring inline ReaderAskSheet Q&A into CompanionScreen:
  * - Excludes `pending` and `incomplete` turns from `asked` so error banners or `"已停止。"`
  *   are never imported as assistant answers.
- * - Prioritizes `customQ?.trim()`, typed `question.trim()`, or the latest `pending || incomplete`
- *   turn's `q` when filling `draftQuestion` so failed/interrupted questions are preserved in the input box.
+ * - Prioritizes `customQ?.trim()`, typed `question.trim()`, or the trailing `pending || incomplete`
+ *   turn's `q` when filling `draftQuestion` so failed/interrupted questions are preserved in the input box
+ *   without resurrecting an older failed turn that was already superseded by a completed Q&A turn.
  */
 export function buildReaderAskHandoff(params: {
   bookTitle: string;
@@ -68,10 +69,9 @@ export function buildReaderAskHandoff(params: {
   customQ?: string;
 }): ReaderAskHandoff {
   const { bookTitle, sectionIndex, sectionTitle, selectedText, turns, question, customQ } = params;
-  const lastUnresolvedQ = [...turns]
-    .reverse()
-    .find((t) => t.pending || t.incomplete)
-    ?.q?.trim();
+  const lastTurn = turns.at(-1);
+  const unresolved = lastTurn && (lastTurn.pending || lastTurn.incomplete) ? lastTurn : undefined;
+  const lastUnresolvedQ = unresolved?.q?.trim();
   const explicitOrPendingQ = customQ?.trim() || question.trim() || lastUnresolvedQ || "";
   const qForPrompt = explicitOrPendingQ || "请结合这段原文帮我解读";
   const excerpt = selectedText.slice(0, 320);

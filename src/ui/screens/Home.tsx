@@ -739,12 +739,17 @@ export default function Home() {
               label: "编纂入书斋藏书",
               onSelect: async () => {
                 try {
-                  const res = await saveWorldNovelToLibrary(game.repo, menuFor.world.id);
+                  const saved = await saveWorldNovelToLibrary(game.repo, menuFor.world.id);
                   await loadLibrary();
-                  toast(`已将《${res.title}》收入书斋`, {
-                    label: "去书斋",
-                    run: () => switchSpace("library"),
-                  });
+                  toast(
+                    saved.forked
+                      ? `已另存新卷收入书斋：《${saved.title}》（原卷已被故事引用）`
+                      : `已将《${saved.title}》收入书斋`,
+                    {
+                      label: "去书斋",
+                      run: () => switchSpace("library"),
+                    },
+                  );
                 } catch (err) {
                   toast(err instanceof Error ? err.message : "尚无足够正文可编纂成书");
                 }

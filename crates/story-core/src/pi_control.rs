@@ -70,6 +70,19 @@ pub(crate) fn enqueue(store: &PiStore, request: &Value) -> Result<Value> {
             next.insert(name.into(), value.clone());
         }
     }
+    if let Some(ref_scope) = supplied.get("referenceScope").filter(|v| v.is_object()) {
+        let book_id = text(ref_scope, "bookId").trim();
+        if !book_id.is_empty() && !ref_scope.get("through").is_none_or(Value::is_null) {
+            let Some(through) = ref_scope["through"].as_i64() else {
+                return Err(invalid("指定的原著章节范围无效"));
+            };
+            let from = ref_scope["from"].as_i64().unwrap_or(0);
+            if through < 0 || from < 0 || from > through {
+                return Err(invalid("指定的原著章节范围无效"));
+            }
+        }
+        next.insert("referenceScope".into(), ref_scope.clone());
+    }
     if let Some(aux) = supplied.get("auxModel") {
         if let Some(trimmed) = aux.as_str().map(str::trim) {
             if !trimmed.is_empty() {

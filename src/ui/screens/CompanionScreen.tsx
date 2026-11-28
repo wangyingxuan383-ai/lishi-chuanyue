@@ -932,7 +932,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
           .filter((t) => !t.runId.startsWith("imported:") && t.status !== "archived");
         const snaps = await Promise.all(
           watched.map(async (t) => {
-            const ver = `${t.status}:${t.updatedAt ?? ""}`;
+            const ver = `${t.status}:${t.updatedAt ?? ""}:${t.previewStale === true ? "1" : "0"}`;
             const prev = piSnapCache.current[t.runId];
             if (!agentSnapshotNeedsRead(prev, t.status, piSnapVer.current[t.runId] === ver)) {
               return [t.runId, prev!] as const;
@@ -1963,7 +1963,7 @@ export function CompanionScreen(props: CompanionScreenProps = {}) {
       watched.map(async (t) => {
         const fresh = await agentClient.delta(t.id, 0, 0);
         piSnapCache.current[t.runId] = fresh;
-        piSnapVer.current[t.runId] = `${t.status}:${t.updatedAt ?? ""}`;
+        piSnapVer.current[t.runId] = `${t.status}:${t.updatedAt ?? ""}:${t.previewStale === true ? "1" : "0"}`;
         return [t.runId, fresh] as const;
       }),
     ).catch(() => []);

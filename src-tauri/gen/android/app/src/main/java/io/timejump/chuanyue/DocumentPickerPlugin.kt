@@ -16,6 +16,7 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 internal const val DOCUMENT_PICK_TIMEOUT_MS = 180_000L
@@ -50,10 +51,17 @@ internal fun buildExportDocumentIntent(suggestedName: String): Intent {
 internal fun documentPickerFailure(code: String): JSObject = JSObject()
     .put("status", "failed").put("code", code)
 
+internal fun takeSurrogateSafe(text: String, maxChars: Int): String {
+    if (maxChars <= 0) return ""
+    if (text.length <= maxChars) return text
+    val cut = text.take(maxChars)
+    return if (cut.isNotEmpty() && Character.isHighSurrogate(cut.last())) cut.dropLast(1) else cut
+}
+
 internal fun sanitizeDocumentDisplayName(raw: String?): String? {
     if (raw == null) return null
     val leaf = raw.substringAfterLast('/').substringAfterLast('\\')
-    val cleaned = leaf.filter { !Character.isISOControl(it) }.trim().take(512)
+    val cleaned = takeSurrogateSafe(leaf.filter { !Character.isISOControl(it) }.trim(), 512)
     if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return null
     return cleaned
 }
@@ -105,7 +113,10 @@ internal fun sanitizeExportDisplayName(raw: String?, fallback: String): String {
     val firstSeg = stem.substringBefore('.').trim(' ', '.').uppercase()
     if (firstSeg in WINDOWS_RESERVED_STEMS) stem = "_$stem"
     val maxChars = (180 - ext.length).coerceAtLeast(16)
-    if (stem.length > maxChars) stem = stem.take(maxChars).trimEnd('.', ' ').ifEmpty { fallbackStem }
+    if (stem.length > maxChars) {
+        val cut = takeSurrogateSafe(stem, maxChars)
+        stem = cut.trimEnd('.', ' ').ifEmpty { fallbackStem }
+    }
     return "$stem$ext"
 }
 
@@ -200,6 +211,16 @@ internal class DocumentPickerRequestSlot<T : Any> {
  */
 @TauriPlugin
 class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
+    companion object {
+        private val activePickCounter = AtomicInteger(0)
+
+        internal val activePickCount: Int
+            get() = activePickCounter.get()
+
+        @JvmStatic
+        internal fun isBusy(): Boolean = activePickCounter.get() > 0
+    }
+
     private val handler = Handler(Looper.getMainLooper())
     private class Pending(
         val token: Long,
@@ -210,22 +231,37 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
         val directory: Boolean = false
     ) {
         var callbackReceived: Boolean = false
+        var timedOut: Boolean = false
         lateinit var timeout: Runnable
+        lateinit var quarantineWatch: Runnable
     }
     private val requests = DocumentPickerRequestSlot<Pending>()
     private val pending: Pending? get() = requests.current
 
+    private fun acquireSlot(current: Pending): Boolean {
+        if (!requests.acquire(current)) return false
+        activePickCounter.incrementAndGet()
+        return true
+    }
+
+    private fun releaseSlot(current: Pending): Boolean {
+        if (!requests.release(current)) return false
+        activePickCounter.updateAndGet { count -> if (count > 0) count - 1 else 0 }
+        return true
+    }
+
     private fun finish(current: Pending, value: JSObject) {
         if (pending !== current) return
         handler.removeCallbacks(current.timeout)
-        requests.release(current)
+        handler.removeCallbacks(current.quarantineWatch)
+        releaseSlot(current)
         current.gate.finish(value)
     }
 
     @Command
     fun ensureIdle(invoke: Invoke) {
         handler.post {
-            val reply = if (pending == null && FilesPlugin.activeExportCount == 0) JSObject().put("status", "idle")
+            val reply = if (pending == null && !isBusy() && !FilesPlugin.isBusy()) JSObject().put("status", "idle")
                 else documentPickerFailure("file_busy")
             invoke.resolve(reply)
         }
@@ -255,7 +291,7 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
 
     private fun launchPicker(invoke: Invoke, intent: Intent, grant: Boolean = false, writable: Boolean = false, directory: Boolean = false) {
         handler.post {
-            if (pending != null || FilesPlugin.activeExportCount > 0) {
+            if (pending != null || isBusy() || FilesPlugin.isBusy()) {
                 invoke.resolve(documentPickerFailure("file_busy"))
                 return@post
             }
@@ -266,12 +302,34 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
                 }
                 val token = nextPickerRequestToken.incrementAndGet()
                 val current = Pending(token, invoke, DocumentPickerReplyGate { invoke.resolve(it) }, grant, writable, directory)
-                current.timeout = Runnable {
-                    if (pending === current && current.token == token) {
-                        finish(current, documentPickerFailure("file_unconfirmed"))
+                current.quarantineWatch = Runnable {
+                    if (pending !== current || current.token != token) return@Runnable
+                    if (current.callbackReceived) {
+                        releaseSlot(current)
+                    } else if (!ownerActivity.isInMultiWindowMode && ownerActivity.hasWindowFocus()) {
+                        scheduleReturnCheck(current, token, RETURN_CALLBACK_GRACE_MS, allowRetry = true)
+                    } else if (!ownerActivity.isFinishing && !ownerActivity.isDestroyed) {
+                        handler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
+                    } else {
+                        releaseSlot(current)
                     }
                 }
-                if (!requests.acquire(current)) {
+                current.timeout = Runnable {
+                    if (pending === current && current.token == token) {
+                        // Resolve the JS Invoke on timeout, but keep the slot quarantined while
+                        // Picker #1 may still own Tauri's global startActivityForResultCallback.
+                        current.timedOut = true
+                        current.gate.timedOut()
+                        if (current.callbackReceived) {
+                            releaseSlot(current)
+                        } else if (!ownerActivity.isInMultiWindowMode && ownerActivity.hasWindowFocus()) {
+                            scheduleReturnCheck(current, token, RETURN_CALLBACK_GRACE_MS, allowRetry = true)
+                        } else {
+                            handler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
+                        }
+                    }
+                }
+                if (!acquireSlot(current)) {
                     invoke.resolve(documentPickerFailure("file_busy"))
                     return@post
                 }
@@ -297,6 +355,11 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
             val current = pending ?: return@post
             if (current.invoke !== invoke) return@post
             current.callbackReceived = true
+            handler.removeCallbacks(current.quarantineWatch)
+            if (current.timedOut || current.gate.isResolved()) {
+                finish(current, documentPickerFailure("file_unconfirmed"))
+                return@post
+            }
             val reply = try {
                 val decoded = decodeDocumentPickerResult(result)
                 if (!current.gate.isResolved() && decoded.optString("status") == "selected") {
@@ -331,15 +394,23 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
     private fun scheduleReturnCheck(current: Pending, token: Long, delayMs: Long, allowRetry: Boolean) {
         handler.postDelayed({
             if (pending !== current || current.token != token || current.callbackReceived) return@postDelayed
-            if (ownerActivity.isInMultiWindowMode) return@postDelayed
+            if (ownerActivity.isInMultiWindowMode) {
+                if (current.timedOut && !ownerActivity.isFinishing && !ownerActivity.isDestroyed) {
+                    handler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
+                }
+                return@postDelayed
+            }
             if (ownerActivity.hasWindowFocus()) {
                 // Normal Android activity results precede onResume. A small grace
                 // also allows the already queued plugin result to run first.
                 current.gate.returnedWithoutCallback()
                 handler.removeCallbacks(current.timeout)
-                requests.release(current)
+                handler.removeCallbacks(current.quarantineWatch)
+                releaseSlot(current)
             } else if (allowRetry) {
                 scheduleReturnCheck(current, token, RETURN_FOCUS_RETRY_MS, allowRetry = false)
+            } else if (current.timedOut && !ownerActivity.isFinishing && !ownerActivity.isDestroyed) {
+                handler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
             }
         }, delayMs)
     }
@@ -347,7 +418,7 @@ class DocumentPickerPlugin(private val ownerActivity: Activity) : Plugin(ownerAc
     override fun onResume(activity: AppCompatActivity) {
         if (activity !== ownerActivity) return
         val current = pending ?: return
-        if (!current.gate.hasPaused || current.callbackReceived) return
+        if ((!current.gate.hasPaused && !current.timedOut) || current.callbackReceived) return
         if (activity.isInMultiWindowMode) return
         // `hasWindowFocus()` is always false synchronously inside `Activity.onResume()`;
         // post unconditionally and verify focus inside the delayed callback.

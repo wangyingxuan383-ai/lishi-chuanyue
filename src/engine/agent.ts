@@ -67,6 +67,10 @@ export interface AgentTask {
   phase?: string; plan?: AgentPlanItem[]; question?: AgentQuestion | null; questions?: AgentQuestion[];
   inputs?: AgentInput[]; context?: Json; subtasks?: Json[]; skillDrafts?: AgentSkillDraft[]; readOnly?: boolean;
   canUndo?: boolean;
+  previewStale?: boolean;
+  baseLineId?: string;
+  baseHeadId?: string;
+  lineId?: string;
   contextCheckpoint?: Json; contextState?: AgentContextState;
   canonVerificationVersion?: number; requiresOriginalEvidence?: boolean;
   createdAt?: string; updatedAt?: string;
@@ -108,10 +112,45 @@ function taskModel(task: AgentTask): AgentTask {
   return { ...task, model, ...(inputTokens !== undefined ? { inputTokens, inputBudget: agentInputBudget({ inputTokens,
     contextWindowTokens: model.contextWindowTokens, maxOutputTokens: model.maxOutputTokens ?? model.maxTokens }) } : {}) };
 }
+function agentSnapshotApplies(task: AgentTask, snapshot?: AgentSnapshot): snapshot is AgentSnapshot {
+  return Boolean(
+    snapshot &&
+      snapshot.task.id === task.id &&
+      snapshot.task.sessionId === task.sessionId &&
+      task.status !== "undone" &&
+      !(task.updatedAt && snapshot.task.updatedAt && task.updatedAt > snapshot.task.updatedAt),
+  );
+}
 export function agentTaskProjection(task: AgentTask, snapshot?: AgentSnapshot): AgentTask {
-  if (!snapshot || snapshot.task.id !== task.id || snapshot.task.sessionId !== task.sessionId || task.status === "undone"
-      || (task.updatedAt && snapshot.task.updatedAt && task.updatedAt > snapshot.task.updatedAt)) return task;
-  return snapshot.task;
+  if (!agentSnapshotApplies(task, snapshot)) return task;
+  const snapNewer = Boolean(snapshot.task.updatedAt && task.updatedAt && snapshot.task.updatedAt > task.updatedAt);
+  const resolvedStatus = snapNewer ? snapshot.task.status : task.status;
+  const resolvedPreviewStale =
+    task.previewStale !== undefined
+      ? snapNewer && task.previewStale === false && snapshot.task.previewStale === true
+        ? true
+        : task.previewStale
+      : snapshot.task.previewStale;
+  const resolvedCanUndo = task.canUndo !== undefined ? task.canUndo : snapshot.task.canUndo;
+  const resolvedBaseLineId = task.baseLineId !== undefined ? task.baseLineId : snapshot.task.baseLineId;
+  const resolvedBaseHeadId = task.baseHeadId !== undefined ? task.baseHeadId : snapshot.task.baseHeadId;
+  if (
+    snapshot.task.status === resolvedStatus &&
+    snapshot.task.previewStale === resolvedPreviewStale &&
+    snapshot.task.canUndo === resolvedCanUndo &&
+    snapshot.task.baseLineId === resolvedBaseLineId &&
+    snapshot.task.baseHeadId === resolvedBaseHeadId
+  ) {
+    return snapshot.task;
+  }
+  return {
+    ...snapshot.task,
+    status: resolvedStatus,
+    ...(resolvedPreviewStale !== undefined ? { previewStale: resolvedPreviewStale } : {}),
+    ...(resolvedCanUndo !== undefined ? { canUndo: resolvedCanUndo } : {}),
+    ...(resolvedBaseLineId !== undefined ? { baseLineId: resolvedBaseLineId } : {}),
+    ...(resolvedBaseHeadId !== undefined ? { baseHeadId: resolvedBaseHeadId } : {}),
+  };
 }
 export function mergeAgentDelta(previous: AgentSnapshot|undefined, fresh: AgentSnapshot): AgentSnapshot {
   const messages=[...new Map([...(previous?.messages??[]),...fresh.messages].map(item=>[item.id,item])).values()];
@@ -151,10 +190,12 @@ export function agentSessionProjection(detail: AgentSessionDetail, snapshots: Re
     const group = byTask.get(message.taskId) ?? [];
     group.push(message); byTask.set(message.taskId, group);
   }
-  for (const task of tasks) {
+  for (let i = 0; i < tasks.length; i++) {
+    const rawTask = detail.tasks[i]!;
+    const task = tasks[i]!;
     const snapshot = snapshots[task.runId];
-    const fresh = snapshot && snapshot.task === task;
-    const prior=byTask.get(task.id) ?? [];
+    const fresh = agentSnapshotApplies(rawTask, snapshot);
+    const prior = byTask.get(task.id) ?? [];
     messages.push(...(fresh ? snapshot.incremental ? [...new Map([...prior,...snapshot.messages].map(message=>[message.id,message])).values()] : snapshot.messages : prior));
   }
   return { ...detail, tasks, messages };

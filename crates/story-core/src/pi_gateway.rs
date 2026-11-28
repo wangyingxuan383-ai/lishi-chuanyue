@@ -848,12 +848,18 @@ impl StoryToolGateway {
         let current_line_id: String = tx
             .query_row("SELECT current_line_id FROM worlds WHERE id=?", [world], |r| r.get(0))
             .unwrap_or_default();
-        let target_line = if was_previewed
-            && !current_line_id.is_empty()
-            && current_line_id != line
-            && crate::pi_resume::route_available(&tx, world, &current_line_id)?
-        {
-            current_line_id.as_str()
+        let target_line = if was_previewed {
+            if !current_line_id.is_empty() && current_line_id != line {
+                if !crate::pi_resume::route_available(&tx, world, &current_line_id)? {
+                    return Err(Error::Invalid("当前路线已归档、删除或无法进入。请恢复后再继续。".into()));
+                }
+                current_line_id.as_str()
+            } else {
+                if !crate::pi_resume::route_available(&tx, world, line)? {
+                    return Err(Error::Invalid("原路线已归档、删除或无法进入。请恢复后再继续。".into()));
+                }
+                line
+            }
         } else {
             if !crate::pi_resume::route_available(&tx, world, line)? {
                 return Err(Error::Invalid("原路线已归档、删除或无法进入。请恢复后再继续。".into()));
@@ -861,7 +867,11 @@ impl StoryToolGateway {
             line
         };
         let current=ws::base(&tx,world,target_line)?;
-        if current["fingerprint"]!=old_base["fingerprint"] || target_line != line {
+        let diverged = current["fingerprint"]!=old_base["fingerprint"] || target_line != line;
+        if was_previewed && !diverged {
+            return Err(Error::Invalid("这项任务当前不能继续，请先完成正在等待的操作".into()));
+        }
+        if diverged {
             crate::pi_rebase::save(&tx,&task,&task_plan(&tx,&task)?,&ws::parse(ws::text(&task,"workspace_json")),&current)?;
             if target_line != line {
                 tx.execute(

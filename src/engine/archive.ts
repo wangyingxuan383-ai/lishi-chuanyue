@@ -593,7 +593,11 @@ function remap(a: WorldArchive): WorldArchive {
       ...note,
       scope: { ...note.scope, ...(note.scope.toNode ? { toNode: id(note.scope.toNode)! } : {}),
         ...(note.scope.previous?.toNode ? { previous: { ...note.scope.previous, toNode: id(note.scope.previous.toNode)! } } : {}) },
-      progress: note.progress.routeNode ? { ...note.progress, routeNode: id(note.progress.routeNode)! } : note.progress,
+      progress: {
+        ...note.progress,
+        ...(note.progress.routeNode ? { routeNode: id(note.progress.routeNode)! } : {}),
+        ...(note.progress.update?.baseToNode ? { update: { ...note.progress.update, baseToNode: id(note.progress.update.baseToNode)! } } : {}),
+      },
     })) } : {}),
     ...(a.pi ? {pi:{...a.pi,sessions:a.pi.sessions.map(item=>({...item,id:id(item.id)!,worldId:worldId!,lineId:id(item.lineId)!})),tasks:a.pi.tasks.map(item=>({...item,id:id(item.id)!,sessionId:id(item.sessionId)!,...(item.lineId ? {lineId:id(item.lineId)!} : {}),history:sourceIds(item.history)}))}} : {}),
     ...(a.factSources ? {factSources:a.factSources.map(item=>({...item,id:id(item.id),world_id:worldId,line_id:id(item.line_id),node_id:id(item.node_id),task_id:id(item.task_id),batch_id:id(item.batch_id),source_json:JSON.stringify(sourceIds(JSON.parse(String(item.source_json)))),resource_id:["node","state","people","protagonist","places","cards","goals","facts"].includes(String(item.resource_kind))&&item.resource_id ? id(item.resource_id):item.resource_id}))} : {}),
@@ -798,9 +802,9 @@ export async function importWorld(repo: Repo, raw: unknown, mode: "new" | "repla
     }
     if (optionalTables.has("execution_runs")) statements.push({ sql: "DELETE FROM execution_runs WHERE world_id = ?", params: [worldId] });
     if (optionalTables.has("pi_external_effects")) statements.push({ sql: "DELETE FROM pi_external_effects WHERE world_id = ?", params: [worldId] });
-    if (optionalTables.has("world_execution_leases")) statements.push({ sql: "DELETE FROM world_execution_leases WHERE world_id = ? OR world_id LIKE ? || '#read:%'", params: [worldId, worldId] });
+    if (optionalTables.has("world_execution_leases")) statements.push({ sql: "DELETE FROM world_execution_leases WHERE world_id = ? OR (world_id LIKE ? || '#read:%' AND instr(world_id, ? || '#read:') = 1)", params: [worldId, worldId, worldId] });
     if (optionalTables.has("settings")) statements.push({ sql: "DELETE FROM settings WHERE key IN (?, ?)", params: [`autoplayUnusedNote:${worldId}`, `carriedDone:${worldId}`] });
-    if (optionalTables.has("reader_progress")) statements.push({ sql: "DELETE FROM reader_progress WHERE target_type = 'world_novel' AND (target_id = ? OR target_id LIKE ? || ':%')", params: [worldId, worldId] });
+    if (optionalTables.has("reader_progress")) statements.push({ sql: "DELETE FROM reader_progress WHERE target_type = 'world_novel' AND (target_id = ? OR (target_id LIKE ? || ':%' AND instr(target_id, ? || ':') = 1))", params: [worldId, worldId, worldId] });
     if (optionalTables.has("reader_bookmarks")) statements.push({ sql: "DELETE FROM reader_bookmarks WHERE target_type = 'world_novel' AND target_id = ?", params: [worldId] });
     if (optionalTables.has("reader_highlights")) statements.push({ sql: "DELETE FROM reader_highlights WHERE (target_type = 'world_novel' AND target_id = ?) OR world_id = ?", params: [worldId, worldId] });
     statements.push(

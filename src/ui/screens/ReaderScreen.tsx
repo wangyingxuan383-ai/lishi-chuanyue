@@ -323,14 +323,73 @@ export function collectNovelRouteNodeIds(novelBook: NovelBook | null): Set<strin
   return ids;
 }
 
+export const LINE_SCOPED_NODE_PREFIX = "line:";
+
+export function isLineScopedNodeId(nodeId: string | null | undefined): nodeId is string {
+  return typeof nodeId === "string" && nodeId.startsWith(LINE_SCOPED_NODE_PREFIX);
+}
+
+export function encodeWorldNovelAnnotationNodeId(
+  targetType: ReaderTargetType,
+  paraNodeId: string | null | undefined,
+  activeLineId: string | null | undefined,
+): string | null {
+  if (paraNodeId) return paraNodeId;
+  if (targetType === "world_novel") {
+    const cleanLine = activeLineId?.trim();
+    if (cleanLine) return `${LINE_SCOPED_NODE_PREFIX}${cleanLine}`;
+  }
+  return null;
+}
+
+function hasTextSnippet(text: string, needle: string): boolean {
+  if (!needle) return true;
+  if (text.includes(needle)) return true;
+  const t = needle.trim();
+  return t.length > 0 && text.includes(t);
+}
+
+export function resolveWorldNovelSectionIndex(
+  sections: { title: string }[],
+  sectionIndex: number,
+  sectionTitle: string,
+): number {
+  if (
+    sectionIndex >= 0 &&
+    sectionIndex < sections.length &&
+    (!sectionTitle || sections[sectionIndex]?.title === sectionTitle)
+  ) {
+    return sectionIndex;
+  }
+  if (sectionTitle) {
+    const byTitle = sections.findIndex((s) => s.title === sectionTitle);
+    if (byTitle >= 0) return byTitle;
+  }
+  return -1;
+}
+
 export function filterWorldNovelBookmarks(
   bookmarks: ReaderBookmark[],
   routeNodeIds: ReadonlySet<string>,
-  sections: { title: string }[],
+  sections: { title: string; paragraphs?: { text: string }[] }[],
+  activeLineId?: string | null,
 ): ReaderBookmark[] {
   return bookmarks.filter((b) => {
+    if (isLineScopedNodeId(b.nodeId)) {
+      const cleanLine = activeLineId?.trim();
+      if (!cleanLine || b.nodeId !== `${LINE_SCOPED_NODE_PREFIX}${cleanLine}`) {
+        return false;
+      }
+      return resolveWorldNovelSectionIndex(sections, b.sectionIndex, b.sectionTitle) >= 0;
+    }
     if (b.nodeId) return routeNodeIds.has(b.nodeId);
-    return sections.some((s) => s.title === b.sectionTitle);
+    const secIdx = resolveWorldNovelSectionIndex(sections, b.sectionIndex, b.sectionTitle);
+    if (secIdx < 0 || !b.sectionTitle || sections[secIdx]?.title !== b.sectionTitle) {
+      return false;
+    }
+    const sec = sections[secIdx];
+    if (!sec?.paragraphs) return true;
+    return sec.paragraphs.some((p) => hasTextSnippet(p.text, b.snippet));
   });
 }
 
@@ -339,6 +398,7 @@ export function findCurrentSectionBookmark(
   targetType: ReaderTargetType,
   sectionIndex: number,
   currentSection: { title: string; paragraphs: NovelParagraph[] } | null,
+  activeLineId?: string | null,
 ): ReaderBookmark | null {
   if (!currentSection) return null;
   if (targetType === "book") {
@@ -346,12 +406,47 @@ export function findCurrentSectionBookmark(
   }
   return (
     bookmarks.find((b) => {
+      if (isLineScopedNodeId(b.nodeId)) {
+        const cleanLine = activeLineId?.trim();
+        if (!cleanLine || b.nodeId !== `${LINE_SCOPED_NODE_PREFIX}${cleanLine}`) {
+          return false;
+        }
+        return b.sectionTitle ? b.sectionTitle === currentSection.title : b.sectionIndex === sectionIndex;
+      }
       if (b.nodeId) {
         return currentSection.paragraphs.some((p) => p.nodeId === b.nodeId);
       }
-      return b.sectionIndex === sectionIndex && b.sectionTitle === currentSection.title;
+      return (
+        b.sectionTitle === currentSection.title &&
+        currentSection.paragraphs.some((p) => hasTextSnippet(p.text, b.snippet))
+      );
     }) ?? null
   );
+}
+
+export function filterWorldNovelHighlights(
+  highlights: ReaderHighlight[],
+  routeNodeIds: ReadonlySet<string>,
+  sections: { title: string; paragraphs?: { text: string; nodeId?: string | null }[] }[],
+  activeLineId?: string | null,
+): ReaderHighlight[] {
+  return highlights.filter((h) => {
+    if (isLineScopedNodeId(h.nodeId)) {
+      const cleanLine = activeLineId?.trim();
+      if (!cleanLine || h.nodeId !== `${LINE_SCOPED_NODE_PREFIX}${cleanLine}`) {
+        return false;
+      }
+      return resolveWorldNovelSectionIndex(sections, h.sectionIndex, h.sectionTitle) >= 0;
+    }
+    if (h.nodeId) return routeNodeIds.has(h.nodeId);
+    const secIdx = resolveWorldNovelSectionIndex(sections, h.sectionIndex, h.sectionTitle);
+    if (secIdx < 0 || !h.sectionTitle || sections[secIdx]?.title !== h.sectionTitle) {
+      return false;
+    }
+    const sec = sections[secIdx];
+    if (!sec?.paragraphs) return true;
+    return sec.paragraphs.some((p) => hasTextSnippet(p.text, h.selectedText));
+  });
 }
 
 export function filterParagraphHighlights(
@@ -360,27 +455,55 @@ export function filterParagraphHighlights(
   pIdx: number,
   allParagraphs: NovelParagraph[],
   targetType: ReaderTargetType,
+  activeLineId?: string | null,
 ): ReaderHighlight[] {
   if (targetType === "book") {
-    return sectionHighlights.filter((h) => h.paragraphIndex === pIdx);
+    return sectionHighlights.filter((h) => {
+      if (!hasTextSnippet(para.text, h.selectedText)) return false;
+      if (h.paragraphIndex === pIdx) return true;
+      const exactSlot = allParagraphs[h.paragraphIndex];
+      if (exactSlot && exactSlot.kind !== "divider" && hasTextSnippet(exactSlot.text, h.selectedText)) {
+        return false;
+      }
+      const firstIdx = allParagraphs.findIndex(
+        (cand) => cand.kind !== "divider" && hasTextSnippet(cand.text, h.selectedText),
+      );
+      return firstIdx === pIdx;
+    });
   }
-  const hasSnippet = (text: string, needle: string) => {
-    if (!needle) return true;
-    if (text.includes(needle)) return true;
-    const t = needle.trim();
-    return t.length > 0 && text.includes(t);
-  };
   return sectionHighlights.filter((h) => {
+    if (isLineScopedNodeId(h.nodeId)) {
+      const cleanLine = activeLineId?.trim();
+      if (!cleanLine || h.nodeId !== `${LINE_SCOPED_NODE_PREFIX}${cleanLine}`) {
+        return false;
+      }
+      if (para.nodeId) return false;
+      if (!hasTextSnippet(para.text, h.selectedText)) return false;
+      if (h.paragraphIndex === pIdx) return true;
+      const exactSlot = allParagraphs[h.paragraphIndex];
+      if (
+        exactSlot &&
+        exactSlot.kind !== "divider" &&
+        !exactSlot.nodeId &&
+        hasTextSnippet(exactSlot.text, h.selectedText)
+      ) {
+        return false;
+      }
+      const firstIdx = allParagraphs.findIndex(
+        (cand) => cand.kind !== "divider" && !cand.nodeId && hasTextSnippet(cand.text, h.selectedText),
+      );
+      return firstIdx === pIdx;
+    }
     if (h.nodeId) {
       if ((para.nodeId ?? null) !== h.nodeId) return false;
-      if (!hasSnippet(para.text, h.selectedText)) return false;
+      if (!hasTextSnippet(para.text, h.selectedText)) return false;
       if (h.paragraphIndex === pIdx) return true;
       const exactSlot = allParagraphs[h.paragraphIndex];
       if (
         exactSlot &&
         exactSlot.kind !== "divider" &&
         (exactSlot.nodeId ?? null) === h.nodeId &&
-        hasSnippet(exactSlot.text, h.selectedText)
+        hasTextSnippet(exactSlot.text, h.selectedText)
       ) {
         return false;
       }
@@ -388,20 +511,60 @@ export function filterParagraphHighlights(
         (cand) =>
           cand.kind !== "divider" &&
           (cand.nodeId ?? null) === h.nodeId &&
-          hasSnippet(cand.text, h.selectedText),
+          hasTextSnippet(cand.text, h.selectedText),
       );
       return firstIdx === pIdx;
     }
     if (para.nodeId) return false;
-    if (!hasSnippet(para.text, h.selectedText)) return false;
+    if (!hasTextSnippet(para.text, h.selectedText)) return false;
     if (h.paragraphIndex === pIdx) return true;
     const exactSlot = allParagraphs[h.paragraphIndex];
-    if (exactSlot && !exactSlot.nodeId && hasSnippet(exactSlot.text, h.selectedText)) return false;
+    if (
+      exactSlot &&
+      exactSlot.kind !== "divider" &&
+      !exactSlot.nodeId &&
+      hasTextSnippet(exactSlot.text, h.selectedText)
+    ) {
+      return false;
+    }
     const firstIdx = allParagraphs.findIndex(
-      (cand) => cand.kind !== "divider" && !cand.nodeId && hasSnippet(cand.text, h.selectedText),
+      (cand) => cand.kind !== "divider" && !cand.nodeId && hasTextSnippet(cand.text, h.selectedText),
     );
     return firstIdx === pIdx;
   });
+}
+
+export function resolveWorldNovelBookmarkJump(
+  novelBook: NovelBook | null,
+  toc: { title: string }[],
+  bm: Pick<ReaderBookmark, "nodeId" | "sectionIndex" | "sectionTitle" | "paragraphIndex" | "snippet">,
+): { sectionIndex: number; paragraphIndex: number } {
+  if (novelBook && bm.nodeId && !isLineScopedNodeId(bm.nodeId)) {
+    const loc = locateNovelNodeTarget(novelBook, bm.nodeId, bm.paragraphIndex, bm.snippet);
+    if (loc) return loc;
+  }
+  let targetSec = bm.sectionIndex;
+  if (bm.sectionIndex < 0 || bm.sectionIndex >= toc.length || toc[bm.sectionIndex]?.title !== bm.sectionTitle) {
+    const byTocTitle = bm.sectionTitle ? toc.findIndex((t) => t.title === bm.sectionTitle) : -1;
+    if (byTocTitle >= 0) {
+      targetSec = byTocTitle;
+    } else if (novelBook && bm.sectionTitle) {
+      const bySecTitle = novelBook.sections.findIndex((s) => s.title === bm.sectionTitle);
+      if (bySecTitle >= 0) targetSec = bySecTitle;
+    }
+  }
+  let targetPara = bm.paragraphIndex;
+  const fullSec = novelBook?.sections[targetSec];
+  if (fullSec && bm.snippet.trim()) {
+    const curPara = fullSec.paragraphs[targetPara];
+    if (!curPara || !hasTextSnippet(curPara.text, bm.snippet)) {
+      const hitIdx = fullSec.paragraphs.findIndex(
+        (p) => p.kind !== "divider" && hasTextSnippet(p.text, bm.snippet),
+      );
+      if (hitIdx >= 0) targetPara = hitIdx;
+    }
+  }
+  return { sectionIndex: targetSec, paragraphIndex: targetPara };
 }
 
 export function locateNovelNodeTarget(
@@ -1078,10 +1241,17 @@ export default function ReaderScreen({
     };
   }, [bookId, bookSection, novelBook, sectionIndex, toc.length]);
 
+  const effectiveLineId = activeLineId ?? lineId;
+
   const visibleHighlights = useMemo(() => {
     if (targetType !== "world_novel") return highlights;
-    return highlights.filter((h) => !h.nodeId || routeNodeIds.has(h.nodeId));
-  }, [highlights, routeNodeIds, targetType]);
+    return filterWorldNovelHighlights(
+      highlights,
+      routeNodeIds,
+      novelBook?.sections ?? [],
+      effectiveLineId,
+    );
+  }, [effectiveLineId, highlights, novelBook, routeNodeIds, targetType]);
 
   const sectionHighlights = useMemo(() => {
     if (targetType === "book") {
@@ -1091,23 +1261,38 @@ export default function ReaderScreen({
     const secNodeIds = new Set(
       currentSection.paragraphs.map((p) => p.nodeId).filter((id): id is string => !!id),
     );
+    const sections = novelBook?.sections ?? [];
     return visibleHighlights.filter((h) => {
-      if (h.nodeId) return secNodeIds.has(h.nodeId);
+      if (h.nodeId && !isLineScopedNodeId(h.nodeId)) return secNodeIds.has(h.nodeId);
+      const resolvedSec = resolveWorldNovelSectionIndex(sections, h.sectionIndex, h.sectionTitle);
+      if (resolvedSec >= 0) return resolvedSec === sectionIndex;
       return (
         h.sectionIndex === sectionIndex &&
         (!h.sectionTitle || h.sectionTitle === currentSection.title)
       );
     });
-  }, [currentSection, highlights, sectionIndex, targetType, visibleHighlights]);
+  }, [currentSection, highlights, novelBook, sectionIndex, targetType, visibleHighlights]);
 
   const visibleBookmarks = useMemo(() => {
     if (targetType !== "world_novel") return bookmarks;
-    return filterWorldNovelBookmarks(bookmarks, routeNodeIds, novelBook?.sections ?? []);
-  }, [bookmarks, novelBook, routeNodeIds, targetType]);
+    return filterWorldNovelBookmarks(
+      bookmarks,
+      routeNodeIds,
+      novelBook?.sections ?? [],
+      effectiveLineId,
+    );
+  }, [bookmarks, effectiveLineId, novelBook, routeNodeIds, targetType]);
 
   const sectionBookmark = useMemo(
-    () => findCurrentSectionBookmark(visibleBookmarks, targetType, sectionIndex, currentSection),
-    [currentSection, sectionIndex, targetType, visibleBookmarks],
+    () =>
+      findCurrentSectionBookmark(
+        visibleBookmarks,
+        targetType,
+        sectionIndex,
+        currentSection,
+        effectiveLineId,
+      ),
+    [currentSection, effectiveLineId, sectionIndex, targetType, visibleBookmarks],
   );
 
   const intraProgressRatio =
@@ -1834,7 +2019,7 @@ export default function ReaderScreen({
       selectedText: selection.selectedText,
       note,
       color,
-      nodeId: selection.nodeId,
+      nodeId: encodeWorldNovelAnnotationNodeId(targetType, selection.nodeId, effectiveLineId),
     });
     window.getSelection?.()?.removeAllRanges();
     setSelection(null);
@@ -1875,7 +2060,7 @@ export default function ReaderScreen({
       sectionTitle: currentSection.title,
       snippet: (para?.text ?? currentSection.title).slice(0, 48),
       paragraphIndex: paraIdx,
-      nodeId: para?.nodeId ?? null,
+      nodeId: encodeWorldNovelAnnotationNodeId(targetType, para?.nodeId, effectiveLineId),
     });
     setRibbonDropKey((k) => k + 1);
     buzz(game.platform);
@@ -1891,13 +2076,18 @@ export default function ReaderScreen({
     }
     setShelvingBusy(true);
     try {
-      const saved = await saveWorldNovelToLibrary(game.repo, worldId, { lineId });
+      const saved = await saveWorldNovelToLibrary(game.repo, worldId, { lineId: effectiveLineId });
       setShelvedBookId(saved.bookId);
       buzz(game.platform);
-      toast(`已收入书斋：《${saved.title}》（共 ${saved.sectionCount} 章）`, {
-        label: "去翻阅",
-        run: () => push({ name: "reader", bookId: saved.bookId }),
-      });
+      toast(
+        saved.forked
+          ? `已另存新卷收入书斋：《${saved.title}》（原卷已被故事引用）`
+          : `已收入书斋：《${saved.title}》（共 ${saved.sectionCount} 章）`,
+        {
+          label: "去翻阅",
+          run: () => push({ name: "reader", bookId: saved.bookId }),
+        },
+      );
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "收入书斋失败");
     } finally {
@@ -1996,6 +2186,7 @@ export default function ReaderScreen({
           pIdx,
           currentSection.paragraphs,
           targetType,
+          effectiveLineId,
         );
         const notesWithText = paraHighlights.filter((h) => h.note.trim());
         const isSpeaking = tts.status !== "idle" && tts.speakingIndex === pIdx;
@@ -3043,12 +3234,10 @@ export default function ReaderScreen({
                     style={{ textAlign: "left", justifyContent: "flex-start" }}
                     onClick={() => {
                       setDrawerTab(null);
-                      if (targetType === "world_novel" && novelBook && bm.nodeId) {
-                        const loc = locateNovelNodeTarget(novelBook, bm.nodeId, bm.paragraphIndex, bm.snippet);
-                        if (loc) {
-                          void goSection(loc.sectionIndex, { paraIndex: loc.paragraphIndex, recordUndo: true });
-                          return;
-                        }
+                      if (targetType === "world_novel") {
+                        const loc = resolveWorldNovelBookmarkJump(novelBook, toc, bm);
+                        void goSection(loc.sectionIndex, { paraIndex: loc.paragraphIndex, recordUndo: true });
+                        return;
                       }
                       void goSection(bm.sectionIndex, { paraIndex: bm.paragraphIndex, recordUndo: true });
                     }}
@@ -3182,7 +3371,7 @@ export default function ReaderScreen({
                   selectedText: draft.selectedText,
                   note: noteInput.trim(),
                   color,
-                  nodeId: draft.nodeId,
+                  nodeId: encodeWorldNovelAnnotationNodeId(targetType, draft.nodeId, effectiveLineId),
                 });
                 setNewNoteSheet(null);
                 await refreshAnnotations();
@@ -3319,12 +3508,14 @@ export default function ReaderScreen({
       {excerptsOpen && (
         <ExcerptsSheet
           worldId={targetType === "world_novel" ? targetId : worldId}
-          lineId={targetType === "world_novel" ? activeLineId : lineId}
+          lineId={targetType === "world_novel" ? effectiveLineId : lineId}
+          routeNodeIds={targetType === "world_novel" ? routeNodeIds : undefined}
+          targetType={targetType}
           bookId={targetType === "book" ? targetId : null}
           onJumpHighlight={(h) => {
             if (h.targetType === targetType && h.targetId === targetId) {
               if (targetType === "world_novel" && novelBook) {
-                if (h.nodeId) {
+                if (h.nodeId && !isLineScopedNodeId(h.nodeId)) {
                   const loc = locateNovelNodeTarget(
                     novelBook,
                     h.nodeId,
@@ -3338,9 +3529,24 @@ export default function ReaderScreen({
                   void goSection(loc.sectionIndex, { paraIndex: loc.paragraphIndex, recordUndo: true });
                   return;
                 }
-                const titleSec = novelBook.sections.findIndex((s) => s.title === h.sectionTitle);
-                const resolvedSec = titleSec >= 0 ? titleSec : h.sectionIndex;
-                void goSection(resolvedSec, { paraIndex: h.paragraphIndex, recordUndo: true });
+                const resolvedSec = resolveWorldNovelSectionIndex(
+                  novelBook.sections,
+                  h.sectionIndex,
+                  h.sectionTitle,
+                );
+                const targetSec = resolvedSec >= 0 ? resolvedSec : h.sectionIndex;
+                const fullSec = novelBook.sections[targetSec];
+                let targetPara = h.paragraphIndex;
+                if (fullSec && h.selectedText.trim()) {
+                  const curP = fullSec.paragraphs[targetPara];
+                  if (!curP || !hasTextSnippet(curP.text, h.selectedText)) {
+                    const pHit = fullSec.paragraphs.findIndex(
+                      (p) => p.kind !== "divider" && hasTextSnippet(p.text, h.selectedText),
+                    );
+                    if (pHit >= 0) targetPara = pHit;
+                  }
+                }
+                void goSection(targetSec, { paraIndex: targetPara, recordUndo: true });
                 return;
               }
               void goSection(h.sectionIndex, { paraIndex: h.paragraphIndex, recordUndo: true });

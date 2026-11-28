@@ -591,23 +591,14 @@ impl AgentHostService {
                     if let Some(endpoint)=wire["endpointRef"].as_str(){reference["endpointRef"]=endpoint.into();}else{reference.as_object_mut().unwrap().remove("endpointRef");}
                     let mut scoped=request.clone();
                     if !scoped["request"].is_object(){scoped["request"]=json!({});}
-                    scoped["request"]["model"]=reference;
-                    scoped["request"].as_object_mut().unwrap().remove("modelUrl");
-                    let res = crate::pi_control::enqueue(&self.0.gateway.0,&scoped)?;
-                    if let (Some(input_id), Some(ref_scope)) = (
-                        res["id"].as_str(),
-                        request["request"]
-                            .get("referenceScope")
-                            .filter(|v| v.is_object()),
-                    ) {
-                        if let Ok(db) = self.0.gateway.0 .0.lock() {
-                            let _ = db.execute(
-                                "UPDATE pi_inputs SET content_json=json_set(content_json,'$.request.referenceScope',json(?1)) WHERE id=?2",
-                                params![ref_scope.to_string(), input_id],
-                            );
+                    if scoped["request"].get("referenceScope").is_none() {
+                        if let Some(ref_scope) = request.get("referenceScope").filter(|v| v.is_object()) {
+                            scoped["request"]["referenceScope"] = ref_scope.clone();
                         }
                     }
-                    return Ok(res);
+                    scoped["request"]["model"]=reference;
+                    scoped["request"].as_object_mut().unwrap().remove("modelUrl");
+                    return crate::pi_control::enqueue(&self.0.gateway.0,&scoped);
                 }
                 if request["delivery"]!="steer" {return Err(invalid("输入方式无效"));}
                 let host=self.task_host(id)?;

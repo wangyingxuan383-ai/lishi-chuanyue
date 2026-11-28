@@ -1519,45 +1519,89 @@ impl Engine {
     }
 
     pub(crate) fn is_tool_unsupported_error(error: &Error) -> bool {
-        let text_has_tool_rejection = |msg: &str| {
+        let check_message = |msg: &str, status: Option<u16>| {
+            if matches!(status, Some(401 | 403 | 429) | Some(500..)) {
+                return false;
+            }
             let lower = msg.to_lowercase();
-            [
+            let explicit_capability = [
                 "unsupported tool",
                 "tool is not supported",
-                "does not support tools",
+                "tools is not supported",
                 "tools are not supported",
-                "does not support tool use",
+                "does not support tools",
+                "not support tools",
+                "support tool use",
                 "tool use is not supported",
                 "tool calling is not supported",
                 "does not support tool calling",
+                "not support tool calling",
+                "tool_choice is not supported",
+                "does not support tool_choice",
                 "function calling is not supported",
                 "does not support function",
+                "not support function",
                 "functions are not supported",
+                "unprocessable tool",
                 "不支持工具",
-                "不支持函数调用",
+                "未支持工具",
+                "不支持函数",
                 "不支持function",
+                "不支持tool",
+            ]
+            .iter()
+            .any(|m| lower.contains(m));
+            if explicit_capability {
+                return true;
+            }
+            if status == Some(404) {
+                return false;
+            }
+            // Malformed tool call/result payloads or unrelated request parameter errors
+            // (e.g. Anthropic `invalid_request_error` on `max_tokens` or `tool_use` blocks)
+            // must not poison the 24h `toolCapability` cache.
+            if [
+                "tool_result",
+                "tool_call_id",
+                "tool_use.",
+                "tool_use_id",
+                "tool_calls[",
+                "max_tokens",
+                "max_output_tokens",
+                "context_length",
+                "unknown model",
+                "model not found",
+                "unrecognized model",
             ]
             .iter()
             .any(|m| lower.contains(m))
-                || (lower.contains("tool")
-                    && [
-                        "not supported",
-                        "unsupported",
-                        "unrecognized",
-                        "unknown",
-                        "invalid",
-                    ]
+            {
+                return false;
+            }
+            let mentions_tool_param = ["tools", "tool_choice", "functions"]
+                .iter()
+                .any(|m| lower.contains(m));
+            let unknown_param = mentions_tool_param
+                && ["unrecognized", "unknown", "extra inputs are not permitted"]
                     .iter()
-                    .any(|m| lower.contains(m)))
-                || (lower.contains("function")
-                    && ["not supported", "unsupported", "unrecognized", "unknown"]
-                        .iter()
-                        .any(|m| lower.contains(m)))
+                    .any(|m| lower.contains(m));
+            let invalid_param = mentions_tool_param
+                && [
+                    "invalid parameter",
+                    "invalid argument",
+                    "invalid field",
+                    "unsupported parameter",
+                    "unsupported argument",
+                    "unsupported field",
+                ]
+                .iter()
+                .any(|m| lower.contains(m));
+            unknown_param || invalid_param
         };
         match error {
             Error::Provider { partial: true, .. } => false,
-            Error::Provider { message, .. } => text_has_tool_rejection(message),
-            other => text_has_tool_rejection(&other.to_string()),
+            Error::Provider { message, status, .. } => check_message(message, *status),
+            other => check_message(&other.to_string(), None),
         }
     }
 
@@ -1590,19 +1634,7 @@ impl Engine {
                         .and_then(|s| serde_json::from_str::<Value>(s).ok())
                         .is_some_and(|v| v["value"] == "ready")
             }),
-            Err(Error::Provider {
-                status: Some(400 | 404 | 422),
-                partial: false,
-                ..
-            }) => false,
             Err(ref error) if Self::is_tool_unsupported_error(error) => false,
-            Err(Error::Invalid(ref message) | Error::Fail { kind: crate::failure::FailKind::Other, ref message })
-                if ["400", "404", "422"]
-                    .iter()
-                    .any(|s| message.to_lowercase().contains(s)) =>
-            {
-                false
-            }
             Err(error) => return Err(error),
         };
         self.save_observed_tool_support(shared, supported)?;
@@ -2868,6 +2900,37 @@ mod correction_notes_tests {
             partial: false,
         };
         assert!(!Engine::is_tool_unsupported_error(&rate_err));
+        for non_capability_err in [
+            Error::Provider {
+                kind: "http".into(),
+                status: Some(400),
+                message: r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0.tool_use.input: Field required"}}"#.into(),
+                partial: false,
+            },
+            Error::Provider {
+                kind: "http".into(),
+                status: Some(400),
+                message: r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.2.content.0: unexpected tool_use_id in tool_result"}}"#.into(),
+                partial: false,
+            },
+            Error::Provider {
+                kind: "http".into(),
+                status: Some(400),
+                message: r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 16384 > 8192 (request included tools)"}}"#.into(),
+                partial: false,
+            },
+            Error::Provider {
+                kind: "http".into(),
+                status: Some(404),
+                message: "404 Not Found: model 'claude-tool-test' unknown".into(),
+                partial: false,
+            },
+        ] {
+            assert!(
+                !Engine::is_tool_unsupported_error(&non_capability_err),
+                "must not classify unrelated error as tool-unsupported: {non_capability_err:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2983,6 +3046,19 @@ mod correction_notes_tests {
                 // 4. `maintain` runs while line gets soft-deleted before commit -> safely skips writing orphan chapter/edit:
                 MockReply::OkText("{\"people\":[{\"name\":\"王五\",\"role\":\"路人\",\"attitude\":\"中立\"}]}"),
                 MockReply::OkText("{\"title\":\"第一章\",\"gist\":\"开端\",\"summary\":\"测试摘要\"}"),
+                // 5. Classic `tool_capability` encountering generic HTTP 404 or Anthropic `invalid_request_error` does NOT poison 24h `toolCapability` cache:
+                MockReply::Err(Error::Provider {
+                    kind: "http".into(),
+                    status: Some(404),
+                    message: "404 Not Found: endpoint missing".into(),
+                    partial: false,
+                }),
+                MockReply::Err(Error::Provider {
+                    kind: "http".into(),
+                    status: Some(400),
+                    message: r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 16384 > 8192 (with tools)"}}"#.into(),
+                    partial: false,
+                }),
             ])),
             seen_bodies: Mutex::new(vec![]),
         });
@@ -3083,7 +3159,7 @@ mod correction_notes_tests {
             }),
         );
         m_plan.head_id = new_head.clone();
-        m_plan.base_id = Some(new_head);
+        m_plan.base_id = Some(new_head.clone());
         engine.start(m_plan).unwrap();
         let maint_snap = wait_run("run-maint").await;
         assert_eq!(maint_snap.status, "committed");
@@ -3091,6 +3167,38 @@ mod correction_notes_tests {
         let edit_count: i64 = store.lock().unwrap().query_row("SELECT COUNT(*) FROM nodes WHERE world_id='w' AND kind='edit'", [], |r| r.get(0)).unwrap();
         assert_eq!(chapter_count, 0, "archived world must not receive late maintain chapters");
         assert_eq!(edit_count, 0, "archived world must not receive late maintain edit nodes");
+        let (maint_usage_rows, maint_prompt_sum): (i64, i64) = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0) FROM usage WHERE id LIKE 'run-maint:%' AND node_id IS NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(maint_usage_rows, 2, "skipped maintain must still record real LLM usage");
+        assert_eq!(maint_prompt_sum, 100);
+
+        // 5. Unrelated HTTP 404 or Anthropic `invalid_request_error` on `tool_capability` fails without poisoning `toolCapability` cache:
+        store.lock().unwrap().execute("UPDATE worlds SET archived=0 WHERE id='w'", []).unwrap();
+        for (run_id, model_id) in [("run-cap-404", "cap-404-v1"), ("run-cap-maxtok", "cap-maxtok-v1")] {
+            let mut p = make_plan(run_id, "turn", model_id, json!({}));
+            p.head_id = new_head.clone();
+            p.base_id = Some(new_head.clone());
+            engine.start(p).unwrap();
+            let snap = wait_run(run_id).await;
+            assert_eq!(snap.status, "failed");
+            let poisoned: i64 = store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key LIKE ?",
+                    [format!("toolCapability:%:{model_id}")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(poisoned, 0, "{model_id} must not poison toolCapability cache");
+        }
     }
 }
 

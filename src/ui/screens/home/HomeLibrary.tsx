@@ -106,7 +106,9 @@ function LibraryBookCard({
           </span>
           <b className="lib-card-title">{item.title}</b>
           {item.author ? (
-            <small className="lib-card-author">{item.author}</small>
+            <small className="lib-card-author">
+              {item.author} · 共 {item.sectionCount} 节
+            </small>
           ) : (
             <small className="lib-card-author muted-faint">共 {item.sectionCount} 节</small>
           )}
@@ -338,13 +340,18 @@ export function HomeLibrary({
     if (compilingId) return;
     setCompilingId(card.world.id);
     try {
-      const res = await saveWorldNovelToLibrary(game.repo, card.world.id);
+      const saved = await saveWorldNovelToLibrary(game.repo, card.world.id);
       setCompileOpen(false);
       await onReload();
-      toast(`已将《${res.title}》编纂入藏（共 ${res.sectionCount} 节）`, {
-        label: "展读",
-        run: () => push({ name: "reader", bookId: res.bookId }),
-      });
+      toast(
+        saved.forked
+          ? `已另存新卷收入书斋：《${saved.title}》（原卷已被故事引用）`
+          : `已将《${saved.title}》编纂入藏（共 ${saved.sectionCount} 节）`,
+        {
+          label: "展读",
+          run: () => push({ name: "reader", bookId: saved.bookId }),
+        },
+      );
     } catch (err) {
       toast(err instanceof Error ? err.message : "故事尚无足够正文可编纂成书");
     } finally {

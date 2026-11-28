@@ -939,8 +939,22 @@ export async function previewBookResplit(
 export interface ApplyBookResplitResult {
   bookId: string;
   forked: boolean;
+  title: string;
   sectionCount: number;
   sampleTitles: string[];
+}
+
+function nextForkedResplitTitle(currentTitle: string, usedTitles: ReadonlySet<string>): string {
+  const base = currentTitle.replace(/（重分章(?:\s*\d+)?）$/, "").trim() || currentTitle;
+  const firstCandidate = `${base}（重分章）`;
+  if (!currentTitle.endsWith("（重分章）") && !usedTitles.has(firstCandidate)) {
+    return firstCandidate;
+  }
+  let n = 2;
+  while (usedTitles.has(`${base}（重分章 ${n}）`)) {
+    n += 1;
+  }
+  return `${base}（重分章 ${n}）`;
 }
 
 /**
@@ -1003,9 +1017,17 @@ export async function applyBookResplit(
 
   const targetBookId = hasExternalRefs ? newId() : bookId;
   const nowIso = new Date().toISOString();
+  let resolvedBookTitle = bookHeader.title;
+  if (hasExternalRefs) {
+    const titleRows = await repo.platform.sql
+      .query("SELECT title FROM source_books")
+      .catch(() => []);
+    const usedTitles = new Set(titleRows.map((r) => String(r.title ?? "")));
+    resolvedBookTitle = nextForkedResplitTitle(bookHeader.title, usedTitles);
+  }
   const updatedBook: SourceBook = {
     id: targetBookId,
-    title: bookHeader.title,
+    title: resolvedBookTitle,
     format: bookHeader.format,
     createdAt: hasExternalRefs ? nowIso : bookHeader.createdAt,
     sections,
@@ -1201,8 +1223,9 @@ export async function applyBookResplit(
       typeof existingPrefs[bookId] === "object"
     ) {
       const srcPref = existingPrefs[bookId] as Record<string, unknown>;
+      const wasPinned = srcPref.pinned === true;
       const clonedPref: Record<string, unknown> = {
-        pinned: srcPref.pinned === true,
+        pinned: wasPinned,
         coverTone: typeof srcPref.coverTone === "number" ? srcPref.coverTone : null,
         finished: srcPref.finished === true,
         author: typeof srcPref.author === "string" ? srcPref.author : "",
@@ -1212,6 +1235,7 @@ export async function applyBookResplit(
       };
       await repo.setSetting("reader:bookPrefs", {
         ...existingPrefs,
+        ...(wasPinned ? { [bookId]: { ...srcPref, pinned: false } } : {}),
         [targetBookId]: clonedPref,
       });
     }
@@ -1223,6 +1247,7 @@ export async function applyBookResplit(
     return {
       bookId: targetBookId,
       forked: true,
+      title: updatedBook.title,
       sectionCount: sections.length,
       sampleTitles: sections.slice(0, 8).map((s) => s.title),
     };
@@ -1252,9 +1277,34 @@ export async function applyBookResplit(
   ];
 
   await repo.platform.sql.batch(statements);
+
+  const existingPrefs = await repo.getSetting<Record<string, unknown> | null>("reader:bookPrefs", null);
+  if (
+    existingPrefs &&
+    typeof existingPrefs === "object" &&
+    !Array.isArray(existingPrefs) &&
+    existingPrefs[bookId] &&
+    typeof existingPrefs[bookId] === "object"
+  ) {
+    const srcPref = existingPrefs[bookId] as Record<string, unknown>;
+    if (srcPref.origin === "world-novel" || srcPref.sourceWorldId) {
+      const detachedPref: Record<string, unknown> = {
+        ...srcPref,
+        origin: "imported",
+      };
+      delete detachedPref.sourceWorldId;
+      delete detachedPref.sourceLineId;
+      await repo.setSetting("reader:bookPrefs", {
+        ...existingPrefs,
+        [bookId]: detachedPref,
+      });
+    }
+  }
+
   return {
     bookId,
     forked: false,
+    title: updatedBook.title,
     sectionCount: sections.length,
     sampleTitles: sections.slice(0, 8).map((s) => s.title),
   };

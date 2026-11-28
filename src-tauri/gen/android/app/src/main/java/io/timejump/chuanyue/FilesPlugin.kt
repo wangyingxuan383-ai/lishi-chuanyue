@@ -19,6 +19,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 internal fun resolveBinaryExportMime(name: String, explicitMime: String?): String {
     val lower = name.trim().lowercase()
@@ -40,8 +41,13 @@ internal fun resolveBinaryExportMime(name: String, explicitMime: String?): Strin
 @TauriPlugin
 class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     companion object {
-        @Volatile
-        internal var activeExportCount: Int = 0
+        private val activeExportCounter = AtomicInteger(0)
+
+        internal val activeExportCount: Int
+            get() = activeExportCounter.get()
+
+        @JvmStatic
+        internal fun isBusy(): Boolean = activeExportCounter.get() > 0
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -58,12 +64,20 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     ) {
         @Volatile
         var callbackReceived: Boolean = false
+        var timedOut: Boolean = false
         lateinit var timeout: Runnable
+        lateinit var quarantineWatch: Runnable
+    }
+
+    private fun acquireSlot(current: PendingExport): Boolean {
+        if (!requests.acquire(current)) return false
+        activeExportCounter.incrementAndGet()
+        return true
     }
 
     private fun releaseSlot(current: PendingExport) {
         if (requests.release(current)) {
-            activeExportCount = (activeExportCount - 1).coerceAtLeast(0)
+            activeExportCounter.updateAndGet { count -> if (count > 0) count - 1 else 0 }
         }
     }
 
@@ -83,6 +97,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     private fun finish(current: PendingExport, value: JSObject) {
         if (pending !== current) return
         mainHandler.removeCallbacks(current.timeout)
+        mainHandler.removeCallbacks(current.quarantineWatch)
         releaseSlot(current)
         current.gate.finish(value)
     }
@@ -105,7 +120,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
         }
 
         mainHandler.post {
-            if (pending != null) {
+            if (pending != null || isBusy() || DocumentPickerPlugin.isBusy()) {
                 cleanupSource(sourcePath)
                 invoke.resolve(documentPickerFailure("file_busy"))
                 return@post
@@ -117,18 +132,42 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
             }
             val token = nextPickerRequestToken.incrementAndGet()
             val current = PendingExport(token, invoke, DocumentPickerReplyGate { invoke.resolve(it) }, sourcePath, bytesBase64)
-            current.timeout = Runnable {
-                if (pending === current && current.token == token) {
+            current.quarantineWatch = Runnable {
+                if (pending !== current || current.token != token) return@Runnable
+                if (current.callbackReceived) {
+                    return@Runnable
+                } else if (!ownerActivity.isInMultiWindowMode && ownerActivity.hasWindowFocus()) {
+                    scheduleReturnCheck(current, token, RETURN_CALLBACK_GRACE_MS, allowRetry = true)
+                } else if (!ownerActivity.isFinishing && !ownerActivity.isDestroyed) {
+                    mainHandler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
+                } else {
                     cleanupSource(current.sourcePath)
-                    finish(current, documentPickerFailure("file_unconfirmed"))
+                    releaseSlot(current)
                 }
             }
-            if (!requests.acquire(current)) {
+            current.timeout = Runnable {
+                if (pending === current && current.token == token) {
+                    // Resolve the JS Invoke on timeout, while keeping the slot quarantined
+                    // until the SAF picker closes via ActivityResult or focused return.
+                    current.timedOut = true
+                    if (!current.callbackReceived) {
+                        cleanupSource(current.sourcePath)
+                    }
+                    current.gate.timedOut()
+                    if (!current.callbackReceived) {
+                        if (!ownerActivity.isInMultiWindowMode && ownerActivity.hasWindowFocus()) {
+                            scheduleReturnCheck(current, token, RETURN_CALLBACK_GRACE_MS, allowRetry = true)
+                        } else {
+                            mainHandler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
+                        }
+                    }
+                }
+            }
+            if (!acquireSlot(current)) {
                 cleanupSource(sourcePath)
                 invoke.resolve(documentPickerFailure("file_busy"))
                 return@post
             }
-            activeExportCount += 1
             if (!mainHandler.postDelayed(current.timeout, DOCUMENT_PICK_TIMEOUT_MS)) {
                 cleanupSource(sourcePath)
                 finish(current, documentPickerFailure("file_unavailable"))
@@ -150,6 +189,12 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
             if (current.invoke !== invoke) return@post
             val expectedToken = current.token
             current.callbackReceived = true
+            mainHandler.removeCallbacks(current.quarantineWatch)
+            if (current.timedOut || current.gate.isResolved()) {
+                cleanupSource(current.sourcePath)
+                finish(current, documentPickerFailure("file_unconfirmed"))
+                return@post
+            }
             val decoded = try {
                 decodeDocumentPickerResult(result)
             } catch (_: Throwable) {
@@ -223,14 +268,22 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     private fun scheduleReturnCheck(current: PendingExport, token: Long, delayMs: Long, allowRetry: Boolean) {
         mainHandler.postDelayed({
             if (pending !== current || current.token != token || current.callbackReceived) return@postDelayed
-            if (ownerActivity.isInMultiWindowMode) return@postDelayed
+            if (ownerActivity.isInMultiWindowMode) {
+                if (current.timedOut && !ownerActivity.isFinishing && !ownerActivity.isDestroyed) {
+                    mainHandler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
+                }
+                return@postDelayed
+            }
             if (ownerActivity.hasWindowFocus()) {
                 cleanupSource(current.sourcePath)
                 current.gate.returnedWithoutCallback()
                 mainHandler.removeCallbacks(current.timeout)
+                mainHandler.removeCallbacks(current.quarantineWatch)
                 releaseSlot(current)
             } else if (allowRetry) {
                 scheduleReturnCheck(current, token, RETURN_FOCUS_RETRY_MS, allowRetry = false)
+            } else if (current.timedOut && !ownerActivity.isFinishing && !ownerActivity.isDestroyed) {
+                mainHandler.postDelayed(current.quarantineWatch, RETURN_FOCUS_RETRY_MS)
             }
         }, delayMs)
     }
@@ -238,7 +291,7 @@ class FilesPlugin(private val ownerActivity: Activity) : Plugin(ownerActivity) {
     override fun onResume(activity: AppCompatActivity) {
         if (activity !== ownerActivity) return
         val current = pending ?: return
-        if (!current.gate.hasPaused || current.callbackReceived) return
+        if ((!current.gate.hasPaused && !current.timedOut) || current.callbackReceived) return
         if (activity.isInMultiWindowMode) return
         // `hasWindowFocus()` is always false synchronously inside `Activity.onResume()`;
         // check focus inside the delayed callback and retry once if focus transition is still settling.

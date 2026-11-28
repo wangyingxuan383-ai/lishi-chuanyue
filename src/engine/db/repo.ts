@@ -339,7 +339,19 @@ export class Repo {
       if (!readerTables.has(table)) continue;
       const cols = await this.q(`PRAGMA table_info(${table})`).catch(() => []);
       const hasWorldId = cols.some((c) => String(c.name) === "world_id");
-      if (hasWorldId) {
+      if (table === "reader_progress") {
+        if (hasWorldId) {
+          readerCleanups.push({
+            sql: "DELETE FROM reader_progress WHERE (target_type = 'world_novel' AND (target_id = ? OR (target_id LIKE ? || ':%' AND instr(target_id, ? || ':') = 1))) OR world_id = ?",
+            params: [worldId, worldId, worldId, worldId],
+          });
+        } else {
+          readerCleanups.push({
+            sql: "DELETE FROM reader_progress WHERE target_type = 'world_novel' AND (target_id = ? OR (target_id LIKE ? || ':%' AND instr(target_id, ? || ':') = 1))",
+            params: [worldId, worldId, worldId],
+          });
+        }
+      } else if (hasWorldId) {
         readerCleanups.push({
           sql: `DELETE FROM ${table} WHERE (target_type = 'world_novel' AND target_id = ?) OR world_id = ?`,
           params: [worldId, worldId],
@@ -979,6 +991,7 @@ export class Repo {
           AND NOT EXISTS(SELECT 1 FROM story_fact_sources WHERE line_id IN routes OR node_id IN gone)
           AND NOT EXISTS(SELECT 1 FROM fact_corrections WHERE node_id IN gone OR original_node_id IN gone)
           AND NOT EXISTS(SELECT 1 FROM nodes WHERE json_extract(meta_json,'$.revision.nodeId') IN gone)
+          AND NOT EXISTS(SELECT 1 FROM nodes WHERE json_extract(meta_json,'$.agentOriginalNodeId') IN gone)
           AND NOT EXISTS(SELECT 1 FROM nodes WHERE id NOT IN (SELECT id FROM gone WHERE id IS NOT NULL) AND json_extract(meta_json,'$.revision.lineId') IN routes)
           AND NOT EXISTS(SELECT 1 FROM execution_runs WHERE line_id IN routes AND status IN ('running','committing'))
           AND NOT EXISTS(SELECT 1 FROM pi_sessions WHERE line_id IN routes)

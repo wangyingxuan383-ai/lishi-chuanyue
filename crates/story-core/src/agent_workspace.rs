@@ -712,16 +712,43 @@ pub(crate) fn search(db: &Connection, plan: &RunPlan, args: &Value) -> Result<Va
     }
     Ok(json!({"matches":hits}))
 }
-fn scope_book(plan: &RunPlan, value: &mut Value) {
+fn book_scope_bounds(plan: &RunPlan, book_id: &str) -> Option<(Option<u64>, Option<u64>)> {
     let binding = &plan.meta["agent"]["referenceScope"];
-    if binding["bookId"] != value["id"] {
-        return;
+    if book_id.is_empty() || binding["bookId"].as_str() != Some(book_id) {
+        return None;
     }
-    let from = binding["from"].as_u64();
-    let through = binding["through"].as_u64();
+    let from = binding["from"].as_i64().map(|v| v.max(0) as u64);
+    let through = binding["through"].as_i64().map(|v| v.max(0) as u64);
     if from.is_none() && through.is_none() {
-        return;
+        return None;
     }
+    Some((from, through))
+}
+fn book_scope_error(
+    action: &str,
+    from: Option<u64>,
+    through: Option<u64>,
+    total_sections: usize,
+) -> Error {
+    let min_sec = from.unwrap_or(0);
+    let max_sec = through.unwrap_or_else(|| total_sections.saturating_sub(1) as u64);
+    Error::Invalid(format!(
+        "超出本次允许的章节范围：当前仅允许{action}第 {}～{} 节（路径 /data/sections/{min_sec}..={max_sec}）",
+        min_sec + 1,
+        max_sec + 1
+    ))
+}
+fn strip_book_summaries(value: &mut Value) {
+    if let Some(data) = value["data"].as_object_mut() {
+        for key in ["summary", "analysis", "analyses", "synopsis"] {
+            data.remove(key);
+        }
+    }
+}
+fn scope_book(plan: &RunPlan, value: &mut Value) {
+    let Some((from, through)) = book_scope_bounds(plan, text(value, "id")) else {
+        return;
+    };
     let in_range = |n: u64| from.is_none_or(|f| n >= f) && through.is_none_or(|t| n <= t);
     for key in ["sections", "chunks"] {
         if let Some(items) = value[key].as_array_mut() {
@@ -729,18 +756,22 @@ fn scope_book(plan: &RunPlan, value: &mut Value) {
         }
     }
     if let Some(items) = value["data"]["sections"].as_array_mut() {
-        let mut idx = 0u64;
-        items.retain(|_| {
-            let keep = in_range(idx);
-            idx += 1;
-            keep
-        });
-    }
-    if let Some(data) = value["data"].as_object_mut() {
-        for key in ["summary", "analysis", "analyses", "synopsis"] {
-            data.remove(key);
+        if let Some(t) = through {
+            let keep_len = (t as usize).saturating_add(1).min(items.len());
+            items.truncate(keep_len);
+        }
+        if let Some(f) = from.filter(|&f| f > 0) {
+            for (idx, item) in items.iter_mut().enumerate() {
+                if (idx as u64) < f {
+                    *item = Value::Null;
+                } else if let Some(obj) = item.as_object_mut() {
+                    obj.insert("section".into(), json!(idx));
+                    obj.insert("editPath".into(), json!(format!("/data/sections/{idx}")));
+                }
+            }
         }
     }
+    strip_book_summaries(value);
     let mut scope_val =
         json!({"through":through,"message":"只返回本次允许范围，不读取后续或全书总结"});
     if let Some(f) = from {
@@ -793,9 +824,22 @@ pub(crate) fn read_formal(db:&Connection,plan:&RunPlan,args:&Value)->Result<Valu
     read_selected(db,plan,args,None)
 }
 fn read_selected(db:&Connection,plan:&RunPlan,args:&Value,work:Option<Value>)->Result<Value> {
-    let value=selected_value(db,plan,args,work)?;
+    let (value, min_offset) = selected_value_with_offset(db,plan,args,work)?;
+    let effective_args;
+    let page_args = if let Some(min_off) = min_offset.filter(|&f| {
+        args.get("nextCursor").is_none() && args["offset"].as_u64().unwrap_or(0) < f
+    }) {
+        effective_args = {
+            let mut a = args.clone();
+            a["offset"] = min_off.into();
+            a
+        };
+        &effective_args
+    } else {
+        args
+    };
     let kind=canonical_kind(text(args,"kind"));let rid=text(args,"id");
-    let mut page=page(value,args);page["kind"]=kind.into();page["id"]=rid.into();
+    let mut page=page(value,page_args);page["kind"]=kind.into();page["id"]=rid.into();
     attach_read_locators(&mut page,&json!({"kind":kind,"id":rid}));Ok(page)
 }
 /// Pin an explicitly selected draft field without confusing its first page
@@ -804,6 +848,9 @@ pub(crate) fn draft_view(db:&Connection,plan:&RunPlan,task:&str,args:&Value)->Re
     selected_value(db,plan,args,Some(workspace(db,task)?))
 }
 fn selected_value(db:&Connection,plan:&RunPlan,args:&Value,work:Option<Value>)->Result<Value> {
+    Ok(selected_value_with_offset(db,plan,args,work)?.0)
+}
+fn selected_value_with_offset(db:&Connection,plan:&RunPlan,args:&Value,work:Option<Value>)->Result<(Value, Option<u64>)> {
     let scoped;
     let args = if !text(args,"routeId").is_empty() { scoped=scoped_resource_args(db,plan,text(&plan.meta["agent"],"taskId"),args)?; &scoped }else{args};
     let kind = canonical_kind(text(args, "kind"));
@@ -813,17 +860,40 @@ fn selected_value(db:&Connection,plan:&RunPlan,args:&Value,work:Option<Value>)->
         .and_then(|edits| edits.iter().rev().find(|e| matches_edit(e, kind, rid)))
         .map(|e| e["after"].clone());
     let mut value=match draft{Some(value)=>value,None=>resource(db,plan,kind,rid)?};
+    let path = text(args, "path");
+    let mut min_offset = None;
     if kind == "book" {
+        if let Some((from, through)) = book_scope_bounds(plan, text(&value, "id")) {
+            let in_range = |n: u64| from.is_none_or(|f| n >= f) && through.is_none_or(|t| n <= t);
+            let total_sections = value["data"]["sections"].as_array().map(Vec::len).unwrap_or(0);
+            if let Some(rest) = path.strip_prefix("/data/sections/") {
+                let seg = rest.split('/').next().unwrap_or("");
+                let idx = seg
+                    .parse::<u64>()
+                    .map_err(|_| Error::Invalid("资料路径不存在".into()))?;
+                if !in_range(idx) {
+                    return Err(book_scope_error("读取", from, through, total_sections));
+                }
+                strip_book_summaries(&mut value);
+                let selected = value
+                    .pointer(path)
+                    .cloned()
+                    .ok_or_else(|| Error::Invalid("资料路径不存在".into()))?;
+                return Ok((selected, None));
+            }
+            if path == "/data/sections" {
+                min_offset = from.filter(|&f| f > 0);
+            }
+        }
         scope_book(plan, &mut value);
     }
-    let path = text(args, "path");
     if !path.is_empty() {
         value = value
             .pointer(path)
             .cloned()
             .ok_or_else(|| Error::Invalid("资料路径不存在".into()))?;
     }
-    Ok(value)
+    Ok((value, min_offset))
 }
 
 /// A JSON Pointer only has meaning together with its source. Keep that pair
@@ -1187,6 +1257,42 @@ pub(crate) fn stage(db: &Connection, plan: &RunPlan, task: &str, args: &Value) -
         .skip(1)
         .map(|s| s.replace("~1", "/").replace("~0", "~"))
         .collect();
+    if kind == "book" {
+        let book_id = text(&edit["original"], "id");
+        if let Some((from, through)) = book_scope_bounds(plan, book_id) {
+            let total_sections = edit["after"]["data"]["sections"]
+                .as_array()
+                .or_else(|| edit["original"]["data"]["sections"].as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let is_subset = from.unwrap_or(0) > 0
+                || through.is_some_and(|t| (t as usize).saturating_add(1) < total_sections);
+            let is_title = parts == ["title"] || parts == ["data", "title"];
+            if is_title {
+                if is_subset {
+                    return Err(book_scope_error("修改", from, through, total_sections));
+                }
+            } else {
+                if parts.len() < 3 || parts[0] != "data" || parts[1] != "sections" {
+                    return Err(book_scope_error("修改", from, through, total_sections));
+                }
+                if parts[2] == "-" || parts[2].is_empty() {
+                    return Err(book_scope_error("修改", from, through, total_sections));
+                }
+                let idx = parts[2]
+                    .parse::<u64>()
+                    .map_err(|_| Error::Invalid("数组路径无效".into()))?;
+                let in_range =
+                    from.is_none_or(|f| idx >= f) && through.is_none_or(|t| idx <= t);
+                if !in_range {
+                    return Err(book_scope_error("修改", from, through, total_sections));
+                }
+                if parts.len() == 3 && matches!(operation, "remove" | "append") {
+                    return Err(book_scope_error("修改", from, through, total_sections));
+                }
+            }
+        }
+    }
     modify(&mut edit["after"], &parts, text(args, "operation"), args)?;
     if kind=="facts" {let before=edit["original"].clone();normalize_changed_fact_origins(&before,&mut edit["after"])?;}
     if kind=="state" {let before=edit["original"]["facts"].clone();normalize_changed_fact_origins(&before,&mut edit["after"]["facts"])?;}
@@ -1472,11 +1578,46 @@ pub(crate) fn preview_changes(w: &Value) -> Vec<Value> {
     }
     details
 }
+fn scope_book_preview(plan: &RunPlan, value: &mut Value) {
+    let Some((from, through)) = book_scope_bounds(plan, text(value, "id")) else {
+        return;
+    };
+    let in_range = |n: u64| from.is_none_or(|f| n >= f) && through.is_none_or(|t| n <= t);
+    for key in ["sections", "chunks"] {
+        if let Some(items) = value[key].as_array_mut() {
+            items.retain(|s| s["section"].as_u64().is_some_and(in_range));
+        }
+    }
+    if let Some(items) = value["data"]["sections"].as_array_mut() {
+        let kept: Vec<Value> = items
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| in_range(*idx as u64))
+            .map(|(idx, item)| {
+                let mut cloned = item.clone();
+                if from.unwrap_or(0) > 0 {
+                    if let Some(obj) = cloned.as_object_mut() {
+                        obj.insert("section".into(), json!(idx));
+                    }
+                }
+                cloned
+            })
+            .collect();
+        *items = kept;
+    }
+    strip_book_summaries(value);
+    let mut scope_val =
+        json!({"through":through,"message":"只返回本次允许范围，不读取后续或全书总结"});
+    if let Some(f) = from {
+        scope_val["from"] = f.into();
+    }
+    value["scope"] = scope_val;
+}
 fn scoped_preview_changes(plan: &RunPlan, w: &Value) -> Vec<Value> {
     let mut details = preview_changes(w);
     for edit in details.iter_mut().filter(|e| e["kind"] == "book") {
-        scope_book(plan, &mut edit["before"]);
-        scope_book(plan, &mut edit["after"]);
+        scope_book_preview(plan, &mut edit["before"]);
+        scope_book_preview(plan, &mut edit["after"]);
     }
     details
 }
@@ -1708,6 +1849,18 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
     }
     let mut node_edits: HashMap<String, Value> = HashMap::new();
     let mut state_edits: HashMap<String, Value> = HashMap::new();
+    let mut deleted_line_paths: Vec<HashSet<String>> = Vec::new();
+    let staged_node_afters: Vec<&Value> = w["edits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            text(e, "kind") == "node"
+                && e["after"] != e["original"]
+                && !e["after"].is_null()
+        })
+        .map(|e| &e["after"])
+        .collect();
     for edit in w["edits"].as_array().into_iter().flatten() {
         if edit["after"]==edit["original"] {continue;}
         let kind = text(edit, "kind");
@@ -1816,13 +1969,27 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
                             "SELECT EXISTS(SELECT 1 FROM nodes WHERE world_id=? AND CASE WHEN json_valid(meta_json) THEN json_extract(meta_json,'$.revision.lineId')=? ELSE 0 END)",
                             params![plan.world_id, rid],
                             |r| r.get(0),
-                        )? || node_edits.values().any(|n| {
-                            !n.is_null() && n["meta"]["revision"]["lineId"].as_str() == Some(rid)
+                        )? || staged_node_afters.iter().any(|n| {
+                            n["meta"]["revision"]["lineId"].as_str() == Some(rid)
                         });
                         if referenced_by_revision {
                             return Err(Error::Invalid(
                                 "这条路线仍被历史修订节点引用，不能直接删除；可将其归档保留".into(),
                             ));
+                        }
+                        if let Some(rid_head) = tx
+                            .query_row(
+                                "SELECT node_id FROM lines WHERE id=? AND world_id=?",
+                                params![rid, plan.world_id],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .optional()?
+                        {
+                            let rid_nodes: HashSet<String> = path_nodes(tx, &plan.world_id, &rid_head)?
+                                .into_iter()
+                                .map(|n| text(&n, "id").to_owned())
+                                .collect();
+                            deleted_line_paths.push(rid_nodes);
                         }
                         if exists(tx, "story_fact_sources")
                             && tx.query_row(
@@ -2131,6 +2298,49 @@ fn apply_workspace(tx: &Transaction<'_>, plan: &RunPlan, w: &Value) -> Result<St
         return Err(Error::Invalid(
             "部分目标剧情没有完成重算，整批修改未采用".into(),
         ));
+    }
+    if !deleted_line_paths.is_empty() {
+        let mut surviving_nodes = HashSet::new();
+        for surviving_line in rows(
+            tx,
+            "SELECT node_id FROM lines WHERE world_id=? AND deleted_at IS NULL",
+            &[&plan.world_id],
+        )? {
+            for n in path_nodes(tx, &plan.world_id, text(&surviving_line, "node_id"))? {
+                surviving_nodes.insert(text(&n, "id").to_owned());
+            }
+        }
+        for del_nodes in &deleted_line_paths {
+            let exclusive: HashSet<&str> = del_nodes
+                .iter()
+                .map(String::as_str)
+                .filter(|id| !surviving_nodes.contains(*id))
+                .collect();
+            if exclusive.is_empty() {
+                continue;
+            }
+            for &excl_id in &exclusive {
+                let referrers = rows(
+                    tx,
+                    "SELECT id FROM nodes WHERE world_id=?1 AND CASE WHEN json_valid(meta_json) THEN json_extract(meta_json,'$.revision.nodeId')=?2 OR json_extract(meta_json,'$.agentOriginalNodeId')=?2 ELSE 0 END",
+                    &[&plan.world_id, &excl_id],
+                )?;
+                let referenced_by_node = referrers
+                    .iter()
+                    .any(|r| !exclusive.contains(text(r, "id")))
+                    || node_edits.iter().any(|(nid, n)| {
+                        !exclusive.contains(nid.as_str())
+                            && !n.is_null()
+                            && (n["meta"]["revision"]["nodeId"].as_str() == Some(excl_id)
+                                || n["meta"]["agentOriginalNodeId"].as_str() == Some(excl_id))
+                    });
+                if referenced_by_node {
+                    return Err(Error::Invalid(
+                        "这条路线仍被历史修订节点引用，不能直接删除；可将其归档保留".into(),
+                    ));
+                }
+            }
+        }
     }
     let active_line: String = tx.query_row(
         "SELECT current_line_id FROM worlds WHERE id=?",

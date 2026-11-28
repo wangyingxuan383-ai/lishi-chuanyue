@@ -48,5 +48,42 @@ test("packaged parser worker reuses book parsing, preserves spine/order and fenc
     assert.equal((await read("broken.epub", strToU8("PK坏文件"))).ok, false);
     const cancelled = randomUUID(); const pending = parseDocument({ id: cancelled, path: path.join(directory, "book.txt"), name: "book.txt", version: hash(text), operation: "read" });
     cancelDocument(cancelled); await assert.rejects(pending, /停止/);
+
+    // R42: `from > 0` skips early chapters before the 20-hit cap in `find` and defaults `section` to `from` in `read`
+    const chapters25 = strToU8(
+      Array.from({ length: 25 }, (_, idx) => `第${idx + 1}章 卷目${idx + 1}\n共有检索线索词；第${idx + 1}章正文内容。`).join("\n"),
+    );
+    const baseline25 = await read("long25.txt", chapters25);
+    assert.equal(baseline25.ok, true);
+    assert.equal(baseline25.data.sectionCount, 25);
+    const norm25 = baseline25.data.normalizedHash;
+
+    // Default `read` (`section` omitted or `null`) starts at `from` (22) instead of failing on `0 < 22`:
+    const defaultFromRead = await read("long25.txt", chapters25, { boundBookHash: norm25, from: 22, through: 23 });
+    assert.equal(defaultFromRead.ok, true);
+    assert.equal(defaultFromRead.data.section, 22);
+    assert.match(defaultFromRead.data.text, /第23章正文内容/);
+    assert.deepEqual(defaultFromRead.data.sections.map(s => s.index), [22, 23]);
+
+    const nullSectionRead = await read("long25.txt", chapters25, { boundBookHash: norm25, from: 22, through: 23, section: null });
+    assert.equal(nullSectionRead.ok, true);
+    assert.equal(nullSectionRead.data.section, 22);
+
+    // Explicit `section < from` or `section > through` is rejected:
+    assert.equal((await read("long25.txt", chapters25, { boundBookHash: norm25, from: 22, through: 23, section: 0 })).ok, false);
+    assert.equal((await read("long25.txt", chapters25, { boundBookHash: norm25, from: 22, through: 23, section: 24 })).ok, false);
+
+    // `find` skips sections `0..21` BEFORE the 20-hit cap so chapters 22..23 are still found:
+    const rangedFind = await read("long25.txt", chapters25, { boundBookHash: norm25, from: 22, through: 23, query: "共有检索线索词", operation: "find" });
+    assert.equal(rangedFind.ok, true);
+    assert.deepEqual(rangedFind.data.hits.map(h => h.section), [22, 23]);
+
+    // Unbound file in a world with a bound book (`matchesBoundBook === false`) is not fenced by `from`/`through`:
+    const unboundNote = strToU8("第一章 独立笔记\n只有一节的外部授权文件。");
+    const unboundRead = await read("note.txt", unboundNote, { boundBookId: "bound-book-only", from: 22, through: 23 });
+    assert.equal(unboundRead.ok, true);
+    assert.equal(unboundRead.data.section, 0);
+    assert.match(unboundRead.data.sectionTitle, /独立笔记/);
+    assert.match(unboundRead.data.text, /只有一节的外部授权文件/);
   } finally { await fs.rm(directory, { force: true, recursive: true }); }
 });

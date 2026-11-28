@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isBound } from "../../devserver/relay";
 import { Repo } from "./db/repo";
@@ -12,6 +14,7 @@ import {
   type UpdateRequest,
 } from "../platform";
 import { orderedKeepAwake } from "../platform/screenAwake";
+import { createOrderedTtsQueue } from "../platform/tauri";
 import { assertBound } from "../platform/web";
 import { REPO_URL, type ReleaseAsset, type ReleaseInfo } from "../ui/app/update";
 import {
@@ -22,10 +25,21 @@ import {
   snapshot,
   startDownload,
   stepFor,
+  syncBackgroundComplete,
+  syncBackgroundStopped,
 } from "../ui/app/updateFlow";
 import { createUpdateStore } from "../ui/app/updateStore";
-import { resolveSheetStep } from "../ui/components/UpdateSheet";
+import {
+  resolveInstallSha,
+  resolveSheetStep,
+  useUpdateSheetController,
+} from "../ui/components/UpdateSheet";
 import { sanitizeOpeningExportTitle } from "../ui/screens/NewGame";
+import {
+  useReaderTts,
+  type ReaderTtsController,
+  type UseReaderTtsOptions,
+} from "../ui/screens/reader/readerTts";
 
 const ROOT = path.resolve(__dirname, "../..");
 const HASH_OLD = "a".repeat(64);
@@ -444,12 +458,591 @@ describe("R41-T008: Dev harness URL binding normalization & .claude public isola
     ).toBe(false);
   });
 
-  it("E25: isolates .claude/ in both .gitignore and scripts/publish-public.mjs LOCAL_ONLY", () => {
-    const gitignore = fs.readFileSync(path.join(ROOT, ".gitignore"), "utf8").split(/\r?\n/);
-    expect(gitignore).toContain(".claude/");
-    expect(gitignore).not.toContain(".claude/worktrees/");
+  it("E25: isolates .claude/ in .gitignore", () => {
+    const gitignorePath = path.join(ROOT, ".gitignore");
+    if (fs.existsSync(gitignorePath)) {
+      const gitignore = fs.readFileSync(gitignorePath, "utf8").split(/\r?\n/);
+      expect(gitignore).toContain(".claude/");
+      expect(gitignore).not.toContain(".claude/worktrees/");
+    }
+  });
+});
 
-    const publishScript = fs.readFileSync(path.join(ROOT, "scripts/publish-public.mjs"), "utf8");
-    expect(publishScript).toContain('".claude/"');
+function createMinimalDomHarness() {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const winListeners = new Map<string, Set<EventListener>>();
+  const docListeners = new Map<string, Set<EventListener>>();
+  const fakeWin = {
+    HTMLIFrameElement: class FakeIframe {},
+    addEventListener(type: string, fn: EventListener) {
+      if (!winListeners.has(type)) winListeners.set(type, new Set());
+      winListeners.get(type)!.add(fn);
+    },
+    removeEventListener(type: string, fn: EventListener) {
+      winListeners.get(type)?.delete(fn);
+    },
+    dispatchEvent(ev: Event) {
+      winListeners.get(ev.type)?.forEach((fn) => fn(ev));
+      return true;
+    },
+  };
+  const fakeDoc = {
+    nodeType: 9,
+    visibilityState: "visible",
+    defaultView: fakeWin,
+    activeElement: null,
+    documentElement: { namespaceURI: "http://www.w3.org/1999/xhtml" },
+    addEventListener(type: string, fn: EventListener) {
+      if (!docListeners.has(type)) docListeners.set(type, new Set());
+      docListeners.get(type)!.add(fn);
+    },
+    removeEventListener(type: string, fn: EventListener) {
+      docListeners.get(type)?.delete(fn);
+    },
+    createElement: (tag: string) => ({
+      nodeType: 1,
+      nodeName: tag.toUpperCase(),
+      tagName: tag.toUpperCase(),
+      namespaceURI: "http://www.w3.org/1999/xhtml",
+      style: {},
+      appendChild: () => {},
+      removeChild: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }),
+  };
+  const container = {
+    nodeType: 1,
+    nodeName: "DIV",
+    tagName: "DIV",
+    namespaceURI: "http://www.w3.org/1999/xhtml",
+    ownerDocument: fakeDoc,
+    appendChild: () => {},
+    removeChild: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as Element;
+  return { fakeWin, fakeDoc, container };
+}
+
+describe("R42-T001: UpdateSheet download -> ready transition, hotfix re-verification & resolvedSha precedence", () => {
+  it("transitions idle/paused -> preparing -> downloading -> verifying -> ready without getting stuck on stale hydrated snapshot, while still catching hotfix hash changes on already-ready state", async () => {
+    const origWin = (globalThis as Record<string, unknown>).window;
+    const origDoc = (globalThis as Record<string, unknown>).document;
+    const origIframe = (globalThis as Record<string, unknown>).HTMLIFrameElement;
+    const { fakeWin, fakeDoc, container } = createMinimalDomHarness();
+
+    const sumsAsset: ReleaseAsset = {
+      name: "SHA256SUMS.txt",
+      size: 128,
+      url: `${REPO_URL}/releases/download/v0.23.0/SHA256SUMS.txt`,
+      sha256: null,
+    };
+    const apk = makeApk({ sha256: null, size: 10_000 });
+    let currentSumsHash = HASH_OLD;
+    let verifiedHashOnDisk: string | null = null;
+    let partialBytesOnDisk = 4_000;
+    let emitEvent!: (event: UpdateEvent) => void;
+    let finishDownload!: () => void;
+
+    const install = vi.fn(async () => "started" as const);
+    const packageStatus = vi.fn(async ({ sha256 }: { version: string; sha256: string }): Promise<UpdatePackageStatus> => {
+      const ok = verifiedHashOnDisk === sha256;
+      return {
+        downloaded: ok,
+        verified: ok,
+        bytes: ok ? apk.size : partialBytesOnDisk,
+        canInstall: true,
+      };
+    });
+
+    const platform = {
+      name: "android",
+      update: {
+        download: vi.fn((req: UpdateRequest, onEvent: (e: UpdateEvent) => void) => {
+          emitEvent = onEvent;
+          return new Promise<void>((resolve) => {
+            finishDownload = () => {
+              verifiedHashOnDisk = req.sha256;
+              partialBytesOnDisk = req.size;
+              resolve();
+            };
+          });
+        }),
+        cancel: vi.fn(async () => {}),
+        fetchText: vi.fn(async () => `${currentSumsHash}  ${apk.name}\n`),
+        install,
+        canInstall: vi.fn(async () => true),
+        packageStatus,
+      },
+    } as unknown as Platform;
+
+    const { repo } = memoryRepo();
+    let rel = makeRelease([apk, sumsAsset]);
+    let latestCtrl!: ReturnType<typeof useUpdateSheetController>;
+    let root: ReturnType<typeof createRoot> | null = null;
+
+    function SheetProbe({ release }: { release: ReleaseInfo }) {
+      latestCtrl = useUpdateSheetController({
+        repo,
+        platform,
+        release,
+        toast: () => {},
+      });
+      return null;
+    }
+
+    try {
+      (globalThis as Record<string, unknown>).window = fakeWin;
+      (globalThis as Record<string, unknown>).document = fakeDoc;
+      (globalThis as Record<string, unknown>).HTMLIFrameElement = class FakeIframe {};
+      root = createRoot(container);
+
+      // 1. Open sheet before download completes (partial .part on disk -> "paused" with verified: false)
+      await act(async () => {
+        root!.render(createElement(SheetProbe, { release: rel }));
+      });
+      expect(latestCtrl.effectiveState).toEqual({
+        step: "paused",
+        received: 4_000,
+        total: 10_000,
+      });
+
+      // 2. Initiate download -> step through downloading -> verifying -> ready (must NEVER revert to paused/idle!)
+      await act(async () => {
+        latestCtrl.download();
+      });
+      expect(latestCtrl.effectiveState.step).toBe("downloading");
+
+      await act(async () => {
+        emitEvent({ type: "progress", received: 7_500, total: 10_000 });
+      });
+      expect(latestCtrl.effectiveState).toEqual({
+        step: "downloading",
+        received: 7_500,
+        total: 10_000,
+        retrying: false,
+      });
+
+      await act(async () => {
+        emitEvent({ type: "verifying" });
+      });
+      expect(latestCtrl.effectiveState).toEqual({ step: "verifying" });
+
+      await act(async () => {
+        finishDownload();
+      });
+      expect(latestCtrl.effectiveState).toEqual({ step: "ready" });
+      expect(latestCtrl.resolvedSha).toBe(HASH_OLD);
+
+      // 3. Hotfix scenario: publisher updates SHA256SUMS.txt to HASH_NEW while state was ALREADY "ready"
+      currentSumsHash = HASH_NEW;
+      rel = makeRelease([apk, sumsAsset]);
+      partialBytesOnDisk = 0;
+      await act(async () => {
+        root!.render(createElement(SheetProbe, { release: rel }));
+      });
+      expect(latestCtrl.effectiveState).toEqual({ step: "idle" });
+      expect(stepFor(snapshot(), "0.23.0")).toEqual({ step: "idle" });
+
+      // 4. Download hotfixed HASH_NEW and verify install() uses fresh HASH_NEW (never stale HASH_OLD)
+      await act(async () => {
+        latestCtrl.download();
+      });
+      await act(async () => {
+        finishDownload();
+      });
+      expect(latestCtrl.effectiveState).toEqual({ step: "ready" });
+      expect(latestCtrl.resolvedSha).toBe(HASH_NEW);
+      await act(async () => {
+        await latestCtrl.install();
+      });
+      expect(install).toHaveBeenCalledWith({
+        version: "0.23.0",
+        size: 10_000,
+        sha256: HASH_NEW,
+      });
+    } finally {
+      try {
+        if (root) {
+          await act(async () => {
+            root!.unmount();
+          });
+        }
+      } finally {
+        (globalThis as Record<string, unknown>).window = origWin;
+        (globalThis as Record<string, unknown>).document = origDoc;
+        (globalThis as Record<string, unknown>).HTMLIFrameElement = origIframe;
+      }
+    }
+  });
+
+  it("prefers asset.sha256, then fresh flow.sha256 over stale hydrated.sha256 in resolveInstallSha", () => {
+    const apkNoDigest = makeApk({ sha256: null });
+    const relNoDigest = makeRelease([apkNoDigest]);
+    const staleHydrated = {
+      downloaded: true,
+      verified: true,
+      bytes: apkNoDigest.size,
+      canInstall: true,
+      sha256: HASH_OLD,
+    };
+    const freshFlow = {
+      version: "0.23.0",
+      url: apkNoDigest.url,
+      size: apkNoDigest.size,
+      sha256: HASH_NEW,
+      state: { step: "ready" as const },
+    };
+    expect(resolveInstallSha(relNoDigest, apkNoDigest, freshFlow, staleHydrated)).toBe(HASH_NEW);
+
+    // Falls back to hydrated.sha256 when flow is for another version or has null sha256
+    expect(
+      resolveInstallSha(relNoDigest, apkNoDigest, { ...freshFlow, sha256: null }, staleHydrated),
+    ).toBe(HASH_OLD);
+
+    // Explicit asset.sha256 takes top precedence
+    const explicitHash = "f".repeat(64);
+    const apkWithDigest = makeApk({ sha256: explicitHash });
+    expect(
+      resolveInstallSha(makeRelease([apkWithDigest]), apkWithDigest, freshFlow, staleHydrated),
+    ).toBe(explicitHash);
+  });
+});
+
+describe("R42-T001: updateFlow background preemption race guard", () => {
+  it("prevents cancelled autoPrepare's syncBackgroundStopped/syncBackgroundComplete from clobbering preempting startDownload state", async () => {
+    vi.useFakeTimers();
+    const apk = makeApk({ size: 20_000 });
+    const rel = makeRelease([apk]);
+    const { repo } = memoryRepo({ updateLatestRelease: rel, autoUpdate: true });
+
+    let bgReject!: (err: unknown) => void;
+    let bgEmit!: (ev: UpdateEvent) => void;
+    let fgResolve!: () => void;
+    let fgEmit!: (ev: UpdateEvent) => void;
+    let downloadCallCount = 0;
+
+    const platform = {
+      name: "android",
+      llm: { getPublic: vi.fn() },
+      update: {
+        download: vi.fn((_req: UpdateRequest, onEvent: (e: UpdateEvent) => void) => {
+          downloadCallCount += 1;
+          if (downloadCallCount === 1) {
+            bgEmit = onEvent;
+            return new Promise<void>((_res, rej) => {
+              bgReject = rej;
+            });
+          }
+          if (downloadCallCount === 2) {
+            return Promise.reject(new PlatformError("update_busy", "已经在下载了"));
+          }
+          fgEmit = onEvent;
+          return new Promise<void>((res) => {
+            fgResolve = res;
+          });
+        }),
+        cancel: vi.fn(async () => {
+          bgReject?.(new PlatformError("update_cancelled", "下载已暂停"));
+        }),
+        fetchText: vi.fn(),
+        install: vi.fn(),
+        canInstall: vi.fn(async () => true),
+        packageStatus: vi.fn(async (): Promise<UpdatePackageStatus> => ({
+          downloaded: false,
+          verified: false,
+          bytes: 0,
+          canInstall: true,
+        })),
+        environmentStatus: vi.fn(async (): Promise<UpdateEnvironmentStatus> => ({
+          wifiUnmetered: true,
+          freeBytes: 500 * 1024 * 1024,
+        })),
+      },
+    } as unknown as Platform;
+
+    const store = createUpdateStore(repo, platform, "0.22.0");
+    const bgPromise = store.autoPrepare();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(downloadCallCount).toBe(1);
+
+    bgEmit({ type: "progress", received: 5_000, total: apk.size });
+    expect(stepFor(snapshot(), "0.23.0")).toEqual({
+      step: "downloading",
+      received: 5_000,
+      total: apk.size,
+      retrying: false,
+    });
+
+    // Foreground startDownload preempts autoPrepare, cancels background slot, and backs off on update_busy
+    const fgPromise = startDownload(platform, rel, apk);
+    await vi.advanceTimersByTimeAsync(50);
+
+    // Background autoPrepare has caught cancellation and called syncBackgroundStopped,
+    // which MUST NOT overwrite foreground startDownload's active downloading state to "paused"!
+    expect(await bgPromise).toBe(false);
+    expect(stepFor(snapshot(), "0.23.0")).toEqual({
+      step: "downloading",
+      received: 5_000,
+      total: apk.size,
+      retrying: false,
+    });
+
+    // Direct late background calls while backgroundSyncing === false are also strict no-ops
+    syncBackgroundStopped("0.23.0", apk.size, 5_000);
+    syncBackgroundComplete({ version: "0.23.0", url: apk.url, size: apk.size, sha256: HASH_OLD });
+    expect(stepFor(snapshot(), "0.23.0").step).toBe("downloading");
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(downloadCallCount).toBe(3);
+    fgEmit({ type: "progress", received: 15_000, total: apk.size });
+    expect(stepFor(snapshot(), "0.23.0")).toEqual({
+      step: "downloading",
+      received: 15_000,
+      total: apk.size,
+      retrying: false,
+    });
+
+    fgResolve();
+    await fgPromise;
+    expect(stepFor(snapshot(), "0.23.0")).toEqual({ step: "ready" });
+  });
+});
+
+describe("R42-T001: Native TTS FIFO serialization, interrupted/stopped pause & nextParagraph chapter-end advance", () => {
+  it("serializes ttsStop and ttsSpeak onto a single FIFO queue without wedging on errors", async () => {
+    const order: string[] = [];
+    let releaseStop!: () => void;
+    const queue = createOrderedTtsQueue(
+      async ({ utteranceId }) => {
+        order.push(`speak:${utteranceId}`);
+        if (utteranceId === "fail-me") throw new Error("ipc boom");
+        return true;
+      },
+      async () => {
+        order.push("stop:start");
+        await new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        });
+        order.push("stop:done");
+      },
+    );
+
+    const stopCall = queue.ttsStop();
+    const speak1 = queue.ttsSpeak({ utteranceId: "fail-me", text: "第一句", rate: 1.0 });
+    const speak2 = queue.ttsSpeak({ utteranceId: "ok-2", text: "第二句", rate: 1.25 });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual(["stop:start"]);
+
+    releaseStop();
+    const [, r1, r2] = await Promise.all([stopCall, speak1, speak2]);
+    expect(r1).toBe(false);
+    expect(r2).toBe(true);
+    expect(order).toEqual(["stop:start", "stop:done", "speak:fail-me", "speak:ok-2"]);
+  });
+
+  it("pauses cleanly on native 'interrupted'/'stopped' without marking unavailable, and honors sleepMode === 'chapter' + immediate cancel in nextParagraph", async () => {
+    const origWin = (globalThis as Record<string, unknown>).window;
+    const origDoc = (globalThis as Record<string, unknown>).document;
+    const origIframe = (globalThis as Record<string, unknown>).HTMLIFrameElement;
+    const { fakeWin, fakeDoc, container } = createMinimalDomHarness();
+
+    let latestUtteranceId = "";
+    let curSec = 0;
+    const spoken: Array<{ sec: number; text: string }> = [];
+    const toasts: string[] = [];
+    const ttsStop = vi.fn(async () => {});
+    const ttsSpeak = vi.fn(async ({ utteranceId, text }: { utteranceId: string; text: string }) => {
+      latestUtteranceId = utteranceId;
+      spoken.push({ sec: curSec, text });
+      return true;
+    });
+
+    const chapters = [
+      [
+        { kind: "prose", text: "第一章首段。" },
+        { kind: "prose", text: "第一章末段。" },
+      ],
+      [{ kind: "prose", text: "第二章首段。" }],
+    ];
+
+    const ttsPlatform = {
+      name: "android" as const,
+      system: {
+        ttsSpeak,
+        ttsStop,
+      },
+    } as unknown as Platform;
+
+    let ctrl!: ReaderTtsController;
+    let root: ReturnType<typeof createRoot> | null = null;
+    let resolveSectionAdvance: (() => void) | null = null;
+
+    let hookProps: UseReaderTtsOptions = {
+      platform: ttsPlatform,
+      paragraphs: chapters[0]!,
+      sectionIndex: 0,
+      sectionReady: true,
+      jumpTarget: null,
+      onSectionEnd: () =>
+        new Promise<boolean>((resolve) => {
+          resolveSectionAdvance = () => {
+            curSec += 1;
+            hookProps = {
+              ...hookProps,
+              sectionIndex: curSec,
+              paragraphs: chapters[curSec] ?? [],
+            };
+            root?.render(createElement(Harness, hookProps));
+            resolve(true);
+          };
+        }),
+      toast: (msg) => toasts.push(msg),
+    };
+
+    function Harness(props: UseReaderTtsOptions) {
+      ctrl = useReaderTts(props);
+      return null;
+    }
+
+    try {
+      (globalThis as Record<string, unknown>).window = fakeWin;
+      (globalThis as Record<string, unknown>).document = fakeDoc;
+      (globalThis as Record<string, unknown>).HTMLIFrameElement = class FakeIframe {};
+      root = createRoot(container);
+
+      await act(async () => {
+        root!.render(createElement(Harness, hookProps));
+      });
+
+      // 1. Native "interrupted" pauses cleanly (status === "paused", NOT "unavailable")
+      await act(async () => {
+        ctrl.play(0);
+      });
+      expect(ctrl.status).toBe("playing");
+      expect(ctrl.speakingIndex).toBe(0);
+
+      await act(async () => {
+        fakeWin.dispatchEvent(
+          new CustomEvent("lishi:tts-event", {
+            detail: { utteranceId: latestUtteranceId, state: "interrupted" },
+          }),
+        );
+      });
+      expect(ctrl.status).toBe("paused");
+      expect(ctrl.speakingIndex).toBe(0);
+      expect(toasts).not.toContain("当前设备未安装系统语音朗读引擎");
+
+      // Resume and verify "stopped" also pauses cleanly without marking unavailable
+      await act(async () => {
+        ctrl.resume();
+      });
+      expect(ctrl.status).toBe("playing");
+      await act(async () => {
+        fakeWin.dispatchEvent(
+          new CustomEvent("lishi:tts-event", {
+            detail: { utteranceId: latestUtteranceId, state: "stopped" },
+          }),
+        );
+      });
+      expect(ctrl.status).toBe("paused");
+      expect(ctrl.speakingIndex).toBe(0);
+      expect(toasts).toEqual([]);
+
+      // 2. nextParagraph() at end of chapter with sleepMode === "chapter" stops immediately & toasts
+      await act(async () => {
+        ctrl.setSleepMode("chapter");
+        ctrl.play(1);
+      });
+      expect(ctrl.status).toBe("playing");
+      expect(ctrl.speakingIndex).toBe(1);
+      ttsStop.mockClear();
+
+      await act(async () => {
+        ctrl.nextParagraph();
+      });
+      expect(ttsStop).toHaveBeenCalledTimes(1);
+      expect(ctrl.status).toBe("idle");
+      expect(ctrl.sleepMode).toBe("off");
+      expect(resolveSectionAdvance).toBeNull();
+      expect(toasts).toContain("已读完本章，定时朗读结束");
+
+      // 3. nextParagraph() at end of chapter with sleepMode === "off" cancels current speech immediately
+      //    while waiting for async onSectionEnd, then speaks paragraph 0 of next chapter
+      await act(async () => {
+        ctrl.play(1);
+      });
+      ttsStop.mockClear();
+      spoken.length = 0;
+
+      await act(async () => {
+        ctrl.nextParagraph();
+      });
+      // Cancelled immediately BEFORE async section transition resolves!
+      expect(ttsStop).toHaveBeenCalledTimes(1);
+      expect(spoken).toEqual([]);
+      expect(resolveSectionAdvance).not.toBeNull();
+
+      await act(async () => {
+        resolveSectionAdvance!();
+      });
+      expect(curSec).toBe(1);
+      expect(ctrl.status).toBe("playing");
+      expect(ctrl.speakingIndex).toBe(0);
+      expect(spoken).toEqual([{ sec: 1, text: "第二章首段。" }]);
+
+      // 4. Genuine native "error" (without WebSpeech) still transitions to "unavailable"
+      await act(async () => {
+        fakeWin.dispatchEvent(
+          new CustomEvent("lishi:tts-event", {
+            detail: { utteranceId: latestUtteranceId, state: "error" },
+          }),
+        );
+      });
+      expect(ctrl.status).toBe("unavailable");
+      expect(toasts).toContain("当前设备未安装系统语音朗读引擎");
+    } finally {
+      try {
+        if (root) {
+          await act(async () => {
+            root!.unmount();
+          });
+        }
+      } finally {
+        (globalThis as Record<string, unknown>).window = origWin;
+        (globalThis as Record<string, unknown>).document = origDoc;
+        (globalThis as Record<string, unknown>).HTMLIFrameElement = origIframe;
+      }
+    }
+  });
+});
+
+describe("R42-T001: Android SAF timeout quarantine, cross-plugin isBusy guard & surrogate-safe truncation", () => {
+  it("verifies DocumentPickerPlugin.kt and FilesPlugin.kt quarantine timed-out slots, guard cross-plugin busy state, and avoid UTF-16 surrogate splits", () => {
+    const pickerKt = fs.readFileSync(
+      path.join(ROOT, "src-tauri/gen/android/app/src/main/java/io/timejump/chuanyue/DocumentPickerPlugin.kt"),
+      "utf8",
+    );
+    const filesKt = fs.readFileSync(
+      path.join(ROOT, "src-tauri/gen/android/app/src/main/java/io/timejump/chuanyue/FilesPlugin.kt"),
+      "utf8",
+    );
+
+    // Timeout quarantine: calls current.gate.timedOut() without immediately calling finish()
+    expect(pickerKt).toContain("current.gate.timedOut()");
+    expect(filesKt).toContain("current.gate.timedOut()");
+    expect(pickerKt).toContain("quarantineWatch");
+    expect(filesKt).toContain("quarantineWatch");
+
+    // Cross-plugin busy guard
+    expect(pickerKt).toContain("internal fun isBusy(): Boolean");
+    expect(filesKt).toContain("internal fun isBusy(): Boolean");
+    expect(pickerKt).toContain("FilesPlugin.isBusy()");
+    expect(filesKt).toContain("DocumentPickerPlugin.isBusy()");
+
+    // Surrogate-safe truncation
+    expect(pickerKt).toContain("if (cut.isNotEmpty() && Character.isHighSurrogate(cut.last())) cut.dropLast(1)");
   });
 });

@@ -36,7 +36,13 @@ import {
   listReaderHighlights,
   saveReaderProgress,
 } from "./reader/store";
-import { didPersonChangeInUpkeep, personToFormFields, reconcilePersonFormOnUpkeep } from "../ui/components/People";
+import { archiveProblems, exportWorld } from "./archive";
+import {
+  didPersonChangeInUpkeep,
+  personToFormFields,
+  reconcilePersonFormOnUpkeep,
+  stepPersonUpkeepState,
+} from "../ui/components/People";
 import { didEditedCodexChange } from "../ui/components/Codex";
 import { hasModalDomOverlay } from "../ui/screens/Play";
 
@@ -878,6 +884,280 @@ describe("R41-T004 & R41-T007: repo cascade guards, chapter concurrency, canon n
       expect(hasModalDomOverlay(fakeDoc(true))).toBe(true);
       expect(hasModalDomOverlay(fakeDoc(false))).toBe(false);
       expect(hasModalDomOverlay(null)).toBe(false);
+    });
+
+    it("R42-T003: repo.deleteWorld cleans route-scoped world_novel reader_progress ('worldId:lineId') with literal prefix guard", async () => {
+      const platform = await createMemoryPlatform();
+      await migrate(platform);
+      const repo = new Repo(platform);
+
+      const t = new Date().toISOString();
+      const sJson = JSON.stringify(sampleState());
+      // Create target world `w_del%1` and sibling world `wXdelZ1` (which would match `LIKE 'w_del%1:%'` without `instr`)
+      await platform.sql.batch([
+        {
+          sql: "INSERT INTO worlds (id, title, era_id, current_line_id, settings_json, created_at, updated_at, played_at) VALUES ('w_del%1', '删局', 'free', 'l-main', '{}', ?, ?, ?), ('wXdelZ1', '留局', 'free', 'l-sib', '{}', ?, ?, ?)",
+          params: [t, t, t, t, t, t],
+        },
+        {
+          sql: "INSERT INTO nodes (id, world_id, parent_id, seq, kind, narrative, status, rewritten, meta_json, created_at) VALUES ('n-del', 'w_del%1', NULL, 0, 'opening', '开场', 'done', 0, '{}', ?), ('n-sib', 'wXdelZ1', NULL, 0, 'opening', '兄弟开场', 'done', 0, '{}', ?)",
+          params: [t, t],
+        },
+        {
+          sql: "INSERT INTO states (node_id, state_json) VALUES ('n-del', ?), ('n-sib', ?)",
+          params: [sJson, sJson],
+        },
+        {
+          sql: "INSERT INTO lines (id, world_id, name, node_id, kind, auto_named, created_at) VALUES ('l-main', 'w_del%1', '主线', 'n-del', 'branch', 0, ?), ('l-alt', 'w_del%1', '支线', 'n-del', 'branch', 0, ?), ('l-sib', 'wXdelZ1', '主线', 'n-sib', 'branch', 0, ?)",
+          params: [t, t, t],
+        },
+      ]);
+
+      for (const targetId of ["w_del%1", "w_del%1:l-main", "w_del%1:l-alt", "wXdelZ1:l-sib"]) {
+        await saveReaderProgress(repo, {
+          targetType: "world_novel",
+          targetId,
+          sectionIndex: 1,
+          pageIndex: 0,
+          scrollRatio: 0.4,
+          anchorText: targetId,
+          nodeId: null,
+        });
+      }
+
+      await repo.deleteWorld("w_del%1");
+
+      expect(await getReaderProgress(repo, "world_novel", "w_del%1")).toBeNull();
+      expect(await getReaderProgress(repo, "world_novel", "w_del%1:l-main")).toBeNull();
+      expect(await getReaderProgress(repo, "world_novel", "w_del%1:l-alt")).toBeNull();
+      expect(await getReaderProgress(repo, "world_novel", "wXdelZ1:l-sib")).toMatchObject({
+        anchorText: "wXdelZ1:l-sib",
+      });
+    });
+
+    it("R42-T003: restorePrevious handles aborted V1 update (no V0), aborted V1->V2 update (preserving V0), incomplete restartOnRoute, and symmetric gaps/staleFrom swap", async () => {
+      const platform = await createMemoryPlatform();
+      const game = await Game.open(platform, LLM);
+      const repo = game.repo;
+      const book = makeBook(crypto.randomUUID(), 6);
+      await saveBook(repo, book);
+
+      const { world } = await repo.createWorld({
+        title: "札记一致性回归",
+        eraId: "free",
+        opening: {
+          parentId: null,
+          kind: "opening",
+          narrative: "开场：踏入长安。",
+          state: { ...sampleState(), source: newBinding(book.id, true) },
+        },
+      });
+      let c = await tree.cursor(repo, world.id);
+      c = await tree.append(repo, c, { kind: "turn", narrative: "第一回：结识沈青。", state: await repo.getState(c.head.id) });
+      const n1 = c.head;
+      c = await tree.append(repo, c, { kind: "turn", narrative: "第二回：夜探东市。", state: await repo.getState(c.head.id) });
+      const n2 = c.head;
+      c = await tree.append(repo, c, { kind: "turn", narrative: "第三回：城门赴约。", state: await repo.getState(c.head.id) });
+
+      // Case 1: First-time note (previousContent == null, with gaps & staleFrom) fails mid-update -> restores V1 as done!
+      const v1First = {
+        ...newStoryNote(world.id, "plot", { from: 0, to: 1, toNode: n1.id, staleFrom: 1 }, "主线梗概（至第 1 回合）"),
+        status: "done" as const,
+        content: "V1初版正文（第1回合）。",
+        progress: {
+          parts: ["开场要点", ""],
+          batchSizes: [1, 1],
+          total: 3,
+          gaps: [{ batch: 1, sections: [1], reason: "blocked" as const }],
+        },
+      };
+      await saveNote(repo, v1First);
+
+      const midFirstUpdate = startNoteUpdate(v1First, 2, true);
+      expect(midFirstUpdate.previousContent).toBeUndefined();
+      expect(midFirstUpdate.scope.previous).toBeUndefined();
+      expect(midFirstUpdate.progress.update).toMatchObject({
+        base: "V1初版正文（第1回合）。",
+        baseTitle: "主线梗概（至第 1 回合）",
+        baseTo: 1,
+        baseToNode: n1.id,
+        baseStaleFrom: 1,
+        baseGaps: [{ batch: 1, sections: [1], reason: "blocked" }],
+      });
+
+      await saveNote(
+        repo,
+        {
+          ...midFirstUpdate,
+          status: "failed",
+          progress: { ...midFirstUpdate.progress, parts: ["半截"], error: "网络中断", failure: { kind: "network", phase: "batch" } },
+        },
+        true,
+      );
+
+      const abortedFirst = await restorePrevious(repo, v1First.id);
+      expect(abortedFirst).toMatchObject({
+        status: "done",
+        title: "主线梗概（至第 1 回合）",
+        content: "V1初版正文（第1回合）。",
+        scope: { from: 0, to: 1, toNode: n1.id, staleFrom: 1 },
+      });
+      expect(abortedFirst?.previousContent).toBeUndefined();
+      expect(abortedFirst?.progress.update).toBeUndefined();
+      expect(abortedFirst?.progress.gaps).toEqual([{ batch: 1, sections: [1], reason: "blocked" }]);
+      expect(archiveProblems(await exportWorld(repo, world.id))).toEqual([]);
+
+      // Case 2: V0 -> V1 completes (stripping progress.update & storing V0 gaps in scope.previous), then V1 -> V2 fails mid-update -> restores V1 while keeping V0 in previousContent!
+      const v0Book = {
+        ...newNote(book.id, "plot", { from: 0, to: 1 }, "主线：第 1～2 章", world.id),
+        status: "done" as const,
+        content: "V0原著前两章（第1～2章）。",
+        refs: [0, 1],
+        progress: {
+          parts: ["第1章摘要", ""],
+          batchSizes: [1, 1],
+          total: 3,
+          gaps: [{ batch: 1, sections: [1], reason: "blocked" as const }],
+        },
+      };
+      await saveNote(repo, v0Book);
+
+      const v1Book = await runNote(
+        repo,
+        startNoteUpdate(v0Book, 3, true),
+        book.title,
+        {
+          model: "aux",
+          call: async (messages) => {
+            const p = messages.map((m) => m.content).join("\n");
+            if (p.includes("【原札记】")) return "【标题】主线：第 1～4 章 · 入门试剑\nV1原著前四章（第1～4章）。";
+            return "第3～4章新增（第3～4章）。";
+          },
+        },
+        new AbortController().signal,
+        () => {},
+      );
+      expect(v1Book.status).toBe("done");
+      expect(v1Book.progress.update).toBeUndefined();
+      expect(v1Book.progress.failure).toBeUndefined();
+      expect(v1Book.previousContent).toBe("V0原著前两章（第1～2章）。");
+      expect(v1Book.scope.previous?.gaps).toEqual([{ batch: 1, sections: [1], reason: "blocked" }]);
+
+      // Start V1 -> V2 update and pause/fail midway
+      const v2Candidate = startNoteUpdate(v1Book, 5, true);
+      await saveNote(repo, { ...v2Candidate, status: "failed", title: "半截标题", progress: { ...v2Candidate.progress, error: "超时" } }, true, true);
+
+      const backToV1 = await restorePrevious(repo, v0Book.id);
+      expect(backToV1).toMatchObject({
+        status: "done",
+        title: "主线：第 1～4 章 · 入门试剑",
+        content: "V1原著前四章（第1～4章）。",
+        refs: [0, 1, 2, 3],
+        previousContent: "V0原著前两章（第1～2章）。",
+        scope: { from: 0, to: 3 },
+      });
+      expect(backToV1?.progress.update).toBeUndefined();
+      expect(backToV1?.scope.previous?.to).toBe(1);
+      expect(backToV1?.scope.previous?.gaps).toEqual([{ batch: 1, sections: [1], reason: "blocked" }]);
+
+      // Case 4: Swapping V1 <-> V0 symmetrically preserves V0's gaps & title across 恢复上一版 -> 撤销 -> 恢复上一版!
+      const swappedToV0 = await restorePrevious(repo, v0Book.id);
+      expect(swappedToV0).toMatchObject({
+        status: "done",
+        title: "主线：第 1～2 章",
+        content: "V0原著前两章（第1～2章）。",
+        refs: [0, 1],
+        previousContent: "V1原著前四章（第1～4章）。",
+        scope: { from: 0, to: 1 },
+      });
+      expect(swappedToV0?.progress.gaps).toEqual([{ batch: 1, sections: [1], reason: "blocked" }]);
+      expect(archiveProblems(await exportWorld(repo, world.id))).toEqual([]);
+
+      const undoneBackToV1 = await restorePrevious(repo, v0Book.id);
+      expect(undoneBackToV1).toMatchObject({
+        status: "done",
+        title: "主线：第 1～4 章 · 入门试剑",
+        content: "V1原著前四章（第1～4章）。",
+        refs: [0, 1, 2, 3],
+        previousContent: "V0原著前两章（第1～2章）。",
+        scope: { from: 0, to: 3 },
+      });
+      expect(undoneBackToV1?.progress.gaps).toBeUndefined();
+      expect(undoneBackToV1?.scope.previous?.gaps).toEqual([{ batch: 1, sections: [1], reason: "blocked" }]);
+      expect(archiveProblems(await exportWorld(repo, world.id))).toEqual([]);
+
+      // Case 3: Aborting an incomplete restartOnRoute restores staleFrom, title, and gaps while clearing previousContent!
+      const restarted = restartOnRoute(abortedFirst!, 3);
+      expect(restarted.scope.previous).toMatchObject({
+        to: 1,
+        toNode: n1.id,
+        title: "主线梗概（至第 1 回合）",
+        staleFrom: 1,
+        gaps: [{ batch: 1, sections: [1], reason: "blocked" }],
+      });
+      await saveNote(repo, { ...restarted, status: "failed", progress: { parts: [], total: 2, error: "断线" } }, true);
+      const recoveredRestart = await restorePrevious(repo, v1First.id);
+      expect(recoveredRestart).toMatchObject({
+        status: "done",
+        title: "主线梗概（至第 1 回合）",
+        content: "V1初版正文（第1回合）。",
+        previousContent: null,
+        scope: { from: 0, to: 1, toNode: n1.id, staleFrom: 1 },
+      });
+      expect(recoveredRestart?.progress.gaps).toEqual([{ batch: 1, sections: [1], reason: "blocked" }]);
+      expect(n2.id).toBeTruthy();
+      expect(archiveProblems(await exportWorld(repo, world.id))).toEqual([]);
+    });
+
+    it("R42-T003: People.tsx preserves unresolved upkeepConflict and expectedHeadId across subsequent background upkeeps while syncing clean fields", () => {
+      const p0 = {
+        id: "p-wang",
+        name: "王掌柜",
+        aliases: ["老王"],
+        role: "掌柜",
+        attitude: "友善" as const,
+        alive: true,
+        notes: "初识于酒肆",
+        origin: "舅舅",
+        lastSeenMinute: 5,
+      };
+      const base0 = personToFormFields(p0);
+      // Player edits `notes` on top of H0
+      const draft0 = { ...base0, notes: "玩家亲手改写的近况" };
+
+      // Upkeep #1 (H1): AI updates BOTH `notes` (conflict!) and `role` (clean untouched field)
+      const p1 = { ...p0, role: "东市大掌柜", notes: "AI第一轮更新的近况" };
+      const step1 = stepPersonUpkeepState(
+        { base: base0, draft: draft0, upkeepConflict: false, expectedHeadId: "H0" },
+        p1,
+        "H1",
+      );
+      expect(step1.hasFieldConflict).toBe(true);
+      expect(step1.syncedAny).toBe(true);
+      expect(step1.state.upkeepConflict).toBe(true);
+      expect(step1.state.expectedHeadId).toBe("H0"); // Must NOT advance to H1!
+      expect(step1.state.draft.role).toBe("东市大掌柜");
+      expect(step1.state.draft.notes).toBe("玩家亲手改写的近况");
+      // Conflicted key in base MUST stay at H0 value so Upkeep #2 cannot mask the conflict!
+      expect(step1.state.base.notes).toBe("初识于酒肆");
+      expect(step1.state.base.role).toBe("东市大掌柜");
+
+      // Upkeep #2 (H2): AI updates `alive: false` while `notes` stays at H1's value; user still has NOT resolved!
+      const p2 = { ...p1, alive: false };
+      const step2 = stepPersonUpkeepState(step1.state, p2, "H2");
+      expect(step2.syncedAny).toBe(true);
+      expect(step2.state.draft.alive).toBe(false);
+      expect(step2.state.base.alive).toBe(false);
+      expect(step2.hasFieldConflict).toBe(true);
+      expect(step2.state.upkeepConflict).toBe(true); // Conflict MUST remain active!
+      expect(step2.state.expectedHeadId).toBe("H0"); // Must NOT advance to H2!
+
+      // Upkeep #3 (H3): Even if AI reverts `notes` back to H0 (`hasFieldConflict === false`), existing unresolved `upkeepConflict` stays locked until explicit user action!
+      const p3 = { ...p2, notes: "初识于酒肆" };
+      const step3 = stepPersonUpkeepState(step2.state, p3, "H3");
+      expect(step3.hasFieldConflict).toBe(false);
+      expect(step3.state.upkeepConflict).toBe(true);
+      expect(step3.state.expectedHeadId).toBe("H0");
     });
   });
 });

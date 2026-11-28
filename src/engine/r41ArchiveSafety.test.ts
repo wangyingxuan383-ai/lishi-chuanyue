@@ -9,10 +9,10 @@ import {
   sanitizeArchiveFileTitle,
 } from "./archive";
 import { migrate } from "./db/migrate";
-import { Repo } from "./db/repo";
+import { ReferencedRoute, Repo } from "./db/repo";
 import { Game } from "./game";
 import { buildNovelBook } from "./novel";
-import { addReaderHighlight, listReaderHighlights } from "./reader/store";
+import { addReaderHighlight, getReaderProgress, listReaderHighlights, saveReaderProgress } from "./reader/store";
 import { saveBook } from "./sources/library";
 import { listNotes, newLocalNote, newNote, saveNote } from "./sources/notes";
 import { newBinding } from "./sources/types";
@@ -267,5 +267,125 @@ describe("R41 archive safety, state validation, and replace cleanup", () => {
     ]);
     const exported = await exportWorld(repo, made.world.id);
     expect(archiveProblems(exported)).toEqual([]);
+  });
+
+  it("R42-T003: importWorld('replace') guards LIKE prefixes with instr() so '_' and '%' in world.id never delete sibling leases or route-scoped reader_progress", async () => {
+    const { platform, repo } = await setup();
+    const seed = await repo.createWorld({
+      title: "种子世界",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "开场。", state: sampleState() },
+    });
+    const template = await exportWorld(repo, seed.world.id);
+
+    const makeWildcardArchive = (worldId: string, nodeId: string, lineId: string, title: string) => {
+      const copy = structuredClone(template);
+      copy.world = { ...copy.world, id: worldId, title, current_line_id: lineId };
+      copy.nodes = copy.nodes.map((n) => ({ ...n, id: nodeId, world_id: worldId }));
+      copy.states = copy.states.map((s) => ({ ...s, node_id: nodeId }));
+      copy.lines = copy.lines.map((l) => ({ ...l, id: lineId, world_id: worldId, node_id: nodeId }));
+      return copy;
+    };
+
+    // "wX1Za_tail" matches `'w_1%a' || ...` under raw SQLite LIKE because '_' matches 'X' and '%' matches '1Z'!
+    const targetArchive = makeWildcardArchive("w_1%a", "n_target", "l_target", "通配符目标局");
+    const siblingArchive = makeWildcardArchive("wX1Za", "n_sibling", "l_sibling", "无辜兄弟局");
+    await importWorld(repo, targetArchive, "replace");
+    await importWorld(repo, siblingArchive, "replace");
+
+    await platform.sql.batch([
+      {
+        sql: "INSERT INTO world_execution_leases (world_id, owner_id, owner_instance, fence, heartbeat_at_ms, expires_at_ms) VALUES (?, 'o1', 'i1', 1, 100, 1)",
+        params: ["w_1%a#read:ask-target"],
+      },
+      {
+        sql: "INSERT INTO world_execution_leases (world_id, owner_id, owner_instance, fence, heartbeat_at_ms, expires_at_ms) VALUES (?, 'o2', 'i1', 1, 100, 9999999999999)",
+        params: ["wX1Za#read:ask-sibling"],
+      },
+    ]);
+
+    await saveReaderProgress(repo, {
+      targetType: "world_novel",
+      targetId: "w_1%a",
+      sectionIndex: 0,
+      pageIndex: 0,
+      scrollRatio: 0.2,
+      anchorText: "目标裸进度",
+      nodeId: null,
+    });
+    await saveReaderProgress(repo, {
+      targetType: "world_novel",
+      targetId: "w_1%a:l_target",
+      sectionIndex: 1,
+      pageIndex: 0,
+      scrollRatio: 0.6,
+      anchorText: "目标路线进度",
+      nodeId: null,
+    });
+    await saveReaderProgress(repo, {
+      targetType: "world_novel",
+      targetId: "wX1Za:l_sibling",
+      sectionIndex: 2,
+      pageIndex: 0,
+      scrollRatio: 0.8,
+      anchorText: "兄弟路线进度",
+      nodeId: null,
+    });
+
+    await importWorld(repo, targetArchive, "replace");
+
+    const leases = await platform.sql.query("SELECT world_id FROM world_execution_leases");
+    expect(leases.map((r) => r.world_id)).toEqual(["wX1Za#read:ask-sibling"]);
+    expect(await getReaderProgress(repo, "world_novel", "w_1%a")).toBeNull();
+    expect(await getReaderProgress(repo, "world_novel", "w_1%a:l_target")).toBeNull();
+    expect(await getReaderProgress(repo, "world_novel", "wX1Za:l_sibling")).toMatchObject({
+      anchorText: "兄弟路线进度",
+    });
+  });
+
+  it("R42-T003: repo.purgeLine blocks deleting original opening root N0 while cloned opening roots still reference $.agentOriginalNodeId = N0", async () => {
+    const { platform, repo } = await setup();
+    const { world, node: n0, line: l0 } = await repo.createWorld({
+      title: "开局多分支保护",
+      eraId: "tang-748",
+      opening: { parentId: null, kind: "opening", narrative: "原始开场 N0。", state: sampleState() },
+    });
+
+    // Insert two cloned opening roots R1 (on L1) and R2 (on L2), both anchored to N0 via meta.agentOriginalNodeId
+    const t = new Date().toISOString();
+    const stateJson = JSON.stringify(sampleState());
+    const cloneMeta = JSON.stringify({ openingSeed: sampleState(), agentOriginalNodeId: n0.id });
+    await platform.sql.batch([
+      {
+        sql: `INSERT INTO nodes (id, world_id, parent_id, last_child_id, seq, kind, narrative, status, rewritten, meta_json, created_at)
+              VALUES ('r1', ?, NULL, NULL, 1, 'opening', '第一次克隆开场 R1', 'done', 1, ?, ?),
+                     ('r2', ?, NULL, NULL, 2, 'opening', '第二次克隆开场 R2', 'done', 1, ?, ?)`,
+        params: [world.id, cloneMeta, t, world.id, cloneMeta, t],
+      },
+      {
+        sql: "INSERT INTO states (node_id, state_json) VALUES ('r1', ?), ('r2', ?)",
+        params: [stateJson, stateJson],
+      },
+    ]);
+    const l1 = await repo.createLine(world.id, "r1", "重写路线一", false);
+    const l2 = await repo.createLine(world.id, "r2", "重写路线二", false);
+    await repo.setCurrentLine(world.id, l1.id);
+
+    // Move initial route L0 into trash and attempt to purge it while R1 & R2 still depend on N0!
+    await repo.setLineDeleted(l0.id, true);
+    await expect(repo.purgeLine(l0.id)).rejects.toBeInstanceOf(ReferencedRoute);
+    expect(await repo.getNode(n0.id)).not.toBeNull();
+    expect(await repo.getLine(l0.id)).not.toBeNull();
+
+    // Archive validation MUST still find unique original opening N0 (`originals.length === 1`)!
+    expect(archiveProblems(await exportWorld(repo, world.id))).toEqual([]);
+
+    // Purging unreferenced cloned route L2 succeeds cleanly, while L0/N0 remains protected by surviving R1 on L1!
+    await repo.setLineDeleted(l2.id, true);
+    expect(await repo.purgeLine(l2.id)).toBe(1);
+    expect(await repo.getNode("r2")).toBeNull();
+    expect(l1.id).toBeTruthy();
+    await expect(repo.purgeLine(l0.id)).rejects.toBeInstanceOf(ReferencedRoute);
+    expect(archiveProblems(await exportWorld(repo, world.id))).toEqual([]);
   });
 });
